@@ -688,7 +688,7 @@ impl Cascade {
         }
         // Stable sort: importance, then origin (important UA before author would be
         // reversed by CSS rules for user origin; there is none here), then specificity, order.
-        decls.sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
+        decls.sort_by_key(|d| (d.0, d.1, d.2, d.3));
         decls
     }
 

@@ -408,7 +408,7 @@ impl LibraryIndex {
     /// The `limit` most recently opened books, newest first.
     pub fn recent(&self, limit: usize) -> Vec<&BookEntry> {
         let mut v: Vec<&BookEntry> = self.books.iter().filter(|b| b.last_opened.is_some()).collect();
-        v.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+        v.sort_by_key(|b| std::cmp::Reverse(b.last_opened));
         v.truncate(limit);
         v
     }
@@ -421,7 +421,7 @@ impl LibraryIndex {
             SortKey::Recent => v.sort_by(|a, b| b.last_opened.cmp(&a.last_opened).then_with(|| b.added.cmp(&a.added))),
             SortKey::Title => v.sort_by_cached_key(|b| lower(&b.title)),
             SortKey::Author => v.sort_by_cached_key(|b| (lower(b.authors.first().map(String::as_str).unwrap_or("\u{10FFFF}")), lower(&b.title))),
-            SortKey::Added => v.sort_by(|a, b| b.added.cmp(&a.added)),
+            SortKey::Added => v.sort_by_key(|b| std::cmp::Reverse(b.added)),
             SortKey::Progress => v.sort_by(|a, b| b.percent.unwrap_or(0.0).total_cmp(&a.percent.unwrap_or(0.0))),
             SortKey::Series => v.sort_by(|a, b| {
                 let ka = (a.series.as_deref().map(lower), a.series_index.unwrap_or(0.0));

@@ -42,9 +42,11 @@ mod imp {
         {
             return vec![0; pages];
         }
-        raw.chunks_exact(8)
+        raw.as_chunks::<8>()
+            .0
+            .iter()
             .map(|e| {
-                let v = u64::from_le_bytes(e.try_into().unwrap());
+                let v = u64::from_le_bytes(*e);
                 if v >> 63 == 1 { v & ((1 << 55) - 1) } else { 0 }
             })
             .collect()

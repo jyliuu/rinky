@@ -1503,10 +1503,13 @@ struct Group {
     link: Option<String>,
 }
 
+/// What [`split_directives`] returns.
+type Directives = (Vec<Seg>, Option<(String, String)>, bool, Option<String>);
+
 /// Splits `md` at `:::` directive lines: the segments, the input bar
 /// `(link, placeholder)` and whether the view is a sheet. Lines starting with `:::` and
 /// an unknown word stay text.
-fn split_directives(md: &str) -> (Vec<Seg>, Option<(String, String)>, bool, Option<String>) {
+fn split_directives(md: &str) -> Directives {
     let mut segs = Vec::new();
     let mut input = None;
     let mut sheet = false;

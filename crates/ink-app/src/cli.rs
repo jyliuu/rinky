@@ -303,7 +303,7 @@ fn evdump(deadline: std::time::Instant) -> anyhow::Result<()> {
         for (name, f) in files.iter_mut() {
             let mut buf = [0u8; 16 * 64];
             if let Ok(n) = f.read(&mut buf) {
-                for e in buf[..n - n % 16].chunks_exact(16).map(ink_device::evdev::RawEvent::from_bytes) {
+                for e in buf[..n].as_chunks::<16>().0.iter().map(|e| ink_device::evdev::RawEvent::from_bytes(e)) {
                     println!("{name}: {:>10} ms type {} code {} value {}", e.time.as_millis(), e.ty, e.code, e.value);
                 }
             }

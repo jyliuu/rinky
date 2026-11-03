@@ -252,7 +252,7 @@ fn read_settled(path: &Path, check_backup: bool) -> std::io::Result<Option<Vec<u
 /// in progress (a partial one does not parse and is skipped).
 fn newest_temp_copy<T>(path: &Path, not_before: Option<SystemTime>, parse: &impl Fn(&[u8]) -> std::result::Result<T, String>) -> Option<T> {
     let mut temps = temp_siblings(path);
-    temps.sort_by(|a, b| b.1.cmp(&a.1));
+    temps.sort_by_key(|t| std::cmp::Reverse(t.1));
     temps
         .into_iter()
         .filter(|(_, t)| not_before.is_none_or(|nb| *t >= nb))
