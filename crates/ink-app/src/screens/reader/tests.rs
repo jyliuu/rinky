@@ -437,6 +437,43 @@ fn settle_aa(h: &mut Harness) {
     h.paint();
 }
 
+/// Ink in `r` of the panel (0 white).
+fn panel_ink(h: &Harness, r: Rect) -> u64 {
+    let p = h.probe.panel();
+    let mut ink = 0;
+    for y in r.y.max(0) as usize..(r.bottom() as usize).min(p.height) {
+        for x in r.x.max(0) as usize..(r.right() as usize).min(p.width) {
+            ink += 255 - p.pixels[y * p.width + x] as u64;
+        }
+    }
+    ink
+}
+
+#[test]
+fn aa_preview_shows_the_text_weight() {
+    let mut h = Harness::new("aa-weight", "juliet.epub");
+    h.tap_at(636, 848);
+    h.tap_button("aa");
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Aa));
+    let o = h.reader.overlay().unwrap();
+    let preview = aa::preview_rect(o).unwrap();
+    let seg = o.tree.bounds(o.ids["weight"]).unwrap();
+    // Inside the frame: the text only.
+    let text = Rect::new(preview.x + 16, preview.y + 16, preview.w - 32, preview.h - 32);
+    let mut ink = vec![panel_ink(&h, text)];
+    h.shot("01-normal");
+    // Darker, then Darkest: each tap draws the preview darker, the text in place.
+    for (i, name) in [(1, "darker"), (2, "darkest")] {
+        h.tap_at(seg.x + seg.w as i32 * (2 * i + 1) / 6, seg.y + seg.h as i32 / 2);
+        assert_eq!(h.reader.actions().last().map(String::as_str), Some(format!("aa-weight:{i}").as_str()));
+        settle_aa(&mut h);
+        assert_eq!(h.reader.doc.as_deref().unwrap().layout().embolden, i as u8);
+        ink.push(panel_ink(&h, text));
+        h.shot(&format!("0{}-{name}", i + 1));
+    }
+    assert!(ink[1] as f64 > ink[0] as f64 * 1.1 && ink[2] as f64 > ink[1] as f64 * 1.1, "preview ink normal, darker, darkest: {ink:?}");
+}
+
 #[test]
 fn aa_panel_relayouts_keeps_the_position_and_saves_per_book_and_global() {
     let mut h = Harness::new("aa", "juliet.epub");

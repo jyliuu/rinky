@@ -277,6 +277,14 @@ pub fn fill_contours(width: usize, height: usize, contours: &[Vec<(f32, f32)>]) 
     acc.finish()
 }
 
+/// Extra stroke pixels of the user's text weight `level` (0 normal, 1 darker, 2 darkest)
+/// at `px` pixels per em: one step per level up to 59 px, two up to 99 px, and so on.
+/// The reader ([`crate::Fonts::draw_text_extra`] via the book's fonts) and the reading
+/// settings preview both use it, so the preview is as dark as the page.
+pub fn weight_px(level: u8, px: f32) -> u32 {
+    level as u32 * ((px / 40.0).round() as u32).max(1)
+}
+
 /// Widens a mask by `k` pixels to the right and `k / 2` upwards (max filter): synthetic bold.
 pub fn embolden(m: &GlyphMask, k: u32) -> GlyphMask {
     if m.coverage.is_empty() || k == 0 {

@@ -125,6 +125,8 @@ struct GlyphKey {
     id: u16,
     px: u32,
     synth: Synth,
+    /// Extra stroke pixels ([`Fonts::glyph_mask_extra`]).
+    extra: u32,
 }
 
 /// Glyph bitmaps with a byte budget; least recently used entries go first.
@@ -608,10 +610,23 @@ impl Fonts {
 
     /// The cached bitmap of one shaped glyph.
     pub fn glyph_mask(&mut self, face: FaceId, id: u16, px: f32, synth: Synth) -> &GlyphMask {
-        let key = GlyphKey { face, id, px: px.to_bits(), synth };
+        self.glyph_mask_extra(face, id, px, synth, 0)
+    }
+
+    /// [`Fonts::glyph_mask`] with `extra` more pixels of stroke weight (the user's
+    /// "darker text", as [`Fonts::glyph_extra`] on the prototype path).
+    pub fn glyph_mask_extra(&mut self, face: FaceId, id: u16, px: f32, synth: Synth, extra: u32) -> &GlyphMask {
+        let key = GlyphKey { face, id, px: px.to_bits(), synth, extra };
         let data = &self.faces[face as usize];
         self.shaped.get_or_insert(key, || match data.ttf() {
-            Some(f) => raster::rasterize(f, GlyphId(id), px, synth),
+            Some(f) => {
+                let m = raster::rasterize(f, GlyphId(id), px, synth);
+                if extra == 0 {
+                    m
+                } else {
+                    raster::embolden(&m, extra)
+                }
+            }
             None => GlyphMask::default(),
         })
     }
@@ -644,12 +659,19 @@ impl Fonts {
     /// Like [`Fonts::draw_run_value`], but only pixels inside `clip` change: glyph parts
     /// outside it are not drawn. Inside `clip` the result is the same pixel for pixel.
     pub fn draw_run_clipped(&mut self, canvas: &mut Canvas, run: &TextRun, x: f32, baseline: f32, value: u8, clip: Rect) -> f32 {
+        self.draw_run_clipped_extra(canvas, run, x, baseline, value, clip, 0)
+    }
+
+    /// [`Fonts::draw_run_clipped`] with `extra` more pixels of stroke weight
+    /// ([`Fonts::glyph_mask_extra`]); the pen advance stays the same.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_run_clipped_extra(&mut self, canvas: &mut Canvas, run: &TextRun, x: f32, baseline: f32, value: u8, clip: Rect, extra: u32) -> f32 {
         let clip = clip.intersect(&canvas.bounds());
         if clip.is_empty() {
             return x + run.width;
         }
         for g in &run.glyphs {
-            let m = self.glyph_mask(g.face, g.id, run.px, g.synth);
+            let m = self.glyph_mask_extra(g.face, g.id, run.px, g.synth, extra);
             if m.coverage.is_empty() {
                 continue;
             }
@@ -767,6 +789,27 @@ mod tests {
         f.draw_text(&mut c0, Style::Regular, 40.0, 10.0, 60.0, "Juliet");
         f.draw_text_extra(&mut c1, Style::Regular, 40.0, 10.0, 60.0, "Juliet", 0);
         assert_eq!(c0.pixels, c1.pixels);
+    }
+
+    #[test]
+    fn extra_weight_darkens_shaped_runs_like_the_prototype_path() {
+        let mut f = Fonts::load();
+        let run = f.shape(Style::Regular, 40.0, "Juliet");
+        let clip = Rect::new(0, 0, 300, 80);
+        let ink = |f: &mut Fonts, extra| {
+            let mut c = Canvas::new(300, 80);
+            let end = f.draw_run_clipped_extra(&mut c, &run, 10.0, 60.0, 0, clip, extra);
+            (c.pixels.iter().map(|p| 255 - *p as u32).sum::<u32>(), end, c.pixels)
+        };
+        let (a, ea, p0) = ink(&mut f, 0);
+        let (b, eb, _) = ink(&mut f, raster::weight_px(1, 40.0));
+        let (c, ec, _) = ink(&mut f, raster::weight_px(2, 40.0));
+        assert!(b as f32 > a as f32 * 1.15 && c > b, "ink {a} {b} {c}");
+        assert!(ea == eb && eb == ec, "the pen advance is unchanged: {ea} {eb} {ec}");
+        // No extra weight is the plain call, pixel for pixel.
+        let mut plain = Canvas::new(300, 80);
+        f.draw_run_clipped(&mut plain, &run, 10.0, 60.0, 0, clip);
+        assert_eq!(plain.pixels, p0);
     }
 
     #[test]
