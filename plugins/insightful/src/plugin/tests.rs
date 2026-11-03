@@ -122,7 +122,7 @@ fn explain_with_tool_call_streams_in_batches_and_saves() {
     );
     let last = views.last().unwrap();
     assert!(last.starts_with(":::back insightful:chats\n:::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"Two households, both alike in dignity\"\n\nExplain"), "{last}");
-    assert!(last.contains(":::answer gpt-test | 300 tokens in · 90 out · 2 requests\nword0 word1"), "{last}");
+    assert!(last.contains(":::answer AI — gpt-test | 300 tokens in · 90 out · 2 requests\nword0 word1"), "{last}");
     assert!(last.contains(":::chips\n- [Who is Tybalt?](insightful:q/0)"));
     assert!(!last.contains(":::action"), "actions only while the agent runs");
 
@@ -168,15 +168,20 @@ fn chats_list_open_delete_and_close_keeps_running() {
     env.ui.0.clear();
     env.action("chats");
     let list = env.viewers().last().unwrap().clone();
-    assert!(list.starts_with(":::card insightful:open/c1 | ") && list.contains(" · 2 messages · 280 tokens\n**People/characters**\n\n*\"In fair Verona\"*"), "{list}");
-    assert!(list.contains("[Delete a chat…](insightful:delete)"));
+    assert!(list.starts_with(":::chips\n- [Start new chat](insightful:new)\n\n:::card insightful:open/c1 | Current · "), "{list}");
+    assert!(list.contains(" · 2 messages · 280 tokens\n**People / characters**\n\n*\"In fair Verona\"*"), "{list}");
     env.answer(VIEWER, "insightful:open/c1");
     assert!(env.viewers().last().unwrap().contains("Who is Tybalt?"));
 
-    // Closing the viewer while a request runs leaves it running: the viewer stays
+    // The one-time checkbox of the highlight menu: this action starts a new chat.
+    // Closing the viewer while its request runs leaves it running: the viewer stays
     // closed, the answer is saved to its chat and a toast says it came.
     env.select("Two households");
-    env.action("context");
+    env.action("menu");
+    env.answer(MENU_ACTIONS, "stay:override");
+    let UiRequest::TextViewer { id: MENU_ACTIONS, markdown, .. } = env.ui.0.last().unwrap().clone() else { panic!() };
+    assert!(markdown.ends_with(":::row stay:override | check\nStart a new chat\n"), "the checkbox is ticked in place: {markdown}");
+    env.answer(MENU_ACTIONS, "context");
     assert!(env.plugin.running());
     env.answer(VIEWER, "closed");
     assert!(env.plugin.running(), "the request goes on");
@@ -186,35 +191,42 @@ fn chats_list_open_delete_and_close_keeps_running() {
     assert!(env.ui.0.iter().any(|r| matches!(r, UiRequest::Toast { text } if text == "Insightful answered")));
     let saved = env.chats_file();
     assert_eq!(saved["chats"][1]["messages"].as_array().unwrap().len(), 2, "answer saved to c2");
+    assert_eq!(saved["current"], "c2");
     env.action("last_chat");
     assert!(env.viewers().last().unwrap().contains("word0 word1"), "the answer is there when the chat opens again");
 
+    // Hold a chat in the list to delete it.
     env.action("chats");
-    env.answer(VIEWER, "insightful:delete");
-    let list = env.viewers().last().unwrap().clone();
-    assert_eq!(list.matches(":::card insightful:del/").count(), 2, "{list}");
-    env.answer(VIEWER, "insightful:del/c1");
-    assert!(matches!(env.ui.0.last(), Some(UiRequest::Dialog { id: DIALOG_DELETE, .. })));
+    env.answer(VIEWER, "insightful:open/c1");
+    env.answer(VIEWER, "insightful:chats");
+    env.answer(VIEWER, "hold:insightful:open/c1");
+    let Some(UiRequest::Dialog { id: DIALOG_DELETE, title, body, .. }) = env.ui.0.last().cloned() else { panic!("{:?}", env.ui.0.last()) };
+    assert_eq!(title, "Delete this chat?");
+    assert!(body.ends_with("\n\nThe deleted chat cannot be recovered."), "{body}");
     env.answer(DIALOG_DELETE, "delete");
     assert!(env.ui.0.iter().any(|r| matches!(r, UiRequest::Toast { text } if text == "Chat deleted")));
     assert!(env.viewers().last().unwrap().contains("insightful:open/c2"), "the list again");
     let saved = env.chats_file();
     assert_eq!(saved["chats"].as_array().unwrap().len(), 1);
     assert_eq!(saved["chats"][0]["id"], "c2");
+    assert!(saved.get("current").is_none(), "the deleted chat was the current one");
 }
 
 #[test]
 fn a_chat_has_a_back_link_to_the_list_and_last_chat_reopens_it() {
     let t2 = answer_turn();
     let mut env = Env::new("last-chat", TOML, &[(200, &t2)]);
+    // No chat yet: "Continue current chat" opens an empty one.
     env.action("last_chat");
-    assert!(env.ui.0.iter().any(|r| matches!(r, UiRequest::Toast { text } if text.starts_with("No Insightful chats"))));
+    let empty = env.viewers().last().unwrap().clone();
+    assert!(empty.contains("*No conversation yet.*") && empty.ends_with(":::input insightful:ask | Message Insightful…"), "{empty}");
+    assert!(!env.ui.0.iter().any(|r| matches!(r, UiRequest::TextInput { .. })), "the keyboard stays closed");
     env.select("In fair Verona");
     env.action("people");
     env.pump();
     assert!(env.viewers().last().unwrap().starts_with(":::back insightful:chats\n"), "a chat goes back to the list");
     env.answer(VIEWER, "insightful:chats");
-    assert!(env.viewers().last().unwrap().starts_with(":::card insightful:open/c1"), "the list has no back link");
+    assert!(env.viewers().last().unwrap().starts_with(":::chips\n- [Start new chat]"), "the list has no back link");
     env.answer(VIEWER, "closed");
     env.ui.0.clear();
     env.action("last_chat");
@@ -226,12 +238,19 @@ fn ask_ai_errors_and_provider_menu() {
     let mut env = Env::new("errors", TOML, &[(401, "{\"error\":{\"message\":\"Incorrect API key\"}}")]);
     env.select("dignity");
     env.action("ask");
-    assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_ASK, prompt, .. }) if prompt == "Ask about the selection"));
+    // Ask AI… opens the chat with the keyboard closed; the passage waits for the message.
+    let view = env.viewers().last().unwrap().clone();
+    assert!(view.contains(":::card | Sent with your next message\n**Selected passage — Act 1**\n\n> \"dignity\""), "{view}");
+    assert!(!matches!(env.ui.0.last(), Some(UiRequest::TextInput { .. })));
+    env.answer(VIEWER, "insightful:ask");
+    assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_ASK, prompt, .. }) if prompt == "Message Insightful…"));
     env.answer(INPUT_ASK, "What does dignity mean here?");
     env.pump();
     let last = env.viewers().last().unwrap().clone();
     assert!(last.contains("**Error:** AI service HTTP 401: Incorrect API key"), "provider message kept: {last}");
-    assert!(last.contains("[Retry](insightful:retry)"));
+    assert!(!last.contains("[Retry]"), "a rejected key needs a change first: {last}");
+    env.answer(VIEWER, "insightful:retry");
+    assert!(!env.plugin.running());
     let saved = env.chats_file();
     assert_eq!(saved["chats"][0]["messages"][0]["content"], "What does dignity mean here?");
     assert_eq!(saved["chats"][0]["messages"][0]["selection"]["text"], "dignity");
@@ -243,18 +262,106 @@ fn ask_ai_errors_and_provider_menu() {
     env.answer(MENU_PROVIDER, "openai");
     env.action("book_menu");
     let UiRequest::TextViewer { id: MENU_BOOK, markdown, .. } = env.ui.0.last().unwrap().clone() else { panic!() };
-    assert!(markdown.starts_with(":::sheet\n:::row ask_book | chat\nAsk about the book…\n:::row chats | folder\n"), "{markdown}");
-    env.answer(MENU_BOOK, "closed");
-    env.answer(MENU_BOOK, "ask_book");
-    assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_ASK, prompt, .. }) if prompt == "Ask about the book"));
+    assert!(
+        markdown.starts_with(":::sheet\n:::row last_chat | chat\nContinue current chat\n:::row chats | folder\nChats\n:::row new_chat | plus\nStart new chat\n:::row stay:new_on_highlight | minus\nNew chat for highlighted actions   ★\n:::row settings:provider | settings\nProvider: OpenAI\n:::row stats | chart\nStatistics\n"),
+        "{markdown}"
+    );
+    env.answer(MENU_BOOK, "new_chat");
+    assert!(env.viewers().last().unwrap().contains("*No conversation yet.*"));
     assert_eq!(env.store.settings["provider"], "openai");
 
     let mut env = Env::new("nokey", "provider = \"openai\"\n", &[(200, "")]);
     env.action("ask_book");
+    env.answer(VIEWER, "insightful:ask");
     env.answer(INPUT_ASK, "Who wrote this?");
     assert!(!env.plugin.running());
     assert!(env.viewers().last().unwrap().contains("**Error:** Insightful is not configured: no provider has an API key (insightful.toml)."));
     assert!(env.client.bodies_sent().is_empty());
+}
+
+/// Highlighted actions continue the current chat unless the book's setting (or the
+/// menu's one-time checkbox) starts a new one; holding the setting makes it the
+/// default for other books.
+#[test]
+fn highlighted_actions_continue_the_current_chat_or_start_new_ones() {
+    let t = answer_turn();
+    let mut env = Env::new("continue", TOML, &[(200, &t), (200, &t), (200, &t), (200, &t), (200, &t)]);
+    let chats = |env: &Env| env.chats_file()["chats"].as_array().unwrap().iter().map(|c| c["messages"].as_array().unwrap().len()).collect::<Vec<_>>();
+    env.select("In fair Verona");
+    env.action("people");
+    env.pump();
+    env.select("Two households");
+    env.action("context");
+    env.pump();
+    assert_eq!(chats(&env), [4], "the second action continues the chat");
+    let sent = env.client.bodies_sent();
+    let msgs = sent[1]["messages"].as_array().unwrap();
+    assert!(msgs[msgs.len() - 1]["content"].as_str().unwrap().contains("\"Two households\""), "the new passage goes with it");
+    // The checkbox: this one action starts a new chat; the next continues it.
+    env.action("menu");
+    env.answer(MENU_ACTIONS, "stay:override");
+    env.answer(MENU_ACTIONS, "explain");
+    env.pump();
+    assert_eq!(chats(&env), [4, 2]);
+    // The book's setting: every highlighted action starts a new chat...
+    env.action("book_menu");
+    env.answer(MENU_BOOK, "stay:new_on_highlight");
+    let UiRequest::TextViewer { id: MENU_BOOK, markdown, .. } = env.ui.0.last().unwrap().clone() else { panic!() };
+    assert!(markdown.contains(":::row stay:new_on_highlight | check\nNew chat for highlighted actions\n"), "ticked, not the default: {markdown}");
+    env.answer(MENU_BOOK, "closed");
+    env.action("explain");
+    env.pump();
+    assert_eq!(chats(&env), [4, 2, 2]);
+    // ...and the checkbox then says "Start in existing chat".
+    env.action("menu");
+    let UiRequest::TextViewer { id: MENU_ACTIONS, markdown, .. } = env.ui.0.last().unwrap().clone() else { panic!() };
+    assert!(markdown.ends_with(":::row stay:override | minus\nStart in existing chat\n"), "{markdown}");
+    env.answer(MENU_ACTIONS, "stay:override");
+    env.answer(MENU_ACTIONS, "people");
+    env.pump();
+    assert_eq!(chats(&env), [4, 2, 4], "continued the current chat (c3)");
+    assert_eq!(env.chats_file()["new_chat_on_highlight"], true);
+    // Hold: the book's value becomes the default for other books.
+    env.action("book_menu");
+    env.answer(MENU_BOOK, "hold:stay:new_on_highlight");
+    let Some(UiRequest::Dialog { id: DIALOG_DEFAULT, body, .. }) = env.ui.0.last().cloned() else { panic!("{:?}", env.ui.0.last()) };
+    assert_eq!(body, "Use a new chat for highlighted actions by default in other books?");
+    env.answer(DIALOG_DEFAULT, "ok");
+    assert_eq!(env.store.settings[NEW_CHAT_DEFAULT], true);
+    let UiRequest::TextViewer { id: MENU_BOOK, markdown, .. } = env.ui.0.last().unwrap().clone() else { panic!() };
+    assert!(markdown.contains("New chat for highlighted actions   ★"), "{markdown}");
+}
+
+/// Stop ends the answer being written; Retry sends the question again. Statistics show
+/// the requests of the book and of all books.
+#[test]
+fn stop_retry_and_statistics() {
+    let t = answer_turn();
+    let mut env = Env::new("stop", TOML, &[(200, &t), (200, &t)]);
+    env.select("In fair Verona");
+    env.action("people");
+    assert!(env.viewers().last().unwrap().contains("- [Stop](insightful:stop)"));
+    env.answer(VIEWER, "insightful:stop");
+    assert!(!env.plugin.running());
+    let view = env.viewers().last().unwrap().clone();
+    assert!(view.contains("**Error:** Request canceled.") && view.contains("[Retry](insightful:retry)"), "{view}");
+    env.answer(VIEWER, "insightful:retry");
+    assert!(env.plugin.running());
+    env.pump();
+    env.action("stats");
+    env.answer(MENU_STATS, "book");
+    let Some(UiRequest::Dialog { title, body, .. }) = env.ui.0.last().cloned() else { panic!() };
+    assert_eq!(title, "Current book\nRomeo and Juliet");
+    // The stopped request had no response: only the retry counts.
+    assert!(body.starts_with("Model requests: 1\nInput tokens: 200\nOutput tokens: 80\nTotal tokens: 280\nProvider reported cost: Not available"), "{body}");
+    env.answer(MENU_STATS, "all");
+    let Some(UiRequest::Dialog { title, body, .. }) = env.ui.0.last().cloned() else { panic!() };
+    assert_eq!(title, "All books");
+    assert!(body.starts_with("Model requests: 1\n"), "{body}");
+    env.answer(MENU_STATS, "general");
+    let Some(UiRequest::Dialog { title, body, .. }) = env.ui.0.last().cloned() else { panic!() };
+    assert_eq!(title, "General");
+    assert_eq!(body, "Provider: OpenAI\nConfigured model: gpt-test\nStreaming: On\nOutput token limit: Provider default");
 }
 
 #[test]
@@ -275,12 +382,12 @@ fn converts_koreader_configuration_once() {
 #[test]
 fn popup_entry_opens_the_action_menu_and_keeps_the_selection() {
     let t2 = answer_turn();
-    let mut env = Env::new("menu", TOML, &[(200, &t2)]);
+    let mut env = Env::new("menu", TOML, &[(200, &t2), (200, &t2)]);
     env.select("Two households");
     env.action("menu");
     let UiRequest::TextViewer { id: MENU_ACTIONS, markdown, .. } = env.ui.0.last().unwrap().clone() else { panic!("{:?}", env.ui.0) };
     let ids: Vec<&str> = markdown.lines().filter_map(|l| l.strip_prefix(":::row ")).map(|l| l.split(" | ").next().unwrap()).collect();
-    assert_eq!(ids, ["explain", "examples", "context", "people", "ask"]);
+    assert_eq!(ids, ["explain", "examples", "context", "people", "ask", "stay:override"]);
     assert!(markdown.contains(":::row examples | listview\nGive examples\n"));
     // The reader cleared its selection meanwhile; the menu keeps the one from the popup.
     env.plugin.last_sel = None;
@@ -290,10 +397,20 @@ fn popup_entry_opens_the_action_menu_and_keeps_the_selection() {
     let sent = env.client.bodies_sent();
     let user = sent[0]["messages"][1]["content"].as_str().unwrap();
     assert!(user.contains("\"Two households\"") && user.contains("Give clear, concrete examples"), "{user}");
+    // Ask AI… on another passage: the current chat, the passage sent with the message.
     env.select("dignity");
     env.action("menu");
     env.answer(MENU_ACTIONS, "ask");
-    assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_ASK, prompt, .. }) if prompt == "Ask about the selection"));
+    let view = env.viewers().last().unwrap().clone();
+    assert!(view.contains("Give examples") && view.contains("> \"dignity\""), "the current chat with the passage: {view}");
+    env.answer(VIEWER, "insightful:ask");
+    assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_FOLLOWUP, .. })));
+    env.answer(INPUT_FOLLOWUP, "What does it mean?");
+    env.pump();
+    let saved = env.chats_file();
+    assert_eq!(saved["chats"].as_array().unwrap().len(), 1);
+    assert_eq!(saved["chats"][0]["messages"][2]["selection"]["text"], "dignity");
+    assert!(!env.viewers().last().unwrap().contains("Sent with your next message"), "the passage went with it");
 }
 
 const TOML_MODELS: &str = r#"
@@ -445,35 +562,35 @@ fn preset_sends_the_full_prompt_and_the_bubble_shows_it() {
         user.starts_with(&format!("[Selected passage]\nSection: Act 1\nPage/location: 3\n\n\"In fair Verona, where we lay our scene\"\n\n[Question or action]\n{full}\n\n[Reply format]")),
         "the request carries the whole preset prompt, not its label: {user}"
     );
-    assert!(!user.contains("People/characters"), "the label is not sent: {user}");
+    assert!(!user.contains("People / characters"), "the label is not sent: {user}");
     let system = sent[0]["messages"][0]["content"].as_str().unwrap();
     assert!(system.contains("Title: Romeo and Juliet\nAuthor: William Shakespeare"));
 
     let view = env.viewers().last().unwrap().clone();
-    assert!(view.starts_with(":::back insightful:chats\n:::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"In fair Verona, where we lay our scene\"\n\nPeople/characters\n"), "{view}");
+    assert!(view.starts_with(":::back insightful:chats\n:::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"In fair Verona, where we lay our scene\"\n\nPeople / characters\n"), "{view}");
     env.answer(VIEWER, "insightful:prompt/0");
     let Some(UiRequest::Dialog { id: DIALOG_PROMPT, title, body, .. }) = env.ui.0.last().cloned() else { panic!("{:?}", env.ui.0.last()) };
-    assert_eq!(title, "People/characters: the prompt sent");
+    assert_eq!(title, "People / characters: the prompt sent");
     assert!(body.contains(&full) && body.contains("\"In fair Verona, where we lay our scene\""), "{body}");
     let n = env.ui.0.len();
     env.answer(VIEWER, "insightful:prompt/1");
     assert_eq!(env.ui.0.len(), n, "an answer has no prompt dialog");
 }
 
-/// "Ask about the book" opens the chat view first; the keyboard request that follows
-/// docks under it (the host lifts the view's input bar), and the question starts a chat
-/// in the same viewer.
+/// "Start new chat" opens an empty chat view with the keyboard closed; a tap on the
+/// input bar opens it (the host docks it under the view), and the question starts a
+/// chat in the same viewer.
 #[test]
 fn ask_opens_the_chat_view_with_the_keyboard() {
     let mut env = Env::new("askview", TOML, &[(200, &answer_turn())]);
     env.action("ask_book");
-    let n = env.ui.0.len();
     assert!(
-        matches!(&env.ui.0[n - 2], UiRequest::TextViewer { id: VIEWER, markdown, .. } if markdown.contains("*Ask anything about this book.*") && markdown.ends_with(":::input insightful:ask | Ask about this book…")),
+        matches!(env.ui.0.last(), Some(UiRequest::TextViewer { id: VIEWER, markdown, .. }) if markdown.contains("*No conversation yet.*") && markdown.ends_with(":::input insightful:ask | Message Insightful…")),
         "{:?}",
         env.ui.0
     );
-    assert!(matches!(&env.ui.0[n - 1], UiRequest::TextInput { id: INPUT_ASK, prompt, .. } if prompt == "Ask about the book"));
+    env.answer(VIEWER, "insightful:ask");
+    assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_ASK, prompt, .. }) if prompt == "Message Insightful…"));
     // The keyboard put away and the bar tapped again: the keyboard comes back.
     env.answer(INPUT_ASK, "");
     env.answer(VIEWER, "insightful:ask");
@@ -497,6 +614,9 @@ fn a_run_answers_its_own_chat_while_another_is_open() {
     env.select("In fair Verona");
     env.action("people");
     env.pump();
+    // New chats for highlighted actions in this book.
+    env.action("book_menu");
+    env.answer(MENU_BOOK, "stay:new_on_highlight");
     env.select("Two households");
     env.action("context");
     assert!(env.plugin.running());
