@@ -51,7 +51,7 @@ What rinky changes on your Kindle:
 Download the install package `rinky-<version>-kindlehf.tar.gz` from the project's
 releases page. If you want to check the download, compare its SHA-256 with the
 `SHA256SUMS` file of the same release. Example:
-`shasum -a 256 rinky-0.3.0-kindlehf.tar.gz` on a Mac, or `sha256sum ...` on Linux.
+`shasum -a 256 rinky-0.4.0-kindlehf.tar.gz` on a Mac, or `sha256sum ...` on Linux.
 
 ## 2. Install
 

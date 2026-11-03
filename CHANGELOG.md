@@ -4,6 +4,48 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-03
+
+### Added
+- Insightful works like insightful.koplugin. Each book has a current chat, and
+  highlighted actions (Explain, Give examples, Context / history, People / characters,
+  Ask AI…) continue it, so related questions stay together. "New chat for highlighted
+  actions" in the reader menu's Insightful page starts a new chat each time instead
+  (hold it to make it the default for other books), and a checkbox in the actions
+  ("Start a new chat" / "Start in existing chat") changes it for one highlight.
+- Insightful's reader-menu page: Continue current chat, Chats, Start new chat, the
+  setting above, Provider, Statistics (General, Current book, All books) and Gesture
+  shortcuts. Gestures can show the current chat, show the chat list or start a chat.
+- A Stop button while Insightful writes an answer.
+- Plugin viewers: a long press on a link reports `hold:LINK`, and a sheet row whose
+  link starts with `stay:` leaves the sheet open.
+
+### Changed
+- The Insightful chat no longer scrolls along while an answer streams in. A question
+  you send moves to the top and its answer fills in below it. Page turns move a whole
+  screen, never part of one, so you keep your place.
+- Closing the Insightful chat no longer cancels the answer: it is written and saved
+  to its chat, and a notice says when it is ready.
+- Ask AI… opens the chat with the keyboard closed; tap "Message Insightful…" to type.
+  The selected passage goes with your message.
+- Insightful's chat list starts with "Start new chat" and marks the current chat; hold
+  a chat to delete it.
+- Dragging a selection to the bottom (or top) edge of the page now moves half a page
+  at a time instead of a whole page, so the text you are selecting into appears in the
+  middle of the screen with the text before it still in view. When the selection card
+  closes, the reader shows the page the selection ended on.
+
+### Fixed
+- Retry is offered only when sending the question again can work (not after a missing
+  or rejected API key).
+- Going to a percentage right after opening a book landed far too early while the book
+  was still being paginated. ([#9])
+- Tables in Insightful answers (and other plugin text) are laid out in columns that
+  wrap on the Kindle's narrow screen, including tables written without outer pipes.
+  Plugin Markdown is now parsed by a CommonMark parser (pulldown-cmark). ([#10])
+- CI is green: tests no longer depend on the runner's speed, thread count or float
+  rounding. ([#9])
+
 ## [0.3.0] - 2026-11-03
 
 ### Added
@@ -42,6 +84,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.4.0]: https://github.com/jyliuu/rinky/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jyliuu/rinky/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jyliuu/rinky/releases/tag/v0.2.0
 [#1]: https://github.com/jyliuu/rinky/pull/1
@@ -49,3 +92,5 @@ First public release.
 [#3]: https://github.com/jyliuu/rinky/pull/3
 [#4]: https://github.com/jyliuu/rinky/pull/4
 [#5]: https://github.com/jyliuu/rinky/pull/5
+[#9]: https://github.com/jyliuu/rinky/pull/9
+[#10]: https://github.com/jyliuu/rinky/pull/10
