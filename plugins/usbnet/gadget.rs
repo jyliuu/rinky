@@ -8,6 +8,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// The Kindle's address on the cable.
 pub const KINDLE_IP: &str = "192.168.15.244";
@@ -21,6 +22,10 @@ pub const MTP_GADGET: &str = "mtpgadget";
 pub const DEV_ADDR: &str = "ee:19:00:00:00:01";
 /// The computer's side of the link.
 pub const HOST_ADDR: &str = "ee:19:00:00:00:02";
+/// The waits between tries to bind the gadget (about 1.5 s in all): right after MTP
+/// lets go the controller can refuse a new gadget for a moment, and the Kindle's
+/// `mtp.sh` may bind MTP again when the computer sees the port go away.
+pub const BIND_RETRY: [Duration; 5] = [Duration::from_millis(50), Duration::from_millis(100), Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
 
 /// Files and commands, as the device has them (tests use a fake).
 pub trait Sys {
@@ -45,6 +50,11 @@ pub trait Sys {
     /// The file's content without surrounding white space; `None` when it cannot be read.
     fn read(&mut self, path: &Path) -> Option<String> {
         std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    }
+
+    /// Waits (between bind tries).
+    fn sleep(&mut self, d: Duration) {
+        std::thread::sleep(d)
     }
 }
 
@@ -116,9 +126,17 @@ pub enum Error {
     NoController,
     /// `mkdir functions/ecm.usb0` failed.
     NoFunction(String),
-    /// Writing the controller name to `UDC` failed while a cable is in (or its presence
-    /// is unknown): another gadget holds the controller?
+    /// Writing the controller name to `UDC` still failed after [`BIND_RETRY`] while a
+    /// cable is in (or its presence is unknown), with no other gadget in configfs
+    /// holding the controller: the controller name and the last error (with the kernel
+    /// driver that holds it, when the controller says).
     Bind(String, String),
+    /// Another configfs gadget (not MTP, which is taken over) holds the controller: the
+    /// controller and the gadget's name.
+    Held(String, String),
+    /// A legacy gadget module (`g_ether`, ...) holds the controller and cannot be
+    /// unloaded: the controller, the module and the error.
+    Legacy(String, String, String),
     /// Binding failed and no USB cable is in.
     NoCable,
     /// No interface name after binding.
@@ -136,6 +154,7 @@ impl Error {
             Error::Module(_) | Error::NoFunction(_) => "No ECM support",
             Error::NoController => "No USB controller",
             Error::Bind(..) => "USB port busy",
+            Error::Held(..) | Error::Legacy(..) => "USB port in use",
             Error::NoCable => "Not connected",
             Error::NoInterface | Error::Ifconfig(_) => "Network failed",
             Error::Remove(_) => "Off failed",
@@ -149,7 +168,9 @@ impl fmt::Display for Error {
             Error::Module(e) => write!(f, "the kernel has no USB Ethernet (modprobe usb_f_ecm: {e})"),
             Error::NoController => write!(f, "no USB device controller in /sys/class/udc"),
             Error::NoFunction(e) => write!(f, "no ecm function in configfs ({e})"),
-            Error::Bind(udc, e) => write!(f, "cannot take the USB port {udc} ({e})"),
+            Error::Bind(udc, e) => write!(f, "the USB port {udc} stays busy ({e}). Unplug the cable, plug it in again, then turn USB network on"),
+            Error::Legacy(udc, m, e) => write!(f, "the USB port {udc} is used by the kernel module {m} (another USB network tool?), which cannot be unloaded ({e})"),
+            Error::Held(udc, g) => write!(f, "the USB port {udc} is used by the USB gadget \"{g}\". Turn that off first (or restart the Kindle)"),
             Error::NoCable => write!(f, "no USB cable. Connect the Kindle to a computer, then turn it on"),
             Error::NoInterface => write!(f, "the gadget has no network interface"),
             Error::Ifconfig(e) => write!(f, "cannot set the address {KINDLE_IP} ({e})"),
@@ -174,6 +195,8 @@ pub struct UsbNet {
     /// Kernel folders.
     pub paths: Paths,
     sys: Box<dyn Sys>,
+    /// The controller taken from the MTP gadget during this [`UsbNet::on`].
+    took_mtp: Option<String>,
 }
 
 impl UsbNet {
@@ -184,7 +207,7 @@ impl UsbNet {
 
     /// The gadget with these folders and this [`Sys`].
     pub fn new(paths: Paths, sys: Box<dyn Sys>) -> Self {
-        UsbNet { paths, sys }
+        UsbNet { paths, sys, took_mtp: None }
     }
 
     fn dir(&self) -> PathBuf {
@@ -267,13 +290,14 @@ impl UsbNet {
         }
         self.sys.run("modprobe", &["usb_f_ecm"]).map_err(Error::Module)?;
         let udc = self.controller().ok_or(Error::NoController)?;
-        let took_mtp = st.mtp_udc;
-        if let Some(m) = &took_mtp {
-            log::info!("usbnet: unbinding {MTP_GADGET} from {m}");
-            let p = self.mtp_dir().join("UDC");
-            self.attr(&p, "");
+        self.unload_legacy(&udc)?;
+        self.took_mtp = None;
+        if let Some(m) = st.mtp_udc {
+            self.unbind_mtp(m);
         }
-        match self.create_and_bind(&udc) {
+        let r = self.create_and_bind(&udc);
+        let took_mtp = self.took_mtp.take();
+        match r {
             Ok(ifname) => {
                 log::info!("usbnet: on: {ifname} {KINDLE_IP} on {udc}");
                 Ok(On { udc, ifname, took_mtp })
@@ -289,6 +313,63 @@ impl UsbNet {
                 }
             }
         }
+    }
+
+    fn unbind_mtp(&mut self, udc: String) {
+        log::info!("usbnet: unbinding {MTP_GADGET} from {udc}");
+        let p = self.mtp_dir().join("UDC");
+        self.attr(&p, "");
+        self.took_mtp = Some(udc);
+    }
+
+    /// Unloads a legacy gadget module bound to `udc`. The controller's `function` names
+    /// the gadget driver bound to it: a configfs gadget's folder name, or a legacy
+    /// module such as `g_ether` (the stock USB networking and USBNetwork hacks load it;
+    /// seen on the PW12 as "RNDIS/Ethernet Gadget" while rinky's bind failed with EBUSY).
+    fn unload_legacy(&mut self, udc: &str) -> Result<(), Error> {
+        let Some(m) = self.nonempty(&self.paths.udc.join(udc).join("function")).filter(|f| f.starts_with("g_")) else {
+            return Ok(());
+        };
+        log::info!("usbnet: unloading {m}, which holds {udc}");
+        self.sys.run("modprobe", &["-r", &m]).map_err(|e| Error::Legacy(udc.into(), m.clone(), e))?;
+        Ok(())
+    }
+
+    /// The other configfs gadget bound to `udc`, if any.
+    fn holder(&mut self, udc: &str) -> Option<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&self.paths.gadgets).ok()?.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != GADGET).collect();
+        names.sort();
+        names.into_iter().find(|n| self.nonempty(&self.paths.gadgets.join(n).join("UDC")).as_deref() == Some(udc))
+    }
+
+    /// Binds the gadget to `udc`, trying again after each wait of [`BIND_RETRY`] and
+    /// taking the port from MTP again whenever it got it back. A port held by any other
+    /// gadget is not taken ([`Error::Held`]).
+    fn bind(&mut self, udc: &str) -> Result<(), Error> {
+        let path = self.dir().join("UDC");
+        let mut last = String::new();
+        for try_ in 0..=BIND_RETRY.len() {
+            if try_ > 0 {
+                self.sys.sleep(BIND_RETRY[try_ - 1]);
+            }
+            match self.holder(udc) {
+                Some(g) if g == MTP_GADGET => self.unbind_mtp(udc.into()),
+                Some(g) => return Err(Error::Held(udc.into(), g)),
+                None => {}
+            }
+            match self.sys.write(&path, udc) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    log::warn!("usbnet: bind to {udc} (try {}): {err}", try_ + 1);
+                    last = err.to_string();
+                }
+            }
+        }
+        // A kernel driver outside configfs (a legacy gadget module) shows only here.
+        if let Some(f) = self.nonempty(&self.paths.udc.join(udc).join("function")) {
+            last = format!("{last}; the port has the driver {f}");
+        }
+        Err(Error::Bind(udc.into(), last))
     }
 
     fn create_and_bind(&mut self, udc: &str) -> Result<String, Error> {
@@ -323,7 +404,7 @@ impl UsbNet {
                 log::warn!("usbnet: ln -s {}: {err}", link.display());
             }
         }
-        self.sys.write(&e.join("UDC"), udc).map_err(|err| Error::Bind(udc.into(), err.to_string()))?;
+        self.bind(udc)?;
         // The interface gets its name when the function binds.
         let ifname = self.nonempty(&func.join("ifname")).ok_or(Error::NoInterface)?;
         if ifname.contains(char::is_whitespace) || ifname.starts_with('(') {

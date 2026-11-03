@@ -84,14 +84,14 @@ lap() {
 }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 
-CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)} cargo zigbuild --profile "$PROFILE" --target armv7-unknown-linux-musleabihf -p ink-app
-scripts/build-dropbear.sh  # no-op when target/dropbear/dropbearmulti is up to date
-lap "build"
-scripts/package.sh --allow-dirty --no-build --profile "$PROFILE" --out "$OUT" >/dev/null
+# package.sh builds: its flags remap the build machine's paths, which its check of the
+# binary requires (a plain cargo build fails that check), and it runs build-dropbear.sh
+# (a no-op when target/dropbear/dropbearmulti is up to date).
+scripts/package.sh --allow-dirty --profile "$PROFILE" --out "$OUT" >/dev/null
 PKG=$(ls "$OUT"/rinky-*-kindlehf.tar.gz)
 SUM=$(sha256 "$PKG" | cut -d' ' -f1)
 echo "deploy: built $(basename "$PKG") ($PROFILE), sha256 $SUM"
-lap "package"
+lap "build and package"
 
 # --- fast path --------------------------------------------------------------------
 # Returns 0 when the changed files are installed; 1 (reason printed) when the full path
