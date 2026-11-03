@@ -43,12 +43,16 @@ impl StatusFilter {
         }
     }
 
-    fn matches(self, s: ReadingStatus) -> bool {
+    /// The same rule as the cover badge ([`super::browse::shows_progress`]): a book
+    /// opened but still at 0 % is "Unread" (status `Reading`, no progress bar), not
+    /// "Reading".
+    fn matches(self, b: &BookEntry) -> bool {
+        let opened = matches!(b.status, ReadingStatus::Reading | ReadingStatus::Abandoned);
         match self {
             StatusFilter::All => true,
-            StatusFilter::Unread => s == ReadingStatus::New,
-            StatusFilter::Reading => matches!(s, ReadingStatus::Reading | ReadingStatus::Abandoned),
-            StatusFilter::Finished => s == ReadingStatus::Complete,
+            StatusFilter::Unread => b.status == ReadingStatus::New || (opened && !super::browse::shows_progress(b)),
+            StatusFilter::Reading => opened && super::browse::shows_progress(b),
+            StatusFilter::Finished => b.status == ReadingStatus::Complete,
         }
     }
 }
@@ -409,7 +413,7 @@ impl Library {
         self.index
             .sorted(q.sort)
             .into_iter()
-            .filter(|b| q.status.matches(b.status))
+            .filter(|b| q.status.matches(b))
             .filter(|b| q.format.as_deref().is_none_or(|f| b.format == f))
             .filter(|b| q.collection.as_deref().is_none_or(|c| b.collections.iter().any(|n| n == c)))
             .filter(|b| {
