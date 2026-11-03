@@ -102,7 +102,9 @@ fn whole_decode(bytes: &[u8], w: u32, h: u32) -> Option<GrayImage> {
         let (iw, ih) = la.dimensions();
         let raw: Vec<u8> = la
             .as_raw()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| ((p[0] as u32 * p[1] as u32 + 255 * (255 - p[1] as u32)) / 255) as u8)
             .collect();
         GrayImage::from_raw(iw, ih, raw)?

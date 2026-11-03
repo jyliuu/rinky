@@ -120,7 +120,7 @@ fn rfind(hay: &[u8], b: u8) -> Option<usize> {
 
 /// Start and end of the tag that carries `aid="X"` (KindleUnpack `locate_beg_end_of_tag`).
 fn tag_with_aid(text: &[u8], aid: &str) -> Option<(usize, usize)> {
-    for q in [b'"', b'\''] {
+    for q in *b"\"'" {
         let pat = [b"aid=".as_slice(), &[q], aid.as_bytes(), &[q]].concat();
         if let Some(p) = find(text, &pat, 0) {
             let b = rfind(&text[..p], b'<')?;

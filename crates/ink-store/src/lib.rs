@@ -252,7 +252,7 @@ fn read_settled(path: &Path, check_backup: bool) -> std::io::Result<Option<Vec<u
 /// in progress (a partial one does not parse and is skipped).
 fn newest_temp_copy<T>(path: &Path, not_before: Option<SystemTime>, parse: &impl Fn(&[u8]) -> std::result::Result<T, String>) -> Option<T> {
     let mut temps = temp_siblings(path);
-    temps.sort_by(|a, b| b.1.cmp(&a.1));
+    temps.sort_by_key(|t| std::cmp::Reverse(t.1));
     temps
         .into_iter()
         .filter(|(_, t)| not_before.is_none_or(|nb| *t >= nb))
@@ -646,7 +646,12 @@ mod tests {
         let t = std::thread::spawn({
             let (f, tmp) = (f.clone(), tmp.clone());
             move || {
-                std::thread::sleep(Duration::from_millis(20));
+                // Finish the save once the load is waiting for it, not after a fixed
+                // sleep, which a busy machine can stretch past the load's 127 ms.
+                let start = std::time::Instant::now();
+                while load_waits() == before && start.elapsed() < Duration::from_secs(5) {
+                    std::thread::yield_now();
+                }
                 std::fs::write(&tmp, b"{\"v\":3}").unwrap();
                 std::fs::rename(&tmp, &f).unwrap();
             }
@@ -658,7 +663,8 @@ mod tests {
         // A file that never existed (no backup, no temporary file) is not waited for.
         let t = std::time::Instant::now();
         assert_eq!(load_recovering(&dir.path().join("new.json"), parse_json).unwrap().source, LoadSource::Missing);
-        assert!(t.elapsed() < Duration::from_millis(50));
+        // Waiting would take the whole 127 ms.
+        assert!(t.elapsed() < Duration::from_millis(120));
     }
 
     #[test]

@@ -376,7 +376,7 @@ impl Library {
         if let Some(b) = self.index.get_mut(path) {
             b.status = status;
             if status == ReadingStatus::Complete {
-                b.percent = Some(1.0).filter(|_| b.percent.is_none()).or(b.percent);
+                b.percent.get_or_insert(1.0);
             }
         }
         match BookState::load(path) {

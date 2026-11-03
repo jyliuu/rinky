@@ -1503,10 +1503,13 @@ struct Group {
     link: Option<String>,
 }
 
+/// What [`split_directives`] returns.
+type Directives = (Vec<Seg>, Option<(String, String)>, bool, Option<String>);
+
 /// Splits `md` at `:::` directive lines: the segments, the input bar
 /// `(link, placeholder)` and whether the view is a sheet. Lines starting with `:::` and
 /// an unknown word stay text.
-fn split_directives(md: &str) -> (Vec<Seg>, Option<(String, String)>, bool, Option<String>) {
+fn split_directives(md: &str) -> Directives {
     let mut segs = Vec::new();
     let mut input = None;
     let mut sheet = false;
@@ -4463,6 +4466,9 @@ mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        // The server sends the first word, then the rest once the viewer has shown it:
+        // the text arrives in steps however slow the machine is.
+        let (shown_tx, shown_rx) = std::sync::mpsc::channel::<()>();
         let server = std::thread::spawn(move || {
             for _ in 0..2 {
                 let (mut c, _) = listener.accept().unwrap();
@@ -4471,7 +4477,10 @@ mod tests {
                 let head = String::from_utf8_lossy(&buf[..n]).to_string();
                 if head.starts_with("GET /sse") {
                     c.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
-                    for word in ["Streaming ", "from ", "a ", "local ", "server."] {
+                    for (i, word) in ["Streaming ", "from ", "a ", "local ", "server."].into_iter().enumerate() {
+                        if i == 1 {
+                            let _ = shown_rx.recv_timeout(Duration::from_secs(10));
+                        }
                         c.write_all(format!("event: delta\ndata: {word}\n\n").as_bytes()).unwrap();
                         c.flush().unwrap();
                         std::thread::sleep(Duration::from_millis(30));
@@ -4501,12 +4510,15 @@ mod tests {
         assert!(host.trigger("net", "go", None));
         s.overlay(&mut host, false);
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut events = 0;
+        let mut partial = false;
         while Instant::now() < deadline {
             assert!(host.timeout().is_some());
             host.handle_event(&UiEvent::Timer(0), None, screen());
             s.overlay(&mut host, false);
-            events += 1;
+            if !partial && host.ui.layers.iter().any(|l| matches!(&l.kind, Kind::Viewer(v) if markdown::to_plain(&v.blocks).trim() == "Streaming")) {
+                partial = true;
+                let _ = shown_tx.send(());
+            }
             let done = host.ui.layers.iter().any(|l| matches!(&l.kind, Kind::Viewer(v) if markdown::to_plain(&v.blocks).ends_with("[done]")));
             if done && host.net.worker.as_ref().is_some_and(|w| w.in_flight() == 0) {
                 break;
@@ -4516,7 +4528,7 @@ mod tests {
         server.join().unwrap();
         let Kind::Viewer(v) = &host.ui.layers.iter().find(|l| matches!(l.kind, Kind::Viewer(_))).unwrap().kind else { panic!() };
         assert_eq!(markdown::to_plain(&v.blocks), "Streaming from a local server. [done]");
-        assert!(events > 3);
+        assert!(partial, "the viewer showed the first word before the rest arrived");
         shot(&s.canvas, "17-streamed-viewer");
         // The 404 answer waits behind the viewer as a toast? No: toasts show on top.
         assert!(host.ui.layer_names().contains(&"viewer"));

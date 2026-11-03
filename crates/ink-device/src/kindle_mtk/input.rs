@@ -114,7 +114,7 @@ pub fn inject_key(device_name: &str, code: u16) -> Result<String> {
 fn read_raw(f: &mut File) -> std::io::Result<Vec<RawEvent>> {
     let mut buf = [0u8; EVENT_SIZE * 64];
     let n = f.read(&mut buf)?;
-    Ok(buf[..n - n % EVENT_SIZE].chunks_exact(EVENT_SIZE).map(RawEvent::from_bytes).collect())
+    Ok(buf[..n].as_chunks::<EVENT_SIZE>().0.iter().map(|e| RawEvent::from_bytes(e)).collect())
 }
 
 /// The touchscreen: device, decoder and grab state.

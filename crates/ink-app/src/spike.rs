@@ -99,14 +99,12 @@ pub fn run(mut device: Device, image: Option<&Path>, limit: Option<Duration>, su
                     device.screen.update_all(&canvas, RefreshClass::Gc16)?;
                     println!("{} spike: screensaver drawn", stamp());
                 }
-                PowerEvent::OutOfScreenSaver | PowerEvent::WakeupFromSuspend | PowerEvent::Resuming => {
-                    if asleep || p != PowerEvent::Resuming {
-                        wakes += 1;
-                        asleep = false;
-                        awake_screen(&mut canvas, &mut fonts, wakes, taps);
-                        device.screen.update_all(&canvas, RefreshClass::Gc16)?;
-                        println!("{} spike: awake screen drawn (wake {wakes})", stamp());
-                    }
+                PowerEvent::OutOfScreenSaver | PowerEvent::WakeupFromSuspend | PowerEvent::Resuming if asleep || p != PowerEvent::Resuming => {
+                    wakes += 1;
+                    asleep = false;
+                    awake_screen(&mut canvas, &mut fonts, wakes, taps);
+                    device.screen.update_all(&canvas, RefreshClass::Gc16)?;
+                    println!("{} spike: awake screen drawn (wake {wakes})", stamp());
                 }
                 _ => {}
             },
