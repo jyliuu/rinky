@@ -121,7 +121,7 @@ fn explain_with_tool_call_streams_in_batches_and_saves() {
         "AGENT ACTION block shown: {views:#?}"
     );
     let last = views.last().unwrap();
-    assert!(last.starts_with(":::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"Two households, both alike in dignity\"\n\nExplain"), "{last}");
+    assert!(last.starts_with(":::back insightful:chats\n:::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"Two households, both alike in dignity\"\n\nExplain"), "{last}");
     assert!(last.contains(":::answer gpt-test | 300 tokens in · 90 out · 2 requests\nword0 word1"), "{last}");
     assert!(last.contains(":::chips\n- [Who is Tybalt?](insightful:q/0)"));
     assert!(!last.contains(":::action"), "actions only while the agent runs");
@@ -445,7 +445,7 @@ fn preset_sends_the_full_prompt_and_the_bubble_shows_it() {
     assert!(system.contains("Title: Romeo and Juliet\nAuthor: William Shakespeare"));
 
     let view = env.viewers().last().unwrap().clone();
-    assert!(view.starts_with(":::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"In fair Verona, where we lay our scene\"\n\nPeople/characters\n"), "{view}");
+    assert!(view.starts_with(":::back insightful:chats\n:::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"In fair Verona, where we lay our scene\"\n\nPeople/characters\n"), "{view}");
     env.answer(VIEWER, "insightful:prompt/0");
     let Some(UiRequest::Dialog { id: DIALOG_PROMPT, title, body, .. }) = env.ui.0.last().cloned() else { panic!("{:?}", env.ui.0.last()) };
     assert_eq!(title, "People/characters: the prompt sent");
@@ -476,7 +476,7 @@ fn ask_opens_the_chat_view_with_the_keyboard() {
     env.answer(INPUT_ASK, "Who is Tybalt?");
     env.pump();
     let last = env.viewers().last().unwrap().clone();
-    assert!(last.starts_with(":::you\nWho is Tybalt?"), "{last}");
+    assert!(last.starts_with(":::back insightful:chats\n:::you\nWho is Tybalt?"), "{last}");
     // In the chat the bar asks a follow-up in the same chat.
     env.answer(VIEWER, "insightful:ask");
     assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_FOLLOWUP, .. })));
