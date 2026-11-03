@@ -950,7 +950,7 @@ fn preview_words<'a>(cx: &mut PaintCx, s: &Shown, cache: &'a mut Option<PreviewC
 }
 
 /// Draws the live preview: two paragraphs at the shown size, spacing, family, justify,
-/// paragraph space and first-line indent, the side margins and the top margin scaled to
+/// paragraph space, first-line indent and text weight, the side margins and the top margin scaled to
 /// the block's width as the reader places them; black on white with a black frame
 /// (reads under DU). Only whole lines are drawn.
 fn paint_preview(cx: &mut PaintCx, r: Rect, s: &Shown, screen_w: u32, cache: &mut Option<PreviewCache>) {
@@ -970,6 +970,8 @@ fn paint_preview(cx: &mut PaintCx, r: Rect, s: &Shown, screen_w: u32, cache: &mu
     let c = preview_words(cx, s, cache);
     let px = s.font_px;
     let line_h = (px * s.spacing).max(px);
+    // As dark as the page: the reader widens the strokes by the same pixels.
+    let extra = ink_text::raster::weight_px(s.weight, px);
     // "Book's own" indent shows as 1 em.
     let indent = if s.indent < 0.0 { 1.0 } else { s.indent } * px;
     let mut y = inner.y as f32;
@@ -997,7 +999,7 @@ fn paint_preview(cx: &mut PaintCx, r: Rect, s: &Shown, screen_w: u32, cache: &mu
             let baseline = y + (line_h - (c.ascent - c.descent)) / 2.0 + c.ascent;
             let mut x = inner.x as f32 + off;
             for run in &words[i..j] {
-                cx.fonts.draw_run_clipped(cx.canvas, run, x, baseline, fg, clip);
+                cx.fonts.draw_run_clipped_extra(cx.canvas, run, x, baseline, fg, clip, extra);
                 x += run.width + gap;
             }
             y += line_h;
@@ -1335,6 +1337,14 @@ pub fn slider_parts(o: &Overlay, key: &str) -> Option<(Rect, Rect, Rect)> {
     let (_, rows) = SliderPanel::areas(b, which.len());
     let (_, minus, track, plus) = SliderPanel::parts(rows[k]);
     Some((minus, track, plus))
+}
+
+/// The live preview's rectangle in a built sheet (the Text tab's size panel, else the
+/// Layout tab's sliders), for tests and scripts.
+pub fn preview_rect(o: &Overlay) -> Option<Rect> {
+    let (key, n) = if o.ids.contains_key("size") { ("size", 1) } else { ("sliders", 4) };
+    let b = o.tree.bounds(*o.ids.get(key)?)?;
+    Some(SliderPanel::areas(b, n).0)
 }
 
 /// Builds the sheet on tab `tab` (0 Text, 1 Layout, 2 Page).

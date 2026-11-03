@@ -712,7 +712,7 @@ impl FontBook {
     /// Extra stroke pixels per embolden level at `px` pixels per em (1 up to 59 px, 2 up
     /// to 99 px, and so on).
     pub fn embolden_px(&self, px: f32) -> u32 {
-        self.embolden as u32 * ((px / 40.0).round() as u32).max(1)
+        ink_text::raster::weight_px(self.embolden, px)
     }
 
     /// Draws `text`; returns the pen position after it.
