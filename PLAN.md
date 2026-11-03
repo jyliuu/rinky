@@ -221,7 +221,6 @@ Port of `insightful.koplugin` v0.7.0 as a first-party plugin on the phase 7 API:
   answer, token and cost statistics.
 - Chat view: Markdown renderer (headings, lists, quotes, code, tables, links) on ink-ui, a
   keyboard-friendly input bar, text arriving in batches.
-- Import existing chats from `insightful/conversations/<book-id>.lua` where the book matches.
 
 ### Phase 9: Network features (6–12M tokens)
 

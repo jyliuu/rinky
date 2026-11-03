@@ -79,6 +79,7 @@ shows the sent text in a dialog.
 request to ink-net's `TestServer` `/echo`; the full plugin with a fake book and a
 `NetWorker`. Only fake keys; no request reaches an AI provider.
 
-## Not done yet (PLAN phase 8)
+## Registration
 
-Importing koplugin chats (`insightful/conversations/<book-id>.lua`). Registered in `crates/ink-app/src/plugins.rs`.
+Registered in `crates/ink-app/src/plugins.rs`. Chats saved by the koplugin are not
+imported.
