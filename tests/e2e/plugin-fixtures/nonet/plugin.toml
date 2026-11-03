@@ -1,0 +1,4 @@
+name = "nonet"
+version = "0.1"
+description = "No network permission (tests/e2e/plugin-net.sh)"
+permissions = []

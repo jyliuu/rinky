@@ -1,0 +1,58 @@
+# Reader timing script for scripts/perf-bench.sh (panel pixels, 1272 x 1696).
+# A `wait` lets the gesture recogniser settle, so one step gives one frame.
+wait 500
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key prev
+key prev
+key prev
+key prev
+key prev
+wait 500
+tap 636 848              # menu
+wait 500
+tap 652 68               # Go to (table of contents)
+wait 500
+shot goto
+key back
+wait 500
+tap 636 848              # menu
+wait 500
+tap 764 68               # Aa sheet
+wait 500
+shot aa
+tap 560 1076             # font size +
+wait 500
+shot aa-bigger
+tap 1158 572             # Done
+wait 500
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+key next
+wait 500
+key power

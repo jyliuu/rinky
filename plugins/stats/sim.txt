@@ -1,0 +1,28 @@
+# Statistics and vocabulary from the library (1272x1696 headless panel).
+# Seed first: cargo run -p ink-stats --example seed -- "$TMPDIR/rinky-sim"
+# Then: cargo run -p ink-app -- sim testdata --headless --script plugins/stats/sim.txt --out OUT
+wait 500
+shot 01-library
+tap 737 75         # Stats (library header)
+shot 02-overview
+tap 1135 748       # 30 days chart
+shot 02b-overview-30
+tap 634 212        # Calendar
+shot 03-calendar
+tap 84 348         # previous month
+shot 03b-previous-month
+tap 1188 348       # next month
+tap 1038 212       # Books
+shot 04-books
+tap 1182 68        # Words
+shot 05-words
+tap 1182 68        # Practice (N)
+shot 06-card
+tap 636 860        # flip the card
+shot 07-shown
+tap 946 1580       # Know
+shot 08-next-card
+key back           # leave the round
+key back           # Vocabulary -> Statistics
+key back           # Statistics -> library
+shot 09-library

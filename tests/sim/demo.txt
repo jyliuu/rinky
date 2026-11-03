@@ -1,0 +1,13 @@
+# Scripted input for `rinky demo --headless`: open the dialog, close it, type "qw".
+shot 01-demo
+tap 200 320        # Dialog button
+shot 02-dialog
+tap 600 1040       # Close
+tap 60 1100        # q
+tap 190 1100       # w
+shot 03-typed
+tap 600 320        # Settings button (pushes the settings screen)
+shot 04-settings
+tap 200 1530       # Back
+shot 05-back
+key power

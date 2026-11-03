@@ -1,0 +1,5 @@
+name = "tlscheck"
+version = "0.1"
+description = "HTTPS test plugin for tests/e2e/plugin-tls.sh"
+permissions = ["network"]
+hosts = ["gutenberg.org"]

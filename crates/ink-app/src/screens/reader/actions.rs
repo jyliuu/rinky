@@ -1,0 +1,371 @@
+//! Reader gesture map: a recognised [`Gesture`] becomes a trigger name from
+//! [`ink_store::prefs::GESTURES`], the user's map (`settings.gestures`) gives the action
+//! name from [`ink_store::prefs::ACTIONS`], and the action runs on the reader.
+//!
+//! Classification ([`triggers`]) is pure and depends only on the gesture and the screen
+//! size:
+//! - taps: corner squares of 1/8 of the screen width first (`tap_top_left`, ...), then the
+//!   zones: left third `tap_left`; middle third across and middle three fifths down, or
+//!   the top tenth, `tap_center`; the rest `tap_right`;
+//! - swipes that start within 1/20 of the screen of an edge and move away from it are
+//!   edge swipes (`swipe_up_from_bottom`, `swipe_down_from_top`, `swipe_right_from_left`,
+//!   `swipe_left_from_right`); other swipes are `swipe_<direction>`;
+//! - two-finger swipes, two-finger tap, pinch in / out, double tap, long press.
+//!
+//! A corner tap or an edge swipe whose action is `none` falls back to the plain trigger
+//! (the zone tap or the plain swipe), so an unused corner still turns the page. A
+//! gesture whose action is `none` after that goes to plugin gesture bindings.
+//!
+//! There is no hidden exit anywhere on the page: `exit` is an action like any other and
+//! asks first ("Exit to Kindle?") when `settings.ui.confirm_exit` is on.
+
+use super::overlay::{Overlay, OverlayKind, PageScrim};
+use super::ReaderScreen;
+use crate::router::{AppCtx, Transition};
+use crate::screens::settings::quick_light;
+use ink_device::{Point, Rect, Size};
+use ink_store::prefs::{GestureMap, LONG_PRESS_ACTIONS};
+use ink_store::Settings;
+use ink_ui::{Direction, DoubleTapMode, Gesture};
+
+/// Action of the exit dialog's "Exit" button (handled in `ReaderScreen::action`).
+pub const EXIT_CONFIRMED: &str = "exit-confirmed";
+
+/// Light and warmth gestures change the level by this fraction of the range.
+const LIGHT_STEP_PERCENT: u32 = 10;
+
+/// Trigger names for `g` on a `size` screen: the specific one and the plain one it falls
+/// back to when the specific one maps to `none` (corner tap -> zone tap, edge swipe ->
+/// plain swipe). `None` for gestures the map does not cover (corner holds).
+pub fn triggers(g: &Gesture, size: Size) -> Option<(&'static str, Option<&'static str>)> {
+    let (w, h) = (size.w as i32, size.h as i32);
+    Some(match *g {
+        Gesture::Tap { pos } => {
+            let zone = tap_zone(pos, w, h);
+            match tap_corner(pos, w, h) {
+                Some(c) => (c, Some(zone)),
+                None => (zone, None),
+            }
+        }
+        Gesture::DoubleTap { .. } => ("double_tap", None),
+        Gesture::LongPress { .. } => ("long_press", None),
+        Gesture::Swipe { from, dir, .. } => {
+            let plain = swipe_name(dir);
+            match edge_swipe(from, dir, w, h) {
+                Some(e) => (e, Some(plain)),
+                None => (plain, None),
+            }
+        }
+        Gesture::TwoFingerSwipe { dir, .. } => (
+            match dir {
+                Direction::Up => "two_finger_swipe_up",
+                Direction::Down => "two_finger_swipe_down",
+                Direction::Left => "two_finger_swipe_left",
+                Direction::Right => "two_finger_swipe_right",
+            },
+            None,
+        ),
+        Gesture::TwoFingerTap { .. } => ("two_finger_tap", None),
+        Gesture::Pinch { scale_milli, .. } => (if scale_milli > 1000 { "pinch_out" } else { "pinch_in" }, None),
+        Gesture::CornerHold { .. } => return None,
+    })
+}
+
+/// The trigger and action `map` gives `g`: the specific trigger's action, or the plain
+/// trigger's when the specific one is `none`. The action is `none` when neither is set.
+pub fn resolve<'m>(g: &Gesture, size: Size, map: &'m GestureMap) -> Option<(&'static str, &'m str)> {
+    let (first, plain) = triggers(g, size)?;
+    let a = map.action(first);
+    if a != "none" {
+        return Some((first, a));
+    }
+    Some(match plain {
+        Some(p) => (p, map.action(p)),
+        None => (first, a),
+    })
+}
+
+fn tap_corner(p: Point, w: i32, h: i32) -> Option<&'static str> {
+    let k = w / 8;
+    let (left, right, top, bottom) = (p.x < k, p.x >= w - k, p.y < k, p.y >= h - k);
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some("tap_top_left"),
+        (_, true, true, _) => Some("tap_top_right"),
+        (true, _, _, true) => Some("tap_bottom_left"),
+        (_, true, _, true) => Some("tap_bottom_right"),
+        _ => None,
+    }
+}
+
+fn tap_zone(p: Point, w: i32, h: i32) -> &'static str {
+    if p.y < h / 10 || (p.x >= w / 3 && p.x < w * 2 / 3 && p.y >= h / 5 && p.y < h * 4 / 5) {
+        "tap_center"
+    } else if p.x < w / 3 {
+        "tap_left"
+    } else {
+        "tap_right"
+    }
+}
+
+fn swipe_name(dir: Direction) -> &'static str {
+    match dir {
+        Direction::Up => "swipe_up",
+        Direction::Down => "swipe_down",
+        Direction::Left => "swipe_left",
+        Direction::Right => "swipe_right",
+    }
+}
+
+fn edge_swipe(from: Point, dir: Direction, w: i32, h: i32) -> Option<&'static str> {
+    let (ex, ey) = (w / 20, h / 20);
+    match dir {
+        Direction::Up if from.y >= h - ey => Some("swipe_up_from_bottom"),
+        Direction::Down if from.y < ey => Some("swipe_down_from_top"),
+        Direction::Right if from.x < ex => Some("swipe_right_from_left"),
+        Direction::Left if from.x >= w - ex => Some("swipe_left_from_right"),
+        _ => None,
+    }
+}
+
+/// True when a long press on a word selects it (`long_press` is `dictionary` or
+/// `select`); otherwise a hold runs the mapped action and starts no selection.
+pub fn long_press_selects(settings: &Settings) -> bool {
+    let a = settings.gestures.action("long_press");
+    LONG_PRESS_ACTIONS.iter().any(|(n, _)| *n == a)
+}
+
+/// Double-tap mode for the reader: delayed (single taps wait at most 250 ms) only when
+/// `double_tap` has an action and no overlay is open; otherwise taps come at once.
+pub fn double_tap_mode(overlay_open: bool, settings: &Settings) -> DoubleTapMode {
+    if !overlay_open && settings.gestures.action("double_tap") != "none" {
+        DoubleTapMode::Delayed
+    } else {
+        DoubleTapMode::After
+    }
+}
+
+/// Every action name [`ReaderScreen::run_action`] knows (besides `plugin:<p>:<item>`).
+pub const KNOWN: &[&str] = &[
+    "none",
+    "next_page",
+    "prev_page",
+    "menu",
+    "reading_settings",
+    "toc",
+    "goto",
+    "bookmark",
+    "bookmarks",
+    "search",
+    "back",
+    "control_center",
+    "light_up",
+    "light_down",
+    "warmth_up",
+    "warmth_down",
+    "night_mode",
+    "font_bigger",
+    "font_smaller",
+    "zoom_in",
+    "zoom_out",
+    "status_bars",
+    "full_refresh",
+    "rotate",
+    "library",
+    "home",
+    "sleep",
+    "exit",
+    "dictionary",
+    "select",
+];
+
+impl ReaderScreen {
+    /// Runs the mapped action of `g`. `Ok(None)` when the map has no action for it (the
+    /// caller offers it to plugins).
+    pub(super) fn gesture_action(&mut self, g: &Gesture, cx: &mut AppCtx) -> anyhow::Result<Option<Transition>> {
+        let size = cx.screen.size();
+        let Some((trigger, action)) = resolve(g, size, &cx.settings.gestures) else { return Ok(None) };
+        let p = g.pos();
+        log::info!("reader gesture {trigger} at {},{} -> {action}", p.x, p.y);
+        let mut action = action.to_string();
+        // `back` with no link to go back from: the plain trigger's action (a swipe in from
+        // the left edge then turns back a page like any right swipe).
+        if action == "back" && self.link_return_page().is_none() {
+            if let Some((_, Some(plain))) = triggers(g, size) {
+                action = cx.settings.gestures.action(plain).to_string();
+                log::info!("reader gesture {trigger}: nothing to go back to, {plain} -> {action}");
+            }
+        }
+        if action == "none" {
+            return Ok(None);
+        }
+        // A long press that selected nothing (blank space): it turns the page by side,
+        // as before the gesture map.
+        if trigger == "long_press" && LONG_PRESS_ACTIONS.iter().any(|(n, _)| *n == action) {
+            self.turn(if p.x < size.w as i32 / 3 { -1 } else { 1 }, cx);
+            return Ok(Some(Transition::None));
+        }
+        self.run_action(&action, cx).map(Some)
+    }
+
+    /// Runs one action from [`ink_store::prefs::ACTIONS`] (or `plugin:<p>:<item>`).
+    pub(super) fn run_action(&mut self, action: &str, cx: &mut AppCtx) -> anyhow::Result<Transition> {
+        let fixed = self.doc.as_deref().is_some_and(|d| d.kind() == ink_doc::DocKind::Fixed);
+        match action {
+            "none" | "dictionary" | "select" => {}
+            "next_page" => self.next_page(cx),
+            "prev_page" => self.prev_page(cx),
+            "menu" => self.open_menu(cx),
+            "reading_settings" => self.open_aa(cx),
+            "toc" => self.open_toc(cx)?,
+            "goto" => self.open_goto(cx)?,
+            "bookmark" => {
+                let on = self.toggle_bookmark();
+                log::info!("reader: bookmark {}", if on { "added" } else { "removed" });
+            }
+            "bookmarks" => self.open_bookmarks(cx)?,
+            "search" => self.open_search(cx),
+            "back" => {
+                if !self.go_back_from_link() {
+                    log::info!("reader: back: no link to go back from");
+                }
+            }
+            "control_center" => {
+                log::info!("reader: control center");
+                return Ok(quick_light::open_control_center(cx));
+            }
+            "light_up" | "light_down" | "warmth_up" | "warmth_down" => light_step(action, cx),
+            "night_mode" => self.toggle_night(cx)?,
+            "font_bigger" | "zoom_in" if fixed => {
+                self.zoom_step(1);
+            }
+            "font_smaller" | "zoom_out" if fixed => {
+                self.zoom_step(-1);
+            }
+            "font_bigger" => self.font_step(1, cx)?,
+            "font_smaller" => self.font_step(-1, cx)?,
+            "zoom_in" | "zoom_out" => log::info!("reader: {action} is for fixed-layout books (PDF, CBZ)"),
+            "status_bars" => self.toggle_status_bars(),
+            "full_refresh" => self.full_refresh(),
+            "rotate" => {
+                let mut s = cx.settings_update.take().unwrap_or_else(|| cx.settings.clone());
+                s.device.rotation = (s.device.rotation + 1) % 4;
+                log::info!("reader: rotate to {}", s.device.rotation);
+                *cx.settings_update = Some(s);
+            }
+            // The library opened the book (the launcher starts the library): back to it.
+            "library" | "home" => {
+                log::info!("reader: {action}: back to the library");
+                return Ok(Transition::Pop);
+            }
+            "sleep" => {
+                log::info!("reader: sleep now");
+                if let Err(e) = cx.services.power.sleep_now() {
+                    log::warn!("reader: sleep: {e}");
+                }
+            }
+            "exit" if cx.settings.ui.confirm_exit => self.confirm_exit(cx),
+            "exit" => {
+                log::info!("reader: exit to Kindle");
+                return Ok(Transition::Exit);
+            }
+            _ if action.starts_with("plugin:") => {
+                let mut parts = action.splitn(3, ':').skip(1);
+                let (Some(plugin), Some(item)) = (parts.next(), parts.next()) else {
+                    log::warn!("reader: bad plugin action {action:?}");
+                    return Ok(Transition::None);
+                };
+                log::info!("reader: plugin {plugin} item {item}");
+                let doc = self.doc.as_deref_mut().map(|d| d as &mut dyn ink_doc::Document);
+                cx.plugins.trigger(plugin, item, doc);
+            }
+            _ => log::warn!("reader: unknown gesture action {action:?}"),
+        }
+        Ok(Transition::None)
+    }
+
+    /// Opens the "Exit to Kindle?" dialog (Cancel closes it, Exit leaves the app).
+    fn confirm_exit(&mut self, cx: &mut AppCtx) {
+        let size = cx.screen.size();
+        let mut o = Overlay::new(OverlayKind::Popup);
+        o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
+        let dialog = ink_ui::Dialog {
+            title: "Exit to Kindle?".into(),
+            body: "rinky closes and the Kindle home screen starts.".into(),
+            buttons: vec![("Cancel".into(), "close".into()), ("Exit".into(), EXIT_CONFIRMED.into())],
+        };
+        let frame = ink_ui::Dialog::frame(size);
+        o.buttons.push((EXIT_CONFIRMED.into(), frame));
+        o.tree.add(None, Box::new(dialog), frame);
+        log::info!("reader: exit asks first");
+        self.open_overlay(o, cx);
+    }
+}
+
+/// Brighter, dimmer, warmer or cooler by [`LIGHT_STEP_PERCENT`] of the range, through
+/// the control center's light code (auto warmth keeps the user's warmth).
+fn light_step(action: &str, cx: &mut AppCtx) {
+    let light = &mut *cx.services.light;
+    let warmth = action.starts_with("warmth");
+    let up = action.ends_with("_up");
+    let ((lo, hi), cur) = if warmth { (light.warmth_range(), light.warmth()) } else { (light.brightness_range(), light.brightness()) };
+    let cur = match cur {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("reader: {action}: {e}");
+            return;
+        }
+    };
+    let step = ((hi.saturating_sub(lo)) * LIGHT_STEP_PERCENT / 100).max(1);
+    let v = if up { cur.saturating_add(step).min(hi) } else { cur.saturating_sub(step).max(lo) };
+    let name = if warmth { quick_light::WARMTH } else { quick_light::BRIGHTNESS };
+    if let Some(text) = quick_light::apply(&format!("{name}:{v}"), light) {
+        log::info!("reader: {action}: {cur} -> {text}");
+    }
+    if warmth {
+        let now = cx.services.clock.local_now();
+        quick_light::with_auto_warmth(&mut *cx.services.light, |w, light| w.manual(v, light, &now));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ink_store::prefs::{ACTIONS, DEFAULT_GESTURES};
+
+    const SIZE: Size = Size::new(1272, 1696);
+
+    fn tap(x: i32, y: i32) -> Gesture {
+        Gesture::Tap { pos: Point::new(x, y) }
+    }
+
+    fn swipe(x: i32, y: i32, dir: Direction) -> Gesture {
+        Gesture::Swipe { from: Point::new(x, y), to: Point::new(x, y), dir }
+    }
+
+    #[test]
+    fn defaults_resolve_with_fallback_to_plain_triggers() {
+        let map = GestureMap::default();
+        let r = |g: Gesture| resolve(&g, SIZE, &map).unwrap();
+        assert_eq!(r(tap(100, 900)), ("tap_left", "prev_page"));
+        assert_eq!(r(tap(1000, 900)), ("tap_right", "next_page"));
+        assert_eq!(r(tap(636, 848)), ("tap_center", "menu"));
+        assert_eq!(r(tap(50, 50)), ("tap_top_left", "bookmark"));
+        // Unused corners fall back to their zone: no hidden exit top right.
+        assert_eq!(r(tap(1250, 40)), ("tap_center", "menu"));
+        assert_eq!(r(tap(1250, 1680)), ("tap_right", "next_page"));
+        // Edge swipes, and an unused edge falls back to the plain swipe.
+        assert_eq!(r(swipe(600, 1690, Direction::Up)), ("swipe_up_from_bottom", "reading_settings"));
+        assert_eq!(r(swipe(600, 10, Direction::Down)), ("swipe_down_from_top", "control_center"));
+        assert_eq!(r(swipe(1260, 800, Direction::Left)), ("swipe_left", "next_page"));
+        assert_eq!(r(swipe(600, 800, Direction::Up)), ("swipe_up", "none"));
+        let pinch = Gesture::Pinch { center: Point::new(600, 800), scale_milli: 600 };
+        assert_eq!(r(pinch), ("pinch_in", "font_smaller"));
+        // Every listed action has a handler.
+        for (a, _) in ACTIONS.iter().chain(LONG_PRESS_ACTIONS) {
+            assert!(KNOWN.contains(a), "{a} has no handler");
+        }
+        for (_, a) in DEFAULT_GESTURES {
+            assert!(KNOWN.contains(a), "{a} has no handler");
+        }
+    }
+}

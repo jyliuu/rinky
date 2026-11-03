@@ -1,0 +1,54 @@
+[package]
+name = "ink-app"
+description = "rinky: screens, router, plugin host and the command-line entry point"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ink_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rinky"
+path = "src/main.rs"
+
+[dependencies]
+ink-device.workspace = true
+ink-text.workspace = true
+ink-ui.workspace = true
+ink-doc.workspace = true
+ink-html.workspace = true
+ink-formats.workspace = true
+ink-mupdf.workspace = true
+ink-store.workspace = true
+ink-net.workspace = true
+ink-plugin.workspace = true
+ink-stats.workspace = true
+kosync.workspace = true
+opds.workspace = true
+calibre.workspace = true
+insightful.workspace = true
+usbnet.workspace = true
+ssh.workspace = true
+anyhow.workspace = true
+log.workspace = true
+# In-app update (src/update.rs, packaging agent): release JSON, SHA-256, .tar.gz reader.
+# serde_json and thiserror are workspace dependencies; ring and flate2 are already in
+# Cargo.lock with these features (through ureq/rustls and zip), so nothing new is built.
+serde_json.workspace = true
+thiserror.workspace = true
+ring = { workspace = true, features = ["default"] }
+flate2 = { workspace = true, features = ["default"] }
+# Compiled-in plugins (one line each).
+dictionary = { path = "../../plugins/dictionary" }
+wikipedia = { path = "../../plugins/wikipedia" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+# The host simulator window exists only off the Kindle.
+[target.'cfg(not(target_arch = "arm"))'.dependencies]
+ink-device = { workspace = true, features = ["sim"] }

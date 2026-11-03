@@ -1,0 +1,21 @@
+[package]
+name = "ssh"
+description = "SSH server plugin: runs dropbear on the Kindle while rinky runs (Wi-Fi or USB networking)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+path = "lib.rs"
+
+[dependencies]
+ink-plugin.workspace = true
+log.workspace = true
+# kill(SIGTERM) for the server and getifaddrs for the addresses to show.
+libc.workspace = true
+
+[dev-dependencies]

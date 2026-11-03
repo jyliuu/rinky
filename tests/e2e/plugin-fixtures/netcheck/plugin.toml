@@ -1,0 +1,5 @@
+name = "netcheck"
+version = "0.1"
+description = "Network test plugin for tests/e2e/plugin-net.sh"
+permissions = ["network", "storage"]
+hosts = ["10.0.2.2"]

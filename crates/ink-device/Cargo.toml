@@ -1,0 +1,30 @@
+[package]
+name = "ink-device"
+description = "Device layer: screen, input, light, battery, power, Wi-Fi, USB, clock; Kindle MTK, host simulator and headless backends"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+
+[features]
+default = []
+# Host simulator window (minifb). Enabled by ink-app on host builds only.
+sim = ["dep:minifb"]
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+png.workspace = true
+
+# Process groups and kill(2) for the lipc runner on every unix (host tests too);
+# ioctls, poll and netlink on the Kindle.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(not(target_arch = "arm"))'.dependencies]
+minifb = { workspace = true, optional = true }

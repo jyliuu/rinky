@@ -1,0 +1,14 @@
+# Library timing script for scripts/perf-bench.sh: open the library on a folder, let the
+# metadata pass run between (virtual) idle periods, then exit.
+wait 1000
+wait 1000
+wait 1000
+wait 1000
+wait 1000
+wait 1000
+wait 1000
+wait 1000
+wait 1000
+wait 1000
+shot library
+key power

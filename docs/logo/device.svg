@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="rinky logo (device)"><title>rinky logo (device)</title>
+<rect width="512" height="512" rx="112" fill="#f5f2ea"/>
+<rect x="124" y="70" width="264" height="372" rx="38" fill="none" stroke="#1c1b19" stroke-width="22"/>
+<rect x="170" y="150" width="172" height="14" rx="7" fill="#1c1b19"/><rect x="170" y="184" width="172" height="14" rx="7" fill="#1c1b19"/><rect x="170" y="218" width="172" height="14" rx="7" fill="#1c1b19"/><rect x="170" y="252" width="120" height="14" rx="7" fill="#1c1b19"/><rect x="170" y="304" width="172" height="14" rx="7" fill="#1c1b19"/><rect x="170" y="338" width="150" height="14" rx="7" fill="#1c1b19"/>
+<path transform="translate(324 396) scale(44)" d="M0,-1 C0.35,-0.45 0.62,-0.12 0.62,0.24 C0.62,0.6 0.34,0.86 0,0.86 C-0.34,0.86 -0.62,0.6 -0.62,0.24 C-0.62,-0.12 -0.35,-0.45 0,-1Z" fill="#1c1b19"/>
+</svg>

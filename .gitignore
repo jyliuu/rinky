@@ -1,0 +1,10 @@
+/target
+/out
+*.orig
+# Reader state written next to the test books by host runs (sim, render tests).
+/testdata/*.sdr/
+/testdata/*.rinky
+/dist
+/.cache
+/.claude/worktrees
+/.zig-cache

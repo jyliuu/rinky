@@ -1,0 +1,64 @@
+{
+	"items": [
+	{
+		"name": "rinky",
+		"priority": 0,
+		"items": [
+		{
+			"name": "Start rinky",
+			"priority": 1,
+			"action": "./bin/kual.sh",
+			"params": "start",
+			"status": false,
+			"internal": "status Starting rinky"
+		},
+		{
+			"name": "Exit to Kindle (stop rinky)",
+			"priority": 2,
+			"action": "./bin/kual.sh",
+			"params": "exit",
+			"exitmenu": false,
+			"refresh": false,
+			"status": false,
+			"internal": "status Stopping rinky, starting the Kindle UI"
+		},
+		{
+			"name": "Update rinky",
+			"priority": 3,
+			"action": "./bin/kual.sh",
+			"params": "update",
+			"exitmenu": false,
+			"refresh": false,
+			"status": false,
+			"internal": "status Checking for an rinky update"
+		},
+		{
+			"name": "Uninstall rinky",
+			"priority": 9,
+			"items": [
+			{
+				"name": "Uninstall, keep notes and settings",
+				"priority": 1,
+				"action": "./bin/kual.sh",
+				"params": "uninstall-keep-data",
+				"exitmenu": false,
+				"refresh": true,
+				"status": false,
+				"internal": "status Removing rinky (keeping your data)"
+			},
+			{
+				"name": "Uninstall completely",
+				"priority": 2,
+				"action": "./bin/kual.sh",
+				"params": "uninstall",
+				"exitmenu": false,
+				"refresh": true,
+				"status": false,
+				"internal": "status Removing rinky and its data"
+			}
+			]
+		}
+		]
+	}
+	]
+}

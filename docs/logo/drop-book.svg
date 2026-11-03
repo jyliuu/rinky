@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="rinky logo (drop-book)"><title>rinky logo (drop-book)</title>
+<rect width="512" height="512" rx="112" fill="#f5f2ea"/>
+<path d="M256 178 C206 150 142 142 92 150 L92 382 C142 374 206 382 256 410 Z" fill="none" stroke="#1c1b19" stroke-width="22" stroke-linejoin="round"/>
+<path d="M256 178 C306 150 370 142 420 150 L420 382 C370 374 306 382 256 410 Z" fill="#1c1b19"/>
+<g stroke="#f5f2ea" stroke-width="12" stroke-linecap="round"><path d="M300 214 C330 202 358 198 384 198"/><path d="M300 256 C330 244 358 240 384 240"/><path d="M300 298 C330 286 358 282 384 282"/><path d="M300 340 C330 328 358 324 384 324"/></g>
+<path transform="translate(256 112) scale(46)" d="M0,-1 C0.35,-0.45 0.62,-0.12 0.62,0.24 C0.62,0.6 0.34,0.86 0,0.86 C-0.34,0.86 -0.62,0.6 -0.62,0.24 C-0.62,-0.12 -0.35,-0.45 0,-1Z" fill="#1c1b19"/>
+</svg>

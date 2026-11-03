@@ -1,0 +1,20 @@
+[package]
+name = "ink-doc"
+description = "Document trait, positions (crengine xpointers, fixed-layout pages), TOC, search, links, selection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+
+[dependencies]
+ink-device.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

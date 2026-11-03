@@ -1,0 +1,16 @@
+# Sample plugin in the headless simulator (see docs/plugins.md, Testing).
+# The sim reads plugins from $TMPDIR/rinky-sim/plugins.
+wait 300
+shot 01-open
+wait 5000            # headless waits do not expire toasts (virtual clock)
+shot 02-later
+tap 1000 900
+wait 300
+shot 03-page2
+power goingToScreenSaver
+wait 300
+power outOfScreenSaver
+wait 300
+shot 04-welcome-back
+wait 3000
+shot 05-after

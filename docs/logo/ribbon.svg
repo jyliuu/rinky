@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="rinky logo (ribbon)"><title>rinky logo (ribbon)</title>
+<rect width="512" height="512" rx="112" fill="#f5f2ea"/>
+<path d="M112 120 C112 98 128 86 150 86 L362 86 C384 86 400 98 400 120 L400 414 C340 392 300 392 256 418 C212 392 172 392 112 414 Z" fill="none" stroke="#1c1b19" stroke-width="22" stroke-linejoin="round"/>
+<path d="M226 86 L226 268 C226 300 286 300 286 268 L286 86 Z" fill="#1c1b19"/>
+<path transform="translate(256 290) scale(30)" d="M0,-1 C0.35,-0.45 0.62,-0.12 0.62,0.24 C0.62,0.6 0.34,0.86 0,0.86 C-0.34,0.86 -0.62,0.6 -0.62,0.24 C-0.62,-0.12 -0.35,-0.45 0,-1Z" fill="#1c1b19"/>
+</svg>

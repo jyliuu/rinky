@@ -1,0 +1,25 @@
+[package]
+name = "ink-store"
+description = "Book identity (KOReader partial MD5), per-book sidecars, library index, settings, KOReader migration reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+md-5.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+# Tests set file times by path (utimensat): fd-based futimens does not stick on the
+# Kindle's FUSE user store.
+libc.workspace = true

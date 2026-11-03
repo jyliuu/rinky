@@ -1,0 +1,7 @@
+# Sample rinky plugin: word count and reading timer.
+# Copy this folder (plugin.toml and main.lua) to /mnt/us/rinky/plugins/sample-lua/.
+name = "sample-lua"
+version = "0.1.0"
+description = "Word count and reading timer (sample Lua plugin)"
+permissions = ["document", "ui", "storage"]
+entry = "main.lua"

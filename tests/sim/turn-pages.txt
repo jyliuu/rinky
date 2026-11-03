@@ -1,0 +1,20 @@
+# Scripted input for `rinky sim` (window) and `rinky sim --headless`.
+# Panel pixels, 1272 x 1696. See crates/ink-device/src/script.rs for the syntax.
+shot 01-open
+tap 1000 900          # next page (right two thirds)
+shot 02-next
+quicktap 1000 900     # PW12 short tap: down and up in one SYN frame
+shot 03-quicktap
+swipe 1000 800 200 800  # swipe left = next page
+shot 04-swipe-next
+tap 100 900           # left third = previous page
+shot 05-prev
+swipe 600 300 600 1200  # vertical swipe does nothing
+shot 06-vertical
+key next
+key next
+key next
+key next
+key next
+shot 07-after-9-turns   # the 8th turn flashed (GC16)
+key power             # power key = exit (no hidden exit corner)

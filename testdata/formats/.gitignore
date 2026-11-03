@@ -1,0 +1,3 @@
+# Reader state written next to fixtures by host runs.
+*.sdr/
+*.rinky

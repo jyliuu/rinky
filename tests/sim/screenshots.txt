@@ -1,0 +1,57 @@
+# README screenshots (scripts/screenshots.sh): the showcase library of
+# scripts/make-showcase-library.py, Noto Sans UI, Noto Serif text. 1272 x 1696 panel.
+# `sleep` (real time) lets the library's background scan fill in covers and titles.
+sleep 3000
+tap 1100 70           # Statistics (home header)
+sleep 1500
+shot stats
+key back
+sleep 800
+tap 478 1640          # Library tab
+sleep 2000
+tap 990 66            # grid view
+sleep 2000
+shot library
+tap 159 1640          # Home tab
+sleep 1500
+tap 565 425           # Start reading: Alice
+sleep 1500
+shot reading
+key next
+sleep 300
+key next
+sleep 300
+tap 636 848           # reader menu
+sleep 500
+shot menu
+tap 762 66            # Aa: reading settings
+sleep 800
+shot typography
+key back
+sleep 500
+hold 410 497 900      # long press "Latitude": dictionary
+sleep 800
+shot dictionary
+key back
+sleep 500
+down 140 662          # select "Presently she began again ... downward"
+sleep 900
+move 700 700
+sleep 100
+move 1000 740
+sleep 100
+move 1110 774
+sleep 100
+up 1110 774
+sleep 800
+shot highlight
+tap 189 1104          # Highlight
+sleep 500
+tap 636 848           # reader menu
+sleep 500
+tap 30 66             # back to home
+sleep 2000
+shot home
+tap 1113 1640         # Settings tab
+sleep 1500
+shot settings

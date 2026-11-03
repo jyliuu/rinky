@@ -1,0 +1,26 @@
+[package]
+name = "ink-net"
+description = "HTTPS client (ureq + rustls), SSE streaming, downloads, OPDS and KOSync clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# The one doc example is marked ignore; skipping rustdoc --test saves about 0.7 s per `cargo test`.
+doctest = false
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+md-5.workspace = true
+quick-xml.workspace = true
+webpki-roots.workspace = true
+ureq = { workspace = true, features = ["rustls", "gzip"] }
+# Already in the tree through ureq (same versions and features); used directly for the
+# test server (rustls server side), SHA-256 and random device ids (ring).
+rustls = { workspace = true, features = ["logging", "std", "tls12", "ring"] }
+ring.workspace = true

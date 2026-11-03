@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+<stylesheet type="text/css">.big { font-size: 120%; }</stylesheet>
+<description>
+ <title-info>
+  <genre>prose_classic</genre><genre>fairy_tale</genre>
+  <author><first-name>Inkreader</first-name><last-name>Fixtures</last-name></author>
+  <book-title>FB2 Sample Book</book-title>
+  <annotation><p>A small book that uses every FB2 element the converter knows.</p></annotation>
+  <keywords>test, fb2</keywords>
+  <date value="2026-10-24">2026</date>
+  <coverpage><image l:href="#cover.png"/></coverpage>
+  <lang>en</lang>
+  <sequence name="Inkreader Tests" number="3"/>
+ </title-info>
+ <document-info><author><nickname>formats</nickname></author><date value="2026-10-24">2026</date><id>inkreader-fb2-sample-0001</id><version>1.0</version></document-info>
+ <publish-info><publisher>inkreader</publisher><year>2026</year><isbn>978-0-00-000000-2</isbn></publish-info>
+</description>
+<body>
+ <image l:href="#cover.png"/>
+ <title><p>FB2 Sample Book</p><p>A Test</p></title>
+ <epigraph><p>Every element has its place.</p><text-author>The Converter</text-author></epigraph>
+ <section id="part1">
+  <title><p>Part One</p><p>Prose</p></title>
+  <section id="ch1">
+   <title><p>Chapter 1</p><p>The Lamp</p></title>
+   <epigraph><p>Light first, then words.</p></epigraph>
+   <p>The first paragraph has a footnote<a l:href="#n1" type="note">[1]</a>, <emphasis>emphasis</emphasis>, <strong>strong text</strong>, <strikethrough>struck</strikethrough>, H<sub>2</sub>O, E=mc<sup>2</sup> and <code>code</code>.</p>
+   <p><style name="big">A styled run</style> and a link to <a l:href="#ch2">chapter 2</a>.</p>
+   <p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 1.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 2.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 3.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 4.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 5.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 6.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 7.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 8.</p>
+
+   <image l:href="#pic.png" title="A dark rectangle"/>
+   <subtitle>* * *</subtitle>
+   <cite><p>A quoted paragraph from somewhere else.</p><text-author>Somebody</text-author></cite>
+   <empty-line/>
+   <table><tr><th>Format</th><th>Status</th></tr><tr><td>FB2</td><td align="center">read</td></tr></table>
+  </section>
+  <section id="ch2">
+   <title><p>Chapter 2</p><p>The Poem</p></title>
+   <poem>
+    <title><p>A Short Poem</p></title>
+    <stanza><v>The rain is on the window,</v><v>the lamp is on the desk,</v></stanza>
+    <stanza><v>the reader turns the pages</v><v>and leaves the world the rest.</v></stanza>
+    <text-author>Fixtures</text-author>
+   </poem>
+   <p>A second note<a l:href="#n2" type="note">[2]</a> ends the chapter.</p>
+   <p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 1.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 2.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 3.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 4.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 5.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 6.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 7.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 8.</p>
+
+  </section>
+ </section>
+ <section id="part2">
+  <title><p>Part Two</p></title>
+  <section><title><p>Chapter 3</p></title><p>Chapter three has no id of its own; the converter gives it one.</p><p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 1.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 2.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 3.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 4.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 5.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 6.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 7.</p>
+<p>The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. The lamp on the desk hummed quietly while the reader turned another page. Outside, the rain kept a steady rhythm on the window, and the story went on. Paragraph 8.</p>
+</section>
+ </section>
+</body>
+<body name="notes">
+ <title><p>Notes</p></title>
+ <section id="n1"><title><p>1</p></title><p>The first footnote.</p></section>
+ <section id="n2"><title><p>2</p></title><p>The second footnote.</p></section>
+</body>
+<binary id="cover.png" content-type="image/png">iVBORw0KGgoAAAANSUhEUgAAADwAAABQCAAAAABgoUmPAAAAKUlEQVR42u3LMQ0AAAwDoEqv9IrY
+tQR+0oPIsizLsizLsizLsizL8q88T7BgiOE25sMAAAAASUVORK5CYII=</binary>
+<binary id="pic.png" content-type="image/png">iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAAAAADaLSBnAAAAFElEQVR42mMwIBIwjCocVTiqEAQA
+TUSWAQMBsPUAAAAASUVORK5CYII=</binary>
+</FictionBook>

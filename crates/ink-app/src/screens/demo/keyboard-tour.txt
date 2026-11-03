@@ -1,0 +1,15 @@
+# Keyboard tour, panel coordinates (portrait): symbols page and the four layouts.
+#   rinky demo --headless --script crates/ink-app/src/screens/demo/keyboard-tour.txt --out DIR
+tap 889 160            # Input tab
+tap 100 1625           # ?123: symbols
+shot 01-symbols
+tap 100 1625           # ABC: letters again
+tap 258 1625           # globe: Danish
+shot 02-dansk
+tap 258 1625           # globe: German
+shot 03-deutsch
+tap 258 1625           # globe: French
+shot 04-francais
+tap 258 1625           # globe: English again
+shot 05-english
+key power

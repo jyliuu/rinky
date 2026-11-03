@@ -1,0 +1,50 @@
+[package]
+name = "ink-html"
+description = "Reflowable engine: XHTML/HTML parsing, CSS cascade, layout, pagination and rendering; implements ink-doc's Document"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+
+[dependencies]
+ink-device.workspace = true
+ink-text.workspace = true
+ink-doc.workspace = true
+quick-xml.workspace = true
+log.workspace = true
+md-5.workspace = true
+ttf-parser.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
+cssparser.workspace = true
+# Pattern dictionaries for 82 languages embedded in the binary (+3.0 MB on ARM).
+hyphenation = { workspace = true, features = ["embed_all"] }
+image = { workspace = true, features = ["jpeg", "png", "gif", "webp"] }
+# SVG images: no text shaping or system fonts (SVG <text> is not drawn); raster images
+# inside SVG (the usual SVG cover wrapper) are decoded.
+resvg = { workspace = true, features = ["raster-images"] }
+usvg.workspace = true
+tiny-skia.workspace = true
+# Big images are decoded with bounded memory: PNG row by row, JPEG straight to gray
+# (both crates are already in the tree through `image`).
+png.workspace = true
+zune-jpeg.workspace = true
+zune-core.workspace = true
+
+# Background pagination threads run at nice 10 (setpriority per thread).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+# Golden tests open EPUBs through ink-formats (a dev-only cycle; integration tests link
+# the same ink-html library that ink-formats uses).
+ink-formats.workspace = true
+ink-store.workspace = true
+serde_json.workspace = true
+# The fixture generator (examples/make_fixtures.rs) writes EPUBs and images.
+zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }

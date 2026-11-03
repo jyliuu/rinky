@@ -1,0 +1,22 @@
+# Kindle PW12 userland is ARMv7 hard-float. The documented build is
+#   cargo zigbuild --release --target armv7-unknown-linux-musleabihf
+# zig is the C compiler and linker, so crates with C code (ring, vendored Lua, bundled
+# SQLite, MuPDF later) cross-compile without a GNU toolchain.
+#
+# Old route (pure-Rust crates only): link with the linker shipped with Rust.
+#   [target.armv7-unknown-linux-musleabihf]
+#   linker = "rust-lld"
+#   rustflags = ["-C", "link-self-contained=yes"]
+# It cannot compile C dependencies, and it conflicts with zigbuild's linker wrapper,
+# so it stays commented out.
+
+[resolver]
+# Never resolve a dependency that needs a newer rustc than workspace.package.rust-version.
+incompatible-rust-versions = "fallback"
+
+# The PW12 (MT8110/MT8113) has four Cortex-A53 cores running this ARMv7 hard-float
+# userland in AArch32: schedule for the A53 and use NEON (the default armv7 target has
+# NEON off). The emulator machine (mt8113-bellatrix4) is the same CPU. Checked with
+# cargo zigbuild on 2026-11-01. RUSTFLAGS in the environment replaces this.
+[target.armv7-unknown-linux-musleabihf]
+rustflags = ["-C", "target-cpu=cortex-a53", "-C", "target-feature=+neon"]

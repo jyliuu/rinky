@@ -1,0 +1,67 @@
+#!/bin/bash
+# Verifier finding (wave A cycle 2), open. Unit test: crates/ink-ui/tests/verify_ui_cycle2.rs
+# held_key_after_a_long_input_gap_does_not_burst.
+#
+# The gesture recogniser replays every missed 150 ms hold repeat when the next input
+# frame carries a later time. Here: "abcdefgh" is typed in the Input tab, Backspace is
+# held 0.7 s with a raw protocol-B record (one live repeat at 600 ms), the guest clock is
+# set 1 h forward (evdev timestamps are CLOCK_REALTIME), the lift is written, and the clock
+# is set back. A held key should repeat while time passes, not replay an hour of repeats
+# on the next frame. Pass = at most 3 characters deleted.
+# Observed at 1c74b3f (out/evidence/ui/verify-2/e2e-findings-3): the text in the log went
+# from "abcdefgh" to "" about 4 s after the lift; the panel still showed "abcdefg" with
+# Backspace pressed 10 s later; the app was still logging "demo action: keyboard" (about
+# 11100 lines) 60 s after the lift, did not take the exit tap and was killed (143).
+#   bash tests/e2e/ui-verify2-hold-gap.sh INSTANCE OUTDIR
+NAME=$1 OUT=$2
+. "$(dirname "$0")/../../scripts/e2e/lib.sh"
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+LOG=$DEST/rinky.log
+pos() { guest "grep 'demo $1 $2 panel' $LOG | tail -1" 2>/dev/null | awk '{print $(NF-1), $NF}'; }
+tapb() { local p; p=$(pos button "$1"); [ -n "$p" ] || fail "no button $1 in the log"; tap $p; }
+tapk() { local p; p=$(pos key "$1"); [ -n "$p" ] || fail "no key $1 in the log"; tap $p; }
+count() { local n; n=$(guest "grep -c -- '$1' $LOG" 2>/dev/null | tail -1); echo "${n:-0}"; }
+at_least() { [ "$(count "$1")" -ge "$2" ]; }
+expect() { wait_until 20 "'$1' x$2" at_least "$1" "$2" || fail "expected $2 log lines with '$1', got $(count "$1")"; }
+
+wait_home 240 home-before
+guest "rm -f $LOG $DEST/watchdog.log; sh $DEST/rinky.sh -- demo --kindle" || fail "launch"
+wait_until 90 "gallery running, KPPMainApp gone" reader_running || fail "rinky did not take over"
+wait_until 30 "layout logged" at_least "demo button rotate" 1 || fail "no layout"
+sleep 5
+tapb tab:3; expect "demo action: tab:3" 1; sleep 3
+for k in a b c d e f g h; do tapk $k; done
+expect "demo text input: abcdefgh" 1
+shot typed >/dev/null
+del=$(pos key del)
+[ -n "$del" ] || fail "no del key in the log"
+dir=$(mktemp -d "$OUT/.mt.XXXXXX") || fail "mktemp"
+python3 "$HERE/ui-verify-mt.py" "$dir" hold $del || fail "ui-verify-mt hold"
+guest 'rm -rf /tmp/ui-mt; mkdir -p /tmp/ui-mt' || fail "mkdir"
+"$SLOT" push "$NAME" "$dir"/*.bin /tmp/ui-mt/ >/dev/null || fail "push mt"
+log "hold del at $del for 0.7 s, clock +3600 s, lift, clock -3600 s"
+guest 'ev=$(grep -A4 "Name=\"fts_ts\"" /proc/bus/input/devices | sed -n "s/.*\(event[0-9]*\).*/\1/p" | head -1)
+       cat /tmp/ui-mt/00.bin > /dev/input/$ev; usleep 700000
+       date -s @$(( $(date +%s) + 3600 )) >/dev/null
+       cat /tmp/ui-mt/01.bin > /dev/input/$ev; usleep 300000
+       date -s @$(( $(date +%s) - 3600 )) >/dev/null; date' >>"$OUT/scenario.log" 2>&1 || fail "write mt"
+t_lift=$(date +%s)
+sleep 3
+shot after-hold-3s >/dev/null
+# The replayed repeats are handled before the next paint: wait for the empty text in the
+# log, then for the panel to show it.
+emptied() { [ "$(count 'demo text input: $')" -ge 1 ]; }
+wait_until 120 "text emptied in the log" emptied || log "the text never became empty"
+log "log shows the empty text about $(( $(date +%s) - t_lift )) s after the lift"
+sleep 5
+shot after-hold-final >/dev/null
+last=$(guest "grep 'demo text input' $LOG | tail -1" | sed 's/.*demo text input: //')
+log "text after the hold: '$last' (from 'abcdefgh')"
+guest "grep -c 'demo text input' $LOG" >"$OUT/text-lines.txt" 2>&1 || true
+tapb exit
+wait_until 30 "gallery exited" reader_gone || guest 'pid=$(cat /tmp/rinky/rinky.pid 2>/dev/null); [ -n "$pid" ] && kill "$pid"'
+save_logs
+wait_clean_home 300 home-after
+[ "${#last}" -ge 5 ] || fail "holding Backspace 0.7 s across a 1 h input-time gap left '$last' of 'abcdefgh'"
+pass "a held key does not replay missed repeats"

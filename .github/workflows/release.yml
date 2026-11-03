@@ -1,0 +1,107 @@
+# Builds the Kindle install package on every push and pull request, and publishes it as a
+# GitHub release when a version tag (v1.2.3) is pushed. The tag must match
+# [workspace.package] version in Cargo.toml.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# Release assets: rinky-V-kindlehf.tar.gz (SSH install and the in-app update),
+# rinky-V-kindle.zip (USB install) and SHA256SUMS (both; the in-app update checks it).
+name: Package
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TARGET: armv7-unknown-linux-musleabihf
+  ZIG_VERSION: 0.17.0
+  CARGO_TERM_COLOR: always
+  # The in-app update looks for releases of the repository that built the binary.
+  RINKY_RELEASE_URL: https://api.github.com/repos/${{ github.repository }}/releases/latest
+  # MuPDF and dropbear are built from pinned, checksummed source tarballs; keep them
+  # between runs.
+  INK_MUPDF_CACHE: ${{ github.workspace }}/.cache/mupdf-build
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag against Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(awk '/^\[workspace\.package\]/ {s = 1; next} /^\[/ {s = 0} s && $1 == "version" {gsub(/"/, "", $3); print $3; exit}' Cargo.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lzip bzip2 patch make file zip
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}-zig${{ env.ZIG_VERSION }}
+
+      - name: Cache MuPDF and dropbear builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/mupdf-build
+            target/dropbear
+          key: c-deps-zig${{ env.ZIG_VERSION }}-${{ hashFiles('crates/ink-mupdf/build.rs', 'crates/ink-mupdf/csrc/**', 'scripts/build-dropbear.sh', 'packaging/dropbear/**') }}
+
+      - name: Build the package
+        run: scripts/package.sh --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rinky-kindle-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rinky-kindle-${{ github.sha }}
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

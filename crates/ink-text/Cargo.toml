@@ -1,0 +1,26 @@
+[package]
+name = "ink-text"
+description = "Fonts, glyph cache, text measuring and drawing, shaping, line breaking and hyphenation APIs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+
+[dependencies]
+ink-device.workspace = true
+fontdue.workspace = true
+unicode-linebreak.workspace = true
+unicode-segmentation.workspace = true
+thiserror.workspace = true
+log.workspace = true
+rustybuzz.workspace = true
+# All 82 pattern dictionaries embedded (+3.0 MB in the ARM binary, measured by the architect).
+hyphenation = { workspace = true, features = ["embed_all"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

@@ -1,0 +1,16 @@
+engine 2
+juliet 210 d78c863aa6b20308d31c112a96652eae
+juliet-small-nopub 152 33e537874dfe32a761a2e971d9617731
+synthetic 6 080a6f752ab7fdb79c74988006e32eb8
+ws 10 a4bed86bd8a5b30349f3eea3c8c79d34
+css-selectors 2 c023ec04196a9e4e4b746cdfe5af990e
+css-selectors-nopub 1 9f8ab8d2b5f620b23d59d728c2e8b3dd
+css-text 5 d974cfc33798a6b9ce14d99925d70499
+css-box 10 befa8bf59172bcaf2af23800ad8af329
+fonts 1 9f8ab8d2b5f620b23d59d728c2e8b3dd
+images 7 a4e4a13e68f08f60fbddae5e8baa5d56
+tables-lists 5 800176aeda4ca247771a0f5d607fdd54
+notes 2 cba03c4cb199f609b8926e55e5f0bf10
+lang 2 63200c58f3b9172c6f43fea56d0a2ec7
+pagelist 4 65e33b1612f275b2102160920d388755
+malformed 3 dd73fae1838bee2c048a854e0468e77a

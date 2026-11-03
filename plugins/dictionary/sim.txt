@@ -1,0 +1,35 @@
+# Dictionary plugin in the headless simulator (juliet.epub, sample dictionary).
+# Setup (a private TMPDIR keeps other runs' sim state away):
+#   export TMPDIR=$(mktemp -d)
+#   cargo run -p ink-dict --example lookup -- --write-sample $TMPDIR/rinky-sim/dict/sample
+#   cp testdata/juliet.epub $TMPDIR/juliet.epub
+#   cargo run -p ink-app -- sim $TMPDIR/juliet.epub --headless --script plugins/dictionary/sim.txt --out OUT
+# Lookups go to $TMPDIR/rinky-sim/vocabulary.sqlite3.
+wait 500
+tap 1000 900
+wait 500
+tap 1000 900
+wait 500
+tap 1000 900
+wait 500
+tap 1000 900
+wait 500
+tap 1000 900
+wait 500
+shot 01-prologue
+hold 292 312 900
+wait 300
+shot 02-selection
+# The long press (long_press = dictionary) opens the card and the lookup popup at once.
+shot 03-popup
+tap 922 1596
+wait 300
+shot 04-full-view
+key back
+wait 300
+shot 05-closed
+hold 292 312 900
+wait 300
+tap 350 1596
+wait 300
+shot 06-added

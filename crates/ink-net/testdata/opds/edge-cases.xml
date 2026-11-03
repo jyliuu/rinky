@@ -1,0 +1,82 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<?xml-stylesheet type="text/xsl" href="/opds.xsl"?>
+<!-- Written for rinky's tests. Each entry reproduces a case seen in real catalogs
+     (KOReader's spec/unit/opds_spec.lua lists most of them). -->
+<feed xmlns="https://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog" xmlns:dc="http://purl.org/dc/terms/" xmlns:os="http://a9.com/-/spec/opensearch/1.1/" xmlns:thr="http://purl.org/syndication/thread/1.0" xmlns:pse="http://vaemendis.net/opds-pse/ns">
+<id>urn:rinky:edge</id>
+<title>Edge &amp; cases &nbsp;feed</title>
+<updated>2026-10-24T00:00:00Z</updated>
+<icon>/favicon.ico</icon>
+<link href="/opds-opensearch.xml" rel="search" type="application/opensearchdescription+xml"/>
+<link href="/opds/search/{searchTerms}" rel="search" type="application/atom+xml"/>
+<link rel='next' href='page2.xml' type='application/atom+xml;profile=opds-catalog;kind=acquisition'/>
+<link rel="http://opds-spec.org/facet" href="?sort=title" title="Title" opds:facetGroup="Sort" opds:activeFacet="true" thr:count="12"/>
+<link rel="http://opds-spec.org/facet" href="?sort=new" title="Newest" opds:facetGroup="Sort"/>
+<link rel="http://opds-spec.org/facet" href="?lang=da" title="Dansk" opds:facetGroup="Sprog"/>
+<os:totalResults>40</os:totalResults>
+<os:itemsPerPage>4</os:itemsPerPage>
+<os:startIndex>5</os:startIndex>
+<entry>
+  <title>First</title>
+  <id>urn:first</id>
+  <content type="text"/>
+  <link type="image/png" rel="http://opds-spec.org/image/thumbnail" href="FIRST_IMG"/>
+</entry>
+<entry>
+  <title>Second</title>
+  <id>urn:second</id>
+  <content type="text">A description.</content>
+  <link type="image/png" rel="http://opds-spec.org/image/thumbnail" href="SECOND_IMG"/>
+</entry>
+<entry>
+  <title>Двадцать тысяч льё под водой</title>
+  <id>urn:third</id>
+  <author><name>Жюль  Верн</name></author>
+  <author><name>Second Author</name><uri>http://x/</uri></author>
+  <category term="Приключения" label="Приключения"/>
+  <category term="fiction"/>
+  <link href="/opds/sequencebooks/109084" rel="related" type="application/atom+xml" title="Все книги серии «Капитан Немо»"/>
+  <link href='/get/third.fb2.zip' rel='http://opds-spec.org/acquisition' type='application/x-zip-compressed-fb2'/>
+</entry>
+<entry>
+  <title>HTML and XHTML content</title>
+  <id>urn:fourth</id>
+  <summary type="html">&lt;p&gt;Line &lt;b&gt;one&lt;/b&gt; &amp;amp; more&lt;/p&gt;&lt;p&gt;Line two&amp;nbsp;here&lt;/p&gt;</summary>
+  <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Para <i>one</i></p><p>Para two<br/>after break</p></div></content>
+  <dc:language>da</dc:language>
+  <dc:publisher>Forlaget</dc:publisher>
+  <dc:issued>1913</dc:issued>
+  <link rel="http://opds-spec.org/acquisition/buy" href="https://shop.example/buy/4" type="text/html">
+    <opds:price currencycode="DKK">49.95</opds:price>
+    <opds:indirectAcquisition type="application/vnd.adobe.adept+xml">
+      <opds:indirectAcquisition type="application/epub+zip"/>
+    </opds:indirectAcquisition>
+  </link>
+  <link rel="http://opds-spec.org/acquisition/sample" href="/sample/4.epub" type="application/epub+zip"/>
+  <link rel="http://opds-spec.org/acquisition/open-access" href="/free/4.pdf" type="application/pdf"/>
+</entry>
+<entry>
+  <title><![CDATA[CDATA <title> & co]]></title>
+  <id>urn:fifth</id>
+  <summary><![CDATA[Summary with <b>markup</b> kept as text]]></summary>
+  <link href="http://example.org/books/file.pdf?opds" type="application/pdf" title="pdf" rel="related"/>
+  <link href="/comics/5" rel="http://vaemendis.net/opds-pse/stream" type="image/jpeg" pse:count="24"/>
+</entry>
+<entry>
+  <title>Navigation without rel</title>
+  <id>tag:author:75357</id>
+  <content type="text">6 книг</content>
+  <link href="/opds/authorsequences/75357" rel="http://www.feedbooks.com/opds/facet" type="application/atom+xml;profile=opds-catalog" title="By series"/>
+  <link href="/opds/author/75357" type="application/atom+xml;profile=opds-catalog"/>
+</entry>
+<entry>
+  <title>Unclosed child</title>
+  <id>urn:seventh</id>
+  <link rel="subsection" href="sub/7" type="application/atom+xml;profile=opds-catalog">
+</entry>
+<entry>
+  <title>After the broken one</title>
+  <id>urn:eighth</id>
+  <link rel="subsection" href="sub/8" type="application/atom+xml;profile=opds-catalog"/>
+</entry>
+</feed>

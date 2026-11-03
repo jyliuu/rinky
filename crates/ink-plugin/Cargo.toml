@@ -1,0 +1,23 @@
+[package]
+name = "ink-plugin"
+description = "Plugin API for Rust and Lua plugins: lifecycle, registries, host services, sandboxed Lua 5.4 host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+
+[dependencies]
+ink-device.workspace = true
+ink-doc.workspace = true
+ink-net.workspace = true
+log.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+mlua.workspace = true

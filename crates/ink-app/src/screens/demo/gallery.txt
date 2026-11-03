@@ -1,0 +1,77 @@
+# Gallery tour, panel coordinates (portrait start; positions from the
+# "demo button" / "demo key" log lines). Run with
+#   rinky demo --headless --script crates/ink-app/src/screens/demo/gallery.txt --out DIR
+#   rinky demo --script crates/ink-app/src/screens/demo/gallery.txt --shots DIR   (window)
+shot 01-controls
+tap 388 358            # Toast
+shot 02-toast
+tap 140 358            # Dialog
+shot 03-dialog
+tap 300 1050           # Cancel
+tap 884 358            # Popup
+shot 04-popup
+tap 100 1500           # outside: the scrim closes it
+tap 1132 358           # Sheet ("Aa")
+shot 05-sheet
+swipe 636 1000 636 1500  # swipe down on the sheet closes it
+tap 300 471            # Night mode toggle
+shot 06-night
+tap 300 471            # day again
+tap 381 160            # Lists tab
+shot 07-lists
+swipe 900 1300 900 600 # next page
+shot 08-lists-page2
+tap 530 160            # Text tab
+shot 09-text
+swipe 636 1300 636 500 # scroll view: next page
+shot 10-text-page2
+tap 742 160            # Input tab
+tap 100 1490           # shift
+tap 762 1355           # H
+tap 321 1220           # e
+tap 888 1355           # j
+tap 573 1625           # space
+down 132 1355          # hold a: key preview, then the alternates
+shot 11-key-preview
+wait 700
+move 132 1355
+shot 12-alternates
+move 258 1220          # slide to the first alternate
+up 258 1220
+tap 573 1625           # space
+tap 258 1625           # globe: Danish layout
+tap 1092 1355          # æ
+tap 1206 1355          # ø
+shot 13-typed
+tap 954 160            # Gestures tab
+tap 600 800
+tap 605 805            # double tap
+hold 300 900 900       # long press
+swipe 900 1200 300 1200
+twotap 400 700 800 700
+pinch 600 1000 200 600 # spread
+down 20 1680           # corner hold, bottom left
+wait 700
+move 20 1680
+up 20 1680
+shot 14-gestures
+tap 127 160            # Controls tab
+tap 56 55              # rotate: clockwise
+shot 15-clockwise
+tap 1216 56            # rotate (now at the panel's top right): upside down
+shot 16-upside-down
+tap 1215 1640          # rotate (bottom right): counter-clockwise
+shot 17-counter-clockwise
+tap 55 1639            # rotate (bottom left): portrait
+shot 18-portrait
+tap 1166 160           # Design tab
+shot 19-design
+tap 166 55             # night mode
+shot 20-design-night
+tap 166 55             # day again
+tap 56 55              # rotate: clockwise (landscape layout of the Design tab)
+shot 21-design-landscape
+tap 1216 56            # upside down
+tap 1215 1640          # counter-clockwise
+tap 55 1639            # portrait
+key power

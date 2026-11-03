@@ -1,0 +1,75 @@
+#!/bin/bash
+# Verifier finding (wave A cycle 2), open. Unit test: crates/ink-ui/tests/verify_ui_cycle2.rs
+# a_layer_above_survives_a_repaint_of_the_widget_below.
+#
+# A widget under an overlay repaints over the overlay: WidgetTree::paint repaints only
+# the dirty widget, so a toast above it is overwritten in the canvas, and the widget's
+# damage sends that to the panel. Gallery in clockwise rotation: the toast lies over the
+# "Reading progress" slider. Tap Toast, then tap the slider's "+" under the toast (a tap
+# on a toast goes to the widget below it). Pass = the toast is still whole on the panel.
+# Headless run of the same steps: out/evidence/ui/verify-2/headless-toast-overlay.
+#   bash tests/e2e/ui-verify2-toast-overlay.sh INSTANCE OUTDIR
+NAME=$1 OUT=$2
+. "$(dirname "$0")/../../scripts/e2e/lib.sh"
+
+LOG=$DEST/rinky.log
+pos() { guest "grep 'demo $1 $2 panel' $LOG | tail -1" 2>/dev/null | awk '{print $(NF-1), $NF}'; }
+tapb() { local p; p=$(pos button "$1"); [ -n "$p" ] || fail "no button $1 in the log"; tap $p; }
+count() { local n; n=$(guest "grep -c -- '$1' $LOG" 2>/dev/null | tail -1); echo "${n:-0}"; }
+at_least() { [ "$(count "$1")" -ge "$2" ]; }
+
+wait_home 240 home-before
+guest "rm -f $LOG $DEST/watchdog.log; sh $DEST/rinky.sh -- demo --kindle" || fail "launch"
+wait_until 90 "gallery running, KPPMainApp gone" reader_running || fail "rinky did not take over"
+wait_until 30 "layout logged" at_least "demo button rotate" 1 || fail "no layout"
+sleep 5
+# A first tap on an empty spot: a freshly started decoder has no position until each axis
+# changes (the kernel drops an ABS value equal to the last one; ink-device does not read
+# the initial state), and the previous run's last tap may share an axis value.
+tap 600 1500
+sleep 2
+tapb rotate
+wait_until 20 "clockwise layout" at_least "demo layout Clockwise" 1 || fail "no clockwise layout"
+sleep 4
+shot clockwise >/dev/null
+# Toast, then at once the "+" of "Reading progress" under it (panel 213 787 in the
+# clockwise layout). The toast lives 2.5 s.
+tapb toast
+sleep 0.3
+f_toast=$(shot toast)
+tap 213 787
+sleep 0.5
+f_after=$(shot after-plus)
+wait_until 20 "the + tap reached the slider" at_least "demo action: progress:" 1 || fail "the + tap gave no progress action"
+# Dark share of two bands inside the toast (panel x 180..300, y 212..1484): A also lies
+# inside the slider (y 24..828), B only inside the toast.
+python3 -I - "$f_toast" "$f_after" >"$OUT/bands.txt" <<'PY'
+import sys
+from PIL import Image
+def dark(path, box):
+    im = Image.open(path).convert("L").crop(box)
+    px = list(im.getdata())
+    return sum(1 for v in px if v < 96) / len(px)
+for p in sys.argv[1:]:
+    a, b = dark(p, (200, 300, 280, 700)), dark(p, (200, 900, 280, 1400))
+    print(f"{p}: band A (toast over slider) {a:.2f} dark, band B (toast only) {b:.2f} dark")
+PY
+cat "$OUT/bands.txt" | tee -a "$OUT/scenario.log"
+read -r a0 b0 a1 b1 < <(python3 -I - "$f_toast" "$f_after" <<'PY'
+import sys
+from PIL import Image
+def dark(path, box):
+    im = Image.open(path).convert("L").crop(box)
+    px = list(im.getdata())
+    return sum(1 for v in px if v < 96) / len(px)
+print(" ".join(f"{dark(p, box):.2f}" for p in sys.argv[1:] for box in [(200, 300, 280, 700), (200, 900, 280, 1400)]))
+PY
+)
+tapb exit
+wait_until 30 "gallery exited" reader_gone || guest 'pid=$(cat /tmp/rinky/rinky.pid 2>/dev/null); [ -n "$pid" ] && kill "$pid"'
+save_logs
+wait_clean_home 300 home-after
+awk "BEGIN { exit !($a0 > 0.6 && $b0 > 0.6) }" || fail "the toast was not whole before the tap (A $a0, B $b0): too slow, inconclusive"
+awk "BEGIN { exit !($b1 > 0.6) }" || fail "the toast was gone after the tap (B $b1): expired, inconclusive"
+awk "BEGIN { exit !($a1 > 0.6) }" || fail "the slider repainted over the toast: band A dark share $a0 -> $a1 while band B stayed $b1"
+pass "the toast stays whole when the slider under it repaints"

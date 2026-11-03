@@ -1,0 +1,19 @@
+[package]
+name = "usbnet"
+description = "USB network plugin: the Kindle's USB port as a USB Ethernet device (CDC ECM) for SSH over the cable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+path = "lib.rs"
+
+[dependencies]
+ink-plugin.workspace = true
+log.workspace = true
+
+[dev-dependencies]

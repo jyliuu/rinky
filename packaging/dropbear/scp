@@ -1,0 +1,5 @@
+#!/bin/sh
+# scp for SSH logins to the Kindle: dropbear runs `scp -t` / `scp -f` through the
+# shell with PATH ending in /mnt/us/rinky/bin (localoptions.h). The userstore is
+# vfat (no symlinks), so this wrapper stands in for a link to dropbearmulti.
+exec "$(dirname "$0")/dropbearmulti" scp "$@"

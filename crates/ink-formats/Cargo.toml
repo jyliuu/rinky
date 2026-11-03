@@ -1,0 +1,31 @@
+[package]
+name = "ink-formats"
+description = "Book containers to the reflowable engine: EPUB, FB2/FB3, TXT, HTML, MOBI/AZW3; KFX/DRM detection; metadata and covers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+
+[dependencies]
+ink-device.workspace = true
+ink-doc.workspace = true
+ink-html.workspace = true
+quick-xml.workspace = true
+zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
+encoding_rs.workspace = true
+chardetng.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
+log.workspace = true
+# Already in Cargo.lock through zip (deflate-flate2-zlib-rs); used for MOBI FONT records.
+flate2 = { workspace = true, features = ["zlib-rs"] }
+
+[dev-dependencies]
+# Library scan test: LibraryIndex::scan entries filled from read_info (no dependency
+# of ink-store on ink-formats).
+ink-store.workspace = true
