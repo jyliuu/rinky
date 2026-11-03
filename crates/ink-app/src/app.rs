@@ -468,7 +468,7 @@ impl App {
     /// top screen again with it.
     fn swap_ui_fonts(&mut self, providers: &[&dyn Provider]) -> anyhow::Result<()> {
         let Some((name, fonts)) = crate::fonts::take_ui_fonts() else { return Ok(()) };
-        log::info!("UI font now '{}'", if name.is_empty() { crate::fonts::BUILTIN } else { &name });
+        log::info!("UI font now '{}'", if name.is_empty() { crate::fonts::UI_BUILTIN } else { &name });
         self.fonts = fonts;
         self.epoch += 1;
         self.enter_top(providers)
