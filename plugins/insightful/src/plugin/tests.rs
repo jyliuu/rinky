@@ -159,9 +159,9 @@ fn explain_with_tool_call_streams_in_batches_and_saves() {
 }
 
 #[test]
-fn chats_list_open_delete_and_close_cancels() {
+fn chats_list_open_delete_and_close_keeps_running() {
     let t2 = answer_turn();
-    let mut env = Env::new("list", TOML, &[(200, &t2)]);
+    let mut env = Env::new("list", TOML, &[(200, &t2), (200, &t2)]);
     env.select("In fair Verona");
     env.action("people");
     env.pump();
@@ -173,16 +173,21 @@ fn chats_list_open_delete_and_close_cancels() {
     env.answer(VIEWER, "insightful:open/c1");
     assert!(env.viewers().last().unwrap().contains("Who is Tybalt?"));
 
-    // Closing the viewer while a request runs cancels it.
+    // Closing the viewer while a request runs leaves it running: the viewer stays
+    // closed, the answer is saved to its chat and a toast says it came.
     env.select("Two households");
     env.action("context");
     assert!(env.plugin.running());
     env.answer(VIEWER, "closed");
-    assert!(!env.plugin.running());
-    assert_eq!(env.worker.in_flight(), 0);
-    env.answer(VIEWER, "insightful:retry");
-    assert!(env.plugin.running(), "retry resends the unanswered question");
+    assert!(env.plugin.running(), "the request goes on");
+    env.ui.0.clear();
     env.pump();
+    assert!(env.viewers().is_empty(), "a closed viewer is not opened again: {:?}", env.ui.0);
+    assert!(env.ui.0.iter().any(|r| matches!(r, UiRequest::Toast { text } if text == "Insightful answered")));
+    let saved = env.chats_file();
+    assert_eq!(saved["chats"][1]["messages"].as_array().unwrap().len(), 2, "answer saved to c2");
+    env.action("last_chat");
+    assert!(env.viewers().last().unwrap().contains("word0 word1"), "the answer is there when the chat opens again");
 
     env.action("chats");
     env.answer(VIEWER, "insightful:delete");
@@ -480,4 +485,28 @@ fn ask_opens_the_chat_view_with_the_keyboard() {
     // In the chat the bar asks a follow-up in the same chat.
     env.answer(VIEWER, "insightful:ask");
     assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_FOLLOWUP, .. })));
+}
+
+/// The user goes back to the list and opens another chat while an answer streams: the
+/// open chat is not overwritten with the live answer, and the answer is saved to the
+/// chat that asked.
+#[test]
+fn a_run_answers_its_own_chat_while_another_is_open() {
+    let t2 = answer_turn();
+    let mut env = Env::new("other-chat", TOML, &[(200, &t2), (200, &t2)]);
+    env.select("In fair Verona");
+    env.action("people");
+    env.pump();
+    env.select("Two households");
+    env.action("context");
+    assert!(env.plugin.running());
+    env.answer(VIEWER, "insightful:chats");
+    env.answer(VIEWER, "insightful:open/c1");
+    env.ui.0.clear();
+    env.pump();
+    assert!(env.viewers().is_empty(), "chat c1 stays as it was: {:?}", env.ui.0);
+    assert!(env.ui.0.iter().any(|r| matches!(r, UiRequest::Toast { text } if text == "Insightful answered")));
+    let saved = env.chats_file();
+    assert_eq!(saved["chats"][0]["messages"].as_array().unwrap().len(), 2, "c1 untouched");
+    assert_eq!(saved["chats"][1]["messages"].as_array().unwrap().len(), 2, "c2 has its answer");
 }

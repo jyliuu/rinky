@@ -32,12 +32,16 @@ and writes `insightful.toml` from its `providers` table.
 
 ## Chat view
 
-The host's Markdown viewer (`UiRequest::TextViewer`, one id), a scrolling chat view. While
-an answer streams, the text is replaced after 160 new characters or 1.2 s. Links:
+The host's Markdown viewer (`UiRequest::TextViewer`, one id), a scrolling chat view that
+pages a whole window at a time. While an answer streams, the text is replaced after 160 new
+characters or 1.2 s; the view does not scroll with it (a question just sent sits at the
+top, its answer fills in below). Links:
 `insightful:q/N` (follow-up question N), `insightful:ask` (keyboard: the host docks it
 under the view and lifts the view's input bar onto it), `insightful:retry`,
-`insightful:prompt/N` (the bubble of preset message N). Closing the viewer cancels the
-request. "Ask about the book…" / "Ask AI…" open the chat view first (empty, with the
+`insightful:prompt/N` (the bubble of preset message N). Closing the viewer (or going to
+another chat) leaves a running request running: the answer is saved to the chat that asked,
+and a toast says "Insightful answered" when it ends off screen. Closing the book cancels
+it. "Ask about the book…" / "Ask AI…" open the chat view first (empty, with the
 selected passage) and the docked keyboard under it.
 
 Preset actions (Explain, Give examples, Context/history, People/characters) store the
