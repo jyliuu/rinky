@@ -242,9 +242,11 @@ the answer goes to `on_ui_result(id, result)`. Nothing blocks: the reader keeps 
 the answer arrives in a later call. Only one modal request shows at a time; later ones
 wait. Several toasts at once show as the first one with `(+N more)`.
 
-Markdown: headings, paragraphs, bullet and numbered lists (nested), block quotes, fenced
-and indented code, rules, pipe tables, `**bold**`, `*italic*`, `` `code` ``,
-`[text](url)` and `<https://url>` (`ink_plugin::markdown`).
+Markdown: CommonMark with GitHub tables (pulldown-cmark, `ink_plugin::markdown`):
+headings, paragraphs, bullet and numbered lists (nested items indented to their parent's
+text, 3 spaces under `1. `), block quotes, fenced and indented code, rules, tables (with
+or without outer pipes; columns wrap on narrow screens), `**bold**`, `*italic*`,
+`` `code` ``, `[text](url)` and `<https://url>`. HTML is shown as text.
 
 ### Storage (`storage`)
 

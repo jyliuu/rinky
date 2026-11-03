@@ -21,3 +21,4 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 mlua.workspace = true
+pulldown-cmark.workspace = true

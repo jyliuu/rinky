@@ -402,19 +402,20 @@ pub fn entry_markdown(headword: &str, e: &ink_dict::Entry) -> String {
         }
         let numbered = g.senses.iter().filter(|s| !s.sub).count() > 1;
         let mut n = 0;
+        // Nested lines are indented to the content of their parent item (CommonMark):
+        // 3 spaces under `1. `, 4 under `10. `, 2 under `- `.
+        let mut parent = 2;
         for s in &g.senses {
             let item = format!("{}{}", md_escape(&s.def), examples(s));
             let indent = if s.sub {
-                md.push_str(&format!("  - {item}\n"));
-                "    "
+                md.push_str(&format!("{}- {item}\n", " ".repeat(parent)));
+                " ".repeat(parent + 2)
             } else {
                 n += 1;
-                if numbered {
-                    md.push_str(&format!("{n}. {item}\n"));
-                } else {
-                    md.push_str(&format!("- {item}\n"));
-                }
-                "  "
+                let marker = if numbered { format!("{n}. ") } else { "- ".to_string() };
+                md.push_str(&format!("{marker}{item}\n"));
+                parent = marker.len();
+                " ".repeat(parent)
             };
             for note in &s.notes {
                 md.push_str(&format!("{indent}- {}\n", md_escape(note)));

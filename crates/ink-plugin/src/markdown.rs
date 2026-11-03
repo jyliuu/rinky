@@ -1,12 +1,11 @@
-//! A small Markdown parser for the plugin text viewer (and the phase 8 chat view).
+//! Markdown for the plugin text viewer and the chat view, parsed by pulldown-cmark
+//! (CommonMark with GitHub tables and strikethrough).
 //!
-//! Supported: ATX headings (`#` .. `######`), paragraphs (lines joined), bullet lists
-//! (`-`, `*`, `+`) and ordered lists (`1.`, `1)`) with nesting by indentation, block
-//! quotes (`>`), fenced code blocks (```` ``` ```` / `~~~`), indented code (4 spaces),
-//! horizontal rules (`---`, `***`, `___`), pipe tables, and inline `**bold**`,
-//! `__bold__`, `*italic*`, `_italic_`, `` `code` ``, `[text](url)`, `<https://url>` and
-//! backslash escapes. Anything else is plain text. The output is data
-//! ([`Block`]s of [`Span`]s); layout and painting are the app's job.
+//! The output is data ([`Block`]s of [`Span`]s): headings, paragraphs (soft line
+//! breaks become spaces), list items with their nesting depth and number, block quote
+//! paragraphs, code blocks, rules and tables (cells of spans, the first row the header).
+//! Inline: bold, italic, code and links. HTML is kept as text. Layout and painting are
+//! the app's job.
 
 /// Inline style of a [`Span`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -73,284 +72,160 @@ pub enum Block {
     },
 }
 
-/// Parses `md`.
+/// Parses `md` (CommonMark with GitHub tables and strikethrough, by pulldown-cmark).
 pub fn parse(md: &str) -> Vec<Block> {
-    let lines: Vec<&str> = md.lines().collect();
-    let mut out = Vec::new();
-    let mut para: Vec<String> = Vec::new();
-    let mut quote: Vec<String> = Vec::new();
-    let flush = |para: &mut Vec<String>, quote: &mut Vec<String>, out: &mut Vec<Block>| {
-        if !para.is_empty() {
-            out.push(Block::Paragraph(inline(&para.join(" "))));
-            para.clear();
-        }
-        if !quote.is_empty() {
-            out.push(Block::Quote(inline(&quote.join(" "))));
-            quote.clear();
-        }
-    };
-    let mut i = 0;
-    while i < lines.len() {
-        let raw = lines[i];
-        let line = raw.trim_end();
-        let trimmed = line.trim_start();
-        let indent = line.len() - trimmed.len();
-        // Fenced code.
-        if let Some(fence) = ["```", "~~~"].into_iter().find(|f| trimmed.starts_with(f)) {
-            flush(&mut para, &mut quote, &mut out);
-            let mut code = Vec::new();
-            i += 1;
-            while i < lines.len() && !lines[i].trim_start().starts_with(fence) {
-                code.push(lines[i].to_string());
-                i += 1;
-            }
-            out.push(Block::Code(code));
-            i += 1;
-            continue;
-        }
-        if trimmed.is_empty() {
-            flush(&mut para, &mut quote, &mut out);
-            i += 1;
-            continue;
-        }
-        // Indented code (not inside a paragraph).
-        if indent >= 4 && para.is_empty() && quote.is_empty() && list_marker(trimmed).is_none() {
-            let mut code = Vec::new();
-            while i < lines.len() && (lines[i].starts_with("    ") || lines[i].trim().is_empty()) {
-                code.push(lines[i].get(4..).unwrap_or("").to_string());
-                i += 1;
-            }
-            while code.last().is_some_and(|l| l.trim().is_empty()) {
-                code.pop();
-            }
-            out.push(Block::Code(code));
-            continue;
-        }
-        if let Some(level) = heading_level(trimmed) {
-            flush(&mut para, &mut quote, &mut out);
-            let text = trimmed[level as usize..].trim().trim_end_matches('#').trim_end();
-            out.push(Block::Heading { level, spans: inline(text) });
-            i += 1;
-            continue;
-        }
-        if is_rule(trimmed) {
-            flush(&mut para, &mut quote, &mut out);
-            out.push(Block::Rule);
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix('>') {
-            if !para.is_empty() {
-                flush(&mut para, &mut quote, &mut out);
-            }
-            quote.push(rest.trim().to_string());
-            i += 1;
-            continue;
-        }
-        if let Some((number, text)) = list_marker(trimmed) {
-            flush(&mut para, &mut quote, &mut out);
-            let depth = (indent / 2).min(6) as u8;
-            let mut text = text.to_string();
-            // Continuation lines: indented, not a new block.
-            while i + 1 < lines.len() {
-                let next = lines[i + 1];
-                let nt = next.trim_start();
-                if nt.is_empty() || list_marker(nt).is_some() || next.len() - nt.len() < 2 || heading_level(nt).is_some() {
-                    break;
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+    let mut b = Builder::default();
+    for ev in Parser::new_ext(md, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH) {
+        match ev {
+            Event::Start(tag) => match tag {
+                Tag::Heading { .. } | Tag::Paragraph | Tag::TableCell | Tag::TableHead | Tag::TableRow => {}
+                Tag::BlockQuote(_) => b.quote += 1,
+                Tag::CodeBlock(_) => b.code = Some(String::new()),
+                Tag::List(start) => {
+                    // A nested list: the item's text so far is its own line.
+                    b.flush_item();
+                    b.lists.push(start);
                 }
-                text.push(' ');
-                text.push_str(nt.trim_end());
-                i += 1;
-            }
-            out.push(Block::ListItem { number, depth, spans: inline(&text) });
-            i += 1;
-            continue;
-        }
-        if trimmed.starts_with('|') && i + 1 < lines.len() {
-            flush(&mut para, &mut quote, &mut out);
-            let mut rows = Vec::new();
-            let mut header = false;
-            while i < lines.len() && lines[i].trim_start().starts_with('|') {
-                let cells = table_cells(lines[i].trim());
-                if cells.iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' '))) {
-                    header = rows.len() == 1;
-                } else {
-                    rows.push(cells.iter().map(|c| inline(c)).collect());
+                Tag::Item => b.items.push(false),
+                Tag::Table(_) => b.table = Some(Vec::new()),
+                Tag::Emphasis => b.italic += 1,
+                Tag::Strong => b.bold += 1,
+                Tag::Link { dest_url, .. } => b.link = Some(dest_url.to_string()),
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Heading(level) => {
+                    let spans = std::mem::take(&mut b.spans);
+                    b.out.push(Block::Heading { level: level as u8, spans });
                 }
-                i += 1;
-            }
-            out.push(Block::Table { rows, header });
-            continue;
-        }
-        if !quote.is_empty() {
-            flush(&mut para, &mut quote, &mut out);
-        }
-        para.push(trimmed.to_string());
-        i += 1;
-    }
-    flush(&mut para, &mut quote, &mut out);
-    out
-}
-
-fn heading_level(s: &str) -> Option<u8> {
-    let n = s.bytes().take_while(|b| *b == b'#').count();
-    ((1..=6).contains(&n) && (s.len() == n || s.as_bytes()[n] == b' ')).then_some(n as u8)
-}
-
-fn is_rule(s: &str) -> bool {
-    let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    compact.len() >= 3 && ["-", "*", "_"].iter().any(|c| compact.chars().all(|ch| ch.to_string() == *c))
-}
-
-fn list_marker(s: &str) -> Option<(Option<u64>, &str)> {
-    for m in ["- ", "* ", "+ "] {
-        if let Some(rest) = s.strip_prefix(m) {
-            return Some((None, rest.trim_start()));
-        }
-    }
-    let digits = s.bytes().take_while(|b| b.is_ascii_digit()).count();
-    if (1..=9).contains(&digits) {
-        let rest = &s[digits..];
-        if let Some(r) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
-            return Some((s[..digits].parse().ok(), r.trim_start()));
-        }
-    }
-    None
-}
-
-fn table_cells(row: &str) -> Vec<String> {
-    let inner = row.trim().trim_start_matches('|').trim_end_matches('|');
-    inner.split('|').map(|c| c.trim().to_string()).collect()
-}
-
-/// Parses inline markup of one paragraph.
-pub fn inline(text: &str) -> Vec<Span> {
-    let mut out: Vec<Span> = Vec::new();
-    let mut style = SpanStyle::default();
-    let mut cur = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    let push = |out: &mut Vec<Span>, cur: &mut String, style: SpanStyle, link: Option<String>| {
-        if cur.is_empty() {
-            return;
-        }
-        match out.last_mut() {
-            Some(last) if last.style == style && last.link == link => last.text.push_str(cur),
-            _ => out.push(Span { text: cur.clone(), style, link }),
-        }
-        cur.clear();
-    };
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\\' && i + 1 < chars.len() && chars[i + 1].is_ascii_punctuation() {
-            cur.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-        if c == '`' {
-            if let Some(end) = chars[i + 1..].iter().position(|&x| x == '`') {
-                push(&mut out, &mut cur, style, None);
-                let code: String = chars[i + 1..i + 1 + end].iter().collect();
-                cur.push_str(&code);
-                push(&mut out, &mut cur, SpanStyle { code: true, ..style }, None);
-                i += end + 2;
-                continue;
-            }
-        }
-        if c == '[' {
-            if let Some((label, url, used)) = link_at(&chars[i..]) {
-                push(&mut out, &mut cur, style, None);
-                for s in inline(&label) {
-                    let st = SpanStyle { bold: s.style.bold || style.bold, italic: s.style.italic || style.italic, code: s.style.code };
-                    let mut t = s.text;
-                    push(&mut out, &mut t, st, Some(url.clone()));
+                TagEnd::Paragraph => b.flush_text(),
+                TagEnd::BlockQuote(_) => b.quote = b.quote.saturating_sub(1),
+                TagEnd::CodeBlock => {
+                    let code = b.code.take().unwrap_or_default();
+                    b.out.push(Block::Code(code.strip_suffix('\n').unwrap_or(&code).split('\n').map(str::to_string).collect()));
                 }
-                i += used;
-                continue;
-            }
-        }
-        if c == '<' {
-            let rest: String = chars[i + 1..].iter().collect();
-            if let Some(end) = rest.find('>') {
-                let url = &rest[..end];
-                if (url.starts_with("http://") || url.starts_with("https://")) && !url.contains(' ') {
-                    push(&mut out, &mut cur, style, None);
-                    let mut t = url.to_string();
-                    push(&mut out, &mut t, style, Some(url.to_string()));
-                    i += end + 2;
-                    continue;
+                TagEnd::List(_) => {
+                    b.lists.pop();
                 }
-            }
-        }
-        if c == '*' || c == '_' {
-            let double = i + 1 < chars.len() && chars[i + 1] == c;
-            let prev = if i > 0 { chars[i - 1] } else { ' ' };
-            let next = chars.get(i + if double { 2 } else { 1 }).copied().unwrap_or(' ');
-            // `_` inside a word (snake_case) is text.
-            let intraword = c == '_' && prev.is_alphanumeric() && next.is_alphanumeric();
-            let opening = !next.is_whitespace();
-            let closing = !prev.is_whitespace();
-            let on = if double { style.bold } else { style.italic };
-            if !intraword && ((on && closing) || (!on && opening && has_closer(&chars[i + if double { 2 } else { 1 }..], c, double))) {
-                push(&mut out, &mut cur, style, None);
-                if double {
-                    style.bold = !style.bold;
-                    i += 2;
-                } else {
-                    style.italic = !style.italic;
-                    i += 1;
+                TagEnd::Item => {
+                    b.flush_item();
+                    b.items.pop();
+                    if let Some(Some(n)) = b.lists.last_mut() {
+                        *n += 1;
+                    }
                 }
-                continue;
-            }
-        }
-        cur.push(c);
-        i += 1;
-    }
-    push(&mut out, &mut cur, style, None);
-    out
-}
-
-fn has_closer(rest: &[char], c: char, double: bool) -> bool {
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == c {
-            let is_double = i + 1 < rest.len() && rest[i + 1] == c;
-            if is_double == double && i > 0 && !rest[i - 1].is_whitespace() {
-                return true;
-            }
-            i += if is_double { 2 } else { 1 };
-        } else {
-            i += 1;
-        }
-    }
-    false
-}
-
-fn link_at(chars: &[char]) -> Option<(String, String, usize)> {
-    let mut depth = 0;
-    let mut close = None;
-    for (j, &ch) in chars.iter().enumerate() {
-        match ch {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(j);
-                    break;
+                TagEnd::TableCell => {
+                    let cell = std::mem::take(&mut b.spans);
+                    b.row.push(cell);
                 }
-            }
+                TagEnd::TableHead | TagEnd::TableRow => {
+                    let row = std::mem::take(&mut b.row);
+                    if let Some(t) = b.table.as_mut() {
+                        t.push(row);
+                    }
+                }
+                TagEnd::Table => {
+                    let rows = b.table.take().unwrap_or_default();
+                    b.out.push(Block::Table { rows, header: true });
+                }
+                TagEnd::Emphasis => b.italic = b.italic.saturating_sub(1),
+                TagEnd::Strong => b.bold = b.bold.saturating_sub(1),
+                TagEnd::Link => b.link = None,
+                _ => {}
+            },
+            Event::Text(t) => match b.code.as_mut() {
+                Some(c) => c.push_str(&t),
+                None => b.text(&t, false),
+            },
+            Event::Code(t) => b.text(&t, true),
+            Event::SoftBreak | Event::HardBreak => b.text(" ", false),
+            Event::Html(t) | Event::InlineHtml(t) => b.text(t.trim_end_matches('\n'), false),
+            Event::Rule => b.out.push(Block::Rule),
+            Event::FootnoteReference(t) => b.text(&format!("[^{t}]"), false),
             _ => {}
         }
     }
-    let close = close?;
-    if chars.get(close + 1) != Some(&'(') {
-        return None;
+    b.flush_text();
+    b.out
+}
+
+/// The state of [`parse`] between parser events.
+#[derive(Default)]
+struct Builder {
+    out: Vec<Block>,
+    /// Inline text of the block (paragraph, item, heading, cell) being read.
+    spans: Vec<Span>,
+    bold: usize,
+    italic: usize,
+    link: Option<String>,
+    quote: usize,
+    code: Option<String>,
+    /// Open lists: the next item's number (`None`: bullets).
+    lists: Vec<Option<u64>>,
+    /// Open items: whether the item's own line was written.
+    items: Vec<bool>,
+    table: Option<Vec<Vec<Vec<Span>>>>,
+    row: Vec<Vec<Span>>,
+}
+
+impl Builder {
+    fn text(&mut self, t: &str, code: bool) {
+        if t.is_empty() {
+            return;
+        }
+        let style = SpanStyle { bold: self.bold > 0, italic: self.italic > 0, code };
+        match self.spans.last_mut() {
+            Some(last) if last.style == style && last.link == self.link => last.text.push_str(t),
+            _ => self.spans.push(Span { text: t.to_string(), style, link: self.link.clone() }),
+        }
     }
-    let end = chars[close + 2..].iter().position(|&c| c == ')')? + close + 2;
-    let label: String = chars[1..close].iter().collect();
-    let target: String = chars[close + 2..end].iter().collect();
-    let url = target.split_whitespace().next().unwrap_or("").trim_matches(['<', '>']).to_string();
-    Some((label, url, end + 1))
+
+    /// The first text of a list item is its line; more text in it is a paragraph.
+    fn flush_item(&mut self) {
+        if self.spans.is_empty() {
+            return;
+        }
+        match self.items.last_mut() {
+            Some(done @ false) => {
+                *done = true;
+                let spans = std::mem::take(&mut self.spans);
+                let depth = self.lists.len().saturating_sub(1).min(6) as u8;
+                let number = self.lists.last().copied().flatten();
+                self.out.push(Block::ListItem { number, depth, spans });
+            }
+            _ => self.flush_text(),
+        }
+    }
+
+    fn flush_text(&mut self) {
+        if self.spans.is_empty() {
+            return;
+        }
+        if self.items.last() == Some(&false) {
+            return self.flush_item();
+        }
+        let spans = std::mem::take(&mut self.spans);
+        self.out.push(if self.quote > 0 { Block::Quote(spans) } else { Block::Paragraph(spans) });
+    }
+}
+
+/// Parses the inline markup of one paragraph.
+pub fn inline(text: &str) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    for b in parse(text) {
+        let spans = match b {
+            Block::Heading { spans, .. } | Block::Paragraph(spans) | Block::Quote(spans) | Block::ListItem { spans, .. } => spans,
+            _ => continue,
+        };
+        for s in spans {
+            match out.last_mut() {
+                Some(last) if last.style == s.style && last.link == s.link => last.text.push_str(&s.text),
+                _ => out.push(s),
+            }
+        }
+    }
+    out
 }
 
 /// The text of `blocks` without markup (one line per block), for logs and tests.

@@ -1460,6 +1460,8 @@ struct Line {
     bar: Option<f32>,
     /// Horizontal rule.
     rule: bool,
+    /// A thin gray rule (between the rows of a wrapped table).
+    hairline: bool,
     /// The `:::` box this line belongs to (index into `MarkdownView::groups`).
     group: Option<usize>,
     /// Icon with its left edge at this x (a square of 0.8 x the line height, 56 at most).
@@ -1742,47 +1744,69 @@ fn layout_blocks(cx: &mut PaintCx, blocks: &[Block], base: f32, width: f32) -> V
                 lines.push(Line { height: base, rule: true, ..Line::default() });
             }
             Block::Table { rows, header } => {
+                // Columns as wide as their text when the table fits; otherwise each
+                // column keeps its longest word and the rest of the width goes to the
+                // columns with more text, and cells wrap inside their column.
                 let ncol = rows.iter().map(Vec::len).max().unwrap_or(0);
-                let col_gap = 40.0;
+                let col_gap = 32.0;
                 let force = |i: usize| (*header && i == 0).then_some(Style::Bold);
-                let mut widths = vec![0f32; ncol];
+                let mut natural = vec![0f32; ncol];
+                let mut longest = vec![0f32; ncol];
                 for (i, row) in rows.iter().enumerate() {
                     for (j, cell) in row.iter().enumerate() {
                         let w: f32 = cell.iter().map(|sp| cx.fonts.text_width(span_style(sp, force(i)), &sp.text, base)).sum();
-                        widths[j] = widths[j].max(w);
+                        natural[j] = natural[j].max(w);
+                        for sp in cell {
+                            for word in sp.text.split(' ') {
+                                longest[j] = longest[j].max(cx.fonts.text_width(span_style(sp, force(i)), word, base));
+                            }
+                        }
                     }
                 }
-                let total: f32 = widths.iter().sum::<f32>() + col_gap * ncol.saturating_sub(1) as f32;
-                if ncol > 0 && total <= width {
-                    // Aligned columns, a rule under the header.
-                    for (i, row) in rows.iter().enumerate() {
-                        let mut line = Line { height: base * 1.4, ..Line::default() };
-                        let mut x = 0.0;
-                        for (j, w) in widths.iter().enumerate() {
-                            let mut cx_x = x;
-                            for sp in row.get(j).into_iter().flatten() {
-                                let st = span_style(sp, force(i));
-                                line.runs.push(Run { x: cx_x, text: sp.text.clone(), style: st, px: base, link: sp.link.clone(), muted: false });
-                                cx_x += cx.fonts.text_width(st, &sp.text, base);
+                let avail = (width - col_gap * ncol.saturating_sub(1) as f32).max(1.0);
+                let fits = natural.iter().sum::<f32>() <= avail;
+                let widths: Vec<f32> = if fits {
+                    natural.clone()
+                } else {
+                    let least: f32 = longest.iter().sum();
+                    if least >= avail {
+                        // Even the longest words do not fit: share by them (words break).
+                        longest.iter().map(|w| (w / least * avail).max(1.0)).collect()
+                    } else {
+                        let slack: Vec<f32> = natural.iter().zip(&longest).map(|(n, l)| (n - l).max(0.0)).collect();
+                        let total: f32 = slack.iter().sum::<f32>().max(1.0);
+                        longest.iter().zip(&slack).map(|(l, s)| l + (avail - least) * s / total).collect()
+                    }
+                };
+                let xs: Vec<f32> = widths.iter().scan(0.0, |x, w| {
+                    let at = *x;
+                    *x += w + col_gap;
+                    Some(at)
+                }).collect();
+                for (i, row) in rows.iter().enumerate() {
+                    let cells: Vec<Vec<Line>> = (0..ncol)
+                        .map(|j| {
+                            let mut ls = Vec::new();
+                            if let Some(cell) = row.get(j) {
+                                wrap_spans(cx, cell, base, force(i), 0.0, widths[j], None, &mut ls);
                             }
-                            x += w + col_gap;
+                            ls
+                        })
+                        .collect();
+                    let n = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
+                    for k in 0..n {
+                        let mut line = Line { height: base * 1.4, ..Line::default() };
+                        for (j, ls) in cells.iter().enumerate() {
+                            for r in ls.get(k).map(|l| l.runs.as_slice()).unwrap_or_default() {
+                                line.runs.push(Run { x: r.x + xs[j], ..r.clone() });
+                            }
                         }
                         lines.push(line);
-                        if *header && i == 0 {
-                            lines.push(Line { height: 8.0, rule: true, ..Line::default() });
-                        }
                     }
-                } else {
-                    // Too wide: one wrapped line per row, cells separated by bars.
-                    for (i, row) in rows.iter().enumerate() {
-                        let mut spans: Vec<Span> = Vec::new();
-                        for (j, cell) in row.iter().enumerate() {
-                            if j > 0 {
-                                spans.push(Span::plain(" | "));
-                            }
-                            spans.extend(cell.iter().cloned());
-                        }
-                        wrap_spans(cx, &spans, base, force(i), 0.0, width, None, &mut lines);
+                    if *header && i == 0 {
+                        lines.push(Line { height: 8.0, rule: true, ..Line::default() });
+                    } else if !fits && i + 1 < rows.len() {
+                        lines.push(Line { height: 12.0, hairline: true, ..Line::default() });
                     }
                 }
                 gap(&mut lines, base * 0.5);
@@ -2380,6 +2404,9 @@ impl MarkdownView {
             }
             if line.rule {
                 cx.canvas.fill_rect(lx as i32, (y + line.height / 2.0) as i32, lw as i32, 2, fg);
+            }
+            if line.hairline {
+                cx.canvas.fill_rect(lx as i32, (y + line.height / 2.0) as i32, lw as i32, 1, muted);
             }
             if let Some((ix, icon)) = line.icon {
                 let side = (line.height * 0.8).min(56.0) as u32;
@@ -3729,6 +3756,38 @@ mod tests {
         let held = UiEvent::Gesture(Gesture::LongPress { pos: p, held: Duration::from_millis(500) });
         assert_eq!(ui.handle(&held, screen()).1, vec![("p".to_string(), 2, "hold:open/c1".to_string())]);
         assert_eq!(ui.layer_names(), vec!["viewer"], "the view stays");
+    }
+
+    /// Tables as models write them, in an answer card: one without outer pipes, one
+    /// with long prose cells. Every row is laid out in columns (no "a | b" fallback):
+    /// cells wrap inside their column, nothing runs past the card, and a row is as tall
+    /// as its tallest cell.
+    #[test]
+    fn answer_tables_wrap_inside_their_columns() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        let md = ":::answer AI — model |\nThe two houses:\n\nHouse | Members | Seat\n--- | --- | ---\nMontague | Romeo, Lord and Lady Montague, Benvolio | Verona\nCapulet | Juliet, Lord and Lady Capulet, Tybalt, the Nurse | Verona\n\n| Theme | Where it shows | Why it matters |\n|---|---|---|\n| Fate | The prologue calls the lovers \"star-cross'd\" and their deaths are foretold before the play begins | It frames every choice the lovers make as already decided, so suspense comes from how, not whether |\n| Haste | Romeo and Juliet marry a day after meeting; Romeo kills Tybalt in a moment of rage | Speed drives the tragedy: every delay that could save them is skipped |\n:::\n:::input chat:ask | Ask";
+        let blocks = markdown::parse(":::x\nHouse | Members\n--- | ---\nA | B\n".trim_start_matches(":::x\n"));
+        assert!(matches!(&blocks[0], Block::Table { rows, header: true } if rows.len() == 2 && rows[0].len() == 2), "a table without outer pipes: {blocks:?}");
+        ui.push("p", UiRequest::TextViewer { id: 1, title: "Chat".into(), markdown: md.into() });
+        s.ui(&mut ui, false);
+        shot(&s.canvas, "30-answer-tables");
+        let Kind::Viewer(v) = &ui.layers[0].kind else { panic!() };
+        let lines = &v.pages[0];
+        let text: String = lines.iter().flat_map(|l| l.runs.iter().map(|r| r.text.clone())).collect::<Vec<_>>().join(" ");
+        assert!(!text.contains(" | ") && !text.contains("---"), "no bar-separated fallback: {text}");
+        let mut right = 0f32;
+        for r in lines.iter().flat_map(|l| l.runs.iter()) {
+            right = right.max(r.x + s.fonts.text_width(r.style, &r.text, r.px));
+        }
+        let group_w = v.groups.iter().map(|g| g.w).fold(0f32, f32::max);
+        assert!(right <= group_w, "text stays inside the card: {right} > {group_w}");
+        // The prose table wraps: the row of "Fate" takes several lines, its cells side by side.
+        let fate = lines.iter().position(|l| l.runs.iter().any(|r| r.text == "Fate")).expect("Fate row");
+        let xs: std::collections::BTreeSet<i32> = lines[fate].runs.iter().map(|r| r.x as i32).collect();
+        assert!(xs.len() >= 3, "three columns on the row's first line: {:?}", lines[fate].runs);
+        assert!(lines[fate + 1].runs.iter().all(|r| r.x > lines[fate].runs[0].x + 50.0), "the next line continues the other columns");
+        assert!(lines.iter().any(|l| l.hairline), "rows of a wrapped table are ruled");
     }
 
     fn juliet(dir: &Path) -> (PathBuf, Box<dyn Document>) {
