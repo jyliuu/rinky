@@ -11,7 +11,7 @@
 
 use super::rows::{Row, Trail};
 use crate::router::AppCtx;
-use ink_store::prefs::{label, GestureMap, ACTIONS, GESTURES, LONG_PRESS_ACTIONS};
+use ink_store::prefs::{label, GestureMap, ACTIONS, GESTURES, LONG_PRESS_ACTIONS, SLIDE_ACTIONS};
 use ink_store::Settings;
 
 /// What a gesture action asks the settings screen to do.
@@ -27,6 +27,8 @@ pub enum Step {
 fn section(trigger: &str) -> &'static str {
     if trigger.starts_with("two_finger") || trigger.starts_with("pinch") {
         "Two fingers"
+    } else if trigger.starts_with("slide_") {
+        "Edge slides (light)"
     } else if trigger.contains("_from_") {
         "Edge swipes"
     } else if trigger.starts_with("swipe") {
@@ -49,11 +51,15 @@ pub fn action_label(action: &str, plugins: &[(String, String)]) -> String {
     if let Some((plugin, item)) = action.strip_prefix("plugin:").and_then(|r| r.split_once(':')) {
         return plugins.iter().find(|(n, _)| n == action).map_or_else(|| format!("{item} ({plugin}, off)"), |(_, l)| l.clone());
     }
-    LONG_PRESS_ACTIONS.iter().chain(ACTIONS).find(|(n, _)| *n == action).map_or(action, |(_, l)| *l).to_string()
+    LONG_PRESS_ACTIONS.iter().chain(SLIDE_ACTIONS).chain(ACTIONS).find(|(n, _)| *n == action).map_or(action, |(_, l)| *l).to_string()
 }
 
-/// The actions offered for `trigger`: `long_press` lists [`LONG_PRESS_ACTIONS`] first.
+/// The actions offered for `trigger`: `long_press` lists [`LONG_PRESS_ACTIONS`] first;
+/// edge slides offer only `none` (off) and [`SLIDE_ACTIONS`].
 pub fn choices(trigger: &str) -> Vec<(&'static str, &'static str)> {
+    if trigger.starts_with("slide_") {
+        return ACTIONS.iter().filter(|(n, _)| *n == "none").chain(SLIDE_ACTIONS).copied().collect();
+    }
     let extra: &[(&str, &str)] = if trigger == "long_press" { LONG_PRESS_ACTIONS } else { &[] };
     extra.iter().chain(ACTIONS).copied().collect()
 }
@@ -76,7 +82,7 @@ pub fn rows(map: &GestureMap, picking: Option<&str>, plugins: &[(String, String)
             rows.push(Row::choice(action_label(now, plugins), true, format!("gset:{trigger}:{now}")));
         }
         rows.extend(list.iter().map(|(n, l)| Row::choice(*l, *n == now, format!("gset:{trigger}:{n}"))));
-        if !plugins.is_empty() {
+        if !plugins.is_empty() && !trigger.starts_with("slide_") {
             rows.push(Row::header("Plugins"));
             rows.extend(plugins.iter().map(|(n, l)| Row::choice(l.as_str(), n == now, format!("gset:{trigger}:{n}"))));
         }
@@ -95,7 +101,7 @@ pub fn rows(map: &GestureMap, picking: Option<&str>, plugins: &[(String, String)
     rows.push(Row::header("Defaults"));
     rows.push(Row::item("Reset to defaults", "gest-reset"));
     rows.push(Row::note(
-        "Corners are squares of 1/8 of the screen width. Edge swipes start within 1/20 of the screen of an edge.",
+        "Corners are squares of 1/8 of the screen width; the bottom middle is the middle third of the bottom fifth. Edge swipes start within 1/20 of the screen of an edge. Edge slides start in the outer 1/8 and move up (more) or down (less).",
     ));
     rows
 }
@@ -116,7 +122,8 @@ pub fn action(a: &str, s: &mut Settings, plugins: &[(String, String)]) -> Option
     }
     let (trigger, act) = a.strip_prefix("gset:")?.split_once(':')?;
     GESTURES.iter().find(|(g, _)| *g == trigger)?;
-    if !act.starts_with("plugin:") && !choices(trigger).iter().any(|(n, _)| *n == act) {
+    let plugin_ok = act.starts_with("plugin:") && !trigger.starts_with("slide_");
+    if !plugin_ok && !choices(trigger).iter().any(|(n, _)| *n == act) {
         return None;
     }
     s.gestures.set(trigger, act);
@@ -157,6 +164,25 @@ mod tests {
         assert_eq!(action("gest-reset", &mut s), Some(Step::Saved("Gestures reset to defaults".into())));
         assert_eq!(s.gestures, GestureMap::default());
         assert_eq!(action("anim:slide", &mut s), None);
+    }
+
+    #[test]
+    fn edge_slides_and_light_toggles_are_settable() {
+        let mut s = Settings::default();
+        let action = |a: &str, s: &mut Settings| action(a, s, &[]);
+        assert_eq!(s.gestures.action("slide_left_edge"), "light_slide");
+        let r = rows(&s.gestures, Some("slide_right_edge"), &[("plugin:ai:ask".into(), "AI: Ask".into())]);
+        let acts: Vec<&str> = r.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(acts, ["", "gset:slide_right_edge:none", "gset:slide_right_edge:light_slide", "gset:slide_right_edge:warmth_slide"]);
+        assert_eq!(action("gset:slide_left_edge:none", &mut s), Some(Step::Saved("Slide up or down the left edge: Nothing".into())));
+        assert_eq!(s.gestures.action("slide_left_edge"), "none");
+        assert_eq!(action("gset:slide_left_edge:next_page", &mut s), None);
+        assert_eq!(action("gset:slide_left_edge:plugin:ai:ask", &mut s), None);
+        assert_eq!(action("gset:tap_left:light_slide", &mut s), None);
+        assert_eq!(action("gset:tap_bottom_center:warmth_toggle", &mut s), Some(Step::Saved("Tap bottom middle: Warmth off / back on".into())));
+        let list = rows(&s.gestures, None, &[]);
+        assert!(list.iter().any(|r| r.title == "Edge slides (light)"));
+        assert!(list.iter().any(|r| r.action == "gest:tap_bottom_left" && r.value.as_deref() == Some("Light off / back on")));
     }
 
     #[test]

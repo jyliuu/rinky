@@ -26,6 +26,7 @@ pub mod aa;
 pub mod actions;
 pub mod footer;
 pub mod goto;
+pub mod light_gestures;
 pub mod menu;
 pub mod overlay;
 pub mod search;
@@ -505,6 +506,8 @@ pub struct ReaderScreen {
     /// An overlay closed during a touch: the gestures of that touch (a slider drag ends
     /// as a swipe) must not turn pages. Cleared by the next finger down.
     swallow_gestures: bool,
+    /// An edge slide (brightness or warmth follows the finger) in progress.
+    slide: Option<light_gestures::Slide>,
     /// The book's bookmarks (loaded on open, saved on every change).
     marks: Vec<Bookmark>,
     /// Bookmarks in the order the Go to panel lists them.
@@ -626,6 +629,7 @@ impl ReaderScreen {
             toc: None,
             actions: Vec::new(),
             swallow_gestures: false,
+            slide: None,
             marks: Vec::new(),
             listed_marks: Vec::new(),
             book_settings: BookSettings::default(),
@@ -2054,6 +2058,9 @@ impl ReaderScreen {
             _ => {}
         }
         if let UiEvent::Touch(t) = ev {
+            if self.slide_touch(t, cx) {
+                return Ok(Transition::None);
+            }
             if actions::long_press_selects(cx.settings) && self.select_touch(t, cx) {
                 return Ok(Transition::None);
             }
@@ -2106,6 +2113,37 @@ impl ReaderScreen {
             _ => {}
         }
         Ok(Transition::None)
+    }
+
+    /// Edge slides ([`light_gestures`]): a vertical drag from the left or right edge
+    /// starts one, moves set the level, the lift writes the final one and swallows the
+    /// swipe gesture that follows. A second finger ends it. Returns true when the event
+    /// was used.
+    fn slide_touch(&mut self, t: &ink_ui::Touch, cx: &mut AppCtx) -> bool {
+        use ink_ui::TouchKind;
+        let size = cx.screen.size();
+        if let Some(slide) = self.slide.as_mut() {
+            match t.kind {
+                TouchKind::Move if t.slot == 0 => slide.moved(t.pos, size.h, &mut *cx.services.light),
+                TouchKind::Up | TouchKind::Cancel | TouchKind::Down => {
+                    if let Some(slide) = self.slide.take() {
+                        let now = cx.services.clock.local_now();
+                        slide.finish(&mut *cx.services.light, &now);
+                    }
+                    self.swallow_gestures = true;
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if t.slot != 0 || t.kind != TouchKind::Move || !t.moved || self.selecting.is_some() || t.held >= ink_ui::LONG_PRESS {
+            return false;
+        }
+        let Some(warmth) = light_gestures::slide_start(t.start, t.pos, size, &cx.settings.gestures) else { return false };
+        let Some(mut slide) = light_gestures::Slide::new(warmth, t.start, &*cx.services.light) else { return false };
+        slide.moved(t.pos, size.h, &mut *cx.services.light);
+        self.slide = Some(slide);
+        true
     }
 
     /// Offers a gesture the reader does not use to plugin gesture bindings
