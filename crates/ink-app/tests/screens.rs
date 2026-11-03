@@ -9,8 +9,12 @@ use ink_device::RefreshClass;
 use ink_store::{Paths, Settings};
 use std::path::{Path, PathBuf};
 
+/// A fresh directory per call: the tests run in parallel, and a shared name let one test's
+/// `remove_dir_all` race another's `create_dir_all`.
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ink-screens-{name}-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("ink-screens-{name}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
