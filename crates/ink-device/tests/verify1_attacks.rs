@@ -467,12 +467,14 @@ fn hostile_screensaver_images_fall_back_to_a_panel_canvas() {
 fn blocked_wakeup_count_reads_do_not_pile_up_threads() {
     use ink_device::kindle_mtk::system::read_wakeup_count;
     use ink_device::sysfs::SysRoot;
+    // Only the reader threads (named `wakeup_count`): other tests of this binary run in
+    // parallel and start threads of their own, which made a count of all threads flaky.
     fn threads() -> usize {
-        std::fs::read_to_string("/proc/self/status")
+        std::fs::read_dir("/proc/self/task")
             .unwrap()
-            .lines()
-            .find_map(|l| l.strip_prefix("Threads:").map(|v| v.trim().parse().unwrap()))
-            .unwrap()
+            .flatten()
+            .filter(|t| std::fs::read_to_string(t.path().join("comm")).is_ok_and(|c| c.trim() == "wakeup_count"))
+            .count()
     }
     let dir = temp_dir("wakeup");
     std::fs::create_dir_all(dir.join("sys/power")).unwrap();
