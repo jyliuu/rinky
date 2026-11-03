@@ -60,6 +60,8 @@ md-5 = "0.10.6"
 encoding_rs = "0.8.42"
 chardetng = "0.1.17"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
+# CommonMark with GitHub tables (ink-plugin: the viewer's Markdown).
+pulldown-cmark = { version = "0.13.6", default-features = false }
 
 # Text.
 fontdue = "0.9.5"

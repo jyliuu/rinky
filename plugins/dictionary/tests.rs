@@ -239,7 +239,7 @@ fn parsed_entry_card_and_full_view() {
     assert_eq!(popup_body(&hit, 1), "_/blɪp/ · noun_\n1. a dot\n2. a sound\nverb: make a blip\n— D · +1 more");
     assert_eq!(vocab_definition(&hit), "noun · a dot");
     let md = entry_markdown("blip", &e);
-    assert_eq!(md, "**blip**  /blɪp/\n\n*noun*\n\n1. a dot: *a blip on the screen*\n  \\- a small dot\n2. a sound\n\n*verb*\n\n- make a blip\n\n**Origin**\n\n1990s: imitative.\n\n".replace("  \\- ", "  - "));
+    assert_eq!(md, "**blip**  /blɪp/\n\n*noun*\n\n1. a dot: *a blip on the screen*\n   \\- a small dot\n2. a sound\n\n*verb*\n\n- make a blip\n\n**Origin**\n\n1990s: imitative.\n\n".replace("   \\- ", "   - "));
     // The viewer's parser sees a numbered list with a nested item.
     let blocks = ink_plugin::markdown::parse(&md);
     assert!(blocks.iter().any(|b| matches!(b, ink_plugin::markdown::Block::ListItem { number: Some(2), depth: 0, .. })), "{blocks:?}");
