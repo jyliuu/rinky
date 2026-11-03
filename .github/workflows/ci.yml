@@ -1,0 +1,56 @@
+# Runs clippy and the test suite on the build machine for every push to main and every
+# pull request. The Kindle package itself is built by release.yml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: 0.17.0
+  CARGO_TERM_COLOR: always
+  # MuPDF is built from a pinned, checksummed source tarball (with zig for the host);
+  # keep it between runs.
+  INK_MUPDF_CACHE: ${{ github.workspace }}/.cache/mupdf-build
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lzip bzip2 patch make
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: host-zig${{ env.ZIG_VERSION }}
+
+      - name: Cache the MuPDF build
+        uses: actions/cache@v4
+        with:
+          path: .cache/mupdf-build
+          key: mupdf-host-zig${{ env.ZIG_VERSION }}-${{ hashFiles('crates/ink-mupdf/build.rs', 'crates/ink-mupdf/csrc/**') }}
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked --keep-going -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked
