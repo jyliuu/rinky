@@ -124,6 +124,23 @@ fn publish_bars(hidden: Option<bool>) {
     READER_BARS.with(|c| c.set(hidden));
 }
 
+/// Draws the highlights on `page` (drawn on `canvas`): saved ones mapped to it in the
+/// current layout, and this session's that the document could not map (fixed layouts).
+fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, saved: &[(Position, Position)], session: &[(String, usize, Vec<Rect>, String)]) {
+    let key = doc.layout().cache_key();
+    let mut drawn: Vec<String> = Vec::new();
+    for (start, end) in saved {
+        let rects = doc.range_rects(page, start, end);
+        if !rects.is_empty() {
+            selection::lighten(canvas, &rects);
+            drawn.push(start.to_string());
+        }
+    }
+    for (_, _, rects, _) in session.iter().filter(|(k, p, _, st)| *k == key && *p == page && !drawn.contains(st)) {
+        selection::lighten(canvas, rects);
+    }
+}
+
 /// Renders page `index` with the default status bars (what `rinky render` writes; the
 /// reader screen uses the user's bars, device values and reading speed).
 pub fn render_page(doc: &mut dyn Document, index: usize, canvas: &mut Canvas, fonts: &mut Fonts) -> anyhow::Result<()> {
@@ -550,6 +567,10 @@ pub struct ReaderScreen {
     sel_edge: Option<(i8, Instant)>,
     /// The drag turned the page: no further turn until the finger leaves the zone.
     sel_edge_lock: bool,
+    /// A selection drag went on half a page ([`selection::Bridge`]): the screen shows the
+    /// lower half of `page` and the upper half of the next. Only while the selection is
+    /// up; when its card closes the reader shows the page the selection ended on.
+    bridge: Option<selection::Bridge>,
     /// The first line's top and the last line's bottom of a page (page, box), for the
     /// turn zones.
     sel_text_box: Option<(usize, Option<(i32, i32)>)>,
@@ -648,6 +669,7 @@ impl ReaderScreen {
             sel_pages: Vec::new(),
             sel_edge: None,
             sel_edge_lock: false,
+            bridge: None,
             sel_text_box: None,
             note_text: String::new(),
             sel_shown: Vec::new(),
@@ -708,6 +730,7 @@ impl ReaderScreen {
         let Some(doc) = self.doc.as_ref() else { return };
         let total = doc.page_count().pages as i64;
         let next = (self.page as i64 + step).clamp(0, (total - 1).max(0)) as usize;
+        self.bridge = None;
         if next != self.page {
             self.page = next;
             self.rerender = true;
@@ -736,6 +759,7 @@ impl ReaderScreen {
         let Some(doc) = self.doc.as_ref() else { return };
         let last = doc.page_count().pages.saturating_sub(1);
         self.page = page.min(last);
+        self.bridge = None;
         self.rerender = true;
         self.turned = false;
         // The class is picked when the page is shown (paint_screen: Change::Jump).
@@ -1123,12 +1147,21 @@ impl ReaderScreen {
                 if self.sel_word.is_none() {
                     return false;
                 }
-                let Some(end) = selection::word_hit(doc, page, p) else {
+                // Half a page on: the point is on the upper or the lower page.
+                let (page, q) = match self.bridge {
+                    Some(b) => b.to_page(p),
+                    None => (page, p),
+                };
+                let Some(end) = selection::word_hit(doc, page, q) else {
                     // Between words or lines: keep the selection as it is.
                     return true;
                 };
-                self.sel_end = selection::bounds(&end.sel.rects).map(|r| (r, p));
-                self.extend_selection(&selection::SpanEnd::Word(end), size);
+                let rects = match self.bridge {
+                    Some(b) => b.to_screen(&[(page, end.sel.rects.clone())]),
+                    None => end.sel.rects.clone(),
+                };
+                self.sel_end = selection::bounds(&rects).map(|r| (r, p));
+                self.extend_selection(&selection::SpanEnd::Word(end), size, page);
                 true
             }
             (TouchKind::Up, Some(_)) => {
@@ -1137,8 +1170,12 @@ impl ReaderScreen {
                 self.sel_edge = None;
                 self.sel_edge_lock = false;
                 self.swallow_gestures = true;
-                let (Some(sel), Some(doc)) = (self.sel.clone(), self.doc.as_deref_mut()) else { return true };
-                self.sel_settle = selection::bounds(&sel.rects);
+                let Some(sel) = self.sel.clone() else {
+                    self.end_bridge();
+                    return true;
+                };
+                self.sel_settle = selection::bounds(&self.sel_screen_rects());
+                let Some(doc) = self.doc.as_deref_mut() else { return true };
                 let one_word = self.sel_pages.len() <= 1 && self.sel_word.as_ref().is_some_and(|w| w.sel.rects == sel.rects);
                 let pages = match (self.sel_pages.first(), self.sel_pages.last()) {
                     (Some(a), Some(b)) if a.0 != b.0 => format!("pages {}-{}", a.0 + 1, b.0 + 1),
@@ -1184,9 +1221,10 @@ impl ReaderScreen {
     /// Extends the selection from the word it started on to `end` on the page shown
     /// (across pages when the drag turned the page; `select` and `set_selection` set the
     /// document's selection, which plugins read).
-    fn extend_selection(&mut self, end: &selection::SpanEnd, size: Size) {
+    /// `page`: the page `end` is on (the page shown, or in a bridge either of its pages).
+    fn extend_selection(&mut self, end: &selection::SpanEnd, size: Size, page: usize) {
         let (Some(doc), Some(word)) = (self.doc.as_deref_mut(), self.sel_word.as_ref()) else { return };
-        let Some(span) = selection::span_select(doc, size, self.sel_anchor_page, word, self.page, end) else { return };
+        let Some(span) = selection::span_select(doc, size, self.sel_anchor_page, word, page, end) else { return };
         if self.sel.as_ref().is_none_or(|s| s.page != span.sel.page || s.rects != span.sel.rects || s.text != span.sel.text) {
             log::debug!("reader: selection extended to {:?} ({} pages)", note_excerpt(&span.sel.text, 60), span.pages.len());
             self.sel = Some(span.sel);
@@ -1195,9 +1233,28 @@ impl ReaderScreen {
         self.sel_pages = span.pages;
     }
 
+    /// Screen rectangles of the selection's part on screen (both pages of a bridge).
+    fn sel_screen_rects(&self) -> Vec<Rect> {
+        match (self.bridge, self.sel.as_ref()) {
+            (Some(b), Some(_)) => b.to_screen(&self.sel_pages),
+            (None, Some(s)) if s.page == self.page => s.rects.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Leaves a bridge: shows the page the selection ended on, drawn whole.
+    fn end_bridge(&mut self) {
+        if let Some(b) = self.bridge {
+            let page = self.sel.as_ref().map_or(b.page, |s| s.page);
+            log::info!("reader: selection done, the half-page view goes back to page {}", page + 1);
+            self.show_page(page);
+        }
+    }
+
     /// The first line's top and the last line's bottom of the page shown (cached).
     fn page_text_box(&mut self, size: Size) -> Option<(i32, i32)> {
         match self.sel_text_box {
+            _ if self.bridge.is_some() => self.bridge.map(|b| b.text_box()),
             Some((p, b)) if p == self.page => b,
             _ => {
                 let doc = self.doc.as_deref_mut()?;
@@ -1213,9 +1270,12 @@ impl ReaderScreen {
     }
 
     /// The dragged selection end rested in a turn zone for [`selection::EDGE_DWELL`]:
-    /// turns the page (a page turn with the reader's refresh policy) and continues the
-    /// selection there, at the next page's first word or the previous page's last word.
-    /// Returns true when the page turned.
+    /// moves on half a page ([`selection::Bridge`]; a whole page turn when a page has
+    /// no lines to cut) and continues the selection there: forward at the first word
+    /// below what was shown (the next page's first word, or the word after the lower
+    /// part of a bridge), back at the last word above it. That word sits in the middle
+    /// of the screen with the text before it still in sight. Returns true when the view
+    /// moved.
     fn sel_edge_turn(&mut self, cx: &mut AppCtx) -> bool {
         let Some((dir, since)) = self.sel_edge else { return false };
         if self.sel_edge_lock || self.selecting.is_none() || since.elapsed() < selection::EDGE_DWELL {
@@ -1223,25 +1283,55 @@ impl ReaderScreen {
         }
         self.sel_edge = None;
         self.sel_edge_lock = true;
-        let Some(doc) = self.doc.as_deref() else { return false };
-        let total = doc.page_count().pages;
-        let next = self.page as i64 + dir as i64;
-        if next < 0 || next as usize >= total || (next as usize).abs_diff(self.sel_anchor_page) >= selection::MAX_SPAN_PAGES {
-            log::info!("reader: selection drag at the {} edge: no page to continue on", if dir > 0 { "bottom" } else { "top" });
-            return false;
-        }
-        self.turn(dir as i64, cx);
         let size = cx.screen.size();
-        // The new page is drawn whole, with its part of the selection inverted.
+        let anchor = self.sel_anchor_page;
+        let Some(doc) = self.doc.as_deref_mut() else { return false };
+        let total = doc.page_count().pages;
+        let fits = |p: usize| p < total && p.abs_diff(anchor) < selection::MAX_SPAN_PAGES;
+        // The view (page, bridge) and where the selection continues (page, end).
+        let (page, bridge, end_page, end) = match (self.bridge, dir > 0) {
+            (None, true) if fits(self.page + 1) => {
+                let next = self.page + 1;
+                let b = selection::Bridge::new(doc, self.page, size);
+                let end = selection::edge_word(doc, next, size, true);
+                (if b.is_some() { self.page } else { next }, b, next, end)
+            }
+            (Some(b), true) => {
+                let next = b.page + 1;
+                let end = if b.cut2 > b.top2 { selection::line_word(doc, next, size, b.cut2 - 2, false) } else { selection::edge_word(doc, next, size, true) };
+                (next, None, next, end)
+            }
+            (None, false) if self.page > 0 && fits(self.page - 1) => {
+                let prev = self.page - 1;
+                let b = selection::Bridge::new(doc, prev, size);
+                let end = selection::edge_word(doc, prev, size, false);
+                (prev, b, prev, end)
+            }
+            (Some(b), false) => (b.page, None, b.page, selection::line_word(doc, b.page, size, b.cut + 2, true)),
+            _ => {
+                log::info!("reader: selection drag at the {} edge: no page to continue on", if dir > 0 { "bottom" } else { "top" });
+                return false;
+            }
+        };
+        self.page = page;
+        self.bridge = bridge;
+        self.rerender = true;
+        self.turned = true;
+        self.dirty = Some(cx.refresh.page_turn());
+        self.turn_wave = None;
+        self.sel_text_box = None;
+        // The new view is drawn whole, with its part of the selection inverted.
         self.sel_shown.clear();
         self.sel_end = None;
-        let Some(doc) = self.doc.as_deref_mut() else { return false };
-        let end = selection::edge_word(doc, self.page, size, dir > 0);
-        self.extend_selection(&end, size);
+        self.extend_selection(&end, size, end_page);
         log::info!(
-            "reader: selection continues on page {} (from page {}): {} chars",
-            self.page + 1,
-            self.sel_anchor_page + 1,
+            "reader: selection continues on page {} ({}; from page {}): {} chars",
+            end_page + 1,
+            match bridge {
+                Some(b) => format!("half-page view of pages {}-{}", b.page + 1, b.page + 2),
+                None => format!("page {} whole", page + 1),
+            },
+            anchor + 1,
             self.sel.as_ref().map_or(0, |s| s.text.chars().count())
         );
         true
@@ -1376,6 +1466,15 @@ impl ReaderScreen {
     /// card does not move). Sets [`ReaderScreen::dict_card`].
     fn selection_overlay(&mut self, sel: &Selection, card: Option<(String, u32, crate::plugin_host::CardDialog)>, keep_above: Option<i32>, cx: &mut AppCtx) -> Overlay {
         let size = cx.screen.size();
+        // In a half-page view the card sits by the selection where it is shown.
+        let shown;
+        let sel = match self.bridge {
+            Some(b) => {
+                shown = Selection { rects: b.to_screen(&self.sel_pages), ..sel.clone() };
+                &shown
+            }
+            None => sel,
+        };
         let (extra, insightful) = selection_entries(cx);
         let card = card.map(|(plugin, id, mut c)| {
             c.prefix = PCARD.into();
@@ -1535,6 +1634,7 @@ impl ReaderScreen {
         if self.overlay.as_ref().is_some_and(|o| o.kind == overlay::OverlayKind::Hits) {
             self.rerender = true;
         }
+        self.end_bridge();
         if self.sel.take().is_some() {
             // The inverted selection is on the canvas only; put the page back there too.
             if let Some(b) = selection::bounds(&self.sel_shown) {
@@ -2246,7 +2346,23 @@ impl ReaderScreen {
             let mut save = false;
             if !restored {
                 let t_draw = Instant::now();
-                doc.render_page(self.page, cx.canvas)?;
+                match self.bridge {
+                    // Half a page on: both pages drawn whole with their highlights, then
+                    // the two halves put together.
+                    Some(b) => {
+                        let mut upper = cx.canvas.clone();
+                        let mut lower = cx.canvas.clone();
+                        doc.render_page(b.page, &mut upper)?;
+                        draw_highlights(doc, b.page, &mut upper, &self.saved_hl, &self.session_hl);
+                        doc.render_page(b.page + 1, &mut lower)?;
+                        draw_highlights(doc, b.page + 1, &mut lower, &self.saved_hl, &self.session_hl);
+                        b.compose(&upper, &lower, cx.canvas);
+                    }
+                    None => {
+                        doc.render_page(self.page, cx.canvas)?;
+                        draw_highlights(doc, self.page, cx.canvas, &self.saved_hl, &self.session_hl);
+                    }
+                }
                 if let Some(t) = self.open_trace.as_mut() {
                     t.step("render page");
                 }
@@ -2254,20 +2370,6 @@ impl ReaderScreen {
                     footer::draw_bars(cx.canvas, cx.fonts, doc.layout(), &cx.settings.status_bars, info, footer::Part::All);
                 }
                 self.status_shown = status;
-                let key = doc.layout().cache_key();
-                // Saved highlights, mapped to this page in the current layout.
-                let mut drawn: Vec<String> = Vec::new();
-                for (start, end) in &self.saved_hl {
-                    let rects = doc.range_rects(self.page, start, end);
-                    if !rects.is_empty() {
-                        selection::lighten(cx.canvas, &rects);
-                        drawn.push(start.to_string());
-                    }
-                }
-                // Highlights of this session the document could not map (fixed layouts).
-                for (_, _, rects, _) in self.session_hl.iter().filter(|(k, p, _, st)| *k == key && *p == self.page && !drawn.contains(st)) {
-                    selection::lighten(cx.canvas, rects);
-                }
                 // Search hits on this page while the hit bar is shown.
                 if self.overlay.as_ref().is_some_and(|o| o.kind == overlay::OverlayKind::Hits) {
                     for h in self.hits.iter().flatten() {
@@ -2298,9 +2400,10 @@ impl ReaderScreen {
             // A selection drag turned the page: its part on this page is shown inverted
             // in the same update (the page buffer stays without it).
             if self.selecting.is_some() {
-                if let Some(s) = self.sel.as_ref().filter(|s| s.page == self.page) {
-                    selection::invert(cx.canvas, &s.rects);
-                    self.sel_shown = s.rects.clone();
+                let rects = self.sel_screen_rects();
+                if !rects.is_empty() {
+                    selection::invert(cx.canvas, &rects);
+                    self.sel_shown = rects;
                     self.sel_dirty = false;
                 }
             }
@@ -2344,7 +2447,7 @@ impl ReaderScreen {
         }
         if std::mem::take(&mut self.sel_dirty) {
             // Put the page back where the old selection was, invert the new one.
-            let new = self.sel.as_ref().map(|s| s.rects.clone()).unwrap_or_default();
+            let new = if self.sel.is_some() { self.sel_screen_rects() } else { Vec::new() };
             let mut all = self.sel_shown.clone();
             all.extend(new.iter().copied());
             if let (Some(area), Some(buf)) = (selection::bounds(&all), self.page_buf.as_ref()) {

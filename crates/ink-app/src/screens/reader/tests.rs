@@ -798,49 +798,65 @@ impl Harness {
     }
 }
 
-/// A drag held at the bottom edge turns the page and the selection continues there;
-/// the card, the document's selection (plugins) and the saved highlight have the whole
-/// passage, and the highlight is drawn on both pages.
+/// A drag held at the bottom edge moves on half a page: the lower half of the page at
+/// the top, the upper half of the next page below, and the selection continues at the
+/// next page's first word in the middle of the screen. The card, the document's
+/// selection (plugins) and the saved highlight have the whole passage; when the card
+/// closes the reader shows the page the selection ended on, with the highlight.
 #[test]
 fn a_selection_drag_continues_on_the_next_page() {
     let mut h = Harness::new("selnext", "juliet.epub");
     h.reader.go_to_page(30);
     h.paint();
     let plain30 = h.probe.panel().clone();
-    let target = h.word_point(31, 400);
     let p = h.text_point();
     h.frame(400, p.x, p.y + 400, TouchPhase::Down);
     h.tick(700);
     let anchor = h.reader.sel.clone().expect("hold on text selects");
     h.frame(100, p.x + 300, p.y + 460, TouchPhase::Move);
-    // Into the bottom band: nothing turns before the rest.
+    // Into the bottom band: nothing moves before the rest.
     h.frame(100, 636, 1690, TouchPhase::Move);
     h.frame(100, 640, 1688, TouchPhase::Move);
     assert_eq!(h.reader.page(), 30);
     assert!(h.reader.sel_edge.is_some_and(|(d, _)| d == 1));
     let n = h.probe.updates().len();
     h.rest_in_turn_zone();
-    assert_eq!(h.reader.page(), 31, "the rest at the bottom edge turned the page");
+    let b = h.reader.bridge.expect("half a page on");
+    assert_eq!((h.reader.page(), b.page), (30, 30));
+    // The cut is about the middle of the text; the next page's part is below it.
+    assert!(b.cut > 500 && b.cut < 1200 && b.split > b.top && b.cut2 > b.top2, "{b:?}");
     // One page-turn update of the whole screen (the reader's turn policy, not DU), with
-    // the selection's part on the new page inverted in it.
+    // the selection inverted in it.
     let ups = &h.probe.updates()[n..];
     assert!(ups.iter().any(|u| u.rect == FULL && u.class != RefreshClass::Du), "{ups:?}");
     let sel = h.reader.sel.clone().unwrap();
-    assert_eq!(sel.page, 31);
-    assert!(!sel.rects.is_empty());
-    let r = sel.rects[0];
+    assert_eq!(sel.page, 31, "the selection runs to the next page's first word");
+    let first31 = b.to_screen(&[(31, sel.rects.clone())]);
+    let r = *first31.first().expect("the first word of page 31 is shown");
+    assert!(r.y >= b.split && r.y < 1696 * 2 / 3, "the selection goes on in the middle of the screen: {r:?}");
     let inverted = h.probe.panel().get(r.x + 2, r.y + 2).unwrap();
     assert!(inverted < 60, "{inverted}");
-    // More rests in the zone do not turn again; leaving it and dragging up extends.
+    // The top of the screen is page 30 from its cut: a row above the selection there.
+    let row = |c: &Canvas, y: i32| (0..1272).map(|x| c.get(x, y).unwrap()).collect::<Vec<_>>();
+    let above = anchor.rects[0].y - 4;
+    if above >= b.cut {
+        assert_eq!(row(&h.probe.panel(), above - b.cut + b.top), row(&plain30, above));
+    }
+    h.shot("01-half-page");
+    // More rests in the zone do not move again; leaving it and dragging up extends.
     h.frame(100, 641, 1689, TouchPhase::Move);
     assert!(h.reader.sel_edge.is_none());
+    let target = h.word_point(31, b.top2 + (b.cut2 - b.top2) / 2);
+    let target = Point::new(target.x, target.y - b.top2 + b.split);
+    assert_eq!(b.to_page(target).0, 31);
     h.frame(100, target.x, target.y, TouchPhase::Move);
     let sel = h.reader.sel.clone().unwrap();
-    h.shot("01-next-page");
+    assert_eq!(sel.page, 31);
     h.frame(100, target.x, target.y, TouchPhase::Up);
     assert_eq!(h.kind(), Some(overlay::OverlayKind::Selection));
-    assert_eq!(h.reader.page(), 31);
-    // The whole passage, from the first word on page 31 to the word dragged to.
+    assert!(h.reader.bridge.is_some(), "the half-page view stays while the card is up");
+    h.shot("02-half-page-card");
+    // The whole passage, from the anchor on page 30 to the word dragged to on 31.
     let doc = h.reader.doc.as_deref_mut().unwrap();
     assert_eq!(doc.selection().map(|s| s.text.clone()), Some(sel.text.clone()), "plugins read the whole passage");
     assert_eq!(sel.start, anchor.start);
@@ -855,8 +871,11 @@ fn a_selection_drag_continues_on_the_next_page() {
     let id = o.ids["card"];
     let card_quote = o.tree.get_mut::<selection::SelectionCard>(id).unwrap().quote.clone();
     assert_eq!(card_quote, selection::quote(&sel, 300));
-    // Highlight: saved once, from page 30 to page 31, drawn on the page shown...
+    // Highlight: saved once, from page 30 to page 31; the reader shows page 31 whole.
     h.tap_button("sel-highlight");
+    assert_eq!(h.kind(), None);
+    assert!(h.reader.bridge.is_none());
+    assert_eq!(h.reader.page(), 31, "the page the selection ended on");
     let st = BookState::load(&h.reader.path).unwrap();
     assert_eq!(st.highlights.len(), 1);
     assert_eq!(st.highlights[0].text, sel.text);
@@ -869,30 +888,78 @@ fn a_selection_drag_continues_on_the_next_page() {
     assert!(!r31.is_empty() && !r30.is_empty());
     let gray31 = r31.iter().flat_map(|r| (r.y..r.bottom()).flat_map(move |y| (r.x..r.right()).map(move |x| (x, y)))).filter(|&(x, y)| shown31.get(x, y).is_some_and(|v| (150..240).contains(&v))).count();
     assert!(gray31 > 100, "page 31: {gray31}");
+    h.shot("03-highlight-page-31");
     // ...and on page 30, from the anchor word to the page end.
     h.reader.go_to_page(30);
     h.paint();
     let n = grayed(&h, &plain30, &r30);
     assert!(n > 100, "page 30: {n}");
     assert!(r30.last().unwrap().bottom() > anchor.rects[0].bottom(), "the highlight runs to the end of page 30");
-    h.shot("02-highlight-page-30");
 }
 
-/// Dragging the selection to the top edge continues it on the previous page.
+/// Held at the bottom again, the half-page view goes on to the next page whole (the
+/// selection runs to the last word that was shown, now in the middle of the screen);
+/// the top edge goes back half a page at a time the same way.
+#[test]
+fn a_selection_drag_moves_half_a_page_each_rest() {
+    let mut h = Harness::new("selhalf", "juliet.epub");
+    h.reader.go_to_page(30);
+    h.paint();
+    let p = h.text_point();
+    h.frame(400, p.x, p.y + 400, TouchPhase::Down);
+    h.tick(700);
+    let rest = |h: &mut Harness, y: i32| {
+        h.frame(100, 640, 900, TouchPhase::Move);
+        h.frame(100, 636, y, TouchPhase::Move);
+        h.frame(100, 640, y + if y > 800 { -2 } else { 2 }, TouchPhase::Move);
+        h.rest_in_turn_zone();
+    };
+    rest(&mut h, 1690);
+    let b = h.reader.bridge.expect("half a page on");
+    rest(&mut h, 1690);
+    assert_eq!((h.reader.page(), h.reader.bridge), (31, None), "the next page whole");
+    let sel = h.reader.sel.clone().unwrap();
+    assert_eq!(sel.page, 31);
+    let end = *sel.rects.last().unwrap();
+    assert!((end.bottom() - b.cut2).abs() < 8, "the selection ends at the last line the half-page view showed: {end:?} {b:?}");
+    assert!(end.bottom() < 1696 * 2 / 3, "in the middle of the screen: {end:?}");
+    // Back: half a page (pages 30-31), then page 30 whole.
+    rest(&mut h, 8);
+    let back = h.reader.bridge.expect("half a page back");
+    assert_eq!((h.reader.page(), back.page), (30, 30));
+    rest(&mut h, 8);
+    assert_eq!((h.reader.page(), h.reader.bridge), (30, None));
+    let sel = h.reader.sel.clone().unwrap();
+    assert_eq!(sel.page, 30);
+    // The anchor is below the cut on page 30: the passage runs from the first line the
+    // half-page view showed down to it.
+    let anchor_y = h.reader.sel_word.as_ref().unwrap().sel.rects[0].y;
+    let start = sel.rects[0];
+    assert!(anchor_y > back.cut && (start.y - back.cut).abs() < 8, "back at the first line the half-page view showed: {start:?} {back:?}");
+    h.frame(100, 640, 900, TouchPhase::Up);
+    h.tap_button("sel-cancel");
+    assert!(h.reader.sel.is_none() && h.reader.bridge.is_none());
+}
+
+/// Dragging the selection to the top edge goes back half a page: the end of the
+/// previous page above the start of this one, and the selection continues at the
+/// previous page's last word. When the card closes the reader shows the previous page.
 #[test]
 fn a_selection_drag_continues_on_the_previous_page() {
     let mut h = Harness::new("selprev", "juliet.epub");
     h.reader.go_to_page(31);
     h.paint();
-    let target = h.word_point(30, 900);
     let p = h.text_point();
     h.frame(400, p.x, p.y, TouchPhase::Down);
     h.tick(700);
     let anchor = h.reader.sel.clone().unwrap();
     h.frame(100, 636, 8, TouchPhase::Move);
     h.rest_in_turn_zone();
-    assert_eq!(h.reader.page(), 30);
-    h.frame(100, 640, 200, TouchPhase::Move);
+    let b = h.reader.bridge.expect("half a page back");
+    assert_eq!((h.reader.page(), b.page), (30, 30));
+    let target = h.word_point(30, b.cut + 60);
+    let target = Point::new(target.x, target.y - b.cut + b.top);
+    h.frame(100, 640, 400, TouchPhase::Move);
     h.frame(100, target.x, target.y, TouchPhase::Move);
     h.frame(100, target.x, target.y, TouchPhase::Up);
     assert_eq!(h.kind(), Some(overlay::OverlayKind::Selection));
@@ -903,9 +970,9 @@ fn a_selection_drag_continues_on_the_previous_page() {
     let doc = h.reader.doc.as_deref_mut().unwrap();
     assert_eq!(doc.selection().map(|s| s.text.clone()), Some(sel.text.clone()));
     assert_eq!(doc.page_of(&sel.start).unwrap(), 30);
-    // A plain lift is a normal selection: the first page has no previous one to turn to.
     h.tap_button("sel-cancel");
     assert!(h.reader.sel.is_none());
+    assert_eq!((h.reader.page(), h.reader.bridge), (30, None));
 }
 
 #[test]
