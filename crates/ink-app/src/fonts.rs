@@ -13,7 +13,8 @@
 //!   `font_family = "Bookerly"` sets the book in Bookerly. [`reading_default`] is the
 //!   family for books without their own choice.
 //! - UI font: `settings.ui.font_family` (empty: the built-in Noto Sans, [`UI_BUILTIN`];
-//!   "Noto Serif": the embedded reading faces). Parsing a face
+//!   "Noto Serif": the embedded reading faces). Bold UI text (titles, headings) is drawn
+//!   in the family's regular face, so titles are light. Parsing a face
 //!   for the UI costs about 0.5 s, so [`request_ui_font`] loads it on a thread and the
 //!   app loop swaps it in ([`take_ui_fonts`]). Every UI font gets the fallback faces of
 //!   [`UI_FALLBACKS`] for characters it lacks (IPA in dictionary pronunciations).
@@ -36,12 +37,11 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 /// Name of the built-in family (embedded Noto Serif); `ink-html` maps it to its default.
 pub const BUILTIN: &str = "Noto Serif";
 
-/// Name of the built-in UI family: Noto Sans Regular and Bold, embedded (OFL,
-/// `fonts/LICENSE-Noto`). The UI has no italic face of its own; italic UI text uses the
-/// regular face.
+/// Name of the built-in UI family: Noto Sans Regular, embedded (OFL,
+/// `fonts/LICENSE-Noto`). It draws bold and italic UI text too (light titles; the UI has
+/// no italic face of its own).
 pub const UI_BUILTIN: &str = "Noto Sans";
 static UI_REGULAR: &[u8] = include_bytes!("../../../fonts/ui/NotoSans-Regular.ttf");
-static UI_BOLD: &[u8] = include_bytes!("../../../fonts/ui/NotoSans-Bold.ttf");
 
 /// Family used for books when the user chose none and the Kindle has it.
 pub const PREFERRED_READING: &str = "Bookerly";
@@ -292,30 +292,31 @@ pub fn add_fallback_chain(fonts: &mut Fonts, chain: &[UiFallback], builtin: bool
 
 /// The embedded Noto Sans UI fonts with the UI fallback faces.
 pub fn builtin_ui_fonts() -> Fonts {
-    let mut f = Fonts::from_static([UI_REGULAR, UI_BOLD, UI_REGULAR]).expect("embedded UI font");
+    let mut f = Fonts::from_static([UI_REGULAR, UI_REGULAR, UI_REGULAR]).expect("embedded UI font");
     add_ui_fallbacks(&mut f, false);
     f
 }
 
 /// UI fonts for family `name` (empty or [`UI_BUILTIN`]: the embedded Noto Sans;
 /// [`BUILTIN`]: the embedded Noto Serif), with the UI fallback faces
-/// ([`add_ui_fallbacks`]). Missing bold or italic faces use the regular face. `None` when
-/// the family is not installed or does not parse.
+/// ([`add_ui_fallbacks`]). Bold text uses the regular face (light titles), and so does
+/// italic text when the family has no italic. `None` when the family is not installed or
+/// does not parse.
 pub fn ui_fonts(name: &str) -> Option<Fonts> {
     if name.trim().is_empty() || name.trim().eq_ignore_ascii_case(UI_BUILTIN) {
         return Some(builtin_ui_fonts());
     }
     if name.trim().eq_ignore_ascii_case(BUILTIN) {
-        let mut f = Fonts::load();
+        let (r, i) = (ink_text::embedded_font_bytes(Style::Regular), ink_text::embedded_font_bytes(Style::Italic));
+        let mut f = Fonts::from_static([r, r, i]).expect("embedded font");
         add_ui_fallbacks(&mut f, true);
         return Some(f);
     }
     let fam = registry::installed_family(name)?;
     let map = |f: Option<&FaceRef>| f.and_then(|f| ink_text::face::map_file(&f.path).ok());
     let r = map(fam.regular())?;
-    let b = map(fam.face(true, false)).unwrap_or(r);
     let i = map(fam.face(false, true)).unwrap_or(r);
-    match Fonts::from_static([r, b, i]) {
+    match Fonts::from_static([r, r, i]) {
         Ok(mut f) => {
             add_ui_fallbacks(&mut f, false);
             Some(f)
@@ -466,6 +467,22 @@ mod tests {
         assert_eq!(reading_default(&s).as_deref(), Some("Literata"));
         s.reader.font_family = BUILTIN.into();
         assert_eq!(reading_default(&s), None);
+    }
+
+    /// Titles are light: bold UI text is the regular face, in the built-in Noto Sans and
+    /// in the embedded Noto Serif.
+    #[test]
+    fn ui_bold_text_uses_the_regular_face() {
+        for (name, mut f) in [("Noto Sans", builtin_ui_fonts()), ("Noto Serif", ui_fonts(BUILTIN).unwrap())] {
+            let t = "Library · Settings";
+            assert_eq!(f.text_width(Style::Bold, t, 56.0), f.text_width(Style::Regular, t, 56.0), "{name}");
+            let (bold, _) = render(&mut f, &[(Style::Bold, t)]);
+            let (regular, _) = render(&mut f, &[(Style::Regular, t)]);
+            assert!(bold.pixels == regular.pixels, "{name}: bold draws differently");
+        }
+        // The reading fonts keep their bold face.
+        let mut book = Fonts::load();
+        assert_ne!(book.text_width(Style::Bold, "Library", 56.0), book.text_width(Style::Regular, "Library", 56.0));
     }
 
     /// Dictionary pronunciations (OALD8 and NOAD StarDict) and symbols from their bodies.
