@@ -94,6 +94,14 @@ fn queries_sort_filter_and_search() {
     assert_eq!(lib.query(&Query { status: StatusFilter::Reading, ..Default::default() }).len(), 1);
     assert_eq!(lib.query(&Query { status: StatusFilter::Unread, ..Default::default() }).len(), 3);
     assert_eq!(lib.query(&Query { sort: SortKey::Recent, ..Default::default() })[0].path, j);
+    // Opened but still at 0 %: the badge says "Unread", so the Unread filter lists it.
+    st.percent = Some(0.002);
+    st.save(&j).unwrap();
+    lib.refresh_state(&j);
+    assert_eq!(lib.index.get(&j).unwrap().status, ReadingStatus::Reading);
+    assert_eq!(super::browse::book_state(lib.index.get(&j).unwrap()), Err(super::browse::Badge::New));
+    assert_eq!(lib.query(&Query { status: StatusFilter::Unread, ..Default::default() }).len(), 4);
+    assert!(lib.query(&Query { status: StatusFilter::Reading, ..Default::default() }).is_empty());
     lib.set_status(&j, ReadingStatus::Complete);
     assert_eq!(BookState::load(&j).unwrap().status, ReadingStatus::Complete, "status saved in the sidecar");
     assert!(lib.current().is_none());
