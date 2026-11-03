@@ -4,16 +4,19 @@
 //!
 //! Classification ([`triggers`]) is pure and depends only on the gesture and the screen
 //! size:
-//! - taps: corner squares of 1/8 of the screen width first (`tap_top_left`, ...), then the
-//!   zones: left third `tap_left`; middle third across and middle three fifths down, or
+//! - taps: corner squares of 1/8 of the screen width first (`tap_top_left`, ...), then
+//!   the bottom middle (middle third across, bottom fifth down: `tap_bottom_center`),
+//!   then the zones: left third `tap_left`; middle third across and middle three fifths down, or
 //!   the top tenth, `tap_center`; the rest `tap_right`;
 //! - swipes that start within 1/20 of the screen of an edge and move away from it are
 //!   edge swipes (`swipe_up_from_bottom`, `swipe_down_from_top`, `swipe_right_from_left`,
 //!   `swipe_left_from_right`); other swipes are `swipe_<direction>`;
 //! - two-finger swipes, two-finger tap, pinch in / out, double tap, long press.
 //!
-//! A corner tap or an edge swipe whose action is `none` falls back to the plain trigger
-//! (the zone tap or the plain swipe), so an unused corner still turns the page. A
+//! A corner or bottom-middle tap or an edge swipe whose action is `none` falls back to
+//! the plain trigger (the zone tap or the plain swipe), so an unused corner still turns
+//! the page. Edge slides (`slide_left_edge`, `slide_right_edge`) follow the finger and
+//! are not gestures here: see [`super::light_gestures`]. A
 //! gesture whose action is `none` after that goes to plugin gesture bindings.
 //!
 //! There is no hidden exit anywhere on the page: `exit` is an action like any other and
@@ -42,7 +45,7 @@ pub fn triggers(g: &Gesture, size: Size) -> Option<(&'static str, Option<&'stati
     Some(match *g {
         Gesture::Tap { pos } => {
             let zone = tap_zone(pos, w, h);
-            match tap_corner(pos, w, h) {
+            match tap_corner(pos, w, h).or_else(|| tap_bottom_center(pos, w, h)) {
                 Some(c) => (c, Some(zone)),
                 None => (zone, None),
             }
@@ -95,6 +98,10 @@ fn tap_corner(p: Point, w: i32, h: i32) -> Option<&'static str> {
         (_, true, _, true) => Some("tap_bottom_right"),
         _ => None,
     }
+}
+
+fn tap_bottom_center(p: Point, w: i32, h: i32) -> Option<&'static str> {
+    (p.x >= w / 3 && p.x < w * 2 / 3 && p.y >= h * 4 / 5).then_some("tap_bottom_center")
 }
 
 fn tap_zone(p: Point, w: i32, h: i32) -> &'static str {
@@ -162,6 +169,10 @@ pub const KNOWN: &[&str] = &[
     "light_down",
     "warmth_up",
     "warmth_down",
+    "light_toggle",
+    "warmth_toggle",
+    "light_slide",
+    "warmth_slide",
     "night_mode",
     "font_bigger",
     "font_smaller",
@@ -234,6 +245,12 @@ impl ReaderScreen {
                 return Ok(quick_light::open_control_center(cx));
             }
             "light_up" | "light_down" | "warmth_up" | "warmth_down" => light_step(action, cx),
+            "light_toggle" | "warmth_toggle" => {
+                let now = cx.services.clock.local_now();
+                super::light_gestures::toggle(action == "warmth_toggle", &mut *cx.services.light, &now);
+            }
+            // Edge slides follow the finger (light_gestures); as a tap or swipe: nothing.
+            "light_slide" | "warmth_slide" => {}
             "night_mode" => self.toggle_night(cx)?,
             "font_bigger" | "zoom_in" if fixed => {
                 self.zoom_step(1);
@@ -330,7 +347,7 @@ fn light_step(action: &str, cx: &mut AppCtx) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ink_store::prefs::{ACTIONS, DEFAULT_GESTURES};
+    use ink_store::prefs::{ACTIONS, DEFAULT_GESTURES, SLIDE_ACTIONS};
 
     const SIZE: Size = Size::new(1272, 1696);
 
@@ -352,7 +369,11 @@ mod tests {
         assert_eq!(r(tap(50, 50)), ("tap_top_left", "bookmark"));
         // Unused corners fall back to their zone: no hidden exit top right.
         assert_eq!(r(tap(1250, 40)), ("tap_center", "menu"));
-        assert_eq!(r(tap(1250, 1680)), ("tap_right", "next_page"));
+        // Bottom corners: light and warmth off / on (KOReader).
+        assert_eq!(r(tap(40, 1680)), ("tap_bottom_left", "light_toggle"));
+        assert_eq!(r(tap(1250, 1680)), ("tap_bottom_right", "warmth_toggle"));
+        // Bottom middle: unused by default, so it turns the page as before.
+        assert_eq!(r(tap(636, 1600)), ("tap_right", "next_page"));
         // Edge swipes, and an unused edge falls back to the plain swipe.
         assert_eq!(r(swipe(600, 1690, Direction::Up)), ("swipe_up_from_bottom", "reading_settings"));
         assert_eq!(r(swipe(600, 10, Direction::Down)), ("swipe_down_from_top", "control_center"));
@@ -361,11 +382,37 @@ mod tests {
         let pinch = Gesture::Pinch { center: Point::new(600, 800), scale_milli: 600 };
         assert_eq!(r(pinch), ("pinch_in", "font_smaller"));
         // Every listed action has a handler.
-        for (a, _) in ACTIONS.iter().chain(LONG_PRESS_ACTIONS) {
+        for (a, _) in ACTIONS.iter().chain(LONG_PRESS_ACTIONS).chain(SLIDE_ACTIONS) {
             assert!(KNOWN.contains(a), "{a} has no handler");
         }
         for (_, a) in DEFAULT_GESTURES {
             assert!(KNOWN.contains(a), "{a} has no handler");
         }
+    }
+
+    #[test]
+    fn bottom_zones_do_not_overlap_and_stay_assignable() {
+        let (w, h) = (SIZE.w as i32, SIZE.h as i32);
+        let first = |x, y| triggers(&tap(x, y), SIZE).unwrap();
+        // Corners, bottom middle and the page-turn zones they fall back to.
+        assert_eq!(first(w / 8 - 1, h - 1), ("tap_bottom_left", Some("tap_left")));
+        assert_eq!(first(w / 8, h - 1), ("tap_left", None));
+        assert_eq!(first(w - w / 8, h - 1), ("tap_bottom_right", Some("tap_right")));
+        assert_eq!(first(w / 3, h * 4 / 5), ("tap_bottom_center", Some("tap_right")));
+        assert_eq!(first(w / 3 - 1, h - 1), ("tap_left", None));
+        assert_eq!(first(w * 2 / 3, h - 1), ("tap_right", None));
+        assert_eq!(first(w / 2, h * 4 / 5 - 1), ("tap_center", None));
+        // No point is in two specific zones: corners are inside the outer thirds.
+        for x in (0..w).step_by(7) {
+            for y in (h * 3 / 4..h).step_by(7) {
+                let p = Point::new(x, y);
+                assert!(!(tap_corner(p, w, h).is_some() && tap_bottom_center(p, w, h).is_some()), "{x},{y}");
+            }
+        }
+        let mut map = GestureMap::default();
+        map.set("tap_bottom_center", "toc");
+        map.set("tap_bottom_left", "none");
+        assert_eq!(resolve(&tap(636, 1690), SIZE, &map).unwrap(), ("tap_bottom_center", "toc"));
+        assert_eq!(resolve(&tap(10, 1690), SIZE, &map).unwrap(), ("tap_left", "prev_page"));
     }
 }

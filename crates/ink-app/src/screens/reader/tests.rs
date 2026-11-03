@@ -200,6 +200,50 @@ fn zones() {
 }
 
 #[test]
+fn edge_slides_set_the_light_and_bottom_corners_toggle_it_without_repaints() {
+    let mut h = Harness::new("light-gestures", "juliet.epub");
+    let light = crate::screens::settings::fakes::install(&mut h.dev);
+    light.borrow_mut().brightness = 10;
+    light.borrow_mut().warmth = 4;
+    let before = h.probe.updates().len();
+    // Up the left edge: brighter while the finger moves, no page turn, nothing drawn.
+    h.frame(400, 40, 1000, TouchPhase::Down);
+    h.frame(50, 42, 900, TouchPhase::Move);
+    let mid = light.borrow().brightness;
+    assert!(mid > 10, "{mid}");
+    h.frame(50, 44, 700, TouchPhase::Move);
+    h.frame(50, 44, 700, TouchPhase::Up);
+    let up = light.borrow().brightness;
+    assert!(up > mid, "{up}");
+    // Down the right edge: cooler.
+    h.frame(400, 1250, 600, TouchPhase::Down);
+    h.frame(50, 1250, 800, TouchPhase::Move);
+    h.frame(50, 1250, 1000, TouchPhase::Up);
+    assert!(light.borrow().warmth < 4, "{}", light.borrow().warmth);
+    assert_eq!(h.reader.page(), 0);
+    assert!(h.transitions.is_empty(), "{:?}", h.transitions);
+    assert_eq!(h.probe.updates().len(), before, "an edge slide draws nothing");
+    // Bottom-left corner: off, then back to the level before.
+    h.tap_at(30, 1680);
+    assert_eq!(light.borrow().brightness, 0);
+    h.tap_at(30, 1680);
+    assert_eq!(light.borrow().brightness, up);
+    // Bottom-right corner: warmth off and back.
+    light.borrow_mut().warmth = 7;
+    h.tap_at(1250, 1680);
+    assert_eq!(light.borrow().warmth, 0);
+    h.tap_at(1250, 1680);
+    assert_eq!(light.borrow().warmth, 7);
+    assert_eq!(h.reader.page(), 0, "corner taps turn no page");
+    // Turned off in the settings: the left-edge slide is a plain swipe up again.
+    h.settings.gestures.set("slide_left_edge", "none");
+    h.frame(400, 40, 1000, TouchPhase::Down);
+    h.frame(50, 42, 800, TouchPhase::Move);
+    h.frame(50, 42, 600, TouchPhase::Up);
+    assert_eq!(light.borrow().brightness, up);
+}
+
+#[test]
 fn center_tap_opens_the_menu_and_a_tap_outside_restores_the_page() {
     let mut h = Harness::new("menu", "juliet.epub");
     h.tap_at(1000, 900);

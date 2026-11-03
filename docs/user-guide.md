@@ -51,7 +51,7 @@ What rinky changes on your Kindle:
 Download the install package `rinky-<version>-kindlehf.tar.gz` from the project's
 releases page. If you want to check the download, compare its SHA-256 with the
 `SHA256SUMS` file of the same release. Example:
-`shasum -a 256 rinky-0.2.0-kindlehf.tar.gz` on a Mac, or `sha256sum ...` on Linux.
+`shasum -a 256 rinky-0.3.0-kindlehf.tar.gz` on a Mac, or `sha256sum ...` on Linux.
 
 ## 2. Install
 
@@ -167,6 +167,11 @@ Now:
 
 - Tap the right two thirds of the screen for the next page, and the left third for
   the previous page. Horizontal swipes also turn pages.
+- Light, as in KOReader: slide a finger up or down the left edge for brightness, or
+  the right edge for warmth. Tap the bottom-left corner to turn the light off and tap
+  it again to get the old level back; the bottom-right corner does the same for
+  warmth. *Settings > Gestures* turns these off or moves them, and the bottom middle
+  of the page can be given an action there too.
 - rinky saves your position after every page turn. The book opens at that page
   the next time.
 

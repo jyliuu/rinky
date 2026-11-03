@@ -32,6 +32,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("light_down", "Dimmer"),
     ("warmth_up", "Warmer"),
     ("warmth_down", "Cooler"),
+    ("light_toggle", "Light off / back on"),
+    ("warmth_toggle", "Warmth off / back on"),
     ("night_mode", "Toggle night mode"),
     ("font_bigger", "Larger text"),
     ("font_smaller", "Smaller text"),
@@ -47,7 +49,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
 ];
 
 /// Reader gestures (`trigger`, label). Corners are squares of 1/8 of the screen width;
-/// edge swipes start within 1/20 of the screen height (or width) of that edge.
+/// the bottom-centre zone is the middle third across, bottom fifth down; edge swipes
+/// start within 1/20 of the screen height (or width) of that edge; edge slides are
+/// vertical drags that start in the left or right 1/8 of the screen (not in the top or
+/// bottom 1/20) and take [`SLIDE_ACTIONS`] only.
 pub const GESTURES: &[(&str, &str)] = &[
     ("tap_left", "Tap left side"),
     ("tap_right", "Tap right side"),
@@ -56,6 +61,7 @@ pub const GESTURES: &[(&str, &str)] = &[
     ("tap_top_right", "Tap top-right corner"),
     ("tap_bottom_left", "Tap bottom-left corner"),
     ("tap_bottom_right", "Tap bottom-right corner"),
+    ("tap_bottom_center", "Tap bottom middle"),
     ("double_tap", "Double tap"),
     ("long_press", "Long press on a word"),
     ("swipe_left", "Swipe left"),
@@ -66,6 +72,8 @@ pub const GESTURES: &[(&str, &str)] = &[
     ("swipe_down_from_top", "Swipe down from the top edge"),
     ("swipe_right_from_left", "Swipe in from the left edge"),
     ("swipe_left_from_right", "Swipe in from the right edge"),
+    ("slide_left_edge", "Slide up or down the left edge"),
+    ("slide_right_edge", "Slide up or down the right edge"),
     ("two_finger_swipe_up", "Two-finger swipe up"),
     ("two_finger_swipe_down", "Two-finger swipe down"),
     ("two_finger_swipe_left", "Two-finger swipe left"),
@@ -82,8 +90,9 @@ pub const DEFAULT_GESTURES: &[(&str, &str)] = &[
     ("tap_center", "menu"),
     ("tap_top_left", "bookmark"),
     ("tap_top_right", "none"),
-    ("tap_bottom_left", "none"),
-    ("tap_bottom_right", "none"),
+    ("tap_bottom_left", "light_toggle"),
+    ("tap_bottom_right", "warmth_toggle"),
+    ("tap_bottom_center", "none"),
     ("double_tap", "none"),
     ("long_press", "dictionary"),
     ("swipe_left", "next_page"),
@@ -94,6 +103,8 @@ pub const DEFAULT_GESTURES: &[(&str, &str)] = &[
     ("swipe_down_from_top", "control_center"),
     ("swipe_right_from_left", "back"),
     ("swipe_left_from_right", "none"),
+    ("slide_left_edge", "light_slide"),
+    ("slide_right_edge", "warmth_slide"),
     ("two_finger_swipe_up", "light_up"),
     ("two_finger_swipe_down", "light_down"),
     ("two_finger_swipe_left", "warmth_down"),
@@ -106,6 +117,10 @@ pub const DEFAULT_GESTURES: &[(&str, &str)] = &[
 /// `long_press` also accepts `dictionary` (select the word and look it up) and
 /// `select` (select the word only).
 pub const LONG_PRESS_ACTIONS: &[(&str, &str)] = &[("dictionary", "Select word and look it up"), ("select", "Select word")];
+
+/// Edge slides (`slide_left_edge`, `slide_right_edge`) take only these (or `none`):
+/// the level follows the finger while it moves (up = more).
+pub const SLIDE_ACTIONS: &[(&str, &str)] = &[("light_slide", "Brightness follows the finger"), ("warmth_slide", "Warmth follows the finger")];
 
 /// Status-bar widgets, as `(name, label)`.
 pub const STATUS_WIDGETS: &[(&str, &str)] = &[
@@ -397,7 +412,7 @@ mod tests {
         let map = GestureMap::default();
         for (g, a) in DEFAULT_GESTURES {
             assert_eq!(map.action(g), *a);
-            assert!(ACTIONS.iter().chain(LONG_PRESS_ACTIONS).any(|(n, _)| n == a), "{a} unknown");
+            assert!(ACTIONS.iter().chain(LONG_PRESS_ACTIONS).chain(SLIDE_ACTIONS).any(|(n, _)| n == a), "{a} unknown");
         }
         assert_eq!(GestureMap(BTreeMap::new()).action("swipe_up_from_bottom"), "reading_settings");
         assert_eq!(map.action("no_such_gesture"), "none");
