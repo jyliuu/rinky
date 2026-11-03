@@ -134,6 +134,9 @@ pub enum Error {
     /// Another configfs gadget (not MTP, which is taken over) holds the controller: the
     /// controller and the gadget's name.
     Held(String, String),
+    /// A legacy gadget module (`g_ether`, ...) holds the controller and cannot be
+    /// unloaded: the controller, the module and the error.
+    Legacy(String, String, String),
     /// Binding failed and no USB cable is in.
     NoCable,
     /// No interface name after binding.
@@ -151,7 +154,7 @@ impl Error {
             Error::Module(_) | Error::NoFunction(_) => "No ECM support",
             Error::NoController => "No USB controller",
             Error::Bind(..) => "USB port busy",
-            Error::Held(..) => "USB port in use",
+            Error::Held(..) | Error::Legacy(..) => "USB port in use",
             Error::NoCable => "Not connected",
             Error::NoInterface | Error::Ifconfig(_) => "Network failed",
             Error::Remove(_) => "Off failed",
@@ -166,6 +169,7 @@ impl fmt::Display for Error {
             Error::NoController => write!(f, "no USB device controller in /sys/class/udc"),
             Error::NoFunction(e) => write!(f, "no ecm function in configfs ({e})"),
             Error::Bind(udc, e) => write!(f, "the USB port {udc} stays busy ({e}). Unplug the cable, plug it in again, then turn USB network on"),
+            Error::Legacy(udc, m, e) => write!(f, "the USB port {udc} is used by the kernel module {m} (another USB network tool?), which cannot be unloaded ({e})"),
             Error::Held(udc, g) => write!(f, "the USB port {udc} is used by the USB gadget \"{g}\". Turn that off first (or restart the Kindle)"),
             Error::NoCable => write!(f, "no USB cable. Connect the Kindle to a computer, then turn it on"),
             Error::NoInterface => write!(f, "the gadget has no network interface"),
@@ -286,6 +290,7 @@ impl UsbNet {
         }
         self.sys.run("modprobe", &["usb_f_ecm"]).map_err(Error::Module)?;
         let udc = self.controller().ok_or(Error::NoController)?;
+        self.unload_legacy(&udc)?;
         self.took_mtp = None;
         if let Some(m) = st.mtp_udc {
             self.unbind_mtp(m);
@@ -315,6 +320,19 @@ impl UsbNet {
         let p = self.mtp_dir().join("UDC");
         self.attr(&p, "");
         self.took_mtp = Some(udc);
+    }
+
+    /// Unloads a legacy gadget module bound to `udc`. The controller's `function` names
+    /// the gadget driver bound to it: a configfs gadget's folder name, or a legacy
+    /// module such as `g_ether` (the stock USB networking and USBNetwork hacks load it;
+    /// seen on the PW12 as "RNDIS/Ethernet Gadget" while rinky's bind failed with EBUSY).
+    fn unload_legacy(&mut self, udc: &str) -> Result<(), Error> {
+        let Some(m) = self.nonempty(&self.paths.udc.join(udc).join("function")).filter(|f| f.starts_with("g_")) else {
+            return Ok(());
+        };
+        log::info!("usbnet: unloading {m}, which holds {udc}");
+        self.sys.run("modprobe", &["-r", &m]).map_err(|e| Error::Legacy(udc.into(), m.clone(), e))?;
+        Ok(())
     }
 
     /// The other configfs gadget bound to `udc`, if any.

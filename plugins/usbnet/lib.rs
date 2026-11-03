@@ -8,7 +8,8 @@
 //!   bind failure without a cable is `Not connected`, not `USB port busy`. Binding is
 //!   tried again for about 1.5 s (the controller can refuse for a moment after MTP lets
 //!   go, and MTP may bind itself again); a port held by another, non-MTP gadget is
-//!   `USB port in use`, naming it.
+//!   `USB port in use`, naming it. A legacy gadget module on the port (`g_ether`, the
+//!   "RNDIS/Ethernet Gadget" a computer sees) is unloaded first.
 //! - Settings page "USB network": the status, Turn on / Turn off, "Turn on when
 //!   rinky starts" (setting `autostart`, default off) and "How to connect a
 //!   computer" (a Markdown page: addresses, macOS, Linux, Windows, `ssh root@...`).

@@ -56,6 +56,18 @@ impl Sys for FakeSys {
         log.calls.push(format!("{program} {}", args.join(" ")));
         match (program, args) {
             ("modprobe", [m]) if log.bad_modules.contains(m) => Err(format!("modprobe: FATAL: Module {m} not found")),
+            ("modprobe", ["-r", m]) if log.bad_modules.contains(m) => Err(format!("modprobe: FATAL: Module {m} is builtin.")),
+            ("modprobe", ["-r", m]) => {
+                // The legacy gadget lets go of the controller.
+                for d in std::fs::read_dir(&self.udc).unwrap() {
+                    let f = d.unwrap().path().join("function");
+                    if std::fs::read_to_string(&f).is_ok_and(|s| s.trim() == *m) {
+                        std::fs::remove_file(f).unwrap();
+                        log.refuse_binds = 0;
+                    }
+                }
+                Ok(())
+            }
             ("modprobe", [m]) => {
                 log.loaded.push(m.to_string());
                 Ok(())
@@ -372,6 +384,38 @@ fn bind_takes_the_port_from_mtp_again() {
     assert_eq!(dev.file("mtpgadget/UDC"), format!("{UDC}\n"));
 }
 
+/// What the user's PW12 showed: the Mac saw "RNDIS/Ethernet Gadget" (the kernel's
+/// legacy `g_ether`) on the cable, and every bind failed. The module is unloaded first.
+#[test]
+fn legacy_gadget_module_is_unloaded() {
+    let dev = Device::new("gether").with_mtp("");
+    dev.cable("configured", true);
+    dev.refuse_binds(u32::MAX);
+    std::fs::write(dev.paths.udc.join(UDC).join("function"), "g_ether\n").unwrap();
+    let mut net = dev.net();
+    let on = net.on().unwrap();
+    assert_eq!(on.ifname, "usb0");
+    assert!(dev.calls().contains(&"modprobe -r g_ether".to_string()));
+    assert!(dev.log.borrow().sleeps.is_empty());
+
+    // Built in (or in use): it cannot be unloaded, and the error says which module.
+    let dev = Device::new("gether-builtin").with_mtp("");
+    dev.cable("configured", true);
+    dev.refuse_binds(u32::MAX);
+    dev.log.borrow_mut().bad_modules.push("g_ether");
+    std::fs::write(dev.paths.udc.join(UDC).join("function"), "g_ether\n").unwrap();
+    let e = dev.net().on().unwrap_err();
+    assert!(matches!(&e, Error::Legacy(u, m, _) if u == UDC && m == "g_ether"), "{e:?}");
+    assert_eq!(e.short(), "USB port in use");
+    assert!(!dev.gadget().exists());
+
+    // A configfs gadget's name in `function` is not a module.
+    let dev = Device::new("function-ours").with_mtp(UDC);
+    std::fs::write(dev.paths.udc.join(UDC).join("function"), "mtpgadget\n").unwrap();
+    dev.net().on().unwrap();
+    assert!(!dev.calls().iter().any(|c| c.starts_with("modprobe -r")));
+}
+
 /// A controller that never lets go: after all tries the error says what to do and
 /// which kernel driver holds the port.
 #[test]
@@ -379,12 +423,12 @@ fn bind_gives_up_with_advice() {
     let dev = Device::new("stuckport").with_mtp(UDC);
     dev.cable("configured", true);
     dev.refuse_binds(u32::MAX);
-    std::fs::write(dev.paths.udc.join(UDC).join("function"), "g_ether\n").unwrap();
+    std::fs::write(dev.paths.udc.join(UDC).join("function"), "fastboot\n").unwrap();
     let mut net = dev.net();
     let e = net.on().unwrap_err();
     assert_eq!(e.short(), "USB port busy");
     let text = e.to_string();
-    assert!(text.contains("the driver g_ether") && text.contains("Unplug the cable, plug it in again"), "{text}");
+    assert!(text.contains("the driver fastboot") && text.contains("Unplug the cable, plug it in again"), "{text}");
     assert_eq!(dev.log.borrow().sleeps, gadget::BIND_RETRY);
     assert!(!dev.gadget().exists(), "undone");
     assert_eq!(dev.file("mtpgadget/UDC"), format!("{UDC}\n"), "MTP given back");
