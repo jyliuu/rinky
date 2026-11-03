@@ -20,10 +20,12 @@ pub const LINK_ASK: &str = "insightful:ask";
 pub const LINK_RETRY: &str = "insightful:retry";
 /// Link of a chat in the chat list (`insightful:open/c3`).
 pub const LINK_OPEN: &str = "insightful:open/";
-/// Link that shows the chat list in delete mode.
-pub const LINK_DELETE: &str = "insightful:delete";
-/// Link of a chat in the delete list (`insightful:del/c3`).
-pub const LINK_DEL: &str = "insightful:del/";
+/// Link that starts a new, empty chat (the chat list's first row).
+pub const LINK_NEW: &str = "insightful:new";
+/// Link that stops the answer being written.
+pub const LINK_STOP: &str = "insightful:stop";
+/// What the host reports for a held link (`hold:insightful:open/c3` deletes that chat).
+pub const HOLD: &str = "hold:";
 /// Link back to the chat list.
 pub const LINK_CHATS: &str = "insightful:chats";
 /// Link of a preset question's bubble (`insightful:prompt/0`, the message index): shows
@@ -32,7 +34,9 @@ pub const LINK_PROMPT: &str = "insightful:prompt/";
 /// Caption under a preset question's label.
 pub const PROMPT_CAPTION: &str = "Preset prompt · tap to see what was sent";
 /// Placeholder of the input bar.
-pub const ASK_PLACEHOLDER: &str = "Ask about this book…";
+pub const ASK_PLACEHOLDER: &str = "Message Insightful…";
+/// Status of a chat whose last question has no answer.
+pub const UNANSWERED: &str = "This question was not answered. Tap Retry to send it again.";
 
 /// One stored message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -71,6 +75,12 @@ pub struct Totals {
     pub total_tokens: u64,
     /// Cost in USD (only providers that report it).
     pub cost_usd: f64,
+    /// Requests whose response had token counts.
+    #[serde(default)]
+    pub measured_requests: u64,
+    /// Requests whose response reported a cost.
+    #[serde(default)]
+    pub costed_requests: u64,
 }
 
 impl Totals {
@@ -78,10 +88,14 @@ impl Totals {
     pub fn add(&mut self, u: Option<Usage>) {
         self.requests += 1;
         if let Some(u) = u {
+            self.measured_requests += 1;
             self.input_tokens += u.input_tokens;
             self.output_tokens += u.output_tokens;
             self.total_tokens += u.total_tokens;
-            self.cost_usd += u.cost_usd.unwrap_or(0.0);
+            if let Some(c) = u.cost_usd {
+                self.costed_requests += 1;
+                self.cost_usd += c;
+            }
         }
     }
     /// Adds totals.
@@ -91,6 +105,47 @@ impl Totals {
         self.output_tokens += o.output_tokens;
         self.total_tokens += o.total_tokens;
         self.cost_usd += o.cost_usd;
+        self.measured_requests += o.measured_requests;
+        self.costed_requests += o.costed_requests;
+    }
+
+    /// The Statistics text (`statisticsText` in `main.lua`): `title`, then requests,
+    /// tokens and the reported cost.
+    pub fn statistics(&self, title: &str) -> String {
+        let n = |v: u64| {
+            let d = v.to_string();
+            let mut out = String::new();
+            for (i, c) in d.chars().enumerate() {
+                if i > 0 && (d.len() - i).is_multiple_of(3) {
+                    out.push(',');
+                }
+                out.push(c);
+            }
+            out
+        };
+        let mut lines = vec![
+            title.to_string(),
+            String::new(),
+            format!("Model requests: {}", n(self.requests)),
+            format!("Input tokens: {}", n(self.input_tokens)),
+            format!("Output tokens: {}", n(self.output_tokens)),
+            format!("Total tokens: {}", n(self.total_tokens)),
+        ];
+        if self.costed_requests > 0 {
+            lines.push(format!("Provider reported cost: ${:.8}", self.cost_usd));
+        } else {
+            lines.push("Provider reported cost: Not available".into());
+        }
+        let missing = self.requests.saturating_sub(self.measured_requests);
+        if missing > 0 {
+            lines.push(String::new());
+            lines.push(format!("Requests without token counts: {}", n(missing)));
+        }
+        let missing_cost = self.requests.saturating_sub(self.costed_requests);
+        if missing_cost > 0 && self.costed_requests > 0 {
+            lines.push(format!("Requests without reported cost: {}", n(missing_cost)));
+        }
+        lines.join("\n")
     }
 }
 
@@ -125,6 +180,14 @@ pub struct BookChats {
     /// Last id number handed out.
     #[serde(default)]
     pub next_id: u64,
+    /// The current chat: "Continue current chat" opens it, and highlighted actions
+    /// continue it unless they start a new chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// "New chat for highlighted actions" for this book (`None`: the default for all
+    /// books).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_chat_on_highlight: Option<bool>,
 }
 
 /// Seconds since 1970.
@@ -199,6 +262,9 @@ impl BookChats {
     pub fn delete(&mut self, id: &str) -> bool {
         let n = self.chats.len();
         self.chats.retain(|c| c.id != id);
+        if self.current.as_deref() == Some(id) {
+            self.current = None;
+        }
         self.chats.len() != n
     }
 
@@ -330,9 +396,30 @@ pub fn usage_line(u: &Totals) -> String {
     s
 }
 
+/// The answer label: `AI — model` (`AI` without a model).
+fn ai_label(model: Option<&str>) -> String {
+    match model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => arg(&format!("AI — {m}")),
+        None => "AI".into(),
+    }
+}
+
+/// What the chat view shows besides the messages.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Extras<'a> {
+    /// The answer being written.
+    pub live: Option<&'a Live>,
+    /// An error after the messages.
+    pub error: Option<&'a str>,
+    /// Retry is offered (the last question has no answer and sending it again can work).
+    pub can_retry: bool,
+    /// A selected passage that goes with the next message (Ask AI… on a highlight).
+    pub pending: Option<&'a SelectionInfo>,
+}
+
 /// The chat as viewer Markdown, and the follow-up questions its links refer to.
-/// `error` is shown after the messages.
-pub fn render(conv: &Conversation, live: Option<&Live>, error: Option<&str>) -> (String, Vec<String>) {
+pub fn render(conv: &Conversation, x: Extras) -> (String, Vec<String>) {
+    let (live, error) = (x.live, x.error);
     let mut md: Vec<String> = Vec::new();
     let mut questions = Vec::new();
     let last_answer = conv.messages.iter().rposition(|m| m.role != "user");
@@ -350,7 +437,7 @@ pub fn render(conv: &Conversation, live: Option<&Live>, error: Option<&str>) -> 
             s.push_str(&guard(m.label.as_deref().unwrap_or(&m.content)));
             md.push(s);
         } else {
-            let label = arg(m.model.as_deref().unwrap_or("AI"));
+            let label = ai_label(m.model.as_deref());
             // Older chats have no per-answer usage: the last answer shows the chat's.
             let foot = match (&m.usage, Some(i) == last_answer && live.is_none() && conv.usage.requests > 0) {
                 (Some(u), _) => usage_line(u),
@@ -369,7 +456,7 @@ pub fn render(conv: &Conversation, live: Option<&Live>, error: Option<&str>) -> 
         for a in &l.actions {
             md.push(format!(":::action\n{}", guard(a)));
         }
-        let label = if l.model.is_empty() { "AI".to_string() } else { arg(&l.model) };
+        let label = ai_label(Some(&l.model));
         if !l.text.is_empty() {
             // Questions in a partial answer are not links yet.
             md.push(format!(":::answer {label} |\n{}", guard(&l.text)));
@@ -377,15 +464,26 @@ pub fn render(conv: &Conversation, live: Option<&Live>, error: Option<&str>) -> 
         if !l.status.is_empty() {
             md.push(format!(":::answer {label} |\n*{}*", l.status));
         }
+        md.push(format!(":::chips\n- [Stop]({LINK_STOP})"));
     }
+    let unanswered = live.is_none() && conv.messages.last().is_some_and(|m| m.role == "user");
     if let Some(e) = error {
         md.push(format!(":::card |\n**Error:** {}", guard(e)));
+    } else if unanswered && x.can_retry {
+        md.push(format!("*{UNANSWERED}*"));
     }
-    if live.is_none() && conv.messages.last().is_some_and(|m| m.role == "user") {
+    if unanswered && x.can_retry {
         md.push(format!(":::chips\n- [Retry]({LINK_RETRY})"));
     }
     if md.is_empty() {
         md.push("*No conversation yet.*".into());
+    }
+    if let Some(sel) = x.pending.filter(|s| !s.text.trim().is_empty()) {
+        let label = match sel.section.as_deref().filter(|s| !s.trim().is_empty()) {
+            Some(s) => format!("Selected passage — {}", arg(s)),
+            None => "Selected passage".into(),
+        };
+        md.push(format!(":::card | Sent with your next message\n**{}**\n\n{}", guard(&label), quote_passage(&sel.text)));
     }
     md.push(format!(":::\n:::input {LINK_ASK} | {ASK_PLACEHOLDER}"));
     (md.join("\n\n"), questions)
@@ -407,19 +505,21 @@ pub fn date(secs: u64) -> String {
     format!("{d} {} {y}", MONTHS[(m - 1) as usize])
 }
 
-/// The chat list as viewer Markdown: a card per chat (newest first) with the date, the
-/// message count and the first question; `delete` makes the cards delete links.
-pub fn render_list(book: &BookChats, delete: bool) -> String {
-    let mut md = Vec::new();
-    if delete {
-        md.push("**Tap a chat to delete it.**".to_string());
-    }
-    for c in book.chats.iter().rev() {
-        let link = if delete { LINK_DEL } else { LINK_OPEN };
+/// The chat list as viewer Markdown (`chat_list.lua`): "Start new chat", then a card
+/// per chat (newest first) with the date, the message count and the first question;
+/// the current chat says so. Holding a card deletes the chat.
+pub fn render_list(book: &BookChats) -> String {
+    let mut md = vec![format!(":::chips\n- [Start new chat]({LINK_NEW})")];
+    let mut chats: Vec<&Conversation> = book.chats.iter().collect();
+    chats.sort_by_key(|c| std::cmp::Reverse((c.updated.max(c.created), c.id.trim_start_matches('c').parse::<u64>().unwrap_or(0))));
+    for c in chats {
         let n = c.messages.len();
         let mut caption = format!("{} · {n} message{}", date(c.updated.max(c.created)), if n == 1 { "" } else { "s" });
         if c.usage.total_tokens > 0 {
             caption.push_str(&format!(" · {} tokens", c.usage.total_tokens));
+        }
+        if book.current.as_deref() == Some(c.id.as_str()) {
+            caption = format!("Current · {caption}");
         }
         let first = c.messages.iter().find(|m| m.role == "user");
         let q = first.map(|m| m.label.as_deref().unwrap_or(&m.content)).unwrap_or(&c.title);
@@ -427,16 +527,10 @@ pub fn render_list(book: &BookChats, delete: bool) -> String {
         if let Some(sel) = first.and_then(|m| m.selection.as_ref()).filter(|s| !s.text.trim().is_empty()) {
             body.push_str(&format!("\n\n*\"{}\"*", guard(&short(&sel.text, 90)).replace('*', "")));
         }
-        md.push(format!(":::card {link}{} | {}\n{body}", c.id, arg(&caption)));
+        md.push(format!(":::card {LINK_OPEN}{} | {}\n{body}", c.id, arg(&caption)));
     }
-    if book.chats.is_empty() {
-        md.push("*No chats for this book yet.*".into());
-    }
-    let tail = if delete { format!("- [Cancel]({LINK_CHATS})") } else if book.chats.is_empty() { String::new() } else { format!("- [Delete a chat…]({LINK_DELETE})") };
-    if !tail.is_empty() {
-        md.push(format!(":::chips\n{tail}"));
-    }
-    md.push(format!(":::\n:::input {LINK_ASK} | {ASK_PLACEHOLDER}"));
+    md.push(":::".into());
+    md.push(if book.chats.is_empty() { "*No chats for this book yet.*".to_string() } else { "*Hold a chat to delete it.*".to_string() });
     md.join("\n\n")
 }
 
@@ -464,22 +558,30 @@ mod tests {
     #[test]
     fn render_messages_live_and_tail() {
         let mut c = Conversation { id: "c1".into(), ..Default::default() };
-        assert!(render(&c, None, None).0.starts_with("*No conversation yet.*"));
+        let none = Extras { can_retry: true, ..Default::default() };
+        assert!(render(&c, none).0.starts_with("*No conversation yet.*"));
         let mut u = msg("user", "Explain the selected passage clearly");
         u.label = Some("Explain".into());
         u.selection = Some(SelectionInfo { text: "Two households".into(), ..Default::default() });
         c.messages.push(u);
         let live = Live { actions: vec!["Calling `toc`".into()], text: "Par\n:::input x".into(), status: String::new(), model: "m1".into() };
-        let (md, _) = render(&c, Some(&live), None);
-        assert!(md.starts_with(":::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"Two households\"\n\nExplain\n\n:::action\nCalling `toc`\n\n:::answer m1 |\nPar\n\\:::input x"), "{md}");
-        assert!(md.ends_with(":::\n:::input insightful:ask | Ask about this book…") && !md.contains("Retry"));
-        assert!(render(&c, None, Some("boom")).0.contains(":::card |\n**Error:** boom\n\n:::chips\n- [Retry](insightful:retry)"));
+        let (md, _) = render(&c, Extras { live: Some(&live), ..none });
+        assert!(md.starts_with(":::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"Two households\"\n\nExplain\n\n:::action\nCalling `toc`\n\n:::answer AI — m1 |\nPar\n\\:::input x\n\n:::chips\n- [Stop](insightful:stop)"), "{md}");
+        assert!(md.ends_with(":::\n:::input insightful:ask | Message Insightful…") && !md.contains("Retry"));
+        assert!(render(&c, Extras { error: Some("boom"), ..none }).0.contains(":::card |\n**Error:** boom\n\n:::chips\n- [Retry](insightful:retry)"));
+        // A failure that cannot succeed again: no Retry.
+        assert!(!render(&c, Extras { error: Some("HTTP 401"), can_retry: false, ..none }).0.contains("Retry"));
+        // An unanswered question (a chat reopened later) says so and offers Retry.
+        assert!(render(&c, none).0.contains(&format!("*{UNANSWERED}*\n\n:::chips\n- [Retry](insightful:retry)")));
+        // A passage for the next message.
+        let sel = SelectionInfo { text: "In fair Verona".into(), section: Some("Prologue".into()), ..Default::default() };
+        assert!(render(&c, Extras { pending: Some(&sel), ..none }).0.contains(":::card | Sent with your next message\n**Selected passage — Prologue**\n\n> \"In fair Verona\""));
         let mut a = msg("assistant", "Answer.\n- <question>Next?</question>");
         a.model = Some("m1".into());
-        a.usage = Some(Totals { requests: 1, input_tokens: 5, output_tokens: 7, total_tokens: 12, cost_usd: 0.01 });
+        a.usage = Some(Totals { requests: 1, input_tokens: 5, output_tokens: 7, total_tokens: 12, cost_usd: 0.01, measured_requests: 1, costed_requests: 1 });
         c.messages.push(a);
-        let (md, q) = render(&c, None, None);
-        assert!(md.contains(":::answer m1 | 5 tokens in · 7 out · $0.0100\nAnswer.\n\n:::chips\n- [Next?](insightful:q/0)"), "{md}");
+        let (md, q) = render(&c, none);
+        assert!(md.contains(":::answer AI — m1 | 5 tokens in · 7 out · $0.0100\nAnswer.\n\n:::chips\n- [Next?](insightful:q/0)"), "{md}");
         assert_eq!(q, ["Next?"]);
     }
 
@@ -493,10 +595,24 @@ mod tests {
         c.created = 0;
         c.updated = 0;
         c.messages.push(msg("user", "Who is Tybalt?"));
-        let md = render_list(&b, false);
-        assert!(md.starts_with(":::card insightful:open/c1 | 1 Jan 1970 · 1 message\n**Who is Tybalt?**"), "{md}");
-        assert!(md.contains("[Delete a chat…](insightful:delete)"));
-        assert!(render_list(&b, true).contains(":::card insightful:del/c1 |"));
+        let md = render_list(&b);
+        assert!(md.starts_with(":::chips\n- [Start new chat](insightful:new)\n\n:::card insightful:open/c1 | 1 Jan 1970 · 1 message\n**Who is Tybalt?**"), "{md}");
+        assert!(md.ends_with("*Hold a chat to delete it.*"));
+        b.current = Some(id.clone());
+        assert!(render_list(&b).contains(":::card insightful:open/c1 | Current · 1 Jan 1970"));
+        // Deleting the current chat leaves no current chat.
+        assert!(b.delete(&id) && b.current.is_none());
+        assert!(render_list(&b).ends_with("*No chats for this book yet.*"));
+    }
+
+    #[test]
+    fn statistics_text() {
+        let mut t = Totals::default();
+        t.add(Some(Usage { input_tokens: 1200, output_tokens: 34, total_tokens: 1234, cost_usd: None }));
+        t.add(None);
+        assert_eq!(t.statistics("All books"), "All books\n\nModel requests: 2\nInput tokens: 1,200\nOutput tokens: 34\nTotal tokens: 1,234\nProvider reported cost: Not available\n\nRequests without token counts: 1");
+        t.add(Some(Usage { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: Some(0.5) }));
+        assert!(t.statistics("x").contains("Provider reported cost: $0.50000000\n\nRequests without token counts: 1\nRequests without reported cost: 2"), "{}", t.statistics("x"));
     }
 
     #[test]

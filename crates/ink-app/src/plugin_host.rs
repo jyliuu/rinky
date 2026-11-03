@@ -1579,7 +1579,10 @@ pub(crate) fn icon_named(name: &str) -> Option<Icon> {
 /// `:::card LINK | CAPTION` (a tappable outlined card), each ended by `:::` or the next
 /// block. `:::input LINK | PLACEHOLDER` adds an input bar at the bottom whose tap
 /// reports LINK. `:::sheet` shows the view as a bottom sheet of `:::row LINK | ICON`
-/// rows (label as the body); a tap on a row or outside the sheet closes it. `:::top` in
+/// rows (label as the body); a tap on a row or outside the sheet closes it (a row whose
+/// link starts with `stay:` reports it and leaves the sheet open, for a checkbox the
+/// plugin redraws by sending the sheet again). A long press on any link reports
+/// `hold:LINK` and leaves the view open. `:::top` in
 /// a replacing request opens the new text at its first page (tabs; otherwise a view
 /// that was on its last page follows the end of the new text). `:::back LINK` adds a Back
 /// button to the app bar (left of the title) that reports LINK.
@@ -2471,6 +2474,13 @@ impl Widget for MarkdownView {
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         let turn = |v: &mut Self, step: i32| v.turn(step);
+        // A held link reports `hold:LINK` (a chat list deletes a chat that way).
+        if let UiEvent::Gesture(Gesture::LongPress { pos, .. }) = ev {
+            return match self.links.iter().find(|(r, _)| r.contains(*pos)) {
+                Some((_, url)) => EventResult::Action(format!("hold:{url}")),
+                None => EventResult::Handled,
+            };
+        }
         if self.sheet {
             return match ev {
                 UiEvent::Gesture(Gesture::Tap { pos }) => match self.links.iter().find(|(r, _)| r.contains(*pos)) {
@@ -3191,8 +3201,9 @@ impl PluginUi {
                 }
             }
             let l = &self.layers[top];
-            // Link taps keep the viewer open.
-            let keep = matches!(&l.kind, Kind::Viewer(v) if !v.sheet) && r != "closed";
+            // Link taps keep the viewer open; a sheet stays for a `stay:` row (a
+            // checkbox the plugin redraws in place).
+            let keep = matches!(&l.kind, Kind::Viewer(v) if !v.sheet || r.starts_with("stay:") || r.starts_with("hold:")) && r != "closed";
             if !keep {
                 self.close(top);
             }
@@ -3685,6 +3696,39 @@ mod tests {
         let top_line = view.pages[0].iter().zip(view.line_tops()).find(|(_, (t, _))| (*t - view.scroll).abs() < 0.5).map(|(l, _)| l.group).expect("a line at the top");
         let yous: Vec<usize> = view.groups.iter().enumerate().filter(|(_, g)| g.kind == BoxKind::You).map(|(i, _)| i).collect();
         assert_eq!(top_line, yous.last().copied(), "the new question is at the top");
+    }
+
+    /// A sheet row whose link starts with `stay:` reports it and leaves the sheet open
+    /// (a checkbox the plugin redraws in place); other rows close it. A long press on a
+    /// link reports `hold:LINK` and leaves the view open.
+    #[test]
+    fn sheet_stay_rows_and_held_links() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        ui.push("p", UiRequest::TextViewer { id: 1, title: "Menu".into(), markdown: ":::sheet\n:::row go | chat\nGo\n:::row stay:tick | check\nTick\n".into() });
+        s.ui(&mut ui, false);
+        let link = |ui: &PluginUi, name: &str| {
+            let l = &ui.layers[0];
+            let Kind::Viewer(v) = &l.kind else { panic!() };
+            let (r, _) = v.links.iter().find(|(_, k)| k == name).cloned().expect(name);
+            Point::new(l.rect.x + r.x + 20, l.rect.y + r.y + r.h as i32 / 2)
+        };
+        let p = link(&ui, "stay:tick");
+        assert_eq!(ui.handle(&tap(p.x, p.y), screen()).1, vec![("p".to_string(), 1, "stay:tick".to_string())]);
+        assert_eq!(ui.layer_names(), vec!["viewer"], "the sheet stays");
+        ui.push("p", UiRequest::TextViewer { id: 1, title: "Menu".into(), markdown: ":::sheet\n:::row go | chat\nGo\n:::row stay:tick | minus\nTick\n".into() });
+        s.ui(&mut ui, false);
+        assert_eq!(ui.layers.len(), 1, "redrawn in place");
+        let p = link(&ui, "go");
+        assert_eq!(ui.handle(&tap(p.x, p.y), screen()).1, vec![("p".to_string(), 1, "go".to_string())]);
+        assert!(ui.layers.is_empty(), "a plain row closes the sheet");
+
+        ui.push("p", UiRequest::TextViewer { id: 2, title: "Chats".into(), markdown: ":::card open/c1 | caption\n**Chat**\n".into() });
+        s.ui(&mut ui, false);
+        let p = link(&ui, "open/c1");
+        let held = UiEvent::Gesture(Gesture::LongPress { pos: p, held: Duration::from_millis(500) });
+        assert_eq!(ui.handle(&held, screen()).1, vec![("p".to_string(), 2, "hold:open/c1".to_string())]);
+        assert_eq!(ui.layer_names(), vec!["viewer"], "the view stays");
     }
 
     fn juliet(dir: &Path) -> (PathBuf, Box<dyn Document>) {

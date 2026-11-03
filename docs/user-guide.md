@@ -244,6 +244,34 @@ rinky has two kinds of plugins. Both use the same plugin interface.
 - **Your own Lua plugins** live in `/mnt/us/rinky/plugins/<name>/`, one folder per
   plugin, and are loaded when rinky starts.
 
+### Insightful
+
+Insightful answers questions about the book you are reading. It works with OpenAI,
+DeepSeek, OpenRouter and Anthropic: put your API key in
+`/mnt/us/rinky/plugins/insightful/data/insightful.toml` (or keep KOReader's
+`insightful.koplugin/configuration.lua`, which rinky reads once).
+
+- **Ask about a passage.** Select text and tap **Insightful**. **Explain**, **Give
+  examples**, **Context / history** and **People / characters** send their question
+  at once. **Ask AI…** opens the chat with the keyboard closed: tap **Message
+  Insightful…** to type; the passage goes with your message.
+- **One chat or many.** Highlighted actions continue the book's current chat, so
+  related questions stay together. Turn on **New chat for highlighted actions** in the
+  reader menu's **Insightful** page to start a new chat each time. To change it for one
+  highlight only, tick the checkbox at the bottom of the actions (**Start a new chat**,
+  or **Start in existing chat** when the setting is on). Hold the setting to use it as
+  the default for other books.
+- **Chats.** Reader menu, **Insightful**: **Continue current chat**, **Chats** (tap a
+  chat to open it, hold it to delete it) and **Start new chat**. Gestures can open the
+  current chat or the chat list (Settings, Gestures: *Insightful: show current chat*,
+  *Insightful: show chats*).
+- **While it answers** you see each book lookup as an *agent action*. Tap **Stop** to
+  end the answer, or close the chat: the answer keeps coming and is saved, and a
+  notice tells you when it is ready. Each answer ends with follow-up questions; tap one
+  to ask it.
+- **Statistics** (reader menu, **Insightful**): requests and tokens for the current
+  book and all books, and the cost when the provider reports it.
+
 ### Calibre wireless
 
 Sends books from calibre on your computer to the Kindle over Wi-Fi, like KOReader's

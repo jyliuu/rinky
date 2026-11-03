@@ -7,7 +7,7 @@
 //! host's Markdown viewer (one id, its text replaced as the answer arrives in batches);
 //! the same viewer shows the chat list. The action menus are viewer sheets with icons.
 
-use crate::chat::{self, BookChats, Live, Message, Totals, LINK_ASK, LINK_CHATS, LINK_DEL, LINK_DELETE, LINK_OPEN, LINK_PROMPT, LINK_QUESTION, LINK_RETRY};
+use crate::chat::{self, BookChats, Extras, Live, Message, Totals, HOLD, LINK_ASK, LINK_CHATS, LINK_NEW, LINK_OPEN, LINK_PROMPT, LINK_QUESTION, LINK_RETRY, LINK_STOP};
 use crate::config::{self, Config};
 use crate::models;
 use crate::prompts::{PromptSet, SelectionInfo};
@@ -40,6 +40,15 @@ const INPUT_MODEL: u32 = 13;
 const INPUT_SEARCH: u32 = 14;
 const DIALOG_MODEL: u32 = 15;
 const DIALOG_PROMPT: u32 = 16;
+const MENU_STATS: u32 = 17;
+const DIALOG_DEFAULT: u32 = 18;
+
+/// Plugin storage key of "New chat for highlighted actions" for books that have not set it.
+const NEW_CHAT_DEFAULT: &str = "new_chat_on_highlight_default";
+/// Data file of the token totals over all books.
+const STATS_FILE: &str = "statistics.json";
+/// A request that cannot start while another chat's answer is being written.
+const BUSY: &str = "Another chat is still working on a response. Reopen it or wait for it to finish.";
 
 /// Longest passage shown in the "what was sent" dialog of a preset prompt.
 const PROMPT_PASSAGE_CHARS: usize = 240;
@@ -49,7 +58,7 @@ const ACTION_ICONS: [&str; 4] = ["info", "listview", "clock", "star"];
 
 /// Selection actions: `(id, label, prompt name)`.
 pub const QUICK_ACTIONS: [(&str, &str, &str); 4] =
-    [("explain", "Explain", "explain"), ("examples", "Give examples", "explain_terms"), ("context", "Context/history", "context_history"), ("people", "People/characters", "people_characters")];
+    [("explain", "Explain", "explain"), ("examples", "Give examples", "explain_terms"), ("context", "Context / history", "context_history"), ("people", "People / characters", "people_characters")];
 
 struct BookState {
     id: String,
@@ -108,8 +117,13 @@ pub struct InsightfulPlugin {
     model_provider: Option<String>,
     error: Option<String>,
     viewer_open: bool,
-    /// The viewer shows the chat list (`Some(true)`: in delete mode) instead of a chat.
-    list: Option<bool>,
+    /// The viewer shows the chat list instead of a chat.
+    list: bool,
+    /// The highlight menu's one-time checkbox is ticked: this highlight does the
+    /// opposite of "New chat for highlighted actions".
+    sel_override: bool,
+    /// The last error cannot be fixed by sending the question again (a rejected key).
+    retry_blocked: bool,
     /// The viewer shows a new, empty chat waiting for its first question.
     fresh: bool,
     /// Update the chat view after this many new characters...
@@ -149,7 +163,9 @@ impl InsightfulPlugin {
             model_provider: None,
             error: None,
             viewer_open: false,
-            list: None,
+            list: false,
+            sel_override: false,
+            retry_blocked: false,
             fresh: false,
             batch_chars: 160,
             batch_interval: Duration::from_millis(1200),
@@ -187,8 +203,10 @@ impl InsightfulPlugin {
         let path = cx.data_file(&chat::file_name(&id))?;
         let mut chats = BookChats::load(&path, &id).map_err(PluginError::Failed)?;
         chats.title = meta.title.clone();
+        // The book's current chat (saved), as KOReader's `storage:load` picks it.
+        let current = chats.current.clone().filter(|c| chats.get(c).is_some());
         self.book = Some(BookState { id, title: meta.title, author: meta.authors.join(", "), chats, path });
-        self.chat = None;
+        self.chat = current;
         Ok(())
     }
 
@@ -231,7 +249,7 @@ impl InsightfulPlugin {
     /// an error), but only while the viewer is open on that chat: a closed viewer stays
     /// closed (the run goes on), and the list or another chat stays as it is.
     fn refresh(&mut self, cx: &mut HostCtx, id: &str) -> Result<()> {
-        if !self.viewer_open || self.list.is_some() || self.chat.as_deref() != Some(id) {
+        if !self.viewer_open || self.list || self.chat.as_deref() != Some(id) {
             return Ok(());
         }
         self.show(cx)
@@ -241,15 +259,22 @@ impl InsightfulPlugin {
         let Some(conv) = self.conv() else { return Ok(()) };
         // The live answer only in the chat it belongs to.
         let run = self.run.as_ref().filter(|r| self.chat.as_deref() == Some(r.chat.as_str()));
-        let (md, q) = chat::render(conv, run.map(|r| &r.live), self.error.as_deref());
+        let x = Extras { live: run.map(|r| &r.live), error: self.error.as_deref(), can_retry: !self.retry_blocked, pending: self.pending_sel.as_ref() };
+        let (md, q) = chat::render(conv, x);
         // Back goes to the list of chats.
         let md = format!(":::back {}\n{md}", chat::LINK_CHATS);
-        let title = format!("Insightful\n{}", conv.title);
+        let title = self.view_title();
         self.questions = q;
         cx.ui()?.view_markdown(VIEWER, &title, &md);
         self.viewer_open = true;
-        self.list = None;
+        self.list = false;
         self.fresh = false;
+        // The chat on screen is the book's current chat.
+        let id = self.chat.clone();
+        if let Some(b) = self.book.as_mut().filter(|b| b.chats.current != id) {
+            b.chats.current = id;
+            self.save();
+        }
         if let Some(r) = self.run.as_mut().filter(|r| self.chat.as_deref() == Some(r.chat.as_str())) {
             r.flushed = r.live.text.len();
             r.last_flush = now_ms();
@@ -262,7 +287,7 @@ impl InsightfulPlugin {
         self.ensure_config(cx)?;
         self.ensure_book(cx)?;
         if self.run.is_some() {
-            cx.ui()?.toast("Insightful is still answering");
+            cx.ui()?.toast(BUSY);
             return Ok(());
         }
         let head = label.unwrap_or(content);
@@ -283,16 +308,19 @@ impl InsightfulPlugin {
             return Ok(());
         }
         if self.run.is_some() {
-            cx.ui()?.toast("Insightful is still answering");
+            cx.ui()?.toast(BUSY);
             return Ok(());
         }
+        // A passage chosen with Ask AI… goes with this message.
+        let sel = self.pending_sel.take();
         let Some(conv) = self.conv_mut() else { return Ok(()) };
-        conv.messages.push(Message { role: "user".into(), content: q.trim().into(), selection: None, model: None, label: None, timestamp: chat::now(), usage: None });
+        conv.messages.push(Message { role: "user".into(), content: q.trim().into(), selection: sel, model: None, label: None, timestamp: chat::now(), usage: None });
         self.begin_run(cx)
     }
 
     fn begin_run(&mut self, cx: &mut HostCtx) -> Result<()> {
         self.error = None;
+        self.retry_blocked = false;
         let override_id = cx.storage().ok().and_then(|s| s.get("provider")).and_then(|v| v.as_str().map(str::to_string));
         let Some(profile) = self.config.as_ref().and_then(|c| c.resolve(override_id.as_deref())) else {
             self.error = Some(format!("Insightful is not configured: no provider has an API key ({}).", config::CONFIG_FILE));
@@ -381,7 +409,9 @@ impl InsightfulPlugin {
             c.updated = chat::now();
         }
         self.save();
+        Self::record_stats(cx, &r.usage);
         if self.chat.as_deref() == Some(r.chat.as_str()) {
+            self.retry_blocked = !retryable(&msg);
             self.error = Some(msg);
         }
         self.notify_if_hidden(cx, &r.chat, "Insightful couldn't answer")?;
@@ -390,7 +420,7 @@ impl InsightfulPlugin {
 
     /// A toast when a run ends while its chat is not on screen.
     fn notify_if_hidden(&mut self, cx: &mut HostCtx, id: &str, text: &str) -> Result<()> {
-        if !self.viewer_open || self.list.is_some() || self.chat.as_deref() != Some(id) {
+        if !self.viewer_open || self.list || self.chat.as_deref() != Some(id) {
             cx.ui()?.toast(text);
         }
         Ok(())
@@ -404,6 +434,7 @@ impl InsightfulPlugin {
             c.updated = chat::now();
         }
         self.save();
+        Self::record_stats(cx, &r.usage);
         self.notify_if_hidden(cx, &r.chat, "Insightful answered")?;
         self.refresh(cx, &r.chat)
     }
@@ -474,12 +505,145 @@ impl InsightfulPlugin {
         }
     }
 
-    /// Explain / Give examples / Context / People on `sel`.
-    fn quick_action(&mut self, cx: &mut HostCtx, id: &str, sel: Option<SelectionInfo>) -> Result<()> {
+    /// Explain / Give examples / Context / People on `sel`: in a new chat (`new`) or
+    /// the current one (a new chat when there is none).
+    fn quick_action(&mut self, cx: &mut HostCtx, id: &str, sel: Option<SelectionInfo>, new: bool) -> Result<()> {
         let Some((_, label, prompt)) = QUICK_ACTIONS.iter().find(|(a, _, _)| *a == id) else { return Ok(()) };
         self.ensure_config(cx)?;
+        self.ensure_book(cx)?;
         let content = self.prompts.as_ref().expect("prompts").get(prompt).map_err(PluginError::Failed)?.to_string();
-        self.start_chat(cx, &content, Some(label), sel)
+        if new || self.conv().is_none() {
+            return self.start_chat(cx, &content, Some(label), sel);
+        }
+        if self.run.is_some() {
+            cx.ui()?.toast(BUSY);
+            return Ok(());
+        }
+        self.pending_sel = None;
+        let Some(conv) = self.conv_mut() else { return Ok(()) };
+        conv.messages.push(Message { role: "user".into(), content, selection: sel, model: None, label: Some(label.to_string()), timestamp: chat::now(), usage: None });
+        self.begin_run(cx)
+    }
+
+    /// "New chat for highlighted actions" for the open book (else the default for all
+    /// books).
+    fn new_chat_on_highlight(&mut self, cx: &mut HostCtx) -> bool {
+        let book = self.book.as_ref().and_then(|b| b.chats.new_chat_on_highlight);
+        book.unwrap_or_else(|| Self::new_chat_default(cx))
+    }
+
+    fn new_chat_default(cx: &mut HostCtx) -> bool {
+        cx.storage().ok().and_then(|s| s.get(NEW_CHAT_DEFAULT)).and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    /// A highlighted action (`openFromHighlight`): a quick action (`Some(id)`) or Ask AI…
+    /// (`None`), in a new chat or the current one by the setting, flipped by the
+    /// menu's checkbox.
+    fn open_from_highlight(&mut self, cx: &mut HostCtx, action: Option<&str>) -> Result<()> {
+        self.ensure_config(cx)?;
+        self.ensure_book(cx)?;
+        let new = self.new_chat_on_highlight(cx) != std::mem::take(&mut self.sel_override);
+        match action {
+            Some(id) => {
+                let sel = self.pending_sel.take();
+                self.quick_action(cx, id, sel, new)
+            }
+            // Ask AI…: the chat opens with the keyboard closed; the passage goes with
+            // the message typed next.
+            None if new || self.conv().is_none() => self.fresh_chat(cx),
+            None => {
+                self.error = None;
+                self.show(cx)
+            }
+        }
+    }
+
+    /// The highlight menu (`showHighlightActions`): the four actions, Ask AI… and the
+    /// one-time checkbox (the opposite of the book's setting).
+    fn actions_sheet(&mut self, cx: &mut HostCtx) -> Result<()> {
+        let always_new = self.new_chat_on_highlight(cx);
+        let label = if always_new { "Start in existing chat" } else { "Start a new chat" };
+        let check = if self.sel_override { "check" } else { "minus" };
+        let mut rows: Vec<(&str, &str, &str)> = QUICK_ACTIONS.iter().zip(ACTION_ICONS).map(|((a, l, _), i)| (*l, *a, i)).collect();
+        rows.push(("Ask AI…", "ask", "chat"));
+        rows.push((label, "stay:override", check));
+        Self::sheet(cx, MENU_ACTIONS, "Insightful actions", &rows)
+    }
+
+    /// The reader menu's Insightful page (`addToMainMenu`).
+    fn book_sheet(&mut self, cx: &mut HostCtx) -> Result<()> {
+        self.ensure_config(cx)?;
+        self.ensure_book(cx)?;
+        let on = self.new_chat_on_highlight(cx);
+        // ★: the book's value is the default for other books (hold to make it so).
+        let star = if on == Self::new_chat_default(cx) { "   ★" } else { "" };
+        let toggle = format!("New chat for highlighted actions{star}");
+        let provider = match self.current_profile(cx)? {
+            Some(p) => format!("Provider: {}", provider_name(p.kind.id())),
+            None => "Provider: none".to_string(),
+        };
+        let rows: Vec<(&str, &str, &str)> = vec![
+            ("Continue current chat", "last_chat", "chat"),
+            ("Chats", "chats", "folder"),
+            ("Start new chat", "new_chat", "plus"),
+            (&toggle, "stay:new_on_highlight", if on { "check" } else { "minus" }),
+            (&provider, "settings:provider", "settings"),
+            ("Statistics", "stats", "chart"),
+            ("Gesture shortcuts", "gestures", "info"),
+        ];
+        Self::sheet(cx, MENU_BOOK, "Insightful", &rows)
+    }
+
+    /// Adds a run's requests to the totals over all books (`statistics.json`).
+    fn record_stats(cx: &mut HostCtx, usage: &Totals) {
+        if usage.requests == 0 {
+            return;
+        }
+        let Ok(path) = cx.data_file(STATS_FILE) else { return };
+        let mut all: Totals = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        all.merge(usage);
+        let written = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string()).and_then(|d| ink_store::write_atomic(&path, &d).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            log::warn!("insightful: saving the statistics: {e}");
+        }
+    }
+
+    /// Statistics: General, Current book, All books (`showGeneralStatistics` & co.).
+    fn show_stats(&mut self, cx: &mut HostCtx, which: &str) -> Result<()> {
+        let text = match which {
+            "general" => {
+                let Some(p) = self.current_profile(cx)? else { return Self::no_provider(cx) };
+                let limit = p.max_tokens.or((p.kind.id() == "anthropic").then_some(8192));
+                [
+                    "General".to_string(),
+                    String::new(),
+                    format!("Provider: {}", provider_name(p.kind.id())),
+                    format!("Configured model: {}", if p.model.trim().is_empty() { "Not set" } else { p.model.trim() }),
+                    format!("Streaming: {}", if p.stream { "On" } else { "Off" }),
+                    format!("Output token limit: {}", limit.map_or("Provider default".to_string(), |l| l.to_string())),
+                ]
+                .join("\n")
+            }
+            "book" => {
+                self.ensure_book(cx)?;
+                let b = self.book.as_ref().expect("book");
+                b.chats.totals().statistics(&format!("Current book\n{}", b.title))
+            }
+            _ => {
+                let path = cx.data_file(STATS_FILE)?;
+                let all: Totals = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+                all.statistics("All books")
+            }
+        };
+        let (title, body) = text.split_once("\n\n").unwrap_or((&text, ""));
+        cx.ui()?.dialog(0, title, body, &[("OK", "ok")]);
+        Ok(())
+    }
+
+    /// The chat view's title: Insightful and the book.
+    fn view_title(&self) -> String {
+        let book = self.book.as_ref().map(|b| b.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Book".into());
+        format!("Insightful\n{book}")
     }
 
     /// Feeds the `data` of server-sent events to the accumulator and updates the chat
@@ -512,11 +676,7 @@ impl InsightfulPlugin {
     fn open_chats(&mut self, cx: &mut HostCtx) -> Result<()> {
         self.ensure_config(cx)?;
         self.ensure_book(cx)?;
-        if self.book.as_ref().expect("book").chats.chats.is_empty() {
-            cx.ui()?.toast("No Insightful chats for this book yet");
-            return Ok(());
-        }
-        self.show_list(cx, false)
+        self.show_list(cx)
     }
 
     /// Opens the chat last used in this book (the one open before, else the most recently
@@ -526,52 +686,52 @@ impl InsightfulPlugin {
         self.ensure_book(cx)?;
         let b = self.book.as_ref().expect("book");
         let id = self.chat.clone().filter(|c| b.chats.get(c).is_some()).or_else(|| b.chats.chats.iter().max_by_key(|c| c.updated.max(c.created)).map(|c| c.id.clone()));
-        let Some(id) = id else {
-            cx.ui()?.toast("No Insightful chats for this book yet");
-            return Ok(());
-        };
+        // No chat yet: an empty one, as KOReader's "Continue current chat" does.
+        let Some(id) = id else { return self.fresh_chat(cx) };
         self.chat = Some(id);
         self.error = None;
         self.show(cx)
     }
 
-    /// The chat list in the viewer: book title, a card per chat.
-    fn show_list(&mut self, cx: &mut HostCtx, delete: bool) -> Result<()> {
+    /// The chat list in the viewer (`chat_list.lua`): Start new chat and a card per chat.
+    fn show_list(&mut self, cx: &mut HostCtx) -> Result<()> {
         let Some(b) = self.book.as_ref() else { return Ok(()) };
-        let t = b.chats.totals();
-        let book = if b.title.is_empty() { "This book".to_string() } else { b.title.clone() };
-        let title = format!("Chats\n{book} · {} tokens", t.total_tokens);
-        let md = chat::render_list(&b.chats, delete);
-        cx.ui()?.view_markdown(VIEWER, &title, &md);
+        let book = if b.title.is_empty() { "Book".to_string() } else { b.title.clone() };
+        let md = chat::render_list(&b.chats);
+        cx.ui()?.view_markdown(VIEWER, &format!("Insightful chats\n{book}"), &md);
         self.viewer_open = true;
-        self.list = Some(delete);
+        self.list = true;
         self.fresh = false;
+        self.pending_sel = None;
         Ok(())
     }
 
-    /// A new chat: the chat view with the selected passage (if any) and its input bar,
-    /// and the keyboard docked under it (typing happens in the view's own input bar).
-    fn ask(&mut self, cx: &mut HostCtx) -> Result<()> {
+    /// A new, empty chat (stored with its first message): the chat view with the
+    /// selected passage that goes with the first message (if any) and the input bar,
+    /// the keyboard closed until the bar is tapped.
+    fn fresh_chat(&mut self, cx: &mut HostCtx) -> Result<()> {
         self.ensure_config(cx)?;
         self.ensure_book(cx)?;
-        let book = self.book.as_ref().map(|b| b.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "This book".into());
-        let mut md = match self.pending_sel.as_ref().filter(|s| !s.text.trim().is_empty()) {
-            Some(s) => format!(":::you\n{}\n\n:::\n*Ask about the selected passage.*", chat::quote_passage(&s.text)),
-            None => "*Ask anything about this book.*".to_string(),
-        };
-        md.push_str(&format!("\n\n:::\n:::input {LINK_ASK} | {}", chat::ASK_PLACEHOLDER));
-        if self.book.as_ref().is_some_and(|b| !b.chats.chats.is_empty()) {
-            md = format!(":::back {}\n{md}", chat::LINK_CHATS);
+        let mut md = String::from("*No conversation yet.*");
+        if let Some(s) = self.pending_sel.as_ref().filter(|s| !s.text.trim().is_empty()) {
+            let label = match s.section.as_deref().filter(|t| !t.trim().is_empty()) {
+                Some(t) => format!("Selected passage — {}", t.replace('|', "/")),
+                None => "Selected passage".into(),
+            };
+            md.push_str(&format!("\n\n:::card | Sent with your next message\n**{label}**\n\n{}", chat::quote_passage(&s.text)));
         }
-        cx.ui()?.view_markdown(VIEWER, &format!("Insightful\n{book}"), &md);
+        md.push_str(&format!("\n\n:::\n:::input {LINK_ASK} | {}", chat::ASK_PLACEHOLDER));
+        md = format!(":::back {}\n{md}", chat::LINK_CHATS);
+        cx.ui()?.view_markdown(VIEWER, &self.view_title(), &md);
         self.viewer_open = true;
-        self.list = None;
+        self.list = false;
         self.fresh = true;
-        self.ask_input(cx)
+        self.error = None;
+        Ok(())
     }
 
     fn ask_input(&mut self, cx: &mut HostCtx) -> Result<()> {
-        let prompt = if self.pending_sel.is_some() { "Ask about the selection" } else { "Ask about the book" };
+        let prompt = chat::ASK_PLACEHOLDER;
         cx.ui()?.input(INPUT_ASK, prompt, "");
         Ok(())
     }
@@ -787,9 +947,9 @@ impl Plugin for InsightfulPlugin {
         // One reader-menu entry: a menu with "Ask about the book" and "Chats".
         reg.menu_item("book_menu", "Insightful", 60);
         // For the reader's gesture map (the menu item above is offered there too).
-        reg.action("ask_book", "Insightful: Ask about the book");
-        reg.action("chats", "Insightful: Chats for this book");
-        reg.action("last_chat", "Insightful: Open the last chat");
+        reg.action("last_chat", "Insightful: show current chat");
+        reg.action("chats", "Insightful: show chats");
+        reg.action("ask_book", "Insightful: start new chat");
         reg.settings_page("provider", "Insightful");
         Ok(())
     }
@@ -816,26 +976,43 @@ impl Plugin for InsightfulPlugin {
 
     fn on_action(&mut self, cx: &mut HostCtx, id: &str) -> Result<()> {
         if QUICK_ACTIONS.iter().any(|(a, _, _)| *a == id) {
-            let sel = self.current_selection(cx);
-            return self.quick_action(cx, id, sel);
+            self.pending_sel = self.current_selection(cx);
+            self.sel_override = false;
+            return self.open_from_highlight(cx, Some(id));
         }
         match id {
             "menu" => {
                 // The reader clears its selection when the popup closes: keep it now.
                 self.pending_sel = self.current_selection(cx);
-                let mut rows: Vec<(&str, &str, &str)> = QUICK_ACTIONS.iter().zip(ACTION_ICONS).map(|((a, l, _), i)| (*l, *a, i)).collect();
-                rows.push(("Ask AI…", "ask", "chat"));
-                Self::sheet(cx, MENU_ACTIONS, "Insightful", &rows)
+                self.sel_override = false;
+                self.ensure_config(cx)?;
+                self.ensure_book(cx)?;
+                self.actions_sheet(cx)
             }
-            "ask" | "ask_book" => {
-                self.pending_sel = if id == "ask" { self.current_selection(cx) } else { None };
-                self.ask(cx)
+            "ask" => {
+                self.pending_sel = self.current_selection(cx);
+                self.sel_override = false;
+                self.open_from_highlight(cx, None)
             }
-            "book_menu" => {
-                Self::sheet(cx, MENU_BOOK, "Insightful", &[("Ask about the book…", "ask_book", "chat"), ("Chats for this book", "chats", "folder"), ("Provider", "settings:provider", "settings"), ("Model", "settings:model", "settings")])
+            "ask_book" | "new_chat" => {
+                self.pending_sel = None;
+                self.fresh_chat(cx)
             }
-            "chats" => self.open_chats(cx),
-            "last_chat" => self.open_last_chat(cx),
+            "book_menu" => self.book_sheet(cx),
+            "chats" => {
+                self.pending_sel = None;
+                self.open_chats(cx)
+            }
+            "last_chat" => {
+                self.pending_sel = None;
+                self.open_last_chat(cx)
+            }
+            "stats" => Self::sheet(cx, MENU_STATS, "Statistics", &[("General", "general", "info"), ("Current book", "book", "book"), ("All books", "all", "library")]),
+            "gestures" => {
+                let text = "Open Settings, then Gestures. Assign Insightful: show current chat or Insightful: show chats to a corner, swipe, or other gesture.";
+                cx.ui()?.dialog(0, "Gesture shortcuts", text, &[("OK", "ok")]);
+                Ok(())
+            }
             "settings:provider" => self.settings_menu(cx),
             "settings:model" => self.model_menu(cx),
             _ => Ok(()),
@@ -847,8 +1024,9 @@ impl Plugin for InsightfulPlugin {
             VIEWER => {
                 if result == "closed" {
                     self.viewer_open = false;
-                    self.list = None;
+                    self.list = false;
                     self.fresh = false;
+                    self.pending_sel = None;
                     // A running answer goes on: it is saved to its chat when it ends.
                     self.save();
                 } else if let Some(n) = result.strip_prefix(LINK_QUESTION) {
@@ -862,24 +1040,32 @@ impl Plugin for InsightfulPlugin {
                 } else if result == LINK_ASK {
                     if self.fresh {
                         self.ask_input(cx)?;
-                    } else if self.list.is_some() {
-                        self.pending_sel = None;
-                        cx.ui()?.input(INPUT_ASK, "Ask about the book", "");
                     } else if self.run.is_none() {
-                        cx.ui()?.input(INPUT_FOLLOWUP, "Ask a follow-up question", "");
+                        cx.ui()?.input(INPUT_FOLLOWUP, chat::ASK_PLACEHOLDER, "");
+                    }
+                } else if result == LINK_NEW {
+                    self.pending_sel = None;
+                    self.fresh_chat(cx)?;
+                } else if result == LINK_STOP {
+                    if self.run.as_ref().is_some_and(|r| self.chat.as_deref() == Some(r.chat.as_str())) {
+                        self.fail(cx, "Request canceled.".into())?;
                     }
                 } else if let Some(cid) = result.strip_prefix(LINK_OPEN) {
                     self.chat = Some(cid.to_string());
                     self.error = None;
                     self.show(cx)?;
-                } else if result == LINK_DELETE || result == LINK_CHATS {
-                    self.show_list(cx, result == LINK_DELETE)?;
-                } else if let Some(cid) = result.strip_prefix(LINK_DEL) {
+                } else if result == LINK_CHATS {
+                    self.show_list(cx)?;
+                } else if let Some(cid) = result.strip_prefix(HOLD).and_then(|l| l.strip_prefix(LINK_OPEN)) {
+                    // Hold a chat in the list: delete it after a confirmation.
                     let title = self.book.as_ref().and_then(|b| b.chats.get(cid)).map(|c| c.title.clone()).unwrap_or_default();
                     self.delete_target = Some(cid.to_string());
-                    cx.ui()?.dialog(DIALOG_DELETE, "Delete chat?", &title, &[("Cancel", "cancel"), ("Delete", "delete")]);
+                    let body = format!("{title}\n\nThe deleted chat cannot be recovered.");
+                    cx.ui()?.dialog(DIALOG_DELETE, "Delete this chat?", &body, &[("Cancel", "cancel"), ("Delete", "delete")]);
+                } else if result.starts_with(HOLD) {
+                    // Other held links do what a tap does not.
                 } else if result == LINK_RETRY {
-                    if self.run.is_none() && self.conv().and_then(|c| c.messages.last()).is_some_and(|m| m.role == "user") {
+                    if self.run.is_none() && !self.retry_blocked && self.conv().and_then(|c| c.messages.last()).is_some_and(|m| m.role == "user") {
                         self.begin_run(cx)?;
                     }
                 } else if !result.is_empty() {
@@ -904,18 +1090,46 @@ impl Plugin for InsightfulPlugin {
                     }
                     self.save();
                     cx.ui()?.toast(if ok { "Chat deleted" } else { "Chat not found" });
-                    if self.viewer_open && self.list.is_some() {
-                        self.show_list(cx, false)?;
+                    if self.viewer_open && self.list {
+                        self.show_list(cx)?;
                     }
                 }
                 Ok(())
             }
-            MENU_BOOK if !result.is_empty() && result != "closed" => self.on_action(cx, result),
-            MENU_ACTIONS if result == "ask" => self.ask(cx),
-            MENU_ACTIONS if !result.is_empty() && result != "closed" => {
-                let sel = self.pending_sel.take();
-                self.quick_action(cx, result, sel)
+            MENU_BOOK if result == "stay:new_on_highlight" => {
+                let on = self.new_chat_on_highlight(cx);
+                if let Some(b) = self.book.as_mut() {
+                    b.chats.new_chat_on_highlight = Some(!on);
+                }
+                self.save();
+                self.book_sheet(cx)
             }
+            MENU_BOOK if result == "hold:stay:new_on_highlight" => {
+                let text = if self.new_chat_on_highlight(cx) {
+                    "Use a new chat for highlighted actions by default in other books?"
+                } else {
+                    "Continue the current chat for highlighted actions by default in other books?"
+                };
+                cx.ui()?.dialog(DIALOG_DEFAULT, "Insightful", text, &[("Cancel", "cancel"), ("OK", "ok")]);
+                Ok(())
+            }
+            MENU_BOOK if !result.is_empty() && result != "closed" && !result.starts_with(HOLD) => self.on_action(cx, result),
+            DIALOG_DEFAULT if result == "ok" => {
+                let on = self.new_chat_on_highlight(cx);
+                cx.storage()?.set(NEW_CHAT_DEFAULT, json!(on))?;
+                self.book_sheet(cx)
+            }
+            MENU_STATS if matches!(result, "general" | "book" | "all") => self.show_stats(cx, result),
+            MENU_ACTIONS if result == "stay:override" => {
+                self.sel_override = !self.sel_override;
+                self.actions_sheet(cx)
+            }
+            MENU_ACTIONS if result == "ask" => self.open_from_highlight(cx, None),
+            MENU_ACTIONS if result == "closed" => {
+                self.pending_sel = None;
+                Ok(())
+            }
+            MENU_ACTIONS if !result.is_empty() && !result.starts_with(HOLD) => self.open_from_highlight(cx, Some(result)),
             MENU_SETTINGS if result == "provider" => self.provider_menu(cx),
             MENU_SETTINGS if result == "model" => self.model_menu(cx),
             MENU_MODEL if result == "list" => self.fetch_models(cx, None),
@@ -968,6 +1182,25 @@ impl Plugin for InsightfulPlugin {
         }
         Ok(())
     }
+}
+
+/// The provider's name as the menus show it.
+fn provider_name(id: &str) -> &str {
+    match id {
+        "anthropic" => "Anthropic",
+        "deepseek" => "DeepSeek",
+        "openai" => "OpenAI",
+        "openrouter" => "OpenRouter",
+        other => other,
+    }
+}
+
+/// True when sending the same request again could work (`errorText` in `chat.lua`): a
+/// missing or rejected key, a conversation too long for the model, or a refused answer
+/// need a change first.
+fn retryable(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    !["http 401", "http 403", "not configured", "api key", "context window", "context length", "content was filtered", "request was refused"].iter().any(|k| m.contains(k))
 }
 
 #[cfg(test)]
