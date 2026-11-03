@@ -30,6 +30,14 @@ struct Log {
     bad_ifconfig: bool,
     /// Modules loaded.
     loaded: Vec<String>,
+    /// The controller refuses this many binds (EBUSY) even when free, as right after
+    /// MTP let go or without a cable.
+    refuse_binds: u32,
+    /// MTP binds itself again this many times right after being unbound (`mtp.sh`
+    /// reacting to the computer seeing the port go away).
+    mtp_rebinds: u32,
+    /// The waits between bind tries.
+    sleeps: Vec<std::time::Duration>,
 }
 
 struct FakeSys {
@@ -97,8 +105,27 @@ impl Sys for FakeSys {
         std::fs::remove_dir_all(path)
     }
 
+    fn sleep(&mut self, d: std::time::Duration) {
+        self.log.borrow_mut().sleeps.push(d);
+    }
+
     fn write(&mut self, path: &Path, value: &str) -> io::Result<()> {
+        let mtp = path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "mtpgadget");
+        if mtp && path.file_name().is_some_and(|n| n == "UDC") && value.is_empty() {
+            let mut log = self.log.borrow_mut();
+            if log.mtp_rebinds > 0 {
+                log.mtp_rebinds -= 1;
+                return Ok(()); // unbound and at once bound again
+            }
+        }
         if path.file_name().is_some_and(|n| n == "UDC") && !value.is_empty() {
+            {
+                let mut log = self.log.borrow_mut();
+                if log.refuse_binds > 0 && !mtp {
+                    log.refuse_binds -= 1;
+                    return Err(err(io::ErrorKind::ResourceBusy, "Device or resource busy"));
+                }
+            }
             if !self.udc.join(value).exists() {
                 return Err(err(io::ErrorKind::NotFound, "No such device"));
             }
@@ -160,11 +187,9 @@ impl Device {
         }
     }
 
-    /// Another gadget holds the controller, so binding ours fails with EBUSY.
-    fn other_gadget(&self) {
-        let other = self.paths.gadgets.join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::write(other.join("UDC"), format!("{UDC}\n")).unwrap();
+    /// The controller refuses the next `n` binds.
+    fn refuse_binds(&self, n: u32) {
+        self.log.borrow_mut().refuse_binds = n;
     }
 
     fn net(&self) -> UsbNet {
@@ -299,17 +324,70 @@ fn failures_are_reported_and_undone() {
     assert_eq!(dev.file("mtpgadget/UDC"), format!("{UDC}\n"));
     assert!(!net.state().on());
 
-    // Another gadget holds the controller: binding fails, everything is undone.
-    let dev = Device::new("busy");
+    // Another gadget holds the controller: it is not taken, the error names it, and
+    // everything is undone.
+    let dev = Device::new("held");
     let other = dev.paths.gadgets.join("other");
     std::fs::create_dir_all(&other).unwrap();
     std::fs::write(other.join("UDC"), format!("{UDC}\n")).unwrap();
     let mut net = dev.net();
     let e = net.on().unwrap_err();
-    assert!(matches!(&e, Error::Bind(u, why) if u == UDC && why.contains("busy")), "{e:?}");
-    assert_eq!(e.short(), "USB port busy");
+    assert_eq!(e, Error::Held(UDC.into(), "other".into()));
+    assert_eq!(e.short(), "USB port in use");
+    assert!(e.to_string().contains("\"other\". Turn that off first"), "{e}");
+    assert_eq!(dev.file("other/UDC"), format!("{UDC}\n"), "left alone");
     assert!(!dev.gadget().exists());
     assert!(!dev.calls().iter().any(|c| c.ends_with(" up")));
+}
+
+/// The reported "USB port busy" with a computer on the cable: right after MTP lets go,
+/// the controller refuses the new gadget for a moment (the shell script this is a port
+/// of was slow enough not to notice). Binding is tried again after short waits.
+#[test]
+fn bind_waits_for_the_controller_after_mtp() {
+    let dev = Device::new("settle").with_mtp(UDC);
+    dev.cable("configured", true);
+    dev.refuse_binds(2);
+    let mut net = dev.net();
+    let on = net.on().unwrap();
+    assert_eq!(on.took_mtp.as_deref(), Some(UDC));
+    assert_eq!(dev.file("usbnet/UDC"), format!("{UDC}\n"));
+    assert_eq!(dev.log.borrow().sleeps, gadget::BIND_RETRY[..2]);
+}
+
+/// MTP binds itself again right after being unbound: it is taken again before the next
+/// try, and given back at off.
+#[test]
+fn bind_takes_the_port_from_mtp_again() {
+    let dev = Device::new("mtprace").with_mtp(UDC);
+    dev.cable("configured", true);
+    // Rebound after the first unbind and after the one before the first try.
+    dev.log.borrow_mut().mtp_rebinds = 2;
+    let mut net = dev.net();
+    let on = net.on().unwrap();
+    assert_eq!(on.took_mtp.as_deref(), Some(UDC));
+    assert_eq!(dev.file("mtpgadget/UDC"), "\n");
+    assert_eq!(dev.log.borrow().sleeps.len(), 1);
+    net.off(on.took_mtp.as_deref()).unwrap();
+    assert_eq!(dev.file("mtpgadget/UDC"), format!("{UDC}\n"));
+}
+
+/// A controller that never lets go: after all tries the error says what to do and
+/// which kernel driver holds the port.
+#[test]
+fn bind_gives_up_with_advice() {
+    let dev = Device::new("stuckport").with_mtp(UDC);
+    dev.cable("configured", true);
+    dev.refuse_binds(u32::MAX);
+    std::fs::write(dev.paths.udc.join(UDC).join("function"), "g_ether\n").unwrap();
+    let mut net = dev.net();
+    let e = net.on().unwrap_err();
+    assert_eq!(e.short(), "USB port busy");
+    let text = e.to_string();
+    assert!(text.contains("the driver g_ether") && text.contains("Unplug the cable, plug it in again"), "{text}");
+    assert_eq!(dev.log.borrow().sleeps, gadget::BIND_RETRY);
+    assert!(!dev.gadget().exists(), "undone");
+    assert_eq!(dev.file("mtpgadget/UDC"), format!("{UDC}\n"), "MTP given back");
 }
 
 #[test]
@@ -350,7 +428,7 @@ fn cable_detection() {
 fn bind_failure_without_a_cable_is_not_connected() {
     let dev = Device::new("nocable");
     dev.cable("not attached", false);
-    dev.other_gadget();
+    dev.refuse_binds(u32::MAX);
     let e = dev.net().on().unwrap_err();
     assert_eq!(e, Error::NoCable);
     assert_eq!(e.short(), "Not connected");
@@ -372,7 +450,7 @@ fn tile_without_a_cable() {
 
     // A tap that fails to bind without a cable: "Not connected" and a toast that says
     // what to do, not "USB port busy".
-    dev.other_gadget();
+    dev.refuse_binds(u32::MAX);
     h.ui.0.clear();
     p.on_action(&mut h.cx(), "toggle").unwrap();
     assert_eq!(tile(&p), TileState { text: "Not connected".into(), on: Some(false) });
@@ -389,7 +467,7 @@ fn tile_without_a_cable() {
     assert_eq!(tile(&p).text, "Not connected");
 
     // On (binding works) and then unplugged: still the address, the page adds "no cable".
-    std::fs::remove_dir_all(dev.paths.gadgets.join("other")).unwrap();
+    dev.refuse_binds(0);
     dev.cable("configured", true);
     p.on_action(&mut h.cx(), "toggle").unwrap();
     assert_eq!(tile(&p).text, "192.168.15.244");
