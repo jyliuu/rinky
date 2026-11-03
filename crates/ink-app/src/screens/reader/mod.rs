@@ -141,6 +141,28 @@ fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, sav
     }
 }
 
+/// Longest a percent jump waits for pagination to finish.
+const PERCENT_WAIT: Duration = Duration::from_secs(10);
+
+/// The page at `pct` % of the book. While pagination runs the page count is partial
+/// (90 % of it is far too early), so this waits for the rest (a jump right after the
+/// book opened), at most [`PERCENT_WAIT`]; then it goes by the estimated total, laying
+/// out pages up to the target.
+fn percent_page(doc: &mut dyn Document, pct: f32) -> usize {
+    let f = (pct / 100.0).clamp(0.0, 1.0);
+    if !doc.page_count().complete && !doc.wait_paginated(PERCENT_WAIT) {
+        if let Some(total) = doc.page_estimate() {
+            let page = (f * total.saturating_sub(1) as f32).round() as usize;
+            log::info!("reader: {pct}% while pagination runs: page {} of about {total}", page + 1);
+            // The document lays out pages up to (a few past) its current page.
+            doc.set_current_page(page);
+            return page.min(doc.page_count().pages.saturating_sub(1));
+        }
+    }
+    let last = doc.page_count().pages.saturating_sub(1);
+    (f * last as f32).round() as usize
+}
+
 /// Renders page `index` with the default status bars (what `rinky render` writes; the
 /// reader screen uses the user's bars, device values and reading speed).
 pub fn render_page(doc: &mut dyn Document, index: usize, canvas: &mut Canvas, fonts: &mut Fonts) -> anyhow::Result<()> {
@@ -1699,9 +1721,8 @@ impl ReaderScreen {
                 }
             }
             _ if a.starts_with("pct:") => {
-                if let (Ok(n), Some(doc)) = (a[4..].parse::<f32>(), self.doc.as_deref()) {
-                    let last = doc.page_count().pages.saturating_sub(1);
-                    let page = ((n / 100.0).clamp(0.0, 1.0) * last as f32).round() as usize;
+                if let (Ok(n), Some(doc)) = (a[4..].parse::<f32>(), self.doc.as_deref_mut()) {
+                    let page = percent_page(doc, n);
                     self.close_overlay();
                     self.go_to_page(page);
                 }

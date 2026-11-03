@@ -53,4 +53,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked --keep-going -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace --locked
+        # Every failing test in one run; goldens made on the development machine may
+        # differ by a pixel or two here (float rounding).
+        env:
+          INK_GOLDEN_TOLERANCE: "32"
+        run: cargo test --workspace --locked --no-fail-fast
