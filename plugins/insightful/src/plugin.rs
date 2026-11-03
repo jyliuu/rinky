@@ -60,6 +60,9 @@ struct BookState {
 }
 
 struct Run {
+    /// The chat this run answers: it keeps running (and is saved there) while the
+    /// viewer is closed or shows another chat.
+    chat: String,
     profile: Profile,
     request: Option<u32>,
     system: String,
@@ -219,10 +222,16 @@ impl InsightfulPlugin {
         self.book.as_mut()?.chats.get_mut(&id)
     }
 
-    /// Updates the chat view after a streamed change, unless the viewer shows the chat
-    /// list now (the user went back while the answer was still coming).
-    fn refresh(&mut self, cx: &mut HostCtx) -> Result<()> {
-        if self.viewer_open && self.list.is_some() {
+    /// The chat `id` of this book.
+    fn chat_mut(&mut self, id: &str) -> Option<&mut chat::Conversation> {
+        self.book.as_mut()?.chats.get_mut(id)
+    }
+
+    /// Updates the chat view after a change to chat `id` (a streamed batch, an answer,
+    /// an error), but only while the viewer is open on that chat: a closed viewer stays
+    /// closed (the run goes on), and the list or another chat stays as it is.
+    fn refresh(&mut self, cx: &mut HostCtx, id: &str) -> Result<()> {
+        if !self.viewer_open || self.list.is_some() || self.chat.as_deref() != Some(id) {
             return Ok(());
         }
         self.show(cx)
@@ -230,7 +239,9 @@ impl InsightfulPlugin {
 
     fn show(&mut self, cx: &mut HostCtx) -> Result<()> {
         let Some(conv) = self.conv() else { return Ok(()) };
-        let (md, q) = chat::render(conv, self.run.as_ref().map(|r| &r.live), self.error.as_deref());
+        // The live answer only in the chat it belongs to.
+        let run = self.run.as_ref().filter(|r| self.chat.as_deref() == Some(r.chat.as_str()));
+        let (md, q) = chat::render(conv, run.map(|r| &r.live), self.error.as_deref());
         // Back goes to the list of chats.
         let md = format!(":::back {}\n{md}", chat::LINK_CHATS);
         let title = format!("Insightful\n{}", conv.title);
@@ -239,7 +250,7 @@ impl InsightfulPlugin {
         self.viewer_open = true;
         self.list = None;
         self.fresh = false;
-        if let Some(r) = &mut self.run {
+        if let Some(r) = self.run.as_mut().filter(|r| self.chat.as_deref() == Some(r.chat.as_str())) {
             r.flushed = r.live.text.len();
             r.last_flush = now_ms();
         }
@@ -268,7 +279,11 @@ impl InsightfulPlugin {
     }
 
     fn ask_followup(&mut self, cx: &mut HostCtx, q: &str) -> Result<()> {
-        if self.run.is_some() || q.trim().is_empty() {
+        if q.trim().is_empty() {
+            return Ok(());
+        }
+        if self.run.is_some() {
+            cx.ui()?.toast("Insightful is still answering");
             return Ok(());
         }
         let Some(conv) = self.conv_mut() else { return Ok(()) };
@@ -307,6 +322,7 @@ impl InsightfulPlugin {
         prompts.add_reminder(&mut msgs);
         let live = Live { model: profile.model.clone(), status: "Thinking…".into(), ..Default::default() };
         self.run = Some(Run {
+            chat: self.chat.clone().expect("chat"),
             acc: StreamAccumulator::new(profile.kind),
             sse: SseParser::new(),
             profile,
@@ -322,6 +338,8 @@ impl InsightfulPlugin {
             flushed: 0,
             last_flush: now_ms(),
         });
+        // The user asked: the chat comes on screen, then the request starts.
+        self.show(cx)?;
         self.send_turn(cx)
     }
 
@@ -341,38 +359,53 @@ impl InsightfulPlugin {
         r.live.status = "Thinking…".into();
         match cx.start_request(http, mode) {
             Ok(id) => {
-                self.run.as_mut().expect("run").request = Some(id);
-                self.show(cx)
+                let r = self.run.as_mut().expect("run");
+                r.request = Some(id);
+                let chat = r.chat.clone();
+                self.refresh(cx, &chat)
             }
             Err(e) => self.fail(cx, format!("Couldn't reach the AI service: {e}")),
         }
     }
 
     fn fail(&mut self, cx: &mut HostCtx, msg: String) -> Result<()> {
-        if let Some(r) = self.run.take() {
-            if let Some(id) = r.request {
-                cx.cancel_request(id);
-            }
-            let usage = r.usage;
-            if let Some(c) = self.conv_mut() {
-                c.usage.merge(&usage);
-                c.updated = chat::now();
-            }
+        let Some(r) = self.run.take() else {
+            self.error = Some(msg);
+            return self.show(cx);
+        };
+        if let Some(id) = r.request {
+            cx.cancel_request(id);
         }
-        self.error = Some(msg);
+        if let Some(c) = self.chat_mut(&r.chat) {
+            c.usage.merge(&r.usage);
+            c.updated = chat::now();
+        }
         self.save();
-        self.refresh(cx)
+        if self.chat.as_deref() == Some(r.chat.as_str()) {
+            self.error = Some(msg);
+        }
+        self.notify_if_hidden(cx, &r.chat, "Insightful couldn't answer")?;
+        self.refresh(cx, &r.chat)
+    }
+
+    /// A toast when a run ends while its chat is not on screen.
+    fn notify_if_hidden(&mut self, cx: &mut HostCtx, id: &str, text: &str) -> Result<()> {
+        if !self.viewer_open || self.list.is_some() || self.chat.as_deref() != Some(id) {
+            cx.ui()?.toast(text);
+        }
+        Ok(())
     }
 
     fn finish_answer(&mut self, cx: &mut HostCtx, text: String) -> Result<()> {
         let r = self.run.take().expect("run");
-        if let Some(c) = self.conv_mut() {
+        if let Some(c) = self.chat_mut(&r.chat) {
             c.messages.push(Message { role: "assistant".into(), content: text, selection: None, model: Some(r.profile.model.clone()), label: None, timestamp: chat::now(), usage: Some(r.usage) });
             c.usage.merge(&r.usage);
             c.updated = chat::now();
         }
         self.save();
-        self.refresh(cx)
+        self.notify_if_hidden(cx, &r.chat, "Insightful answered")?;
+        self.refresh(cx, &r.chat)
     }
 
     fn run_tools(&mut self, cx: &mut HostCtx, reply: provider::Reply) -> Result<()> {
@@ -470,7 +503,8 @@ impl InsightfulPlugin {
         };
         let grown = r.live.text.len().saturating_sub(r.flushed);
         if grown >= self.batch_chars || (grown > 0 && r.last_flush.elapsed() >= self.batch_interval) {
-            return self.refresh(cx);
+            let chat = r.chat.clone();
+            return self.refresh(cx, &chat);
         }
         Ok(())
     }
@@ -815,9 +849,7 @@ impl Plugin for InsightfulPlugin {
                     self.viewer_open = false;
                     self.list = None;
                     self.fresh = false;
-                    if let Some(id) = self.run.take().and_then(|r| r.request) {
-                        cx.cancel_request(id);
-                    }
+                    // A running answer goes on: it is saved to its chat when it ends.
                     self.save();
                 } else if let Some(n) = result.strip_prefix(LINK_QUESTION) {
                     if let Some(q) = n.parse::<usize>().ok().and_then(|n| self.questions.get(n)).cloned() {

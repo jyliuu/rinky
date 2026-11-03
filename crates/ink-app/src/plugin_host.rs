@@ -1614,6 +1614,9 @@ pub struct MarkdownView {
     scroll: f32,
     content_h: f32,
     window_h: f32,
+    /// A chat view puts its `n`th `:::you` message at the top of the window at the next
+    /// layout (a question was just sent: its answer streams in below it).
+    anchor: Option<usize>,
 }
 
 const FOOT_H: i32 = 80;
@@ -1807,6 +1810,7 @@ impl MarkdownView {
             scroll: 0.0,
             content_h: 0.0,
             window_h: 0.0,
+            anchor: None,
         };
         v.set_text(markdown);
         // A chat view opens at its newest message (`:::top`: at its start).
@@ -1911,8 +1915,9 @@ impl MarkdownView {
     }
 
     /// True for a chat view (a viewer with an input bar): one long page that scrolls
-    /// (swipes, taps on the sides and page keys move it by a screenful less a line, a
-    /// scroll bar shows where it is) instead of pages.
+    /// (swipes, taps on the sides and page keys move it a whole window, starting at the
+    /// first line that was not wholly shown; a scroll bar shows where it is) instead of
+    /// pages. Streamed text never moves it.
     pub fn scrolls(&self) -> bool {
         self.input.is_some() && !self.sheet
     }
@@ -1924,16 +1929,38 @@ impl MarkdownView {
         Rect::new(b.x, top, b.w, (b.bottom() - self.bottom_h() - 16 - top).max(1) as u32)
     }
 
-    /// Largest scroll offset.
-    fn max_scroll(&self) -> f32 {
-        (self.content_h - self.window_h).max(0.0)
+    /// Top of each line of a chat view's content (from the last layout).
+    fn line_tops(&self) -> Vec<(f32, f32)> {
+        let mut y = 0.0;
+        self.pages.first().map_or(&[][..], |p| &p[..]).iter().map(|l| {
+            let t = y;
+            y += l.height;
+            (t, l.height)
+        }).collect()
     }
 
-    /// True when the view shows its end (the last page, or scrolled to the bottom): a
-    /// replaced text then follows its new end.
+    /// The scroll offset that shows the end of a chat view: the first line that has the
+    /// rest of the content fit below it.
+    fn end_scroll(&self) -> f32 {
+        let target = self.content_h - self.window_h;
+        if target <= 0.0 {
+            return 0.0;
+        }
+        self.line_tops().into_iter().map(|(t, _)| t).find(|t| *t >= target - 0.5).unwrap_or(target)
+    }
+
+    /// Largest scroll offset: a page turn may go past [`Self::end_scroll`] so that it
+    /// moves a whole window (blank below the last line), up to the last line's top.
+    fn max_scroll(&self) -> f32 {
+        let last = self.line_tops().last().map_or(0.0, |(t, _)| *t);
+        self.end_scroll().max(last)
+    }
+
+    /// True when the view shows its end (the last page, or the last line of a chat
+    /// view): a paged view then follows the end of a replaced text.
     pub fn at_end(&self) -> bool {
         if self.scrolls() {
-            self.scroll + 1.0 >= self.max_scroll()
+            self.scroll + self.window_h >= self.content_h - 0.5
         } else {
             self.page + 1 >= self.page_count()
         }
@@ -1944,12 +1971,33 @@ impl MarkdownView {
         (self.page, self.scroll.round() as i32)
     }
 
-    /// Moves a page (`step` pages), or for a chat view `step` screenfuls less a line.
+    /// Moves a page (`step` pages), or for a chat view `step` windows: forward to the
+    /// first line not wholly shown, back so that the window ends where it started. A
+    /// turn never moves part of a window, so the eye finds where it was.
     fn turn(&mut self, step: i32) {
         self.follow_end = false;
+        self.anchor = None;
         if self.scrolls() {
-            let by = (self.window_h - 80.0).max(self.window_h / 2.0);
-            self.scroll = (self.scroll + step as f32 * by).clamp(0.0, self.max_scroll());
+            let tops = self.line_tops();
+            for _ in 0..step.unsigned_abs() {
+                if step > 0 {
+                    let edge = self.scroll + self.window_h;
+                    if edge >= self.content_h - 0.5 {
+                        break;
+                    }
+                    let next = tops.iter().find(|(t, h)| t + h > edge + 0.5).map_or(edge, |(t, _)| *t);
+                    // A line taller than the window: a window further.
+                    self.scroll = if next > self.scroll + 0.5 { next } else { edge };
+                } else {
+                    if self.scroll <= 0.5 {
+                        break;
+                    }
+                    let target = self.scroll - self.window_h;
+                    let prev = if target <= 0.0 { 0.0 } else { tops.iter().map(|(t, _)| *t).find(|t| *t >= target - 0.5).unwrap_or(target) };
+                    self.scroll = if prev < self.scroll - 0.5 { prev } else { target.max(0.0) };
+                }
+            }
+            self.scroll = self.scroll.clamp(0.0, self.max_scroll());
         } else {
             self.page = (self.page as i32 + step).clamp(0, self.page_count() as i32 - 1) as usize;
         }
@@ -1963,7 +2011,8 @@ impl MarkdownView {
         }
         // The shared bar, in pixels of content; the track sits in the right margin.
         let bar = ink_ui::ScrollBar::new(
-            self.content_h.round() as usize,
+            // Past the end (a whole-window turn): blank below counts as content.
+            self.content_h.max(self.scroll + self.window_h).round() as usize,
             self.scroll.round() as usize,
             self.window_h.round() as usize,
         );
@@ -2110,8 +2159,30 @@ impl MarkdownView {
             self.pages = vec![lines];
             self.groups = groups;
             self.page = 0;
-            if self.follow_end {
-                self.scroll = self.max_scroll();
+            // A question just sent goes to the top; opening or docking shows the end.
+            // Both happen once: streamed text that grows later leaves the window where
+            // it is.
+            if let Some(n) = self.anchor.take() {
+                let mut y = 0.0;
+                let mut seen = 0;
+                let mut last_group = None;
+                for l in &self.pages[0] {
+                    if l.group != last_group {
+                        last_group = l.group;
+                        if l.group.is_some_and(|g| self.groups[g].kind == BoxKind::You) {
+                            if seen == n {
+                                self.scroll = y;
+                                break;
+                            }
+                            seen += 1;
+                        }
+                    }
+                    y += l.height;
+                }
+                self.follow_end = false;
+            } else if self.follow_end {
+                self.scroll = self.end_scroll();
+                self.follow_end = false;
             }
             self.scroll = self.scroll.clamp(0.0, self.max_scroll());
             self.laid_for = Some((b.w, b.h));
@@ -2818,9 +2889,18 @@ impl PluginUi {
                 if let Kind::Viewer(v) = &mut l.kind {
                     let top = markdown.lines().any(|l| l.trim() == ":::top");
                     let at_end = v.at_end();
+                    let yous = |v: &MarkdownView| v.segs.iter().filter(|s| s.kind == BoxKind::You).count();
+                    let before = yous(v);
                     v.title = title.clone();
                     v.set_text(markdown);
-                    v.follow_end = at_end && !top;
+                    if !v.scrolls() {
+                        v.follow_end = at_end && !top;
+                    } else if !top && yous(v) > before {
+                        // A new question: shown at the top, its answer streams in below.
+                        v.anchor = Some(yous(v) - 1);
+                    }
+                    // Otherwise a chat view stays where it is (a pending follow of a
+                    // dock change stays too).
                     if top {
                         v.page = 0;
                         v.scroll = 0.0;
@@ -3532,6 +3612,79 @@ mod tests {
                 assert!(!d.is_empty() && d.iter().all(|u| u.rect.y >= APP_BAR_H as i32), "the app bar stays: {d:?}");
             }
         }
+    }
+
+    /// A chat view pages by whole windows: each turn starts at the first line the last
+    /// window did not wholly show (back: ends where the last one started), no line is
+    /// cut at the top, and the last turn forward is a whole window too (blank below).
+    /// Streamed text never moves the window; a new question goes to its top.
+    #[test]
+    fn chat_view_pages_whole_windows_and_streaming_does_not_scroll() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        let chat = |questions: usize, answer: &str| {
+            let mut md = String::new();
+            for i in 0..questions {
+                md.push_str(&format!(":::you\nQuestion {i}?\n:::answer model |\nAnswer number {i}, with enough words in it to wrap over a couple of lines on the panel.\n"));
+            }
+            md.push_str(&format!(":::you\nThe last question?\n:::answer model |\n{answer}\n:::\n:::input chat:ask | Ask about this book…"));
+            md
+        };
+        ui.push("p", UiRequest::TextViewer { id: 1, title: "Chat".into(), markdown: chat(20, "Short.") });
+        s.ui(&mut ui, false);
+        let v = |ui: &PluginUi| match &ui.layers[0].kind {
+            Kind::Viewer(v) => (v.scroll, v.window_h, v.content_h, v.at_end(), v.line_tops()),
+            _ => panic!(),
+        };
+        let (end, win, _, at_end, tops) = v(&ui);
+        assert!(at_end && end > 0.0);
+        let on_line = |y: f32| tops.iter().any(|(t, _)| (t - y).abs() < 0.5);
+        assert!(on_line(end), "the end starts on a line");
+        // Back to the start, then forward to the end.
+        let mut at = end;
+        while at > 0.0 {
+            ui.handle(&key(Key::PagePrev), screen());
+            let (now, ..) = v(&ui);
+            assert!(now < at && now >= at - win - 0.5 && on_line(now), "back from {at} to {now}");
+            at = now;
+        }
+        loop {
+            ui.handle(&key(Key::PageNext), screen());
+            let (now, _, content, ..) = v(&ui);
+            if now == at {
+                break;
+            }
+            assert!(now > at && now <= at + win + 0.5 && on_line(now), "forward from {at} to {now}");
+            assert!(tops.iter().all(|(t, h)| !(*t < now - 0.5 && t + h > at + win + 0.5)), "no line skipped");
+            assert!(now <= content, "{now}");
+            at = now;
+        }
+        assert!(v(&ui).3, "at the end");
+        s.ui(&mut ui, false);
+
+        // Streamed text that grows past the window leaves it where it is.
+        ui.handle(&key(Key::PagePrev), screen());
+        ui.handle(&key(Key::PageNext), screen());
+        let (before, ..) = v(&ui);
+        let mut answer = String::from("The");
+        for i in 0..25 {
+            answer.push_str(&format!(" streamed words of batch {i}, more of them, and then some more words to fill a few lines of the answer card."));
+            ui.push("p", UiRequest::TextViewer { id: 1, title: "Chat".into(), markdown: chat(20, &answer) });
+            s.ui(&mut ui, false);
+            assert_eq!(v(&ui).0, before, "batch {i}");
+        }
+        assert!(!v(&ui).3, "the answer goes on below the window");
+
+        // A new question: at the top of the window.
+        let mut md = chat(20, &answer).replace(":::\n:::input", "");
+        md = md.trim_end_matches(" Ask about this book…").trim_end_matches("chat:ask |").to_string();
+        let md = format!("{}\n:::you\nA new question?\n:::answer model |\nThinking…\n:::\n:::input chat:ask | Ask about this book…", md.trim_end());
+        ui.push("p", UiRequest::TextViewer { id: 1, title: "Chat".into(), markdown: md });
+        s.ui(&mut ui, false);
+        let Kind::Viewer(view) = &ui.layers[0].kind else { panic!() };
+        let top_line = view.pages[0].iter().zip(view.line_tops()).find(|(_, (t, _))| (*t - view.scroll).abs() < 0.5).map(|(l, _)| l.group).expect("a line at the top");
+        let yous: Vec<usize> = view.groups.iter().enumerate().filter(|(_, g)| g.kind == BoxKind::You).map(|(i, _)| i).collect();
+        assert_eq!(top_line, yous.last().copied(), "the new question is at the top");
     }
 
     fn juliet(dir: &Path) -> (PathBuf, Box<dyn Document>) {
