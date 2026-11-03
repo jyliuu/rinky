@@ -13,10 +13,14 @@
 //!
 //! A passage that goes on over the page: the finger drags off the text (past the last
 //! line, into the bottom band or the bottom-right corner, [`edge_zone`]) and rests there
-//! for [`EDGE_DWELL`]; the page turns (a normal page turn, the reader's refresh policy)
-//! and the selection continues at the new page's first word. The top band, the top-left
-//! corner or above the first line goes back a page the same way. After a turn the finger
-//! must leave the zone before another one. The selection is kept as document positions
+//! for [`EDGE_DWELL`]; the view moves on half a page ([`Bridge`]: the lower half of the
+//! page at the top, the upper half of the next below it; the reader's page-turn refresh)
+//! and the selection continues at the next page's first word, now in the middle of the
+//! screen with the text before it in sight. Another rest goes on to the next page whole
+//! (the selection runs to the last line the bridge showed), and so on. The top band, the
+//! top-left corner or above the first line goes back half a page the same way. After a
+//! move the finger must leave the zone before another one. When the selection's card
+//! closes, the reader shows the page the selection ended on. The selection is kept as document positions
 //! from the press's word to the dragged end ([`span_select`]: every page's part through
 //! `Document::select`, joined, and set as the document's selection for plugins); its
 //! card, Note, Search, plugins and the saved highlight get the whole text, and the
@@ -350,6 +354,138 @@ pub fn edge_word(doc: &mut dyn ink_doc::Document, page: usize, size: Size, forwa
         None if forward => SpanEnd::PageStart,
         None => SpanEnd::PageEnd,
     }
+}
+
+/// The text lines of `page` as `(top, bottom)` bands, top to bottom (overlapping rects
+/// merged). Clears the document's selection.
+pub fn line_bands(doc: &mut dyn ink_doc::Document, page: usize, size: Size) -> Vec<(i32, i32)> {
+    let (s, e) = (page_start(), page_end(size));
+    let mut rects = doc.select(page, s, e).ok().flatten().map(|s| s.rects).unwrap_or_default();
+    doc.clear_selection();
+    rects.sort_by_key(|r| r.y);
+    let mut bands: Vec<(i32, i32)> = Vec::new();
+    for r in rects {
+        match bands.last_mut() {
+            Some(b) if r.y < b.1 => b.1 = b.1.max(r.bottom()),
+            _ => bands.push((r.y, r.bottom())),
+        }
+    }
+    bands
+}
+
+/// Half a page on: the lower half of page `page`'s text moved up to the text top, and
+/// the upper half of the next page below it, each cut between lines. A selection drag
+/// held at the bottom edge goes page, bridge, next page, ... (back the same way), half
+/// a page at a time, so the place it continues from stays in the middle of the screen
+/// with the text before it in sight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bridge {
+    /// The upper page (the next one is below it).
+    pub page: usize,
+    /// Screen y of the text top (where the upper page's part starts).
+    pub top: i32,
+    /// Upper page y of the first line shown (the cut).
+    pub cut: i32,
+    /// Upper page y of the bottom of its last line.
+    pub end: i32,
+    /// Screen y where the lower page's part starts.
+    pub split: i32,
+    /// Lower page y of its text top.
+    pub top2: i32,
+    /// Lower page y of the end of its part (the bottom of its last line shown).
+    pub cut2: i32,
+    /// The lower of the two pages' last line bottoms: the text area ends there.
+    pub bottom: i32,
+}
+
+impl Bridge {
+    /// The bridge from `page` to `page + 1`; `None` when either has no text lines or
+    /// `page` has one line (nothing to cut).
+    pub fn new(doc: &mut dyn ink_doc::Document, page: usize, size: Size) -> Option<Bridge> {
+        let a = line_bands(doc, page, size);
+        let b = line_bands(doc, page + 1, size);
+        let (&(top, _), &(_, a_end)) = (a.first()?, a.last()?);
+        let (&(top2, _), &(_, b_end)) = (b.first()?, b.last()?);
+        // The first line from the middle of the text on (never the first line).
+        let mid = (top + a_end) / 2;
+        let k = a.iter().position(|l| l.0 >= mid).filter(|k| *k > 0)?;
+        let cut = a[k].0;
+        let gap = (a[k].0 - a[k - 1].1).max(0);
+        let split = top + (a_end - cut) + gap;
+        // Lines of the next page that fit above the lower of the two text ends.
+        let bottom = a_end.max(b_end);
+        let cut2 = b.iter().take_while(|l| split + (l.1 - top2) <= bottom).last().map_or(top2, |l| l.1);
+        Some(Bridge { page, top, cut, end: a_end, split, top2, cut2, bottom })
+    }
+
+    /// The page and page point under screen point `p`.
+    pub fn to_page(&self, p: Point) -> (usize, Point) {
+        if p.y < self.split {
+            (self.page, Point::new(p.x, p.y - self.top + self.cut))
+        } else {
+            (self.page + 1, Point::new(p.x, p.y - self.split + self.top2))
+        }
+    }
+
+    /// Screen rectangles of page rectangles (`pages`: page and its rects): the parts in
+    /// the bridge, moved to where they are shown.
+    pub fn to_screen(&self, pages: &[(usize, Vec<Rect>)]) -> Vec<Rect> {
+        let mut out = Vec::new();
+        for (page, rects) in pages {
+            for r in rects {
+                if *page == self.page && r.y >= self.cut - 1 {
+                    out.push(Rect::new(r.x, r.y - self.cut + self.top, r.w, r.h));
+                } else if *page == self.page + 1 && r.bottom() <= self.cut2 + 1 {
+                    out.push(Rect::new(r.x, r.y - self.top2 + self.split, r.w, r.h));
+                }
+            }
+        }
+        out
+    }
+
+    /// The top of the first line shown and the bottom of the last (as [`text_box`]).
+    pub fn text_box(&self) -> (i32, i32) {
+        (self.top, self.split + (self.cut2 - self.top2))
+    }
+
+    /// Draws the bridge on `out` from the two pages drawn whole (`upper`, `lower`, the
+    /// size of `out`): the lower page's margins, the text area white, the upper page's
+    /// lines from the cut, then the lower page's lines that fit (whole lines only).
+    pub fn compose(&self, upper: &Canvas, lower: &Canvas, out: &mut Canvas) {
+        let (w, h) = (out.width, out.height as i32);
+        out.pixels.copy_from_slice(&lower.pixels);
+        let band_top = self.top.min(self.top2).clamp(0, h);
+        let band_end = self.bottom.clamp(0, h);
+        let rows = |out: &mut Canvas, src: &Canvas, from: i32, to: i32, at: i32| {
+            for y in from.max(0)..to.min(h) {
+                let dst = y - from + at;
+                if (0..h).contains(&dst) {
+                    let (d, s) = (dst as usize * w, y as usize * w);
+                    out.pixels[d..d + w].copy_from_slice(&src.pixels[s..s + w]);
+                }
+            }
+        };
+        for y in band_top..band_end {
+            let i = y as usize * w;
+            out.pixels[i..i + w].fill(255);
+        }
+        rows(out, upper, self.cut, self.end, self.top);
+        rows(out, lower, self.top2, self.cut2, self.split);
+    }
+}
+
+/// The first (`first`) or last word of the line of `page` around page y `y`; the page
+/// start or end when no word is found there.
+pub fn line_word(doc: &mut dyn ink_doc::Document, page: usize, size: Size, y: i32, first: bool) -> SpanEnd {
+    let fallback = if first { SpanEnd::PageStart } else { SpanEnd::PageEnd };
+    // The line's rectangle from the whole page's selection (one rect per line).
+    let all = doc.select(page, page_start(), page_end(size)).ok().flatten().map(|s| s.rects).unwrap_or_default();
+    doc.clear_selection();
+    let on = |r: &&Rect| r.y <= y && y < r.bottom();
+    let line = if first { all.iter().find(on) } else { all.iter().rev().find(on) }.copied();
+    let Some(r) = line else { return fallback };
+    let x = if first { r.x + 2 } else { r.right() - 3 };
+    word_hit(doc, page, Point::new(x, r.y + r.h as i32 / 2)).map_or(fallback, SpanEnd::Word)
 }
 
 /// Text shown at the top of the selection popup (at most `max` characters).
