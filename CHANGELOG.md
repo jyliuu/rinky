@@ -4,6 +4,24 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-04
+
+### Fixed
+- The Kindle no longer freezes or falls back to sleep after waking. Stopping the Kindle
+  UI left some Amazon programs running unmanaged; one of them (fastmetrics) got stuck,
+  and the Kindle's power service then took about 32 s to handle each cover or power
+  button event. rinky's launcher now ends such leftovers. ([#12])
+- A cover that moves in a bag no longer wakes the Kindle. The cover must stay open for
+  0.4 s before the Kindle wakes, a wake from full sleep with the cover still closed
+  goes back to sleep, and a cover wake that nobody touches sleeps again after 3
+  minutes. ([#12])
+
+### Changed
+- While rinky runs, the Amazon background services it does not use (cloud sync, usage
+  reporting, log uploads, audio, text-to-speech, Bluetooth) are stopped, and they start
+  again when you leave rinky. Power management, Wi-Fi, USB and battery protection keep
+  running. `RINKY_QUIET=0` in `rinky.env` leaves them all running. ([#12])
+
 ## [0.4.0] - 2026-11-03
 
 ### Added
@@ -84,6 +102,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.4.1]: https://github.com/jyliuu/rinky/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jyliuu/rinky/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jyliuu/rinky/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jyliuu/rinky/releases/tag/v0.2.0
@@ -94,3 +113,4 @@ First public release.
 [#5]: https://github.com/jyliuu/rinky/pull/5
 [#9]: https://github.com/jyliuu/rinky/pull/9
 [#10]: https://github.com/jyliuu/rinky/pull/10
+[#12]: https://github.com/jyliuu/rinky/pull/12
