@@ -121,7 +121,8 @@ fn explain_with_tool_call_streams_in_batches_and_saves() {
         "AGENT ACTION block shown: {views:#?}"
     );
     let last = views.last().unwrap();
-    assert!(last.starts_with(":::back insightful:chats\n:::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"Two households, both alike in dignity\"\n\nExplain"), "{last}");
+    assert!(last.starts_with(":::back insightful:chats\n:::you\n**Selected passage"), "{last}");
+    assert!(last.contains("> \"Two households, both alike in dignity\"\n\nExplain the selected passage clearly"), "{last}");
     assert!(last.contains(":::answer AI — gpt-test | 300 tokens in · 90 out · 2 requests\nword0 word1"), "{last}");
     assert!(last.contains(":::chips\n- [Who is Tybalt?](insightful:q/0)"));
     assert!(!last.contains(":::action"), "actions only while the agent runs");
@@ -402,7 +403,7 @@ fn popup_entry_opens_the_action_menu_and_keeps_the_selection() {
     env.action("menu");
     env.answer(MENU_ACTIONS, "ask");
     let view = env.viewers().last().unwrap().clone();
-    assert!(view.contains("Give examples") && view.contains("> \"dignity\""), "the current chat with the passage: {view}");
+    assert!(view.contains("Give clear, concrete examples") && view.contains("> \"dignity\""), "the current chat with the passage: {view}");
     env.answer(VIEWER, "insightful:ask");
     assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_FOLLOWUP, .. })));
     env.answer(INPUT_FOLLOWUP, "What does it mean?");
@@ -546,8 +547,8 @@ fn model_search_errors_offline_and_close() {
     assert_eq!(env.ui.0.len(), n, "no dialog or menu after the cancel");
 }
 
-/// A preset action shows its short label in the chat but sends the whole prompt file
-/// (with the passage, its section and page); the bubble shows what was sent.
+/// A preset action sends the whole prompt file (with the passage, its section and
+/// page), and the chat shows exactly that: the passage with its location, then the prompt.
 #[test]
 fn preset_sends_the_full_prompt_and_the_bubble_shows_it() {
     let mut env = Env::new("preset", TOML, &[(200, &answer_turn())]);
@@ -567,14 +568,9 @@ fn preset_sends_the_full_prompt_and_the_bubble_shows_it() {
     assert!(system.contains("Title: Romeo and Juliet\nAuthor: William Shakespeare"));
 
     let view = env.viewers().last().unwrap().clone();
-    assert!(view.starts_with(":::back insightful:chats\n:::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"In fair Verona, where we lay our scene\"\n\nPeople / characters\n"), "{view}");
-    env.answer(VIEWER, "insightful:prompt/0");
-    let Some(UiRequest::Dialog { id: DIALOG_PROMPT, title, body, .. }) = env.ui.0.last().cloned() else { panic!("{:?}", env.ui.0.last()) };
-    assert_eq!(title, "People / characters: the prompt sent");
-    assert!(body.contains(&full) && body.contains("\"In fair Verona, where we lay our scene\""), "{body}");
-    let n = env.ui.0.len();
-    env.answer(VIEWER, "insightful:prompt/1");
-    assert_eq!(env.ui.0.len(), n, "an answer has no prompt dialog");
+    let bubble = format!(":::back insightful:chats\n:::you\n**Selected passage — Act 1**\n\n> \"In fair Verona, where we lay our scene\"\n\n{full}\n");
+    assert!(view.starts_with(&bubble), "the passage and the whole prompt, no tap needed: {view}");
+    assert!(!view.contains("tap to see") && !view.contains("People / characters"), "{view}");
 }
 
 /// "Start new chat" opens an empty chat view with the keyboard closed; a tap on the

@@ -59,18 +59,18 @@ top, its answer fills in below). Links:
 `insightful:q/N` (follow-up question N), `insightful:ask` (the "Message Insightful…" bar:
 keyboard, docked under the view with the bar lifted onto it), `insightful:stop` (while an
 answer is written), `insightful:retry` (only when sending again can work: not after a
-missing or rejected key), `insightful:prompt/N` (the bubble of preset message N),
-`insightful:chats` (Back: the chat list). Answers are labelled `AI — <model>`. Closing the
+missing or rejected key), `insightful:chats` (Back: the chat list). Answers are labelled `AI — <model>`. Closing the
 viewer (or going to another chat) leaves a running request running: the answer is saved
 to the chat that asked, and a toast says "Insightful answered" when it ends off screen.
 Closing the book cancels it. Only one answer runs at a time.
 
 Preset actions (Explain, Give examples, Context/history, People/characters) store the
-whole prompt file as the message and its label separately: the request carries the full
-prompt (wrapped in `highlighted_question.md` with the passage, section and page, plus
-the follow-up reminder; the system prompt has title, author and position), the chat
-shows the label with the caption "Preset prompt · tap to see what was sent", and a tap
-shows the sent text in a dialog.
+whole prompt file as the message and its label separately (the label titles the chat in
+the chat list). The request carries the full prompt (wrapped in
+`highlighted_question.md` with the passage, section and page, plus the follow-up
+reminder; the system prompt has title, author and position). As in the koplugin, a
+user bubble shows "Selected passage — LOCATION" (section, else page, else locator), the
+passage, and then the text that was sent: a preset's whole prompt, not its label.
 
 ## Tests
 

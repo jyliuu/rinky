@@ -28,11 +28,6 @@ pub const LINK_STOP: &str = "insightful:stop";
 pub const HOLD: &str = "hold:";
 /// Link back to the chat list.
 pub const LINK_CHATS: &str = "insightful:chats";
-/// Link of a preset question's bubble (`insightful:prompt/0`, the message index): shows
-/// the whole prompt that was sent for the short label.
-pub const LINK_PROMPT: &str = "insightful:prompt/";
-/// Caption under a preset question's label.
-pub const PROMPT_CAPTION: &str = "Preset prompt · tap to see what was sent";
 /// Placeholder of the input bar.
 pub const ASK_PLACEHOLDER: &str = "Message Insightful…";
 /// Status of a chat whose last question has no answer.
@@ -51,7 +46,8 @@ pub struct Message {
     /// Model that answered (assistant turns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Short label shown instead of a long action prompt (`Explain`).
+    /// Short name of a preset action prompt (`Explain`): the chat list's title for a
+    /// chat that starts with one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// Seconds since 1970.
@@ -297,6 +293,17 @@ pub struct Live {
     pub model: String,
 }
 
+/// "Selected passage — LOCATION" (the section, else the page, else the locator), as
+/// the koplugin's `selectionHtml` labels it.
+fn passage_label(sel: &SelectionInfo) -> String {
+    let nonblank = |s: &Option<String>| s.as_deref().filter(|s| !s.trim().is_empty()).map(arg);
+    let location = nonblank(&sel.section).or_else(|| sel.page.map(|p| format!("page {p}"))).or_else(|| nonblank(&sel.locator));
+    match location {
+        Some(l) => format!("Selected passage — {l}"),
+        None => "Selected passage".into(),
+    }
+}
+
 /// A selected passage as the chat view shows it: a quote in quotation marks.
 pub fn quote_passage(text: &str) -> String {
     quote(&guard(&format!("\"{}\"", text.trim())))
@@ -425,16 +432,13 @@ pub fn render(conv: &Conversation, x: Extras) -> (String, Vec<String>) {
     let last_answer = conv.messages.iter().rposition(|m| m.role != "user");
     for (i, m) in conv.messages.iter().enumerate() {
         if m.role == "user" {
-            // A preset action shows its short label; the bubble opens the full prompt.
-            let mut s = match &m.label {
-                Some(_) => format!(":::you {LINK_PROMPT}{i} | {PROMPT_CAPTION}\n"),
-                None => String::from(":::you\n"),
-            };
+            // As the koplugin shows it: the passage with its location, then the text that
+            // was sent (a preset action's whole prompt, not its short label).
+            let mut s = String::from(":::you\n");
             if let Some(sel) = m.selection.as_ref().filter(|s| !s.text.trim().is_empty()) {
-                s.push_str(&quote(&guard(&format!("\"{}\"", sel.text.trim()))));
-                s.push_str("\n\n");
+                s.push_str(&format!("**{}**\n\n{}\n\n", guard(&passage_label(sel)), quote_passage(&sel.text)));
             }
-            s.push_str(&guard(m.label.as_deref().unwrap_or(&m.content)));
+            s.push_str(&guard(&m.content));
             md.push(s);
         } else {
             let label = ai_label(m.model.as_deref());
@@ -479,11 +483,7 @@ pub fn render(conv: &Conversation, x: Extras) -> (String, Vec<String>) {
         md.push("*No conversation yet.*".into());
     }
     if let Some(sel) = x.pending.filter(|s| !s.text.trim().is_empty()) {
-        let label = match sel.section.as_deref().filter(|s| !s.trim().is_empty()) {
-            Some(s) => format!("Selected passage — {}", arg(s)),
-            None => "Selected passage".into(),
-        };
-        md.push(format!(":::card | Sent with your next message\n**{}**\n\n{}", guard(&label), quote_passage(&sel.text)));
+        md.push(format!(":::card | Sent with your next message\n**{}**\n\n{}", guard(&passage_label(sel)), quote_passage(&sel.text)));
     }
     md.push(format!(":::\n:::input {LINK_ASK} | {ASK_PLACEHOLDER}"));
     (md.join("\n\n"), questions)
@@ -566,8 +566,17 @@ mod tests {
         c.messages.push(u);
         let live = Live { actions: vec!["Calling `toc`".into()], text: "Par\n:::input x".into(), status: String::new(), model: "m1".into() };
         let (md, _) = render(&c, Extras { live: Some(&live), ..none });
-        assert!(md.starts_with(":::you insightful:prompt/0 | Preset prompt · tap to see what was sent\n> \"Two households\"\n\nExplain\n\n:::action\nCalling `toc`\n\n:::answer AI — m1 |\nPar\n\\:::input x\n\n:::chips\n- [Stop](insightful:stop)"), "{md}");
+        assert!(md.starts_with(":::you\n**Selected passage**\n\n> \"Two households\"\n\nExplain the selected passage clearly\n\n:::action\nCalling `toc`\n\n:::answer AI — m1 |\nPar\n\\:::input x\n\n:::chips\n- [Stop](insightful:stop)"), "{md}");
         assert!(md.ends_with(":::\n:::input insightful:ask | Message Insightful…") && !md.contains("Retry"));
+        // The label names the section, else the page, else the locator.
+        let at = |section: Option<&str>, page, locator: Option<&str>| {
+            let sel = SelectionInfo { text: "x".into(), section: section.map(Into::into), page, locator: locator.map(Into::into) };
+            passage_label(&sel)
+        };
+        assert_eq!(at(Some("Act 1"), Some(3), None), "Selected passage — Act 1");
+        assert_eq!(at(Some(" "), Some(3), Some("epubcfi")), "Selected passage — page 3");
+        assert_eq!(at(None, None, Some("epubcfi")), "Selected passage — epubcfi");
+        assert_eq!(at(None, None, None), "Selected passage");
         assert!(render(&c, Extras { error: Some("boom"), ..none }).0.contains(":::card |\n**Error:** boom\n\n:::chips\n- [Retry](insightful:retry)"));
         // A failure that cannot succeed again: no Retry.
         assert!(!render(&c, Extras { error: Some("HTTP 401"), can_retry: false, ..none }).0.contains("Retry"));
