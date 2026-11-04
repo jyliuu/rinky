@@ -90,6 +90,12 @@ wake_amazon() {
     n=0
     while [ -n "$q" ] && kill -0 "$q" 2>/dev/null && [ $n -lt 30 ]; do sleep 1; n=$((n + 1)); done
     rm -f "$RUN/quiet.pid"
+    # The Kindle's screensaver (blanket's module), unloaded while rinky ran.
+    if [ -f "$RUN/blanket-unloaded" ]; then
+        lipc-set-prop com.lab126.blanket load screensaver >/dev/null 2>&1
+        rm -f "$RUN/blanket-unloaded"
+        log "blanket: screensaver loaded again"
+    fi
     [ -s "$RUN/quieted" ] || return 0
     log "starting again: $(tr '\n' ' ' <"$RUN/quieted")"
     for j in $(sed '1!G;h;$!d' "$RUN/quieted"); do

@@ -775,6 +775,44 @@ fn long_press_selects_drag_extends_and_highlight_is_saved() {
     assert_eq!(BookState::load(&h.reader.path).unwrap().highlights.len(), 1);
 }
 
+/// A tap on a saved highlight opens its selection card with "Remove highlight" in
+/// place of "Highlight"; removing it clears the page and the sidecar.
+#[test]
+fn tap_on_a_highlight_opens_its_card_and_removes_it() {
+    let mut h = Harness::new("hl-tap", "juliet.epub");
+    h.reader.go_to_page(30);
+    h.paint();
+    let p = h.text_point();
+    h.frame(400, p.x, p.y, TouchPhase::Down);
+    h.tick(700);
+    h.frame(100, p.x + 300, p.y, TouchPhase::Move);
+    h.frame(100, p.x + 300, p.y, TouchPhase::Up);
+    let sel = h.reader.sel.clone().unwrap();
+    h.tap_button("sel-highlight");
+    assert_eq!(BookState::load(&h.reader.path).unwrap().highlights.len(), 1);
+    assert!(h.reader.overlay().is_none() && h.reader.sel.is_none());
+    // Tap the highlight.
+    let r = sel.rects[0];
+    h.tap(Rect::new(r.x + 4, r.y + 2, 8, r.h.saturating_sub(4).max(1)));
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Selection), "{:?}", h.reader.actions());
+    let o = h.reader.overlay().unwrap();
+    assert!(o.button_rect("sel-unhighlight").is_some() && o.button_rect("sel-highlight").is_none());
+    assert_eq!(h.reader.sel.as_ref().unwrap().text, sel.text, "the card quotes the highlight");
+    assert_eq!(h.reader.doc.as_deref().unwrap().selection().map(|s| s.text.clone()), Some(sel.text.clone()), "plugins read it");
+    h.shot("01-highlight-card");
+    h.tap_button("sel-unhighlight");
+    assert_eq!(h.kind(), None);
+    assert!(h.reader.saved_hl.is_empty());
+    assert!(BookState::load(&h.reader.path).unwrap().highlights.is_empty());
+    // A new selection afterwards offers "Highlight" again.
+    h.frame(400, p.x, p.y, TouchPhase::Down);
+    h.tick(700);
+    h.frame(100, p.x, p.y, TouchPhase::Up);
+    if h.kind() == Some(overlay::OverlayKind::Selection) {
+        assert!(h.reader.overlay().unwrap().button_rect("sel-highlight").is_some());
+    }
+}
+
 impl Harness {
     /// The selection drag has rested in its turn zone long enough: backdates the rest
     /// and delivers the timer the reader asked for (as the app loop does).

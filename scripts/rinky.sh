@@ -6,7 +6,8 @@
 #      can take the userstore, and a redeploy cannot hit a running file);
 #   2. start rinky-watchdog.sh (own session too);
 #   3. stop lab126_gui and wait until KPPMainApp and pillowd are gone;
-#   3b. stop the Amazon services rinky has no use for ($QUIET_JOBS: cloud sync,
+#   3b. unload the Kindle's screensaver (blanket), stop the Amazon services rinky has
+#      no use for ($QUIET_JOBS: cloud sync,
 #      metrics, log uploaders, audio, Bluetooth; listed in $RUN/quieted) and kill what
 #      a stopped job left running (its shell died, its daemon did not: fastmetrics,
 #      wifilocker; a stuck orphaned fastmetrics made powerd take 32 s per event);
@@ -296,6 +297,12 @@ wake_amazon() {
     n=0
     while [ -n "$q" ] && kill -0 "$q" 2>/dev/null && [ $n -lt 30 ]; do sleep 1; n=$((n + 1)); done
     rm -f "$RUN/quiet.pid"
+    # The Kindle's screensaver (blanket's module), unloaded while rinky ran.
+    if [ -f "$RUN/blanket-unloaded" ]; then
+        lipc-set-prop com.lab126.blanket load screensaver >/dev/null 2>&1
+        rm -f "$RUN/blanket-unloaded"
+        log "blanket: screensaver loaded again"
+    fi
     [ -s "$RUN/quieted" ] || return 0
     log "starting again: $(tr '\n' ' ' <"$RUN/quieted")"
     for j in $(sed '1!G;h;$!d' "$RUN/quieted"); do
@@ -432,6 +439,13 @@ done
 trap 'STATUS=signal; REASON="launcher got a signal"; exit 143' TERM
 log "framework stopped after ${waited}s"
 phase "stop framework" "$t"
+# The framework's blanket module stays loaded with X and draws the Kindle's screensaver
+# when powerd times out or the cover closes, over rinky's own (the book cover; the
+# power key is fine: powerd ignores it). KOReader unloads it too. wake_amazon loads it.
+if lipc-set-prop com.lab126.blanket unload screensaver >&3 2>&3; then
+    : >"$RUN/blanket-unloaded"
+    log "blanket: screensaver unloaded"
+fi
 # In the background: the slowest job's stop takes about 8 s, and rinky need not wait.
 # wake_amazon waits for it ($RUN/quiet.pid) before it starts anything again.
 t=$(now_ms)

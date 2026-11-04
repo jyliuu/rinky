@@ -3106,7 +3106,10 @@ impl PluginUi {
         let keyboard_open = self.layers.last().is_some_and(|l| matches!(l.kind, Kind::Input(_)));
         let input = matches!(ev, UiEvent::Gesture(_) | UiEvent::Key(_)) || (keyboard_open && matches!(ev, UiEvent::Touch(_)));
         if !input {
-            return (false, Vec::new());
+            // Under a modal layer (the chat view, a dialog) the screen gets no touches
+            // either: the reader's edge slides set the light from them, and they belong
+            // to the page alone.
+            return (matches!(ev, UiEvent::Touch(_)) && self.modal_open(), Vec::new());
         }
         if let UiEvent::Key(k) = ev {
             if k.key == ink_device::Key::Power {
@@ -4596,6 +4599,24 @@ mod tests {
         ui.handle(&key(Key::Back), screen());
         compose(&mut s, &mut ui, &[]);
         assert!(!ui.modal_open() && ui.pending() == 0, "nothing left to swallow taps: {:?}", ui.layer_names());
+    }
+
+    /// Under a modal layer (the Insightful chat, a dialog) the screen gets no touches:
+    /// the reader's edge slides set brightness and warmth from them, on the page only.
+    #[test]
+    fn modal_layer_keeps_touches_from_the_screen() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        let p = Point::new(20, 800);
+        let touch = UiEvent::Touch(ink_ui::Touch { slot: 0, kind: ink_ui::TouchKind::Move, pos: p, start: Point::new(20, 900), held: Duration::from_millis(80), moved: true });
+        assert!(!ui.handle(&touch, screen()).0, "no layer: the page gets it");
+        ui.push("p", UiRequest::Toast { text: "t".into() });
+        compose(&mut s, &mut ui, &[]);
+        assert!(!ui.handle(&touch, screen()).0, "a toast is not modal");
+        ui.push("p", UiRequest::Dialog { id: 1, title: "T".into(), body: "B".into(), buttons: vec![("OK".into(), "ok".into())] });
+        compose(&mut s, &mut ui, &[]);
+        assert!(ui.modal_open());
+        assert!(ui.handle(&touch, screen()).0, "the modal layer keeps it");
     }
 
     /// A test screen: fills the canvas with `fill` when dirty and shows it itself;

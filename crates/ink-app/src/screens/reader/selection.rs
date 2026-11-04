@@ -541,13 +541,19 @@ fn plugin_icon(label: &str) -> Icon {
     }
 }
 
-/// Every tool of the card in order: Highlight, Note, Insightful (`plugin-sel:I` with
+/// Every tool of the card in order: Highlight (Remove highlight when the selection is a
+/// saved highlight, `highlighted`), Note, Insightful (`plugin-sel:I` with
 /// `insightful = Some(I)`, the index of Insightful's selection action in `plugins`), the
 /// other plugin actions (`plugin-sel:I`), Search. Close and More are added by
 /// [`layout_tools`].
-pub fn all_tools(plugins: &[String], insightful: Option<usize>) -> Vec<Tool> {
+pub fn all_tools(plugins: &[String], insightful: Option<usize>, highlighted: bool) -> Vec<Tool> {
+    let first = if highlighted {
+        Tool { label: "Remove highlight".into(), icon: Some(Icon::Close), action: "sel-unhighlight".into() }
+    } else {
+        Tool { label: "Highlight".into(), icon: None, action: "sel-highlight".into() }
+    };
     let mut v = vec![
-        Tool { label: "Highlight".into(), icon: None, action: "sel-highlight".into() },
+        first,
         Tool { label: "Note".into(), icon: Some(Icon::Chat), action: "sel-note".into() },
     ];
     if let Some(i) = insightful.filter(|i| *i < plugins.len()) {
@@ -560,10 +566,10 @@ pub fn all_tools(plugins: &[String], insightful: Option<usize>) -> Vec<Tool> {
 
 /// The card's main row for a card `w` wide and the tools listed after "More": as many of
 /// [`all_tools`] as fit, "More" when some do not, Close.
-pub fn layout_tools(plugins: &[String], insightful: Option<usize>, w: u32) -> (Vec<Tool>, Vec<Tool>) {
+pub fn layout_tools(plugins: &[String], insightful: Option<usize>, highlighted: bool, w: u32) -> (Vec<Tool>, Vec<Tool>) {
     let inner = w.saturating_sub(SHADOW + 2 * PAD as u32);
     let slots = ((inner + GAP) / (TOOL_MIN_W + GAP)).max(4) as usize;
-    let mut all = all_tools(plugins, insightful);
+    let mut all = all_tools(plugins, insightful, highlighted);
     // One slot is Close; when not everything fits, one more is More.
     let room = slots.saturating_sub(1);
     let rest = if all.len() <= room { Vec::new() } else { all.split_off(room.saturating_sub(1)) };
@@ -576,7 +582,7 @@ pub fn layout_tools(plugins: &[String], insightful: Option<usize>, w: u32) -> (V
 
 /// The tools shown in the card's main row for a card `w` wide (see [`layout_tools`]).
 pub fn tools(plugins: &[String], insightful: Option<usize>, w: u32) -> Vec<Tool> {
-    layout_tools(plugins, insightful, w).0
+    layout_tools(plugins, insightful, false, w).0
 }
 
 /// The selection card: the quoted text with a black bar on its left, a row of icon
@@ -768,12 +774,12 @@ impl Widget for SelectionCard {
 /// Insightful's among them (its button takes the third place); tools that do not fit the
 /// row are listed after "More". `above`: the card stays above this y (the top of the
 /// dictionary card added next to it).
-pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, size: Size, above: Option<i32>) -> Overlay {
+pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, highlighted: bool, size: Size, above: Option<i32>) -> Overlay {
     let mut o = Overlay::new(OverlayKind::Selection);
     o.tree.add(None, Box::new(PageScrim { action: "sel-cancel".into() }), Rect::from_size(size));
     let anchor = bounds(&sel.rects).unwrap_or_default();
     let w = size.w.saturating_sub(48).min(CARD_W);
-    let (tools, rest) = layout_tools(plugins, insightful, w);
+    let (tools, rest) = layout_tools(plugins, insightful, highlighted, w);
     let quote = quote(sel, 300);
     let h = SelectionCard::height(&tools, quote.chars().count() + 2, rest.len(), w);
     let room = Size::new(size.w, above.map_or(size.h, |y| (y - GAP as i32).clamp(0, size.h as i32) as u32));
@@ -1074,7 +1080,7 @@ mod tests {
     fn card_row_fits_and_more_lists_every_plugin() {
         let size = Size::new(1272, 1696);
         // One plugin: Highlight, Note, the plugin, Search, Close (no More, no Copy).
-        let mut o = popup(&sel("Romeo"), &["Look up".into()], None, size, None);
+        let mut o = popup(&sel("Romeo"), &["Look up".into()], None, false, size, None);
         let acts: Vec<&str> = o.buttons.iter().map(|(a, _)| a.as_str()).collect();
         assert_eq!(acts, ["sel-highlight", "sel-note", "plugin-sel:0", "sel-search", "sel-cancel"]);
         for (a, r) in o.buttons.clone() {
@@ -1083,7 +1089,7 @@ mod tests {
         }
         // Eight plugins: two inline, More opens a page with the other six and Search (paged).
         let plugins: Vec<String> = (0..8).map(|i| format!("Action {i}")).collect();
-        let mut o = popup(&sel("Romeo"), &plugins, None, size, None);
+        let mut o = popup(&sel("Romeo"), &plugins, None, false, size, None);
         let acts: Vec<String> = o.buttons.iter().map(|(a, _)| a.clone()).collect();
         assert_eq!(acts, ["sel-highlight", "sel-note", "plugin-sel:0", "plugin-sel:1", "sel-more", "sel-cancel"]);
         let more = o.button_rect("sel-more").unwrap();
@@ -1116,7 +1122,7 @@ mod tests {
         assert!(!o.tree.get_mut::<SelectionCard>(id).unwrap().more);
         // Landscape and a narrow screen keep at least four tools of 96 px.
         for size in [Size::new(1696, 1272), Size::new(600, 800)] {
-            let o = popup(&sel("x"), &plugins, None, size, None);
+            let o = popup(&sel("x"), &plugins, None, false, size, None);
             assert!(o.buttons.iter().all(|(_, r)| r.w >= 96 && r.right() <= size.w as i32), "{size:?} {:?}", o.buttons);
         }
     }
@@ -1125,7 +1131,7 @@ mod tests {
     fn insightful_takes_the_third_place_and_there_is_no_copy() {
         let size = Size::new(1272, 1696);
         let plugins: Vec<String> = vec!["Look up".into(), "Insightful".into()];
-        let mut o = popup(&sel("Romeo"), &plugins, Some(1), size, None);
+        let mut o = popup(&sel("Romeo"), &plugins, Some(1), false, size, None);
         let acts: Vec<&str> = o.buttons.iter().map(|(a, _)| a.as_str()).collect();
         // Insightful's own plugin button is not listed twice.
         assert_eq!(acts, ["sel-highlight", "sel-note", "plugin-sel:1", "plugin-sel:0", "sel-search", "sel-cancel"]);
@@ -1136,12 +1142,12 @@ mod tests {
         let r = o.button_rect("plugin-sel:1").unwrap();
         assert_eq!(tap(&mut o, r).as_deref(), Some("plugin-sel:1"));
         // Not loaded: no Insightful button.
-        assert!(!all_tools(&plugins[..1], None).iter().any(|t| t.label == "Insightful"));
+        assert!(!all_tools(&plugins[..1], None, false).iter().any(|t| t.label == "Insightful"));
         // Kept above a card whose top is at y 900, even for a word under it.
         for y in [400, 1200] {
             let mut s = sel("Romeo");
             s.rects = vec![Rect::new(100, y, 400, 50)];
-            let o = popup(&s, &plugins, Some(1), size, Some(900));
+            let o = popup(&s, &plugins, Some(1), false, size, Some(900));
             let b = o.tree.bounds(o.ids["card"]).unwrap();
             assert!(b.bottom() <= 900 && b.y >= 0, "word at {y}: {b:?}");
         }
