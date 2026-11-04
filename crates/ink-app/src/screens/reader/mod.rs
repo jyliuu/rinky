@@ -618,6 +618,9 @@ pub struct ReaderScreen {
     session_hl: Vec<(String, usize, Vec<Rect>, String)>,
     /// Saved highlight ranges of the book (start, end), drawn with `range_rects`.
     saved_hl: Vec<(Position, Position)>,
+    /// The selection is a saved highlight that was tapped: its card offers "Remove
+    /// highlight" instead of "Highlight".
+    sel_highlight: bool,
     /// Plugin status texts (left, center, right) drawn on the shown page.
     status_shown: [String; 3],
     /// Chapter starts for the footer (rebuilt when the layout changes).
@@ -708,6 +711,7 @@ impl ReaderScreen {
             sel_dirty: false,
             session_hl: Vec::new(),
             saved_hl: Vec::new(),
+            sel_highlight: false,
             status_shown: Default::default(),
             chapter_map: None,
             speed: footer::Speed::default(),
@@ -1132,6 +1136,52 @@ impl ReaderScreen {
         }
     }
 
+    /// The saved highlight under `pos` on the shown page: its range and rectangles.
+    fn highlight_at(&mut self, pos: Point) -> Option<(Position, Position, Vec<Rect>)> {
+        const NEAR: i32 = 8;
+        let page = self.page;
+        let doc = self.doc.as_deref_mut()?;
+        self.saved_hl.iter().rev().find_map(|(start, end)| {
+            let rects = doc.range_rects(page, start, end);
+            let hit = rects.iter().any(|r| Rect::new(r.x - NEAR, r.y - NEAR, r.w + 2 * NEAR as u32, r.h + 2 * NEAR as u32).contains(pos));
+            hit.then(|| (start.clone(), end.clone(), rects))
+        })
+    }
+
+    /// Selects the saved highlight `start`..`end` (drawn at `rects` on the shown page)
+    /// and opens its card, as after selecting the text by hand: plugins read it as the
+    /// selection, and the card offers "Remove highlight".
+    fn open_highlight(&mut self, start: Position, end: Position, rects: Vec<Rect>, cx: &mut AppCtx) {
+        let text = BookState::load(&self.path)
+            .ok()
+            .and_then(|st| st.highlights.into_iter().find(|h| h.start == start.to_string() && h.end == end.to_string()))
+            .map(|h| h.text)
+            .unwrap_or_default();
+        log::info!("reader: tap on a highlight on page {} ({} chars)", self.page + 1, text.chars().count());
+        let sel = Selection { start, end, text, page: self.page, rects: rects.clone() };
+        if let Some(d) = self.doc.as_deref_mut() {
+            d.set_selection(sel.clone());
+        }
+        self.sel = Some(sel.clone());
+        self.sel_pages = vec![(self.page, rects)];
+        self.sel_highlight = true;
+        let o = self.selection_overlay(&sel, None, None, cx);
+        self.open_overlay(o, cx);
+    }
+
+    /// Removes the saved highlight `start`..`end` from the page and the book's sidecar.
+    fn remove_highlight(&mut self, start: &Position, end: &Position) {
+        self.saved_hl.retain(|(s, e)| !(s == start && e == end));
+        let key = start.to_string();
+        self.session_hl.retain(|(.., st)| *st != key);
+        let mut state = BookState::load(&self.path).unwrap_or_default();
+        let removed = state.remove_highlight(&key, &end.to_string());
+        match state.save(&self.path) {
+            Ok(()) => log::info!("reader: highlight removed ({})", if removed { "from the sidecar" } else { "not in the sidecar" }),
+            Err(e) => log::warn!("cannot save after removing a highlight: {e}"),
+        }
+    }
+
     /// True when a long press on a word selects it (`gestures.long_press` is
     /// `dictionary` or `select`).
     fn long_press_selects(cx: &AppCtx) -> bool {
@@ -1553,7 +1603,7 @@ impl ReaderScreen {
             let r = c.frame(&mut PaintCx::new(cx.canvas, cx.fonts, cx.theme), size);
             (plugin, id, c, r)
         });
-        let mut o = selection::popup(sel, &extra, insightful, size, card.as_ref().map(|(.., r)| r.y).or(keep_above));
+        let mut o = selection::popup(sel, &extra, insightful, self.sel_highlight, size, card.as_ref().map(|(.., r)| r.y).or(keep_above));
         self.dict_card = None;
         if let Some((plugin, id, c, r)) = card {
             log::info!("reader: {plugin} card {id} {:?} at {r:?}, sibling of the selection card (pages {:?})", c.title, c.pages);
@@ -1708,6 +1758,7 @@ impl ReaderScreen {
         }
         self.end_bridge();
         if self.sel.take().is_some() {
+            self.sel_highlight = false;
             // The inverted selection is on the canvas only; put the page back there too.
             if let Some(b) = selection::bounds(&self.sel_shown) {
                 self.reveal.push(b);
@@ -1822,6 +1873,14 @@ impl ReaderScreen {
             "sel-cancel" => self.close_overlay(),
             "sel-highlight" => {
                 self.add_highlight(None);
+                self.close_overlay();
+                self.rerender = true;
+                self.mark_change = true;
+            }
+            "sel-unhighlight" => {
+                if let Some(sel) = self.sel.clone() {
+                    self.remove_highlight(&sel.start, &sel.end);
+                }
                 self.close_overlay();
                 self.rerender = true;
                 self.mark_change = true;
@@ -2260,6 +2319,13 @@ impl ReaderScreen {
             UiEvent::Gesture(g) => match *g {
                 Gesture::Tap { pos } if self.pill_shown() && back_rect(size).contains(pos) => {
                     self.go_back_from_link();
+                }
+                // A tap on a saved highlight: its selection card (Remove highlight, Note,
+                // Insightful, ...).
+                Gesture::Tap { pos } if self.highlight_at(pos).is_some() => {
+                    if let Some((start, end, rects)) = self.highlight_at(pos) {
+                        self.open_highlight(start, end, rects, cx);
+                    }
                 }
                 Gesture::Tap { pos } if self.link_at(pos).is_some() => {
                     if let Some(link) = self.link_at(pos) {
