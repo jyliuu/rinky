@@ -1136,16 +1136,25 @@ impl ReaderScreen {
         }
     }
 
-    /// The saved highlight under `pos` on the shown page: its range and rectangles.
+    /// The saved highlight under `pos` on the shown page: its range and rectangles. A
+    /// document that cannot map a saved range (fixed layouts) has the rectangles kept
+    /// for the highlights made this session.
     fn highlight_at(&mut self, pos: Point) -> Option<(Position, Position, Vec<Rect>)> {
         const NEAR: i32 = 8;
+        let near = |rects: &[Rect]| rects.iter().any(|r| Rect::new(r.x - NEAR, r.y - NEAR, r.w + 2 * NEAR as u32, r.h + 2 * NEAR as u32).contains(pos));
         let page = self.page;
         let doc = self.doc.as_deref_mut()?;
-        self.saved_hl.iter().rev().find_map(|(start, end)| {
+        let mapped = self.saved_hl.iter().rev().find_map(|(start, end)| {
             let rects = doc.range_rects(page, start, end);
-            let hit = rects.iter().any(|r| Rect::new(r.x - NEAR, r.y - NEAR, r.w + 2 * NEAR as u32, r.h + 2 * NEAR as u32).contains(pos));
-            hit.then(|| (start.clone(), end.clone(), rects))
-        })
+            near(&rects).then(|| (start.clone(), end.clone(), rects))
+        });
+        if mapped.is_some() {
+            return mapped;
+        }
+        let key = doc.layout().cache_key();
+        let (.., rects, st) = self.session_hl.iter().rev().find(|(k, p, rects, _)| *k == key && *p == page && near(rects))?;
+        let (start, end) = self.saved_hl.iter().find(|(s, _)| s.to_string() == *st)?;
+        Some((start.clone(), end.clone(), rects.clone()))
     }
 
     /// Selects the saved highlight `start`..`end` (drawn at `rects` on the shown page)
