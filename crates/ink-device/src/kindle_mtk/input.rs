@@ -583,6 +583,9 @@ impl KindleInput {
             me.opts.sleep.as_ref().map(|c| (c.auto_sleep, c.suspend)),
             me.opts.sleep.as_ref().map(|c| c.cover)
         );
+        if me.opts.sleep.is_some() {
+            me.keep_powerd_out_of_screensaver();
+        }
         // Read only: KOReader's hall toggle writes hall_enable; rinky never does.
         let hall = HallInfo::read(&me.sys);
         if hall.disabled() {
@@ -591,6 +594,22 @@ impl KindleInput {
             log::info!("{}", hall.describe());
         }
         Ok(me)
+    }
+
+    /// rinky draws its own screensaver. powerd still runs its inactivity timer and
+    /// follows the cover, and its screensaver (the framework's blanket module) drew the
+    /// Kindle's picture over the book cover after a timeout or a cover close. Sets
+    /// `preventScreenSaver` (journaled: the launcher puts the old value back).
+    fn keep_powerd_out_of_screensaver(&mut self) {
+        let old = self.lipc.get_int("com.lab126.powerd", "preventScreenSaver");
+        if let Ok(v) = old {
+            let sh = self.shared.borrow();
+            let _ = sh.journal.record(Entry::LipcInt { publisher: "com.lab126.powerd".into(), prop: "preventScreenSaver".into(), value: v });
+        }
+        match self.lipc.set_int("com.lab126.powerd", "preventScreenSaver", 1) {
+            Ok(()) => log::info!("sleep: powerd preventScreenSaver 1 (was {old:?})"),
+            Err(e) => log::warn!("sleep: powerd preventScreenSaver not set: {e}"),
+        }
     }
 
     /// The touchscreen.

@@ -269,7 +269,9 @@ for how in exit kill; do
   after=$(jobs_state)
   [ "$during" = "stop/waiting stop/waiting " ] && [ "$after" = "start/running start/running " ] \
     && [ "$(cat "$SB/state/btmanagerd")" = stop/waiting ] && [ ! -e "$SB/run/quieted" ] \
-    && ok "15 Amazon services ($how): stopped while rinky runs, started again" \
+    && grep -q "lipc-set-prop com.lab126.blanket unload screensaver" "$SB/calls.log" \
+    && grep -q "lipc-set-prop com.lab126.blanket load screensaver" "$SB/calls.log" && [ ! -e "$SB/run/blanket-unloaded" ] \
+    && ok "15 Amazon services ($how): stopped while rinky runs, started again; the Kindle screensaver unloaded and loaded again" \
     || bad "15 ($how) during=[$during] after=[$after] btmanagerd=$(cat "$SB/state/btmanagerd")"
   finish
 done
