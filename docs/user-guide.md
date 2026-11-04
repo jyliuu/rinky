@@ -454,6 +454,9 @@ back on its own within about 15 seconds.
 Updates come from the project's GitHub releases. Each release contains the package
 `rinky-<version>-kindlehf.tar.gz` and a `SHA256SUMS` file.
 
+- **In rinky:** *Settings > Update*, *Check for update*, then *Install X and restart*.
+  Turn Wi-Fi on first. rinky installs the new version and restarts into it by itself;
+  the Kindle's own screens do not come up in between.
 - **KUAL:** *rinky > Update rinky*. Turn Wi-Fi on first. The result appears at
   the bottom of the screen.
 - **Over SSH:**
@@ -477,7 +480,8 @@ What the update does:
    SHA-256 again while it unpacks the file, then runs the package's installer. The
    installer installs all files or none (see [Install](#2-install)). Your settings,
    notes and plugins are kept.
-5. The new version runs the next time you start rinky.
+5. From *Settings > Update* rinky then restarts into the new version. From KUAL or
+   SSH the new version runs the next time you start rinky.
 
 The update needs about 10 MB free on the Kindle: the unpacked package in
 `/mnt/us/rinky/.update` (about 5 MB) and the installer's copies next to the old

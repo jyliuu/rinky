@@ -20,7 +20,8 @@
 //!    first install. It copies every file next to its target first and renames the
 //!    copies into place only when all copies succeeded, so the running binary is not
 //!    disturbed and a failed copy (no space left) leaves the old version installed.
-//!    The new version runs after the next start.
+//!    The new version runs after the next start; the Update page asks the launcher for
+//!    that start at once ([`request_restart`]).
 //!
 //! Every failure leaves the installed files as one version: the old one, unless the
 //! installer failed while renaming (it then says so). The download and the unpacked copy
@@ -223,6 +224,33 @@ impl fmt::Display for Version {
             write!(f, "-{}", self.pre)?;
         }
         Ok(())
+    }
+}
+
+/// Asks the launcher to run the installed rinky again when this one exits, without
+/// starting the Kindle UI in between: writes `$RINKY_RUN/restart`, as
+/// `rinky-ctl.sh restart` does. False (nothing written) when rinky was not started by
+/// a launcher that can restart (no `$RINKY_RUN/restart-capable`): the user then exits
+/// and starts rinky again.
+pub fn request_restart() -> bool {
+    std::env::var_os("RINKY_RUN").is_some_and(|run| request_restart_in(Path::new(&run)))
+}
+
+/// [`request_restart`] with the launcher's run directory `run`.
+pub fn request_restart_in(run: &Path) -> bool {
+    if !run.join("restart-capable").exists() {
+        log::info!("update: the launcher cannot restart rinky ({} missing)", run.join("restart-capable").display());
+        return false;
+    }
+    match std::fs::write(run.join("restart"), b"") {
+        Ok(()) => {
+            log::info!("update: installed; the launcher restarts rinky into it");
+            true
+        }
+        Err(e) => {
+            log::warn!("update: cannot ask for a restart ({e})");
+            false
+        }
     }
 }
 
@@ -893,6 +921,22 @@ mod tests {
     use std::io::{BufRead, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+
+    /// After an install the app asks the launcher for a restart into the new version,
+    /// only from a launcher that can do it (an older one would start the Kindle UI).
+    #[test]
+    fn restart_is_requested_only_from_a_restart_capable_launcher() {
+        let run = std::env::temp_dir().join(format!("ink-update-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&run);
+        std::fs::create_dir_all(&run).unwrap();
+        assert!(!request_restart_in(&run), "no restart-capable file");
+        assert!(!run.join("restart").exists());
+        std::fs::write(run.join("restart-capable"), b"").unwrap();
+        assert!(request_restart_in(&run));
+        assert!(run.join("restart").exists(), "the launcher's restart request");
+        assert!(!request_restart_in(&run.join("missing")), "no run directory");
+        let _ = std::fs::remove_dir_all(&run);
+    }
 
     // ---- archive helpers (ustar + gzip), the format scripts/package.sh writes ----
 

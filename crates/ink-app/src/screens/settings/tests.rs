@@ -421,6 +421,27 @@ fn update_jobs_show_progress_then_the_result() {
     assert_eq!(s.rebuild, Some(RefreshClass::Gl16));
 }
 
+/// Install has no confirmation: the button says "Install X and restart". Without a
+/// launcher that can restart (tests, a run by hand) the status says to start rinky
+/// again; with one, "Restarting rinky…" shows and the next timer ends rinky.
+#[test]
+fn install_restarts_into_the_new_version() {
+    let mut s = SettingsScreen::default();
+    let package = update::Asset { name: "rinky-9.9.9-kindlehf.tar.gz".into(), url: String::new(), size: None, sha256: None };
+    let rel = update::Release { tag: "v9.9.9".into(), version: update::Version::parse("9.9.9").unwrap(), package, sums: None };
+    s.release = Some(rel.clone());
+    s.start_job(Job::spawn("Installing 9.9.9", move |_: &Reporter<UpdateJob>| UpdateJob::Install(rel, Ok("log".into()))));
+    s.poll_job();
+    assert!(s.dialog.is_none(), "no confirmation dialog");
+    if std::env::var_os("RINKY_RUN").is_none() {
+        assert_eq!(s.status_text, "Installed 9.9.9. Exit and start rinky again to use it.");
+        assert!(s.restarting.is_none() && s.timeout().is_none());
+    }
+    // With the launcher's restart request written: a short timer, then the exit.
+    s.restarting = Some("9.9.9".into());
+    assert_eq!(s.timeout(), Some(RESTART_DELAY));
+}
+
 #[test]
 fn update_check_from_the_page_runs_as_a_job_and_reports_a_bad_url() {
     let mut settings = Settings::default();

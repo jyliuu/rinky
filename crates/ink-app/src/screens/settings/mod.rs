@@ -468,6 +468,9 @@ pub const DEVICE_CARD_H: u32 = 256;
 pub const CLOCK_CARD_H: u32 = 168;
 /// Height of the card on the Update page.
 pub const UPDATE_CARD_H: u32 = 360;
+/// After an update was installed: how long "Restarting rinky…" shows before rinky exits
+/// and the launcher starts the new version.
+const RESTART_DELAY: Duration = Duration::from_millis(500);
 
 /// The last `max` characters of a path, with a leading ellipsis when cut
 /// (card bodies clip at the card edge; the end of a path is the useful part).
@@ -906,7 +909,6 @@ impl PluginPage {
 enum Confirm {
     Exit,
     Forget(String),
-    Install,
 }
 
 /// Result of an update job.
@@ -935,6 +937,9 @@ pub struct SettingsScreen {
     input: Option<WidgetId>,
     networks: Vec<WifiNetwork>,
     release: Option<update::Release>,
+    /// An update was installed and the launcher runs it when rinky exits: the next timer
+    /// ends rinky (after the status line said so). The installed version.
+    restarting: Option<String>,
     /// Update check or install running on a worker thread.
     job: Option<Job<UpdateJob>>,
     /// Plugin settings pages listed on the Plugins page (`ppage:<index>`).
@@ -1444,7 +1449,7 @@ impl SettingsScreen {
         let x = content.x + space(4);
         let w = content.w - 2 * space(4) as u32;
         let card = Card::new(format!("rinky {}", update::current_version()), "").subtitle("Installed version").body(
-            "The check asks the release server for a newer package; an install verifies its SHA-256 and runs install.sh. Wi-Fi must be on.",
+            "The check asks the release server for a newer package. Install downloads it, verifies its SHA-256, installs it and restarts rinky into it. Wi-Fi must be on.",
         );
         let y = content.y + space(2);
         self.tree.add(None, Box::new(card), Rect::new(x, y, w, UPDATE_CARD_H));
@@ -1452,7 +1457,7 @@ impl SettingsScreen {
         match &self.release {
             Some(r) => {
                 self.tree.add(None, Box::new(Button::new("Check again", "update-check")), Rect::new(x, y, w, 104));
-                let label = format!("Install {}", r.version);
+                let label = format!("Install {} and restart", r.version);
                 self.tree.add(None, Box::new(Button::filled(label, "update-install")), Rect::new(x, y + 104 + space(3), w, 104));
             }
             None => {
@@ -1579,11 +1584,6 @@ impl SettingsScreen {
         let (title, body, ok) = match &what {
             Confirm::Exit => ("Exit to Kindle?".to_string(), "rinky closes and the Kindle home screen starts.".to_string(), "Exit"),
             Confirm::Forget(e) => (format!("Forget {e}?"), "The saved password is removed from the Kindle.".to_string(), "Forget"),
-            Confirm::Install => (
-                "Install the update?".to_string(),
-                "The package is downloaded, checked and installed. Start rinky again afterwards.".to_string(),
-                "Install",
-            ),
         };
         let scrim = self.tree.add(None, Box::new(Scrim::new("")), Rect::from_size(self.size));
         let dialog = Dialog { title, body, buttons: vec![("Cancel".into(), "dlg-cancel".into()), (ok.into(), "dlg-ok".into())] };
@@ -1931,7 +1931,8 @@ impl SettingsScreen {
                     UpdateJob::Check(update::check(&client, &cfg))
                 }));
             }
-            "update-install" => self.confirm(Confirm::Install),
+            // No question: the button says what happens.
+            "update-install" => self.start_install(cx),
             "ppage" => {
                 let Some(e) = arg.parse::<usize>().ok().and_then(|i| self.plugin_pages.get(i)).cloned() else {
                     return Ok(Transition::None);
@@ -1966,17 +1967,6 @@ impl SettingsScreen {
                     Err(e) => format!("Cannot forget {essid}: {e}"),
                 };
             }
-            Confirm::Install => {
-                let Some(rel) = self.release.clone() else { return Ok(Transition::None) };
-                let client = ink_net::UreqClient::new();
-                let cfg = update::UpdateConfig::from_settings(cx.settings, cx.paths);
-                let label = format!("Installing {}", rel.version);
-                self.start_job(Job::spawn(label, move |r: &Reporter<UpdateJob>| {
-                    r.progress("downloading, checking and installing");
-                    let out = update::install(&client, &cfg, &rel);
-                    UpdateJob::Install(rel, out)
-                }));
-            }
         }
         Ok(Transition::None)
     }
@@ -1994,6 +1984,20 @@ impl SettingsScreen {
             self.status_text = text;
         }
         Ok(())
+    }
+
+    /// Downloads, checks and installs the release found by the check; rinky restarts
+    /// into it when that worked ([`update::request_restart`]).
+    fn start_install(&mut self, cx: &mut AppCtx) {
+        let Some(rel) = self.release.clone() else { return };
+        let client = ink_net::UreqClient::new();
+        let cfg = update::UpdateConfig::from_settings(cx.settings, cx.paths);
+        let label = format!("Installing {}", rel.version);
+        self.start_job(Job::spawn(label, move |r: &Reporter<UpdateJob>| {
+            r.progress("downloading, checking and installing");
+            let out = update::install(&client, &cfg, &rel);
+            UpdateJob::Install(rel, out)
+        }));
     }
 
     fn start_job(&mut self, job: Job<UpdateJob>) {
@@ -2030,6 +2034,10 @@ impl SettingsScreen {
                     }
                     UpdateJob::Install(rel, r) => {
                         self.status_text = match r {
+                            Ok(_) if update::request_restart() => {
+                                self.restarting = Some(rel.version.to_string());
+                                format!("Installed {}. Restarting rinky…", rel.version)
+                            }
                             Ok(_) => format!("Installed {}. Exit and start rinky again to use it.", rel.version),
                             Err(e) => format!("Install failed: {e}"),
                         };
@@ -2081,6 +2089,11 @@ impl AppScreen for SettingsScreen {
 
     fn handle(&mut self, ev: &UiEvent, cx: &mut AppCtx) -> anyhow::Result<Transition> {
         if matches!(ev, UiEvent::Quit) {
+            return Ok(Transition::Exit);
+        }
+        // The status line showed "Restarting rinky…": the launcher starts the new version.
+        if let (Some(v), UiEvent::Timer(_)) = (&self.restarting, ev) {
+            crate::logging::set_exit_reason(format!("update {v} installed: restarting into it"), true);
             return Ok(Transition::Exit);
         }
         if self.job.is_some() {
@@ -2160,6 +2173,9 @@ impl AppScreen for SettingsScreen {
     }
 
     fn timeout(&self) -> Option<Duration> {
+        if self.restarting.is_some() {
+            return Some(RESTART_DELAY);
+        }
         self.job.is_some().then_some(worker::POLL)
     }
 }
