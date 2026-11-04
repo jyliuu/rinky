@@ -4,6 +4,18 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-11-04
+
+### Added
+- Tap a highlight to open its selection card again, with **Remove highlight** in place
+  of **Highlight**. Note, Insightful, Search and the other actions work on the
+  highlighted text. ([#16])
+
+### Fixed
+- The brightness and warmth edge slides work only on the reading page. With the
+  Insightful chat, a plugin dialog or another plugin window open, a slide along the
+  screen edge no longer changes the light underneath. ([#16])
+
 ## [0.4.2] - 2026-11-04
 
 ### Added
@@ -129,6 +141,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.4.3]: https://github.com/jyliuu/rinky/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jyliuu/rinky/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jyliuu/rinky/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jyliuu/rinky/compare/v0.3.0...v0.4.0
@@ -144,3 +157,4 @@ First public release.
 [#12]: https://github.com/jyliuu/rinky/pull/12
 [#14]: https://github.com/jyliuu/rinky/pull/14
 [#15]: https://github.com/jyliuu/rinky/pull/15
+[#16]: https://github.com/jyliuu/rinky/pull/16
