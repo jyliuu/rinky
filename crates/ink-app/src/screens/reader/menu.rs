@@ -4,8 +4,8 @@
 //!   book title with the chapter under it, icon buttons Contents, Aa, Light, Bookmark,
 //!   Search, More. A marked page shows the bookmark icon on a black disc.
 //! - Bottom: the [`Scrubber`]: its upper half is one row with "Page 3 of 208 · 12%" on
-//!   the left and "12 pages left in chapter" on the right (a "Back to p. N" pill at its
-//!   right end after following an in-book link or footnote), its lower half the slider (a page slider with chapter ticks on the track that
+//!   the left and "12 pages left in chapter" on the right (a "Go back to p. N" button at its
+//!   right end after a jump: search result, Contents, Go to, scrubber, link, footnote), its lower half the slider (a page slider with chapter ticks on the track that
 //!   shows the chapter and page under the finger while dragging), and under it the dock:
 //!   an icon over a label for each plugin entry (when there are any).
 //!
@@ -90,9 +90,8 @@ pub struct ChapterMark {
 pub struct MenuExtra {
     /// Chapter starts (top TOC level), sorted by page.
     pub chapters: Vec<ChapterMark>,
-    /// 0-based page before the last followed in-book link or footnote ("Back to p. N"),
-    /// when it differs from the page. TOC, Go to, scrubber, search and bookmark jumps do
-    /// not set it.
+    /// 0-based page the last jump started from ("Go back to p. N"): a search result,
+    /// Contents, Go to, scrubber, bookmark, link or footnote; when it differs from the page.
     pub return_to: Option<usize>,
 }
 
@@ -167,7 +166,7 @@ pub fn build_with(info: &MenuInfo, extra: &MenuExtra, plugins: &[String], size: 
     if let Some(p) = extra.return_to {
         // A child of the scrubber: it repaints with it (the drag pill clears the row).
         let r = Rect::new((w - pill_w) as i32 - space(3), row_y, pill_w, ROW_H);
-        o.button(Some(slider), Button::new(format!("Back to p. {}", p + 1), "return").with_icon(Icon::Back), r);
+        o.button(Some(slider), Button::new(format!("Go back to p. {}", p + 1), "return").with_icon(Icon::Back), r);
     }
     if !plugins.is_empty() {
         // At most PLUGIN_PILLS entries; with more, the last one opens the rest
@@ -513,8 +512,8 @@ impl super::ReaderScreen {
             .filter_map(|e| Some(ChapterMark { title: e.title.clone(), page: e.page.or_else(|| doc.page_of_known(&e.position))? }))
             .collect();
         chapters.sort_by_key(|c| c.page);
-        // Only footnote jumps show a return pill outside the Aa sheet.
-        let return_to = self.back.last().filter(|_| self.back_pill).and_then(|p| doc.page_of(p).ok()).filter(|&p| p != page);
+        // "Go back" after any jump (search, Contents, Go to, scrubber, link, footnote).
+        let return_to = self.return_page().filter(|&p| p != page);
         MenuExtra { chapters, return_to }
     }
 
@@ -550,7 +549,7 @@ impl super::ReaderScreen {
             }
             "return" => {
                 self.close_overlay();
-                self.go_back_from_link();
+                self.go_back();
             }
             "goto" => {
                 let o = self.goto_overlay(0, size);
@@ -805,22 +804,30 @@ mod wired {
         assert_eq!(a, format!("page:{}", target + 1));
         // The harness runs mod.rs's action; do what the wired reader does for it.
         h.reader.go_to_page(40);
+        h.reader.back.clear();
         assert_eq!(act(&mut h, &a), Transition::None);
         assert_eq!(h.reader.page(), target);
-        // A scrubber jump is not a link: no "Back to p. N".
+        // A scrubber jump has a way back in the menu ("Go back to p. 41"), but it is not
+        // a link: the back gesture and the page pill leave it alone.
         open_menu(&mut h);
-        assert_eq!(h.reader.menu_extra().return_to, None);
-        assert!(h.reader.overlay().unwrap().button_rect("return").is_none());
+        assert_eq!(h.reader.menu_extra().return_to, Some(40));
+        h.shot("05d-reader-menu-go-back");
+        assert!(h.reader.overlay().unwrap().button_rect("return").is_some());
+        assert_eq!(h.reader.link_return_page(), None);
+        assert!(!h.reader.go_back_from_link(), "the back gesture does not go back from a scrub");
+        act(&mut h, "return");
+        assert_eq!(h.reader.page(), 40);
+        assert!(h.reader.back.is_empty());
         // A plain in-book link (e.g. a contents page) keeps the way back for the Aa
-        // sheet, but shows no pill on the page or in the menu.
-        h.reader.go_to_page(40);
+        // sheet and the menu, but shows no pill on the page.
         let target_pos = h.reader.doc.as_deref().unwrap().position_of_page(target).unwrap();
         h.reader.jump(&target_pos, false);
         assert_eq!(h.reader.link_return_page(), Some(40));
         assert!(!h.reader.pill_shown());
         open_menu(&mut h);
-        assert_eq!(h.reader.menu_extra().return_to, None);
+        assert_eq!(h.reader.menu_extra().return_to, Some(40));
         act(&mut h, "close");
+        h.reader.back.clear();
         // After a footnote jump the pill is there and returns.
         h.reader.go_to_page(40);
         h.reader.jump(&target_pos, true);
@@ -832,10 +839,17 @@ mod wired {
         act(&mut h, "return");
         assert_eq!(h.reader.page(), 40);
         assert_eq!(h.kind(), None);
-        // A page jump drops the link return place.
+        // A page jump after a footnote: the way back goes to the footnote's page first,
+        // then to where the footnote was followed. The pill is gone with the jump.
         h.reader.jump(&target_pos, true);
         act(&mut h, "page:42");
-        assert!(h.reader.back.is_empty());
+        assert!(!h.reader.pill_shown());
+        assert_eq!(h.reader.back.len(), 2);
+        assert!(h.reader.go_back());
+        assert_eq!(h.reader.page(), target);
+        assert!(h.reader.go_back());
+        assert_eq!(h.reader.page(), 40);
+        assert!(!h.reader.go_back(), "nowhere left");
     }
 
     #[test]
@@ -893,7 +907,12 @@ mod wired {
         assert!(o.ids.contains_key("list"));
         act(&mut h, "hl:0");
         assert_eq!(h.reader.page(), 30);
-        assert_eq!(h.reader.menu_extra().return_to, None, "a highlight jump is not a link");
+        // Go back from the highlight to where the Go to panel was opened.
+        assert_eq!(h.reader.menu_extra().return_to, Some(100), "a highlight jump has a way back");
+        assert_eq!(h.reader.link_return_page(), None, "but it is not a link");
+        open_menu(&mut h);
+        act(&mut h, "return");
+        assert_eq!(h.reader.page(), 100);
     }
 
     #[test]

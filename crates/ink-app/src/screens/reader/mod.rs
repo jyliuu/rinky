@@ -506,6 +506,15 @@ fn selection_entries(cx: &AppCtx) -> (Vec<String>, Option<usize>) {
 /// ([`ReaderScreen::dict_card`]): `pcard:<the plugin's button action>`.
 const PCARD: &str = "pcard:";
 
+/// A place on the way back: where a jump started.
+#[derive(Clone, Debug)]
+struct Return {
+    position: Position,
+    /// The jump followed an in-book link or footnote (the back gesture and key, the
+    /// "Back to p. N" pill and the Aa sheet use only these).
+    link: bool,
+}
+
 /// The reader.
 pub struct ReaderScreen {
     path: PathBuf,
@@ -555,8 +564,9 @@ pub struct ReaderScreen {
     book_settings: BookSettings,
     /// Links of a page (page, links), read when a tap needs them.
     links: Option<(usize, Vec<Link>)>,
-    /// Where internal links came from, latest last ("Back" returns there).
-    back: Vec<Position>,
+    /// Where jumps came from, latest last: the menu's "Go back" returns to the last one,
+    /// the back gesture and key only when it was a link.
+    back: Vec<Return>,
     /// The "Back to p. N" pill is drawn on the page: only after a footnote jump. Other
     /// in-book links (a contents page, cross references) keep the return place for the
     /// Aa sheet's Back button and the back gesture, without a pill on the page.
@@ -763,16 +773,34 @@ impl ReaderScreen {
         }
     }
 
-    /// Shows page `page` (clamped) as a jump (`Change::Jump`). This is a jump that is not a
-    /// link (TOC, Go to, scrubber, search result, bookmark, plugin): the link return
-    /// place is forgotten, so the "Back to p. N" pill goes away.
+    /// Shows page `page` (clamped) as a jump (`Change::Jump`) without the footnote pill.
+    /// Keeps the way back as it is; a jump the reader asked for goes through
+    /// [`Self::navigate_to_page`].
     fn go_to_page(&mut self, page: usize) {
-        if !self.back.is_empty() {
-            log::info!("reader: link return place dropped (jump to page {})", page + 1);
-            self.back.clear();
-        }
         self.back_pill = false;
         self.show_page(page);
+    }
+
+    /// A jump that is not a link (Contents, Go to, scrubber, search result, bookmark,
+    /// plugin): remembers where the reader was, for the menu's "Go back".
+    fn navigate_to_page(&mut self, page: usize) {
+        self.remember_here(page, false);
+        self.go_to_page(page);
+    }
+
+    /// Puts the shown page's position on the way back, unless the jump goes to `to` =
+    /// this page. At most 50 places are kept.
+    fn remember_here(&mut self, to: usize, link: bool) {
+        if to == self.page {
+            return;
+        }
+        let Some(doc) = self.doc.as_deref() else { return };
+        if let Ok(position) = doc.position_of_page(self.page) {
+            self.back.push(Return { position, link });
+            if self.back.len() > 50 {
+                self.back.remove(0);
+            }
+        }
     }
 
     /// Shows page `page` (clamped) as a jump (`Change::Jump`: REAGL, a GC16 per the
@@ -925,11 +953,11 @@ impl ReaderScreen {
         marked
     }
 
-    /// Goes to `pos` (a TOC entry, bookmark, link or search hit).
+    /// Goes to `pos` (a TOC entry, bookmark or search hit), remembering the way back.
     fn go_to_position(&mut self, pos: &Position) {
         let Some(doc) = self.doc.as_deref() else { return };
         match doc.page_of(pos) {
-            Ok(p) => self.go_to_page(p),
+            Ok(p) => self.navigate_to_page(p),
             Err(e) => log::warn!("reader: cannot go to {pos}: {e}"),
         }
     }
@@ -1011,12 +1039,7 @@ impl ReaderScreen {
                 return;
             }
         };
-        if let Ok(here) = doc.position_of_page(self.page) {
-            self.back.push(here);
-            if self.back.len() > 50 {
-                self.back.remove(0);
-            }
-        }
+        self.remember_here(to, true);
         self.back_pill = pill;
         log::info!("reader: link from page {} to page {} (back pill {})", self.page + 1, to + 1, if pill { "shown" } else { "hidden" });
         self.show_page(to);
@@ -1024,30 +1047,49 @@ impl ReaderScreen {
 
     /// True when the Back pill is on the page (a footnote was followed).
     pub(super) fn pill_shown(&self) -> bool {
-        self.back_pill && !self.back.is_empty()
+        self.back_pill && self.back.last().is_some_and(|r| r.link)
     }
 
     /// The 0-based page "Back to p. N" returns to: where the last followed in-book link
-    /// or footnote was. `None` when no link was followed (or the place is unknown).
+    /// or footnote was. `None` when the last jump was not a link (or the place is
+    /// unknown).
     pub fn link_return_page(&self) -> Option<usize> {
+        self.back.last().filter(|r| r.link).and_then(|_| self.return_page())
+    }
+
+    /// The 0-based page the menu's "Go back" returns to: where the last jump of any
+    /// kind started.
+    pub fn return_page(&self) -> Option<usize> {
         let doc = self.doc.as_deref()?;
-        self.back.last().and_then(|p| doc.page_of(p).ok())
+        self.back.last().and_then(|r| doc.page_of(&r.position).ok())
     }
 
     /// Returns to where the last followed in-book link or footnote was (the "back"
-    /// action, the Back key, the "Back to p. N" pill). False when there is none.
+    /// action, the Back key, the "Back to p. N" pill). False when the last jump was not
+    /// a link: a back swipe after a search turns the page instead.
     pub fn go_back_from_link(&mut self) -> bool {
-        self.back_pill = false;
-        let Some(p) = self.back.pop() else {
+        if !self.back.last().is_some_and(|r| r.link) {
+            self.back_pill = false;
             log::info!("reader: back: no link to return from");
             return false;
+        }
+        self.go_back()
+    }
+
+    /// Returns to where the last jump started (the menu's "Go back"). False when there
+    /// is none.
+    pub fn go_back(&mut self) -> bool {
+        self.back_pill = false;
+        let Some(r) = self.back.pop() else {
+            log::info!("reader: go back: nowhere to return to");
+            return false;
         };
-        match self.doc.as_deref().map(|d| d.page_of(&p)) {
+        match self.doc.as_deref().map(|d| d.page_of(&r.position)) {
             Some(Ok(page)) => {
-                log::info!("reader: back from link to page {}", page + 1);
+                log::info!("reader: go back to page {} ({})", page + 1, if r.link { "link" } else { "jump" });
                 self.show_page(page);
             }
-            Some(Err(e)) => log::warn!("reader: cannot go back to {p}: {e}"),
+            Some(Err(e)) => log::warn!("reader: cannot go back to {}: {e}", r.position),
             None => {}
         }
         true
@@ -1426,7 +1468,15 @@ impl ReaderScreen {
         let Some(h) = hits.get(i) else { return };
         let (pos, total) = (h.position.clone(), hits.len());
         self.hit = i;
-        self.go_to_position(&pos);
+        // From the results list: a jump to remember. Stepping hit to hit keeps the way
+        // back to where the search started.
+        if self.overlay.as_ref().is_some_and(|o| o.kind == overlay::OverlayKind::Hits) {
+            if let Some(Ok(p)) = self.doc.as_deref().map(|d| d.page_of(&pos)) {
+                self.go_to_page(p);
+            }
+        } else {
+            self.go_to_position(&pos);
+        }
         self.open_overlay(search::hit_bar(i, total, cx.screen.size()), cx);
     }
 
@@ -1695,7 +1745,7 @@ impl ReaderScreen {
             _ if a.starts_with("page:") => {
                 if let Ok(n) = a[5..].parse::<usize>() {
                     self.close_overlay();
-                    self.go_to_page(n.saturating_sub(1));
+                    self.navigate_to_page(n.saturating_sub(1));
                 }
             }
             "goto" => {
@@ -1724,7 +1774,7 @@ impl ReaderScreen {
                 if let (Ok(n), Some(doc)) = (a[4..].parse::<f32>(), self.doc.as_deref_mut()) {
                     let page = percent_page(doc, n);
                     self.close_overlay();
-                    self.go_to_page(page);
+                    self.navigate_to_page(page);
                 }
             }
             // aa: the Aa sheet and its actions (reader/aa.rs).
@@ -2403,8 +2453,8 @@ impl ReaderScreen {
                 if self.marks.iter().any(|b| mark_page(doc, b) == Some(self.page)) {
                     draw_dog_ear(cx.canvas);
                 }
-                if self.back_pill && !self.back.is_empty() {
-                    let to = self.back.last().and_then(|p| doc.page_of(p).ok());
+                if self.back_pill && self.back.last().is_some_and(|r| r.link) {
+                    let to = self.back.last().and_then(|r| doc.page_of(&r.position).ok());
                     draw_back(cx.canvas, cx.fonts, cx.theme, to);
                 }
                 log::debug!("reader: page {} drawn in {:.2} ms (plugins {plugins_ms} ms before)", self.page + 1, t_draw.elapsed().as_secs_f64() * 1000.0);
