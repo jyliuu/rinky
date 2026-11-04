@@ -51,7 +51,7 @@ What rinky changes on your Kindle:
 Download the install package `rinky-<version>-kindlehf.tar.gz` from the project's
 releases page. If you want to check the download, compare its SHA-256 with the
 `SHA256SUMS` file of the same release. Example:
-`shasum -a 256 rinky-0.4.1-kindlehf.tar.gz` on a Mac, or `sha256sum ...` on Linux.
+`shasum -a 256 rinky-0.4.2-kindlehf.tar.gz` on a Mac, or `sha256sum ...` on Linux.
 
 ## 2. Install
 
@@ -174,6 +174,9 @@ Now:
   of the page can be given an action there too.
 - rinky saves your position after every page turn. The book opens at that page
   the next time.
+- After a jump (a search result, Contents, Go to, the page slider, a bookmark, a link
+  or a footnote), the reader menu shows **Go back to p. N**: it returns to where you
+  were, one jump at a time.
 
 #### Text appearance
 
@@ -253,7 +256,7 @@ DeepSeek, OpenRouter and Anthropic: put your API key in
 
 - **Ask about a passage.** Select text and tap **Insightful**. **Explain**, **Give
   examples**, **Context / history** and **People / characters** send their question
-  at once. **Ask AI…** opens the chat with the keyboard closed: tap **Message
+  at once; the chat shows the passage and the whole prompt that was sent. **Ask AI…** opens the chat with the keyboard closed: tap **Message
   Insightful…** to type; the passage goes with your message.
 - **One chat or many.** Highlighted actions continue the book's current chat, so
   related questions stay together. Turn on **New chat for highlighted actions** in the

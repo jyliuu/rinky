@@ -4,6 +4,30 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-04
+
+### Added
+- The reader menu has a "Go back to p. N" button after any jump: a search result,
+  Contents, Go to, the page slider, a bookmark or highlight, a link or a footnote. It
+  returns to where you were, one jump at a time. The swipe in from the left edge still
+  goes back only after a link or footnote, so after a search it turns the page as
+  before. ([#14])
+
+### Changed
+- Insightful shows exactly what was sent: a highlighted action's message shows
+  "Selected passage — LOCATION", the passage, and the whole prompt, as
+  insightful.koplugin does, instead of the action's name and "Preset prompt · tap to see
+  what was sent". The prompts are the koplugin's v0.7.0 prompts, unchanged. ([#14])
+
+### Fixed
+- The reader no longer freezes after repeated taps on an Insightful message. Each tap
+  opened another copy of a dialog; the copies kept appearing long after the chat closed,
+  and while one was open every tap and swipe went to it. A plugin's repeated identical
+  dialog now opens once. ([#14])
+- Selecting text across a word the layout hyphenated at a line end ("con-" | "sist")
+  gives the whole word ("consist"), not "con sist". A hyphen of the book at a line end
+  stays ("well-known"). ([#14])
+
 ## [0.4.1] - 2026-11-04
 
 ### Fixed
@@ -102,6 +126,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.4.2]: https://github.com/jyliuu/rinky/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jyliuu/rinky/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jyliuu/rinky/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jyliuu/rinky/compare/v0.2.0...v0.3.0
@@ -114,3 +139,4 @@ First public release.
 [#9]: https://github.com/jyliuu/rinky/pull/9
 [#10]: https://github.com/jyliuu/rinky/pull/10
 [#12]: https://github.com/jyliuu/rinky/pull/12
+[#14]: https://github.com/jyliuu/rinky/pull/14

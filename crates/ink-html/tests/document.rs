@@ -284,6 +284,31 @@ fn selection_by_points() {
     assert!(d.selection().is_none());
 }
 
+/// A word the layout hyphenated across two lines ("in-" | "finities") is one word in
+/// the selected text: no added hyphen, no space or newline in the middle.
+#[test]
+fn selection_joins_a_word_split_by_hyphenation() {
+    let mut d = open("juliet");
+    let mut s = LayoutSettings::for_screen(1272, 1696);
+    s.hyphenate = true;
+    layout(&mut d, &s);
+    let (p, i, runs) = (0..d.page_count().pages)
+        .find_map(|p| {
+            let runs = page_runs(&d, p);
+            let i = runs.iter().position(|t| t.hyphenated && t.text.chars().count() > 3)?;
+            (i + 1 < runs.len()).then_some((p, i, runs))
+        })
+        .expect("a hyphenated word in the book");
+    let (a, b) = (&runs[i], &runs[i + 1]);
+    assert!(a.text.ends_with('-') && b.line_top > a.line_top, "{} | {}", a.text, b.text);
+    let dy = 70.0 - d.page_layout(p).unwrap().1.y0;
+    let from = Point::new((a.x + 2.0) as i32, ((a.line_top + a.line_bottom) / 2.0 + dy) as i32);
+    let to = Point::new((b.x + b.width - 2.0) as i32, ((b.line_top + b.line_bottom) / 2.0 + dy) as i32);
+    let sel = d.select(p, from, to).unwrap().unwrap();
+    let word = format!("{}{}", a.text.trim_end_matches('-'), b.text);
+    assert_eq!(sel.text, word.trim(), "{:?} + {:?}", a.text, b.text);
+}
+
 #[test]
 fn images_scaled_and_dithered() {
     let mut d = open("images");

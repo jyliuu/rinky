@@ -7,7 +7,7 @@
 //! host's Markdown viewer (one id, its text replaced as the answer arrives in batches);
 //! the same viewer shows the chat list. The action menus are viewer sheets with icons.
 
-use crate::chat::{self, BookChats, Extras, Live, Message, Totals, HOLD, LINK_ASK, LINK_CHATS, LINK_NEW, LINK_OPEN, LINK_PROMPT, LINK_QUESTION, LINK_RETRY, LINK_STOP};
+use crate::chat::{self, BookChats, Extras, Live, Message, Totals, HOLD, LINK_ASK, LINK_CHATS, LINK_NEW, LINK_OPEN, LINK_QUESTION, LINK_RETRY, LINK_STOP};
 use crate::config::{self, Config};
 use crate::models;
 use crate::prompts::{PromptSet, SelectionInfo};
@@ -39,7 +39,6 @@ const MENU_MODELS: u32 = 12;
 const INPUT_MODEL: u32 = 13;
 const INPUT_SEARCH: u32 = 14;
 const DIALOG_MODEL: u32 = 15;
-const DIALOG_PROMPT: u32 = 16;
 const MENU_STATS: u32 = 17;
 const DIALOG_DEFAULT: u32 = 18;
 
@@ -49,9 +48,6 @@ const NEW_CHAT_DEFAULT: &str = "new_chat_on_highlight_default";
 const STATS_FILE: &str = "statistics.json";
 /// A request that cannot start while another chat's answer is being written.
 const BUSY: &str = "Another chat is still working on a response. Reopen it or wait for it to finish.";
-
-/// Longest passage shown in the "what was sent" dialog of a preset prompt.
-const PROMPT_PASSAGE_CHARS: usize = 240;
 
 /// Icons of the selection actions in the action sheet (`QUICK_ACTIONS` order).
 const ACTION_ICONS: [&str; 4] = ["info", "listview", "clock", "star"];
@@ -736,23 +732,6 @@ impl InsightfulPlugin {
         Ok(())
     }
 
-    /// The dialog behind a preset bubble: the label and the text that was sent for it.
-    fn show_prompt(&mut self, cx: &mut HostCtx, index: usize) -> Result<()> {
-        let Some(m) = self.conv().and_then(|c| c.messages.get(index)).filter(|m| m.role == "user").cloned() else { return Ok(()) };
-        let Some(prompts) = self.prompts.as_ref() else { return Ok(()) };
-        let sel = m.selection.clone().map(|mut s| {
-            if s.text.chars().count() > PROMPT_PASSAGE_CHARS {
-                s.text = s.text.chars().take(PROMPT_PASSAGE_CHARS).collect::<String>() + "…";
-            }
-            s
-        });
-        let sent = prompts.user_message(&m.content, sel.as_ref()).map_err(PluginError::Failed)?;
-        let body = format!("{sent}\n\nSent with the system prompt (book title, author, reading position).");
-        let title = m.label.as_deref().unwrap_or("Prompt");
-        cx.ui()?.dialog(DIALOG_PROMPT, &format!("{title}: the prompt sent"), &body, &[("OK", "ok")]);
-        Ok(())
-    }
-
     /// A sheet of `(label, action, icon)` rows.
     fn sheet(cx: &mut HostCtx, id: u32, title: &str, rows: &[(&str, &str, &str)]) -> Result<()> {
         let mut md = String::from(":::sheet\n");
@@ -1032,10 +1011,6 @@ impl Plugin for InsightfulPlugin {
                 } else if let Some(n) = result.strip_prefix(LINK_QUESTION) {
                     if let Some(q) = n.parse::<usize>().ok().and_then(|n| self.questions.get(n)).cloned() {
                         self.ask_followup(cx, &q)?;
-                    }
-                } else if let Some(n) = result.strip_prefix(LINK_PROMPT) {
-                    if let Ok(n) = n.parse::<usize>() {
-                        self.show_prompt(cx, n)?;
                     }
                 } else if result == LINK_ASK {
                     if self.fresh {

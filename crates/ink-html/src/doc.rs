@@ -1462,6 +1462,11 @@ impl Document for HtmlDocument {
         let mut text = String::new();
         let mut rects: Vec<Rect> = Vec::new();
         let mut last_line: Option<f32> = None;
+        // The previous line ended in a hyphen ("in-" | "finities", "well-" | "known"):
+        // the next piece continues that word with no space.
+        let mut joins_next = false;
+        // Right edge of the previous run: runs that touch on a line are one word.
+        let mut prev_right = f32::MIN;
         for (k, (_, t)) in items.iter().enumerate().take(e.0 + 1).skip(s.0) {
             let n = t.text.chars().count();
             let c0 = if k == s.0 { s.1 } else { 0 };
@@ -1470,13 +1475,23 @@ impl Document for HtmlDocument {
                 continue;
             }
             match last_line {
-                Some(l) if l == t.line_top => text.push(' '),
+                Some(l) if joins_next && l != t.line_top => {}
+                Some(l) if l == t.line_top && t.x > prev_right + 0.5 => text.push(' '),
+                Some(l) if l == t.line_top => {}
                 Some(_) => text.push('\n'),
                 None => {}
             }
             last_line = Some(t.line_top);
-            let piece: String = t.text.chars().skip(c0).take(c1 - c0).collect();
-            text.push_str(piece.trim_end_matches('-'));
+            prev_right = t.x + t.width;
+            let mut piece: String = t.text.chars().skip(c0).take(c1 - c0).collect();
+            // Only the hyphen the layout added goes; a hyphen of the book stays.
+            if t.hyphenated && c1 == n {
+                piece.pop();
+                joins_next = true;
+            } else {
+                joins_next = c1 == n && piece.ends_with('-');
+            }
+            text.push_str(&piece);
             let edges = self.char_edges(t);
             let r = Rect::new(edges[c0] as i32, (t.line_top + dy) as i32, (edges[c1] - edges[c0]).max(1.0) as u32, (t.line_bottom - t.line_top).max(1.0) as u32);
             match rects.last_mut() {
