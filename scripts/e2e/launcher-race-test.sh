@@ -28,6 +28,8 @@
 #    9 kill -9 launcher inside `start lab126_gui`: framework ends up running
 #   10 kill -9 launcher inside the appmgrd restart: framework ends up running
 #   11 SIGTERM to the launcher while rinky runs: rinky stopped, started once
+#   15 Amazon services: stopped while rinky runs, running again after a normal exit
+#      and after kill -9 of the launcher (the watchdog starts them)
 #   12 rinky exits at once with an error: framework started once
 #   13 framework does not stop within the deadline: no rinky, framework back
 #   14 random kill -9 points (launcher or rinky, 0-4 s after launch), repeated:
@@ -62,6 +64,10 @@ case "\$(basename "\$0") \$1" in
   "stop lab126_gui") echo stop/waiting >"\$SB/state/lab126_gui"; date +%s >"\$SB/state/stopped_at" ;;
   "start lab126_gui") echo start/starting >"\$SB/state/lab126_gui"; sleep "\${START_DELAY:-0}"; echo start/running >"\$SB/state/lab126_gui" ;;
   "stop appmgrd") sleep "\${APPMGRD_DELAY:-0}" ;;
+  # Other jobs exist when \$SB/state/JOB does (case 15: the Amazon services).
+  "status "*) [ -f "\$SB/state/\$1" ] && echo "\$1 \$(cat "\$SB/state/\$1")" ;;
+  "stop "*) [ -f "\$SB/state/\$1" ] && echo stop/waiting >"\$SB/state/\$1" ;;
+  "start "*) [ -f "\$SB/state/\$1" ] && echo start/running >"\$SB/state/\$1" ;;
   "pidof KPPMainApp"|"pidof pillowd")
      t=\$(cat "\$SB/state/stopped_at" 2>/dev/null || echo 0)
      if grep -q start/ "\$SB/state/lab126_gui" || [ \$(( \$(date +%s) - t )) -lt \${STOP_DELAY:-1} ]; then echo 4242; else exit 1; fi ;;
@@ -247,6 +253,26 @@ waitfor 15 in_calls " start lab126_gui"; quiet
 [ "$(inks)" = 0 ] && fw_up && grep -q "giving up" "$SB/app/rinky.log" \
   && ok "13 framework stop timeout: no rinky, framework started again" || bad "13 inks=$(inks) fw=$(fw)"
 finish
+
+# 15. Amazon services stopped while rinky runs and started again
+quieted() { [ "$(jobs_state)" = "stop/waiting stop/waiting " ]; }
+jobs_state() { local j; for j in todo minerva_service; do printf '%s ' "$(cat "$SB/state/$j")"; done; }
+for how in exit kill; do
+  setup "15-$how"
+  echo start/running >"$SB/state/todo"; echo start/running >"$SB/state/minerva_service"
+  echo stop/waiting >"$SB/state/btmanagerd"   # not running: left alone
+  # The stops run in the background while rinky starts.
+  launch; waitfor 15 running1; waitfor 10 quieted
+  during=$(jobs_state)
+  if [ $how = exit ]; then touch "$SB/quit"; else kill -9 "$(lpid)"; fi
+  waitfor 25 fw_up; quiet
+  after=$(jobs_state)
+  [ "$during" = "stop/waiting stop/waiting " ] && [ "$after" = "start/running start/running " ] \
+    && [ "$(cat "$SB/state/btmanagerd")" = stop/waiting ] && [ ! -e "$SB/run/quieted" ] \
+    && ok "15 Amazon services ($how): stopped while rinky runs, started again" \
+    || bad "15 ($how) during=[$during] after=[$after] btmanagerd=$(cat "$SB/state/btmanagerd")"
+  finish
+done
 
 # 14. random kill -9 points
 left=0

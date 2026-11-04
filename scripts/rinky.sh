@@ -6,13 +6,18 @@
 #      can take the userstore, and a redeploy cannot hit a running file);
 #   2. start rinky-watchdog.sh (own session too);
 #   3. stop lab126_gui and wait until KPPMainApp and pillowd are gone;
+#   3b. stop the Amazon services rinky has no use for ($QUIET_JOBS: cloud sync,
+#      metrics, log uploaders, audio, Bluetooth; listed in $RUN/quieted) and kill what
+#      a stopped job left running (its shell died, its daemon did not: fastmetrics,
+#      wifilocker; a stuck orphaned fastmetrics made powerd take 32 s per event);
 #   4. run rinky;
 #      (`rinky-ctl.sh restart` writes $RUN/restart and sends SIGTERM to rinky: the
 #      launcher then copies the installed binary again and runs it again, without
 #      starting the framework in between; if that fails it takes the exit path below;)
 #   5. on every exit path (normal exit, error, crash, signal, watchdog kill):
 #      undo the settings rinky journaled ($RUN/restore: volumd disableMounting,
-#      powerd flIntensity, the framebuffer night flag, ...), then start lab126_gui.
+#      powerd flIntensity, the framebuffer night flag, ...), start the jobs in
+#      $RUN/quieted again, then start lab126_gui.
 # If this launcher itself is killed (even with kill -9), the watchdog stops rinky,
 # undoes the settings and starts the framework. If rinky hangs (its heartbeat file
 # stops changing for RINKY_HANG_S seconds), the watchdog kills it and this
@@ -24,7 +29,8 @@
 #
 # Settings: $DIR/rinky.env is sourced if present (lines like
 # `export RINKY_AUTOSLEEP=10`); RINKY_RESTART_APPMGRD=0 skips the appmgrd
-# restart; RINKY_STOP_DEADLINE (s) bounds the framework stop.
+# restart; RINKY_STOP_DEADLINE (s) bounds the framework stop; RINKY_QUIET=0 leaves
+# the Amazon services running; RINKY_QUIET_JOBS replaces their list.
 # Screen: "Starting rinky..." is drawn (by `rinky splash`, or FBInk) right away
 # and again once the framework is stopped; "Closing rinky..." (or the crash note)
 # before the framework starts again, so the screen is never left blank.
@@ -42,6 +48,14 @@ LOG=$DIR/rinky.log
 RUN=${RINKY_RUN:-/tmp/rinky}
 STOP_DEADLINE=${RINKY_STOP_DEADLINE:-40}
 [ -f "$DIR/rinky.env" ] && . "$DIR/rinky.env"
+# Upstart jobs stopped while rinky runs (5.19.5 names; a job that is not running is
+# skipped). Dependents come before what they depend on. Kept: powerd, lipcd, deviced,
+# cmd/wifid/wifis (network), volumd and mtp (USB), tmd (thermal), battstressd (battery
+# protection), x, dbus and the system jobs.
+QUIET_JOBS=${RINKY_QUIET_JOBS-"todo adm odot archive dpmd dynconfig rcm acedropboxd logmgr
+    ace_messaging_service ace_eventmgr integrity_listener phd demd platformmetricsd
+    minerva_service minervad perfd stackdumpd ttsorchestrator playermgr_limit playermgr
+    audiomgrd acsbtfd btmanagerd appmgrd"}
 
 # The log is opened once, as fd 3, and every command writes to it with >&3 2>&3.
 # Duplicating an open descriptor cannot fail. A plain `>>` redirection to the log can:
@@ -216,6 +230,80 @@ restart_appmgrd() {
     log "appmgrd ready"
 }
 
+# job_pids: "JOB PID NAME" for the main process of every running upstart job and all
+# its descendants. Taken before the stops: a daemon whose job shell dies is
+# reparented to init, and only this list still ties it to its job.
+job_pids() {
+    for d in /proc/[0-9]*; do
+        read -r st 2>/dev/null <"$d/stat" || continue
+        set -- ${st##*) }
+        read -r name _ 2>/dev/null <"$d/comm" || continue
+        echo "${d#/proc/} $2 $name"
+    done >"$RUN/.procs"
+    initctl list 2>/dev/null | sed -n 's|^\([^ ]*\) start/running, process \([0-9]*\)$|\1 \2|p' >"$RUN/.roots"
+    awk 'NR == FNR { up[$1] = $2; name[$1] = $3; next }
+        { job[$2] = $1 }
+        END {
+            for (p in up) {
+                q = p; n = 0
+                while (!(q in job) && (q in up) && q + 0 > 1 && n++ < 64) q = up[q]
+                if (q in job) print job[q], p, name[p]
+            }
+        }' "$RUN/.procs" "$RUN/.roots"
+    rm -f "$RUN/.procs" "$RUN/.roots"
+}
+
+# kill_leftovers FILE: kills what FILE (from job_pids) lists whose job has stopped but
+# which still runs with the same name. rinky's own processes are never touched.
+kill_leftovers() {
+    left=
+    while read -r job pid name; do
+        status "$job" 2>/dev/null | grep -q "start/" && continue
+        read -r now _ 2>/dev/null <"/proc/$pid/comm" || continue
+        [ "$now" = "$name" ] || continue
+        case $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) in *rinky*) continue ;; esac
+        log "killing $name ($pid): still running after its job $job stopped"
+        kill -TERM "$pid" 2>/dev/null
+        left="$left $pid:$name"
+    done <"$1"
+    [ -n "$left" ] || return 0
+    sleep 1
+    for e in $left; do
+        read -r now _ 2>/dev/null <"/proc/${e%%:*}/comm" && [ "$now" = "${e#*:}" ] && kill -KILL "${e%%:*}" 2>/dev/null
+    done
+}
+
+# quiet_amazon: stops the running jobs of $QUIET_JOBS, all at once (one after another
+# took 8 s on the PW12). Each is listed in $RUN/quieted before its stop, so a launcher
+# killed halfway still gets them all started again.
+quiet_amazon() {
+    [ "${RINKY_QUIET:-1}" = 0 ] && { log "RINKY_QUIET=0: Amazon services left running"; return 0; }
+    stops=
+    for j in $QUIET_JOBS; do
+        status "$j" 2>/dev/null | grep -q "start/" || continue
+        echo "$j" >>"$RUN/quieted"
+        stop "$j" >/dev/null 2>&1 &
+        stops="$stops $!"
+    done
+    # Only these: a plain `wait` would also wait for the watchdog.
+    [ -n "$stops" ] && wait $stops
+    [ -s "$RUN/quieted" ] && log "stopped: $(tr '\n' ' ' <"$RUN/quieted")"
+}
+
+# wake_amazon: starts the jobs quiet_amazon stopped, the last stopped first.
+wake_amazon() {
+    q=$(cat "$RUN/quiet.pid" 2>/dev/null)
+    n=0
+    while [ -n "$q" ] && kill -0 "$q" 2>/dev/null && [ $n -lt 30 ]; do sleep 1; n=$((n + 1)); done
+    rm -f "$RUN/quiet.pid"
+    [ -s "$RUN/quieted" ] || return 0
+    log "starting again: $(tr '\n' ' ' <"$RUN/quieted")"
+    for j in $(sed '1!G;h;$!d' "$RUN/quieted"); do
+        (start "$j") >/dev/null 2>&1
+    done
+    rm -f "$RUN/quieted"
+}
+
 # Undo what rinky changed ($RUN/restore lines "lipc i|s PUBLISHER PROP VALUE" and
 # "fb KEY VALUE"). The binary handles both; the shell replays the lipc lines itself if
 # the binary cannot run.
@@ -249,6 +337,7 @@ start_framework() {
         mkdir "$RUN/fwstart" 2>/dev/null || return 0
     fi
     echo $$ >"$RUN/fwstart/pid"
+    wake_amazon
     if framework_running; then
         log "framework already started"
     else
@@ -326,6 +415,7 @@ RINKY_DIR=$DIR RINKY_DETACHED= setsid sh "$WATCHDOG" </dev/null >/dev/null 2>&1 
 # Stopping the framework sends SIGTERM to its process group; ignore it meanwhile.
 trap '' TERM
 t=$(now_ms)
+job_pids >"$RUN/jobs-before" 2>/dev/null
 log "stop lab126_gui"
 (stop lab126_gui) >&3 2>&3
 waited=0
@@ -342,6 +432,16 @@ done
 trap 'STATUS=signal; REASON="launcher got a signal"; exit 143' TERM
 log "framework stopped after ${waited}s"
 phase "stop framework" "$t"
+# In the background: the slowest job's stop takes about 8 s, and rinky need not wait.
+# wake_amazon waits for it ($RUN/quiet.pid) before it starts anything again.
+t=$(now_ms)
+(
+    quiet_amazon
+    kill_leftovers "$RUN/jobs-before"
+    rm -f "$RUN/jobs-before"
+    phase "quiet Amazon services" "$t"
+) </dev/null &
+echo $! >"$RUN/quiet.pid"
 # The framework may have drawn over the first splash while it stopped.
 splash "Starting rinky..."
 rm -f "$RUN/exit-reason" "$RUN/watchdog-kill"
