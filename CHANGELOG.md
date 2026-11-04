@@ -14,6 +14,9 @@ All notable changes to rinky are listed here. The format is based on
   before. ([#14])
 
 ### Changed
+- Updating from *Settings > Update* installs and restarts rinky into the new version
+  by itself, without a confirmation and without bringing up the Kindle's own screens.
+  The button says so: *Install X and restart*. ([#14])
 - Insightful shows exactly what was sent: a highlighted action's message shows
   "Selected passage — LOCATION", the passage, and the whole prompt, as
   insightful.koplugin does, instead of the action's name and "Preset prompt · tap to see
