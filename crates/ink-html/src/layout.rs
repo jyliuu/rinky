@@ -62,6 +62,9 @@ pub struct TextRun {
     pub line_top: f32,
     /// Line bottom.
     pub line_bottom: f32,
+    /// The line breaks inside a word here: the `-` that ends `text` was added by the
+    /// layout (hyphenation or a soft hyphen), it is not in the book.
+    pub hyphenated: bool,
 }
 
 /// An image drawn at a rectangle.
@@ -1528,6 +1531,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 deco_w: mw,
                 line_top: top,
                 line_bottom: bottom,
+                hyphenated: false,
             }));
             if outside <= 0.0 {
                 x0 += mw + gap;
@@ -1614,6 +1618,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                                 prev.width = px_x + width - prev.x;
                                 prev.deco_w = prev.width;
                                 prev.len = dom_end.saturating_sub(prev.start);
+                                prev.hyphenated = pl.hyphen;
                                 continue;
                             }
                         }
@@ -1636,6 +1641,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                         deco_w: width,
                         line_top: top,
                         line_bottom: bottom,
+                        hyphenated: pl.hyphen,
                     }));
                 }
             }
