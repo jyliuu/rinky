@@ -2952,6 +2952,24 @@ impl PluginUi {
                 }
             }
         }
+        if let UiRequest::Dialog { id, title, body, buttons } = &req {
+            // The same dialog again (repeated taps on what opens it): one copy only. Each
+            // copy was modal; a stack of them, shown one after another long after their
+            // chat closed, swallowed every tap and looked like a frozen reader.
+            let open = self.layers.iter().any(|l| {
+                l.plugin == plugin
+                    && l.id == Some(*id)
+                    && match &l.kind {
+                        Kind::Dialog(d) => d.title == *title && d.body == *body && d.buttons == *buttons,
+                        _ => false,
+                    }
+            });
+            let waiting = self.pending.iter().any(|(p, r)| p == plugin && r == &req);
+            if open || waiting {
+                log::info!("plugins: {plugin}: dialog {id} {title:?} is already {}; the repeat is dropped", if open { "open" } else { "waiting" });
+                return;
+            }
+        }
         self.pending.push_back((plugin.to_string(), req));
         // A screen that never paints the overlay must not collect requests forever: keep
         // the newest MAX_PENDING (toasts go first).
@@ -4547,6 +4565,37 @@ mod tests {
         assert_eq!(ui.pending(), 2);
         ui.handle(&key(Key::Back), screen());
         assert_eq!(ui.timeout(), Some(Duration::ZERO), "first closed: B can start");
+    }
+
+    /// The same dialog requested again and again (13 taps on a chat bubble while an
+    /// answer streamed, seen on a PW12) opens once. A stack of copies, shown one after
+    /// another long after the chat closed, swallowed every tap: the reader looked frozen.
+    #[test]
+    fn repeated_dialog_opens_once() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        let dialog = |body: &str| UiRequest::Dialog { id: 16, title: "The prompt sent".into(), body: body.into(), buttons: vec![("OK".into(), "ok".into())] };
+        for _ in 0..13 {
+            ui.push("p", dialog("Explain the passage"));
+        }
+        assert_eq!(ui.pending(), 1, "waiting copies are dropped");
+        compose(&mut s, &mut ui, &[]);
+        assert_eq!(ui.layer_names(), ["dialog"]);
+        for _ in 0..5 {
+            ui.push("p", dialog("Explain the passage"));
+        }
+        assert_eq!(ui.pending(), 0, "copies of the open dialog are dropped");
+        // Another plugin's dialog, or new text under the same id, still waits its turn.
+        ui.push("q", dialog("Explain the passage"));
+        ui.push("p", dialog("Something else"));
+        assert_eq!(ui.pending(), 2);
+        ui.handle(&key(Key::Back), screen());
+        compose(&mut s, &mut ui, &[]);
+        ui.handle(&key(Key::Back), screen());
+        compose(&mut s, &mut ui, &[]);
+        ui.handle(&key(Key::Back), screen());
+        compose(&mut s, &mut ui, &[]);
+        assert!(!ui.modal_open() && ui.pending() == 0, "nothing left to swallow taps: {:?}", ui.layer_names());
     }
 
     /// A test screen: fills the canvas with `fill` when dirty and shows it itself;
