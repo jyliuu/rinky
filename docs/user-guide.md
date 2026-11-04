@@ -623,9 +623,29 @@ RINKY_TOUCH=swap,mirror_x sh /mnt/us/rinky/rinky-ctl.sh start
 
 ### Sleep and battery
 
-> **To be completed at integration (phase 5):** how sleep, the sleep screen and wake
-> work, and what to do if the Kindle does not wake. Sleep and wake have not yet been
-> tested on a real Kindle.
+The power button or closing a magnetic cover puts the Kindle to sleep: the frontlight
+goes off, the sleep screen is drawn, and the Kindle sleeps fully after a moment. The
+power button or opening the cover wakes it. After 10 minutes without a touch the
+Kindle goes to sleep by itself.
+
+A cover can move a little in a bag. rinky ignores a cover that opens for less than
+half a second. If the Kindle wakes from the cover and nobody touches it, it goes back
+to sleep after 3 minutes.
+
+While rinky runs it stops the Amazon background services it does not use (cloud sync,
+usage reporting, audio, Bluetooth) and starts them again when you leave rinky. Power
+management, Wi-Fi, USB and battery protection stay on.
+
+To change these, put lines like the ones below in `/mnt/us/rinky/rinky.env`:
+
+| Line | Effect |
+| --- | --- |
+| `export RINKY_COVER=0` | ignore the cover |
+| `export RINKY_COVER_SETTLE_MS=0` | wake as soon as the cover opens |
+| `export RINKY_COVER_UNUSED_S=0` | no early sleep after a cover wake |
+| `export RINKY_QUIET=0` | leave the Amazon services running |
+
+If the Kindle does not wake, hold the power button for about 10 seconds to restart it.
 
 ### Logs and reporting a problem
 

@@ -2,6 +2,8 @@
 # Watchdog for rinky.sh: makes sure the Kindle framework comes back.
 # Started by the launcher in its own session. It polls once a second:
 #   - launcher finished cleanly ($RUN/done exists)     -> make sure the framework runs, exit;
+#     (every framework start here first starts the Amazon jobs the launcher stopped,
+#     listed in $RUN/quieted;)
 #   - launcher gone (crash, kill -9) while rinky runs -> stop rinky, undo its
 #     settings, start the framework, exit;
 #   - rinky gone but launcher still there          -> give the launcher 15 s to
@@ -80,6 +82,22 @@ replay_journal() {
     rm -f "$J"
 }
 
+# wake_amazon: starts the jobs the launcher stopped ($RUN/quieted), the last stopped
+# first, once the launcher's background stop ($RUN/quiet.pid) has ended (the same
+# function as in rinky.sh).
+wake_amazon() {
+    q=$(cat "$RUN/quiet.pid" 2>/dev/null)
+    n=0
+    while [ -n "$q" ] && kill -0 "$q" 2>/dev/null && [ $n -lt 30 ]; do sleep 1; n=$((n + 1)); done
+    rm -f "$RUN/quiet.pid"
+    [ -s "$RUN/quieted" ] || return 0
+    log "starting again: $(tr '\n' ' ' <"$RUN/quieted")"
+    for j in $(sed '1!G;h;$!d' "$RUN/quieted"); do
+        (start "$j") >/dev/null 2>&1
+    done
+    rm -f "$RUN/quieted"
+}
+
 start_framework() {
     if ! mkdir "$RUN/fwstart" 2>/dev/null; then
         owner=$(cat "$RUN/fwstart/pid" 2>/dev/null)
@@ -91,6 +109,7 @@ start_framework() {
         mkdir "$RUN/fwstart" 2>/dev/null || return 0
     fi
     echo $$ >"$RUN/fwstart/pid"
+    wake_amazon
     if framework_running; then
         log "framework already started"
     else

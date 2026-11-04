@@ -87,8 +87,8 @@ sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else sh
 # package.sh builds: its flags remap the build machine's paths, which its check of the
 # binary requires (a plain cargo build fails that check), and it runs build-dropbear.sh
 # (a no-op when target/dropbear/dropbearmulti is up to date).
-scripts/package.sh --allow-dirty --profile "$PROFILE" --out "$OUT" >/dev/null
-PKG=$(ls "$OUT"/rinky-*-kindlehf.tar.gz)
+# Its last line is the package path: $OUT can also hold older versions' packages.
+PKG=$(scripts/package.sh --allow-dirty --profile "$PROFILE" --out "$OUT" | tail -n 1)
 SUM=$(sha256 "$PKG" | cut -d' ' -f1)
 echo "deploy: built $(basename "$PKG") ($PROFILE), sha256 $SUM"
 lap "build and package"

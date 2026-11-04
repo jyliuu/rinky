@@ -12,10 +12,18 @@
 //!   resumed by the RTC alarm  -> stay asleep, suspend again after rtc_grace
 //!   resumed by anything else  -> wake (the key that woke us may not be delivered)
 //!   refused (EBUSY: USB cable / active wakeup source) -> stay asleep, retry later
-//! ScreenSaver --power key / cover opened--> Awake
+//! ScreenSaver --power key / cover opened and stayed open--> Awake
 //!   (page restored with GC16, input re-grabbed and re-seeded, light back,
 //!   OutOfScreenSaver)
 //! ```
+//!
+//! The hall sensor also fires when the device moves in a bag. So a cover open wakes
+//! only once it stayed open for [`SleepConfig::cover_settle`]; a resume from suspend
+//! with the cover closed stays asleep (unless the power key or a cover open follows);
+//! a wake by the cover or a resume that no touch or key confirms sleeps again after
+//! [`SleepConfig::unconfirmed_sleep`]; and powerd's relayed cover events (which came
+//! 32 s late while a framework daemon was stuck) are dropped when they contradict
+//! what the sensor itself last said.
 //!
 //! [`SleepController`] holds the policy; a [`SleepPlatform`] does the work (the
 //! Kindle backend, or a fake in tests). The emulator refuses kernel suspend (USB
@@ -46,6 +54,12 @@ pub struct SleepConfig {
     pub light_off: bool,
     /// Sleep when the cover closes and wake when it opens.
     pub cover: bool,
+    /// A cover opened while asleep wakes only once it stayed open this long; a close
+    /// within it was a bump (a bag), not an open. Zero wakes at once.
+    pub cover_settle: Duration,
+    /// After a wake by the cover or by a resume, with no touch or key since, sleep
+    /// again after this long (`None` = only [`SleepConfig::auto_sleep`]).
+    pub unconfirmed_sleep: Option<Duration>,
 }
 
 impl Default for SleepConfig {
@@ -60,6 +74,8 @@ impl Default for SleepConfig {
             debounce: Duration::from_millis(600),
             light_off: true,
             cover: true,
+            cover_settle: Duration::from_millis(400),
+            unconfirmed_sleep: Some(Duration::from_secs(3 * 60)),
         }
     }
 }
@@ -68,7 +84,8 @@ impl SleepConfig {
     /// Defaults changed by environment variables (the launcher and tests set them):
     /// `RINKY_AUTOSLEEP` (minutes, 0 = never), `RINKY_SUSPEND` (0/1),
     /// `RINKY_RTC_WAKE` (seconds, 0 = none), `RINKY_SUSPEND_RETRY` (seconds),
-    /// `RINKY_COVER` (0 = ignore the sleep cover).
+    /// `RINKY_COVER` (0 = ignore the sleep cover), `RINKY_COVER_SETTLE_MS`,
+    /// `RINKY_COVER_UNUSED_S` (0 = no early sleep after an unconfirmed wake).
     pub fn from_env() -> Self {
         let mut c = SleepConfig::default();
         let num = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<u64>().ok());
@@ -86,6 +103,12 @@ impl SleepConfig {
         }
         if let Some(s) = num("RINKY_COVER") {
             c.cover = s != 0;
+        }
+        if let Some(ms) = num("RINKY_COVER_SETTLE_MS") {
+            c.cover_settle = Duration::from_millis(ms);
+        }
+        if let Some(s) = num("RINKY_COVER_UNUSED_S") {
+            c.unconfirmed_sleep = (s > 0).then(|| Duration::from_secs(s));
         }
         c
     }
@@ -167,6 +190,13 @@ pub struct SleepController {
     /// when the window ends: the last one wins, so a bouncing magnet does not flash the
     /// screen, and the device never stays asleep with the cover open.
     pending_cover: Option<(bool, String)>,
+    /// The cover opened while asleep: wake at this time unless it closes first.
+    opening: Option<(Instant, String)>,
+    /// The last cover state the hall sensor itself reported (uevent, lipc-hal); powerd
+    /// only relays it, sometimes late.
+    sensor_closed: Option<bool>,
+    /// Awake after a cover or resume wake, and no touch or key since.
+    unconfirmed: bool,
 }
 
 impl SleepController {
@@ -184,6 +214,9 @@ impl SleepController {
             refusals: 0,
             announced: false,
             pending_cover: None,
+            opening: None,
+            sensor_closed: None,
+            unconfirmed: false,
         }
     }
 
@@ -216,6 +249,16 @@ impl SleepController {
     pub fn activity(&mut self, now: Instant) {
         if self.state == SleepState::Awake {
             self.last_activity = now;
+            self.unconfirmed = false;
+        }
+    }
+
+    /// How long the device may stay idle before it sleeps.
+    fn idle_limit(&self) -> Option<Duration> {
+        let early = self.config.unconfirmed_sleep.filter(|_| self.unconfirmed);
+        match (self.config.auto_sleep, early) {
+            (Some(a), Some(e)) => Some(a.min(e)),
+            (a, e) => a.or(e),
         }
     }
 
@@ -261,11 +304,19 @@ impl SleepController {
     /// The cover closed (`true`) or opened; `source` names the event for the log
     /// (`uevent`, `lipc-hal`, `powerd(4)`). Every call logs what it decided. Within
     /// [`SleepConfig::debounce`] of the last sleep/wake change the state is kept and
-    /// applied by [`SleepController::tick`] when the window ends.
+    /// applied by [`SleepController::tick`] when the window ends. A source starting with
+    /// `powerd` is a relay: it is dropped when it contradicts the sensor's last report.
     pub fn cover_from(&mut self, closed: bool, source: &str, now: Instant, p: &mut impl SleepPlatform) -> Vec<PowerEvent> {
         let what = if closed { "closed" } else { "opened" };
         if !self.config.cover {
             self.note(format!("cover {what} ({source}) ignored: sleep cover is off"));
+            return Vec::new();
+        }
+        if !source.starts_with("powerd") {
+            self.sensor_closed = Some(closed);
+        } else if self.sensor_closed.is_some_and(|s| s != closed) {
+            let said = if closed { "open" } else { "closed" };
+            self.note(format!("cover {what} ({source}) ignored: stale, the sensor last said {said}"));
             return Vec::new();
         }
         if self.debounced(now) {
@@ -279,12 +330,26 @@ impl SleepController {
                 self.note(format!("cover closed ({source}): going to sleep"));
                 self.sleep(Trigger::Cover, now, p)
             }
-            (false, SleepState::Asleep) => {
+            (false, SleepState::Asleep) if self.config.cover_settle.is_zero() => {
                 self.note(format!("cover opened ({source}): waking"));
                 self.wake(Trigger::Cover, now, p)
             }
+            (false, SleepState::Asleep) => {
+                if self.opening.is_none() {
+                    let settle = self.config.cover_settle;
+                    self.note(format!("cover opened ({source}): waking in {settle:?} unless it closes"));
+                    self.opening = Some((now + settle, source.to_string()));
+                } else {
+                    self.note(format!("cover opened ({source}) ignored: already waking"));
+                }
+                Vec::new()
+            }
             (true, SleepState::Asleep) => {
-                self.note(format!("cover closed ({source}) ignored: already asleep"));
+                if self.opening.take().is_some() {
+                    self.note(format!("cover closed ({source}) before it settled: a bump, staying asleep"));
+                } else {
+                    self.note(format!("cover closed ({source}) ignored: already asleep"));
+                }
                 Vec::new()
             }
             (false, SleepState::Awake) => {
@@ -319,6 +384,7 @@ impl SleepController {
         self.state = SleepState::Asleep;
         self.last_change = Some(now);
         self.next_suspend = self.config.suspend.then(|| now + self.config.suspend_delay);
+        self.opening = None;
         vec![PowerEvent::GoingToScreenSaver]
     }
 
@@ -344,6 +410,8 @@ impl SleepController {
         self.last_activity = now;
         self.next_suspend = None;
         self.announced = false;
+        self.opening = None;
+        self.unconfirmed = matches!(why, Trigger::Cover | Trigger::Resume);
         vec![PowerEvent::OutOfScreenSaver]
     }
 
@@ -354,18 +422,31 @@ impl SleepController {
         if !ev.is_empty() {
             return ev;
         }
+        if let Some((at, source)) = self.opening.clone() {
+            if now >= at {
+                self.note(format!("cover stayed open ({source}): waking"));
+                return self.wake(Trigger::Cover, now, p);
+            }
+        }
         match self.state {
             SleepState::Awake => {
                 let idle = now.duration_since(self.last_activity);
-                match self.config.auto_sleep {
+                match self.idle_limit() {
                     Some(limit) if idle >= limit && !self.deferred(now) => {
-                        self.note(format!("inactive for {idle:?}"));
+                        if self.unconfirmed {
+                            self.note(format!("no touch or key for {idle:?} since a cover or resume wake"));
+                        } else {
+                            self.note(format!("inactive for {idle:?}"));
+                        }
                         self.sleep(Trigger::Inactivity, now, p)
                     }
                     _ => Vec::new(),
                 }
             }
             SleepState::Asleep => {
+                if self.opening.is_some() {
+                    return Vec::new(); // no suspend while a cover open settles
+                }
                 let Some(at) = self.next_suspend else { return Vec::new() };
                 if now < at {
                     return Vec::new();
@@ -390,6 +471,11 @@ impl SleepController {
                         let after = p.now().max(now);
                         if r.by_rtc {
                             // Maintenance wake: back to sleep soon unless the user acts.
+                            self.next_suspend = Some(after + self.config.rtc_grace);
+                        } else if self.config.cover && self.sensor_closed == Some(true) {
+                            // Woken with the cover closed: a bump in a bag, a cable. A
+                            // power key press or a cover open in the grace time still wakes.
+                            self.note("cover still closed: staying asleep".into());
                             self.next_suspend = Some(after + self.config.rtc_grace);
                         } else {
                             self.last_change = None;
@@ -419,11 +505,11 @@ impl SleepController {
     pub fn deadline(&self) -> Option<Instant> {
         let pending = self.pending_cover.as_ref().and(self.last_change).map(|t| t + self.config.debounce);
         let own = match self.state {
-            SleepState::Awake => self.config.auto_sleep.map(|limit| {
+            SleepState::Awake => self.idle_limit().map(|limit| {
                 let t = self.last_activity + limit;
                 self.deferred_until.map_or(t, |d| d.max(t))
             }),
-            SleepState::Asleep => self.next_suspend,
+            SleepState::Asleep => self.opening.as_ref().map(|(t, _)| *t).or(self.next_suspend),
         };
         match (own, pending) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -578,7 +664,10 @@ mod tests {
         assert_eq!(c.deadline(), Some(t0 + ms(600)));
         assert!(c.tick(t0 + ms(600), &mut p).is_empty());
         assert_eq!(c.deadline(), None, "no suspend configured");
-        assert_eq!(c.cover(false, t0 + Duration::from_secs(5), &mut p), vec![PowerEvent::OutOfScreenSaver]);
+        let t1 = t0 + Duration::from_secs(5);
+        assert!(c.cover(false, t1, &mut p).is_empty(), "settles first");
+        assert_eq!(c.deadline(), Some(t1 + ms(400)));
+        assert_eq!(c.tick(t1 + ms(400), &mut p), vec![PowerEvent::OutOfScreenSaver]);
         let mut off = SleepController::new(SleepConfig { cover: false, ..Default::default() }, t0);
         assert!(off.cover(true, t0, &mut p).is_empty());
     }
@@ -600,14 +689,113 @@ mod tests {
         // The debounce ends before the suspend delay: the pending close is a no-op.
         assert!(c.tick(t0 + ms(600), &mut p).is_empty());
         assert!(c.take_log().iter().any(|l| l == "cover closed (powerd(4), after debounce) ignored: already asleep"));
-        // Opened later: wake, the same path as the power key.
+        // Opened later: once it stayed open, wake, the same path as the power key.
         let t1 = t0 + ms(1500);
-        assert_eq!(c.cover_from(false, "uevent", t1, &mut p), vec![PowerEvent::OutOfScreenSaver]);
+        assert!(c.cover_from(false, "uevent", t1, &mut p).is_empty());
+        assert!(c.cover_from(false, "lipc-hal", t1 + ms(50), &mut p).is_empty());
+        assert_eq!(c.tick(t1 + ms(400), &mut p), vec![PowerEvent::OutOfScreenSaver]);
         assert_eq!(c.state(), SleepState::Awake);
         assert!(p.calls.ends_with(&["regrab".to_string(), "restore".to_string(), "light true".to_string()]));
-        assert!(c.cover_from(false, "lipc-hal", t1 + ms(50), &mut p).is_empty());
-        assert!(c.tick(t1 + ms(600), &mut p).is_empty());
-        assert!(c.take_log().iter().any(|l| l.contains("cover opened (lipc-hal, after debounce) ignored: already awake")));
+        assert!(c.cover_from(false, "powerd(6)", t1 + ms(450), &mut p).is_empty());
+        assert!(c.tick(t1 + ms(1000), &mut p).is_empty());
+        let log = c.take_log();
+        assert!(log.iter().any(|l| l == "cover opened (lipc-hal) ignored: already waking"), "{log:?}");
+        assert!(log.iter().any(|l| l.contains("cover opened (powerd(6), after debounce) ignored: already awake")), "{log:?}");
+    }
+
+    /// A bump in a bag: the sensor reads open for a moment, then closed again.
+    /// No wake, no screen flash, and the suspend goes ahead.
+    #[test]
+    fn brief_cover_open_is_a_bump_not_a_wake() {
+        let t0 = Instant::now();
+        let mut c = SleepController::new(SleepConfig { suspend: false, ..Default::default() }, t0);
+        let mut p = Fake::default();
+        c.cover_from(true, "uevent", t0, &mut p);
+        let n = p.calls.len();
+        let t1 = t0 + Duration::from_secs(10);
+        assert!(c.cover_from(false, "uevent", t1, &mut p).is_empty());
+        assert!(c.cover_from(true, "uevent", t1 + ms(150), &mut p).is_empty());
+        assert!(c.tick(t1 + ms(400), &mut p).is_empty());
+        assert_eq!(c.state(), SleepState::Asleep);
+        assert_eq!(p.calls.len(), n, "no restore, no light");
+        assert!(c.take_log().iter().any(|l| l == "cover closed (uevent) before it settled: a bump, staying asleep"));
+        assert_eq!(c.deadline(), None);
+        // No suspend while an open settles; it runs once the open turned out a bump.
+        let mut s = SleepController::new(SleepConfig::default(), t0);
+        s.cover_from(true, "uevent", t0, &mut p);
+        s.cover_from(false, "uevent", t0 + ms(1900), &mut p);
+        assert_eq!(s.deadline(), Some(t0 + ms(2300)));
+        s.cover_from(true, "uevent", t0 + ms(2000), &mut p);
+        assert_eq!(s.deadline(), Some(t0 + ms(2000)), "the suspend delay again");
+    }
+
+    /// powerd relays the sensor; while a framework daemon was stuck its relays came
+    /// 32 s late and put the device to sleep with the cover open.
+    #[test]
+    fn stale_powerd_cover_relay_is_ignored() {
+        let t0 = Instant::now();
+        let mut c = SleepController::new(SleepConfig::default(), t0);
+        let mut p = Fake::default();
+        // Without a sensor report, powerd's relay is all there is: it counts.
+        assert_eq!(c.cover_from(true, "powerd(4)", t0, &mut p), vec![PowerEvent::GoingToScreenSaver]);
+        let t1 = t0 + Duration::from_secs(1);
+        c.cover_from(false, "uevent", t1, &mut p);
+        assert_eq!(c.tick(t1 + ms(400), &mut p), vec![PowerEvent::OutOfScreenSaver]);
+        // The close the sensor reported 32 s ago arrives now from powerd.
+        assert!(c.cover_from(true, "powerd(4)", t1 + Duration::from_secs(32), &mut p).is_empty());
+        assert_eq!(c.state(), SleepState::Awake);
+        assert!(c.take_log().iter().any(|l| l == "cover closed (powerd(4)) ignored: stale, the sensor last said open"));
+    }
+
+    /// The kernel resumed (not the RTC) while the cover is closed: a bump or a cable.
+    /// Stay asleep and suspend again, unless the power key or a cover open follows.
+    #[test]
+    fn resume_with_the_cover_closed_stays_asleep() {
+        let t0 = Instant::now();
+        let mut c = SleepController::new(SleepConfig::default(), t0);
+        let t1 = t0 + Duration::from_secs(3);
+        let mut p = Fake { slept: Duration::from_secs(600), clock: Some(t1), ..Default::default() };
+        c.cover_from(true, "uevent", t0, &mut p);
+        let ev = c.tick(t0 + Duration::from_secs(2), &mut p);
+        assert_eq!(ev, vec![PowerEvent::Suspending, PowerEvent::Resuming]);
+        assert_eq!(c.state(), SleepState::Asleep);
+        assert_eq!(c.deadline(), Some(t1 + Duration::from_secs(5)));
+        assert!(c.take_log().iter().any(|l| l == "cover still closed: staying asleep"));
+        // The power key that woke it arrives: wake.
+        assert_eq!(c.power_key(t1 + ms(100), &mut p), vec![PowerEvent::OutOfScreenSaver]);
+        // With the cover open (or unknown) a resume wakes as before.
+        let mut o = SleepController::new(SleepConfig::default(), t0);
+        o.power_key(t0, &mut p);
+        let ev = o.tick(t0 + Duration::from_secs(2), &mut p);
+        assert_eq!(ev, vec![PowerEvent::Suspending, PowerEvent::Resuming, PowerEvent::OutOfScreenSaver]);
+    }
+
+    /// A wake by the cover that no touch or key follows (the magnet moved in a bag)
+    /// sleeps again after `unconfirmed_sleep`; a touch makes it a normal wake.
+    #[test]
+    fn unconfirmed_cover_wake_sleeps_early() {
+        let t0 = Instant::now();
+        let mut c = SleepController::new(SleepConfig { suspend: false, ..Default::default() }, t0);
+        let mut p = Fake::default();
+        c.cover_from(true, "uevent", t0, &mut p);
+        let t1 = t0 + Duration::from_secs(10);
+        c.cover_from(false, "uevent", t1, &mut p);
+        let woke = t1 + ms(400);
+        assert_eq!(c.tick(woke, &mut p), vec![PowerEvent::OutOfScreenSaver]);
+        assert_eq!(c.deadline(), Some(woke + Duration::from_secs(180)));
+        assert_eq!(c.tick(woke + Duration::from_secs(180), &mut p), vec![PowerEvent::GoingToScreenSaver]);
+        assert!(c.take_log().iter().any(|l| l.starts_with("no touch or key for")));
+        // Again, but touched: the 10 min auto-sleep applies from the touch.
+        let t2 = woke + Duration::from_secs(200);
+        c.cover_from(false, "uevent", t2, &mut p);
+        let woke = t2 + ms(400);
+        c.tick(woke, &mut p);
+        c.activity(woke + Duration::from_secs(5));
+        assert_eq!(c.deadline(), Some(woke + Duration::from_secs(5 + 600)));
+        // A power-key wake is deliberate: the normal limit.
+        c.power_key(woke + Duration::from_secs(10), &mut p);
+        c.power_key(woke + Duration::from_secs(20), &mut p);
+        assert_eq!(c.deadline(), Some(woke + Duration::from_secs(20 + 600)));
     }
 
     /// Closed, then opened again within the debounce window: the device must not stay
@@ -622,7 +810,10 @@ mod tests {
         assert_eq!(c.state(), SleepState::Asleep);
         assert_eq!(c.deadline(), Some(t0 + ms(600)), "earlier than the suspend delay");
         assert!(c.tick(t0 + ms(599), &mut p).is_empty());
-        assert_eq!(c.tick(t0 + ms(600), &mut p), vec![PowerEvent::OutOfScreenSaver]);
+        // The open applies when the debounce ends, then settles.
+        assert!(c.tick(t0 + ms(600), &mut p).is_empty());
+        assert_eq!(c.deadline(), Some(t0 + ms(1000)), "no suspend before the open settled");
+        assert_eq!(c.tick(t0 + ms(1000), &mut p), vec![PowerEvent::OutOfScreenSaver]);
         assert_eq!(c.state(), SleepState::Awake);
         assert_eq!(c.suspends(), 0, "no suspend happened");
         // A bounce close-open-close inside the window: the last state (closed) wins and
