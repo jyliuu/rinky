@@ -12,6 +12,12 @@ All notable changes to rinky are listed here. The format is based on
   highlighted text. ([#16])
 
 ### Fixed
+- When the Kindle went to sleep by itself (after the inactivity time) or by closing
+  the cover, the Kindle's own screensaver could replace rinky's book cover. Its
+  screensaver module kept running under rinky and reacted to the Kindle's own timer and
+  the cover; the power button was not affected. rinky now unloads that module while it
+  runs (as KOReader does) and tells the Kindle's power service not to start its
+  screensaver; both come back when you leave rinky. ([#16])
 - The brightness and warmth edge slides work only on the reading page. With the
   Insightful chat, a plugin dialog or another plugin window open, a slide along the
   screen edge no longer changes the light underneath. ([#16])
