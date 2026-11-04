@@ -108,7 +108,12 @@ Dev-dependencies only: ink-html -> ink-formats, ink-store; ink-formats -> ink-st
   `eink_hall`, udev's `com.lab126.hal magSensorClosed/Opened`, powerd
   `goingToScreenSaver 4`/`outOfScreenSaver 6`); `events::cover_from_published` and
   `classify` map them, `SleepController::cover_from` logs each with its source and
-  keeps a change inside the debounce window for later. Start-up logs
+  keeps a change inside the debounce window for later. The hall sensor also fires when
+  the device moves in a bag, so a cover open wakes only after it stayed open for
+  `cover_settle` (400 ms; `RINKY_COVER_SETTLE_MS`), a resume with the cover closed
+  stays asleep, a cover or resume wake that no touch or key follows sleeps again after
+  3 min (`RINKY_COVER_UNUSED_S`, 0 = off), and powerd's relays that contradict the
+  sensor's last report are dropped as stale. Start-up logs
   `/sys/devices/platform/eink_hall/hall_enable` (read only); `RINKY_COVER=0` turns
   the cover off. Settings changed on the device are journaled in `/tmp/rinky/restore`
   and undone by `rinky device restore` (launcher and watchdog). `devtool`
@@ -613,6 +618,25 @@ Firmware 5.19.5 behaves as follows while rinky runs with `lab126_gui` stopped.
   pillow to show the alert, which is visible when the request reaches pillow after the
   framework is back. Restarting appmgrd before starting the framework avoids it; the
   launcher and the watchdog do that (`RINKY_RESTART_APPMGRD=0` turns it off).
+
+- **Orphaned framework daemons stall powerd.** Several upstart jobs run their daemon
+  through a shell (`exec fastmetrics 2>&1 | logger`, `su framework -c ...`). When
+  `stop lab126_gui` stops such a job, upstart kills the shell but the daemon can
+  survive, reparented to init and no longer managed by the job. On a PW12 an orphaned
+  `fastmetrics` got stuck. powerd sends it a metric before it handles each cover or
+  power event, and each send waited about 32 s for a timeout
+  (`FM Metrics Emission:status :4` in `/var/log/messages`). So every powerd event came
+  32 s late, and every lipc read of a powerd property timed out. The launcher records
+  the process tree of every running job before the framework stop and afterwards kills
+  what a stopped job left behind (`fastmetrics`, `wifilocker`, `minerva_service` were
+  seen). It also stops the Amazon services rinky has no use for (`QUIET_JOBS` in
+  `scripts/rinky.sh`: cloud sync, metrics, log uploaders, audio and TTS, Bluetooth,
+  appmgrd), lists them in `/tmp/rinky/quieted`, and the launcher or the watchdog
+  starts them again before the framework. Kept: powerd, lipcd, deviced, cmd, wifid,
+  wifis, volumd, mtp, tmd, battstressd, X and the system jobs. `RINKY_QUIET=0` leaves
+  them all running; `RINKY_QUIET_JOBS` replaces the list. Reading
+  `/sys/devices/platform/eink_hall/hall_test_trigger` injects a fake "cover opened"
+  event: never read it.
 
 `rinky spike-suspend` is a small test screen for these paths: the first power press
 draws a screensaver and tries to suspend, the next one wakes. Scenario:
