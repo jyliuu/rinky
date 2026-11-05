@@ -28,14 +28,14 @@ You need:
 
 - A Kindle with a 300 ppi screen. Check the model under
   *Settings > Device Options > Device Info*. Only the Paperwhite 12th gen (firmware
-  5.19.x) has been tested; on the others rinky should work but nobody has tried yet:
+  5.19.x) has been tested on a real device. Four more ran in an emulator with Amazon's
+  firmware; the rest share a display interface with one of those:
 
   | Kindle | rinky |
   |---|---|
-  | Paperwhite 12th gen (2024) | tested |
-  | Paperwhite 5 and Signature Edition, Kindle 11th and 12th gen, Colorsoft, Scribe | untested (same display controller as the tested model) |
-  | Paperwhite 4, Oasis 2, Oasis 3 | untested |
-  | Paperwhite 3, Voyage, Oasis 1 | untested; their last firmware is old and rinky may not start |
+  | Paperwhite 12th gen (2024) | tested on the device |
+  | Paperwhite 4, Oasis 3, Paperwhite 3, Kindle 12th gen (2024) | runs in the emulator |
+  | Paperwhite 5 and Signature Edition, Kindle 11th gen, Colorsoft, Scribe, Oasis 2, Voyage, Oasis 1 | untested |
   | Paperwhite 1 and 2, Kindle 7th, 8th and 10th gen | not supported: their screens have too few pixels for rinky's layout |
 
   On the Voyage and the Oasis models the page keys turn pages. Models without a warm

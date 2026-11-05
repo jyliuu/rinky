@@ -1,9 +1,10 @@
 rinky - e-book reader for Kindle e-readers (firmware 5.x)
 ==========================================================
 
-Needs a jailbroken Kindle. Tested on the Paperwhite 12th gen (firmware 5.19.x); the
-other Kindles with a 300 ppi screen (Paperwhite 3 and newer, Voyage, Oasis, Scribe,
-Colorsoft, Kindle 11th and 12th gen) should work but are untested. The full manual,
+Needs a jailbroken Kindle. Tested on the Paperwhite 12th gen (firmware 5.19.x) and, in
+an emulator, on the Paperwhite 3 and 4, Oasis 3 and Kindle 12th gen; the other Kindles
+with a 300 ppi screen (Paperwhite 5, Voyage, Oasis 1 and 2, Scribe, Colorsoft, Kindle
+11th gen) should work but are untested. The full manual,
 with the list of models, is user-guide.md in this folder.
 
 Install (pick one)

@@ -77,16 +77,17 @@ reading.
 ## Install
 
 You need a jailbroken Kindle (see [kindlemodding.org](https://kindlemodding.org/)) with
-KUAL installed. rinky is developed and tested on the Paperwhite 12th generation (2024)
-on firmware 5.19.x. It also runs on the other Kindles with a 300 ppi screen, but those
-haven't been tried yet:
+KUAL installed. rinky is developed on the Paperwhite 12th generation (2024) on firmware
+5.19.x and runs on the other Kindles with a 300 ppi screen. Apart from the Paperwhite
+12th gen, they have been tried in an emulator ([eink-emulator](https://github.com/katadelos/eink-emulator)
+with Amazon's firmware), not on real devices:
 
 | Kindle | Status |
 |---|---|
-| Paperwhite 12th gen (2024) | tested |
-| Paperwhite 5 and Signature Edition (11th gen), Kindle 11th and 12th gen, Colorsoft, Scribe (all three) | untested; same display controller as the tested one |
-| Paperwhite 4 (10th gen), Oasis 2 and 3 | untested |
-| Paperwhite 3, Voyage, Oasis 1 | untested; old firmware and kernels, may not start |
+| Paperwhite 12th gen (2024) | tested on the device |
+| Paperwhite 4 (5.18.1), Oasis 3 (5.18.2), Paperwhite 3 (5.16.2), Kindle 12th gen (2024, 5.20.2) | runs in the emulator: books open, taps and page keys turn pages, restart works |
+| Paperwhite 5 and Signature Edition, Kindle 11th gen, Colorsoft, Scribe (all three), Oasis 2 | untested; same display interface as a model above |
+| Voyage, Oasis 1 | untested; same display interface as the Paperwhite 3 |
 | Paperwhite 1 and 2, Kindle 7th, 8th and 10th gen | not supported (lower-resolution screens) |
 
 On a Colorsoft, rinky shows grayscale. If you try rinky on a model marked untested,

@@ -8,12 +8,26 @@ All notable changes to rinky are listed here. The format is based on
 
 ### Added
 - rinky runs on more Kindles: the Paperwhite 3, 4 and 5, Voyage, Oasis 1 to 3, Kindle
-  11th and 12th gen, Scribe and Colorsoft, besides the Paperwhite 12th gen. They are
-  untested; the user guide lists them. rinky reads the model from the serial number
-  and uses that model's display interface, page keys (Voyage, Oasis) and lights. On a
-  Kindle it does not know, it tries each display interface in turn.
+  11th and 12th gen, Scribe and Colorsoft, besides the Paperwhite 12th gen. The
+  Paperwhite 3 and 4, Oasis 3 and Kindle 12th gen were tried in an emulator with
+  Amazon's firmware; the others are untested. The user guide lists them. rinky reads
+  the model from the serial number and uses that model's display interface, page keys
+  (Voyage, Oasis) and lights. On a Kindle it does not know, it tries each display
+  interface in turn.
 - Settings › Device shows the Kindle model, with the firmware under it.
 - `rinky sim --panel WxH` renders the simulator at another screen size.
+
+### Changed
+- rinky and its SSH server are built for the Cortex-A9, the oldest processor of the
+  supported Kindles. The build for the Paperwhite 12th gen's Cortex-A53 stopped with
+  "Illegal instruction" on older models.
+
+### Fixed
+- Restarting rinky (after an in-app update, or `rinky-ctl.sh restart`) went back to the
+  Kindle's Home screen on Kindles with a small temporary folder (32 MB on the
+  Paperwhite 3 and 4 and the Oasis): there was no room for the new copy of rinky next
+  to the old one. The launcher now removes the old copy first, or runs rinky from its
+  install folder.
 
 ## [0.4.3] - 2026-11-04
 

@@ -97,7 +97,7 @@ if [ "$BUILD" = 1 ]; then
   # checkout so a package carries no user name or folder of the build machine. These
   # flags replace .cargo/config.toml's rustflags, so its CPU flags are repeated here.
   sep=$(printf '\037')
-  CARGO_ENCODED_RUSTFLAGS="-Ctarget-cpu=cortex-a53${sep}-Ctarget-feature=+neon${sep}--remap-path-prefix=$HOME=~${sep}--remap-path-prefix=$ROOT=rinky" \
+  CARGO_ENCODED_RUSTFLAGS="-Ctarget-cpu=cortex-a9${sep}-Ctarget-feature=+neon${sep}--remap-path-prefix=$HOME=~${sep}--remap-path-prefix=$ROOT=rinky" \
     CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)} cargo zigbuild --profile "$PROFILE" --target "$TARGET" -p ink-app >&2
   scripts/build-dropbear.sh >&2
 fi

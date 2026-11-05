@@ -5,7 +5,8 @@
 //! measured on the PW12 with it), and the i.MX ones of older Kindles: Rex (PW4, 80
 //! bytes), Zelda (Oasis 2 and 3, 88 bytes) and the original `mxcfb_update_data` (Voyage,
 //! PW3, Oasis 1, 72 bytes). On i.MX, night mode inverts in software with the day
-//! waveforms, there is no page-turn sweep and no fast mode; an unknown Kindle's
+//! waveforms, there is no page-turn sweep and no fast mode. The sweep is also off on the
+//! MTK models KOReader does not animate (`Model::swipe`). An unknown Kindle's
 //! interface is found by sending a GC16 PARTIAL of an unchanged corner with each.
 //!
 //! Struct layouts and request numbers come from KOReader's
@@ -565,7 +566,7 @@ impl KindleFb {
         let w = self.in_flight.before(r, Instant::now());
         self.wait(w);
         self.marker = self.marker.wrapping_add(1).max(1);
-        let swipe = swipe.filter(|_| self.epdc == Epdc::Mtk);
+        let swipe = swipe.filter(|_| self.epdc == Epdc::Mtk && self.model.swipe);
         let mut d = update_data_epdc(self.epdc, r, waveform, mode, self.marker, swipe);
         let flags = if self.epdc == Epdc::Legacy { d[10] } else { d[8] };
         let fd = self.file.as_raw_fd();

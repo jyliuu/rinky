@@ -470,14 +470,23 @@ restart_prepare() {
     rm -f "$RUN/rinky.pid" "$RUN/heartbeat" "$RUN/exit-reason" "$RUN/watchdog-kill"
     [ -x "$DIR/rinky" ] || { log "restart: $DIR/rinky is missing or not executable"; return 1; }
     if [ "$BIN" = "$RUN/bin/rinky" ]; then
+        # Next to the old binary first; on a small tmpfs (32 MB /var on the PW3, PW4 and
+        # Oasis, rinky about 24 MB) only after removing it (rinky has exited); else run
+        # the installed binary from $DIR, as the first start does when it cannot copy.
         rt=.new.$$
         if cp "$DIR/rinky" "$RUN/bin/.rinky$rt" 2>/dev/null &&
             chmod 755 "$RUN/bin/.rinky$rt" && mv -f "$RUN/bin/.rinky$rt" "$RUN/bin/rinky"; then
             :
         else
-            rm -f "$RUN/bin/.rinky$rt"
-            log "restart: cannot copy the new binary to $RUN/bin"
-            return 1
+            rm -f "$RUN/bin/.rinky$rt" "$RUN/bin/rinky"
+            if cp "$DIR/rinky" "$RUN/bin/.rinky$rt" 2>/dev/null &&
+                chmod 755 "$RUN/bin/.rinky$rt" && mv -f "$RUN/bin/.rinky$rt" "$RUN/bin/rinky"; then
+                log "restart: copied the new binary to $RUN/bin after removing the old one"
+            else
+                rm -f "$RUN/bin/.rinky$rt"
+                BIN=$DIR/rinky
+                log "restart: cannot copy the new binary to $RUN/bin; running it from $DIR"
+            fi
         fi
     fi
     t=$(now_ms)

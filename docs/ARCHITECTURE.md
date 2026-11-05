@@ -99,7 +99,9 @@ Dev-dependencies only: ink-html -> ink-formats, ink-store; ink-formats -> ink-st
   original `mxcfb_update_data` for the PW4, Oasis 2/3 and Voyage/PW3/Oasis 1), warmth,
   page keys and their direction, the Voyage's pressure keys, the hall sensor folder.
   `KindleFb` builds each refresh struct (`update_data_epdc`); on i.MX night mode is
-  software inversion with day waveforms and there is no page-turn sweep or fast mode.
+  software inversion with day waveforms and there is no page-turn sweep or fast mode;
+  the sweep is on only for the PW5 and PW12 (`Model::swipe`, KOReader's
+  `canDoSwipeAnimation`: the Kindle 2024 driver voids swept updates).
   An unknown model's interface is probed with a GC16 PARTIAL of an unchanged corner. A
   framebuffer left in landscape (accelerometer models) is turned upright and the old
   `rotate` journaled. The UI is laid out in 300 ppi pixels and adapts to the panel

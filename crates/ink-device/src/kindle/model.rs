@@ -79,6 +79,11 @@ pub struct Model {
     pub pressure_keys: bool,
     /// Has an accelerometer (the framework may leave the framebuffer rotated).
     pub gsensor: bool,
+    /// The MTK driver takes the page-turn sweep (`MTK_EPDC_FLAG_ENABLE_SWIPE`).
+    /// KOReader's `canDoSwipeAnimation`: PW5 and PW12 only. The Kindle 2024's driver
+    /// voids such an update ("swipe update void is true") and the page body stays as
+    /// it was (emulator, 5.20.2, 2026-11-05).
+    pub swipe: bool,
     /// sysfs folder with `hall_enable` (read for logs only).
     pub hall_dir: Option<&'static str>,
     /// Support level.
@@ -104,6 +109,7 @@ const fn m(id: &'static str, name: &'static str, codes: &'static [&'static str],
         page_keys: None,
         pressure_keys: false,
         gsensor: false,
+        swipe: false,
         hall_dir: None,
         tier: Tier::Untested,
     }
@@ -183,11 +189,13 @@ pub const MODELS: &[Model] = &[
     },
     Model {
         warmth: true,
+        swipe: true,
         hall_dir: EINK_HALL,
         ..m("PaperWhite5", "Kindle Paperwhite 5 (11th gen)", &["1Q0", "1PX", "1VD", "21A", "2BJ", "2DK"], Epdc::Mtk)
     },
     Model {
         warmth: true,
+        swipe: true,
         hall_dir: EINK_HALL,
         ..m("PaperWhite5SE", "Kindle Paperwhite 5 Signature Edition", &["1LG", "219", "2BH"], Epdc::Mtk)
     },
@@ -216,6 +224,7 @@ pub const MODELS: &[Model] = &[
     Model { hall_dir: EINK_HALL, ..m("Basic5", "Kindle (12th gen)", &["A89", "3L2", "3L3", "3L4", "3L5", "3L6", "3KM"], Epdc::Mtk) },
     Model {
         warmth: true,
+        swipe: true,
         hall_dir: EINK_HALL,
         tier: Tier::Tested,
         ..m(
@@ -342,5 +351,6 @@ mod tests {
         assert!(!Model::by_code("33W").unwrap().is_unknown());
         assert!(matches!(Model::by_code("0DU").unwrap().tier, Tier::Unsupported(_)));
         assert!(Model::by_code("3H3").unwrap().describe().contains("tested"));
+        assert!(Model::by_code("3H3").unwrap().swipe && !Model::by_code("3KM").unwrap().swipe && !Model::unknown().swipe);
     }
 }
