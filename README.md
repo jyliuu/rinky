@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  An e-book reader for the Kindle Paperwhite 12, written in Rust.
+  An e-book reader for Kindle e-readers, written in Rust.
 </p>
 
 <p align="center">
@@ -76,8 +76,21 @@ reading.
 
 ## Install
 
-You need a Kindle Paperwhite 12th generation (2024) on firmware 5.19.x, jailbroken
-(see [kindlemodding.org](https://kindlemodding.org/)), with KUAL installed.
+You need a jailbroken Kindle (see [kindlemodding.org](https://kindlemodding.org/)) with
+KUAL installed. rinky is developed and tested on the Paperwhite 12th generation (2024)
+on firmware 5.19.x. It also runs on the other Kindles with a 300 ppi screen, but those
+haven't been tried yet:
+
+| Kindle | Status |
+|---|---|
+| Paperwhite 12th gen (2024) | tested |
+| Paperwhite 5 and Signature Edition (11th gen), Kindle 11th and 12th gen, Colorsoft, Scribe (all three) | untested; same display controller as the tested one |
+| Paperwhite 4 (10th gen), Oasis 2 and 3 | untested |
+| Paperwhite 3, Voyage, Oasis 1 | untested; old firmware and kernels, may not start |
+| Paperwhite 1 and 2, Kindle 7th, 8th and 10th gen | not supported (lower-resolution screens) |
+
+On a Colorsoft, rinky shows grayscale. If you try rinky on a model marked untested,
+please open an issue with `rinky/rinky.log` from the Kindle, whether it worked or not.
 
 1. Download `rinky-<version>-kindle.zip` from the [latest release](../../releases/latest)
    and unzip it. It contains two folders, `rinky` and `extensions`.

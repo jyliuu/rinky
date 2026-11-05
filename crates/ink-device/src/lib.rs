@@ -2,7 +2,7 @@
 //!
 //! A [`Device`] bundles one implementation of each service trait:
 //!
-//! | Trait | Kindle (`kindle_mtk`) | Host window (`sim`) | Tests (`headless`) |
+//! | Trait | Kindle (`kindle`) | Host window (`sim`) | Tests (`headless`) |
 //! | --- | --- | --- | --- |
 //! | [`Screen`] | `/dev/fb0` + MTK refresh ioctls | minifb window, e-ink look | PNG frames |
 //! | [`Input`] | evdev touch + power key + powerd events | mouse + keys | script |
@@ -59,7 +59,7 @@ pub mod usb;
 pub mod wifi;
 
 #[cfg(target_os = "linux")]
-pub mod kindle_mtk;
+pub mod kindle;
 #[cfg(all(feature = "sim", not(target_arch = "arm")))]
 pub mod sim;
 
@@ -98,10 +98,12 @@ pub type Result<T, E = DeviceError> = std::result::Result<T, E>;
 /// Which backend a [`Device`] uses and what it runs on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {
-    /// `kindle_mtk`, `sim` or `headless`.
+    /// `kindle`, `sim` or `headless`.
     pub backend: &'static str,
-    /// Model or firmware description.
+    /// Model name (`Kindle Paperwhite 4 (10th gen)`).
     pub model: String,
+    /// Firmware (first line of `/etc/version.txt`); empty off the device.
+    pub firmware: String,
 }
 
 /// One implementation of every device service.

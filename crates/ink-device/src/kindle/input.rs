@@ -7,7 +7,7 @@
 //! (`/tmp/rinky/heartbeat`, a counter) moves while the app waits for input; a
 //! stuck app stops calling `next_event` and the heartbeat stops.
 
-use super::fb::MtkScreen;
+use super::fb::KindleFb;
 use super::system;
 use super::Shared;
 use crate::battery::{self, LowBatteryMonitor};
@@ -88,6 +88,17 @@ fn mt_slots(f: &File, code: u16) -> Option<[i32; SLOTS]> {
     let mut out = [0i32; SLOTS];
     out.copy_from_slice(&buf[1..]);
     Some(out)
+}
+
+/// The power key: the PW12's `bd71828-pwrkey`, else the first device without axes
+/// that has `KEY_POWER` (older Kindles name it after their PMIC).
+pub fn power_key_device(devs: &[DevInfo]) -> Option<&DevInfo> {
+    devs.iter().find(|d| d.name.contains("pwrkey")).or_else(|| devs.iter().find(|d| !d.has_abs && d.has_key(KEY_POWER)))
+}
+
+/// The device that has both page key `codes`.
+pub fn page_key_device(devs: &[DevInfo], codes: (u16, u16)) -> Option<&DevInfo> {
+    devs.iter().find(|d| d.has_key(codes.0) && d.has_key(codes.1))
 }
 
 /// Writes key press + release records into the evdev node of the device whose name
@@ -365,6 +376,8 @@ pub struct KindleInput {
     shared: Rc<RefCell<Shared>>,
     touch: TouchDev,
     power: Option<File>,
+    /// Page keys (Voyage, Oasis) and their (next, previous) codes.
+    page_keys: Option<(File, (u16, u16))>,
     lipc: Lipc,
     sys: SysRoot,
     opts: LoopOptions,
@@ -514,13 +527,30 @@ impl KindleInput {
         let ov = TouchOverride::parse(&std::env::var("RINKY_TOUCH").unwrap_or_default());
         let touch = TouchDev::open(size.w, size.h, opts.grab_touch, &ov)?;
         let devs = list_devices();
-        let power =
-            devs.iter().find(|d| d.name.contains("pwrkey")).and_then(|d| File::open(format!("/dev/input/{}", d.event)).ok());
+        let model = shared.borrow().screen.model;
+        let power = power_key_device(&devs).and_then(|d| {
+            log::info!("power key: {} ({})", d.name, d.event);
+            File::open(format!("/dev/input/{}", d.event)).ok()
+        });
+        let page_keys = model.page_keys.and_then(|codes| {
+            let d = page_key_device(&devs, codes)?;
+            log::info!("page keys: {} ({}), next {} previous {}", d.name, d.event, codes.0, codes.1);
+            Some((File::open(format!("/dev/input/{}", d.event)).ok()?, codes))
+        });
+        if model.pressure_keys {
+            // The Voyage's side keys stay off while the framework is stopped (KOReader).
+            for p in ["fsrkeypadEnable", "fsrkeypadPrevEnable", "fsrkeypadNextEnable"] {
+                if let Err(e) = lipc.set_int("com.lab126.deviced", p, 1) {
+                    log::warn!("page keys: {p}: {e}");
+                }
+            }
+        }
         let now = Instant::now();
         let mut me = KindleInput {
             shared,
             touch,
             power,
+            page_keys,
             lipc: lipc.clone(),
             sys,
             hub: None,
@@ -587,7 +617,10 @@ impl KindleInput {
             me.keep_powerd_out_of_screensaver();
         }
         // Read only: KOReader's hall toggle writes hall_enable; rinky never does.
-        let hall = HallInfo::read(&me.sys);
+        let hall = match model.hall_dir {
+            Some(dir) => HallInfo::read_at(&me.sys, dir),
+            None => HallInfo { dir: "(none on this model)".into(), ..Default::default() },
+        };
         if hall.disabled() {
             log::warn!("{}", hall.describe());
         } else {
@@ -724,7 +757,7 @@ impl KindleInput {
 
     fn amber_check(&mut self, now: Instant) {
         self.amber_next = now + AMBER_EVERY;
-        if !self.opts.amber || self.shared.borrow().asleep {
+        if !self.opts.amber || self.shared.borrow().asleep || !self.shared.borrow().screen.model.warmth {
             return;
         }
         let sched = match super::services::read_amber_schedule(&self.lipc) {
@@ -912,6 +945,26 @@ impl KindleInput {
         } else {
             self.queue.push_back(InputEvent::Key(KeyEvent { key: Key::Power, pressed, time: ev.time }));
         }
+    }
+
+    /// A page key: `Key::PageNext` / `Key::PagePrev` while awake (and unlocked).
+    fn handle_page_key(&mut self, ev: RawEvent, now: Instant) {
+        let Some((_, (next, prev))) = self.page_keys else { return };
+        let key = match ev.code {
+            c if ev.ty == EV_KEY && c == next => Key::PageNext,
+            c if ev.ty == EV_KEY && c == prev => Key::PagePrev,
+            _ => return,
+        };
+        {
+            let sh = self.shared.borrow();
+            if sh.asleep || sh.locked {
+                return;
+            }
+        }
+        if let Some(s) = self.sleep.as_mut() {
+            s.activity(now);
+        }
+        self.queue.push_back(InputEvent::Key(KeyEvent { key, pressed: ev.value != 0, time: ev.time }));
     }
 
     fn handle_cover(&mut self, closed: bool, source: CoverSource, now: Instant) {
@@ -1104,6 +1157,7 @@ impl Input for KindleInput {
                 fds.len() - 1
             };
             let power_idx = self.power.as_ref().map(|p| add(p.as_raw_fd(), libc::POLLIN));
+            let keys_idx = self.page_keys.as_ref().map(|(f, _)| add(f.as_raw_fd(), libc::POLLIN));
             let lipc_idx = self.hub.as_ref().map(|(_, rd)| add(rd.as_raw_fd(), libc::POLLIN));
             let uevent_idx = self.uevent.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLIN));
             let udc_idx = self.udc.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLPRI | libc::POLLERR));
@@ -1135,6 +1189,17 @@ impl Input for KindleInput {
                         if ev.ty == EV_KEY && ev.code == KEY_POWER {
                             self.handle_power_key(ev, now);
                         }
+                    }
+                }
+            }
+            if let Some(i) = keys_idx {
+                if fds[i].revents & libc::POLLIN != 0 {
+                    let evs = match self.page_keys.as_mut() {
+                        Some((f, _)) => read_raw(f)?,
+                        None => Vec::new(),
+                    };
+                    for ev in evs {
+                        self.handle_page_key(ev, now);
                     }
                 }
             }
@@ -1229,7 +1294,7 @@ impl Drop for KindleInput {
     }
 }
 
-impl MtkScreen {
+impl KindleFb {
     /// The panel orientation size (for callers without the trait in scope).
     pub fn size_px(&self) -> (u32, u32) {
         let s = crate::Screen::panel_size(self);

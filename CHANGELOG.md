@@ -4,6 +4,17 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- rinky runs on more Kindles: the Paperwhite 3, 4 and 5, Voyage, Oasis 1 to 3, Kindle
+  11th and 12th gen, Scribe and Colorsoft, besides the Paperwhite 12th gen. They are
+  untested; the user guide lists them. rinky reads the model from the serial number
+  and uses that model's display interface, page keys (Voyage, Oasis) and lights. On a
+  Kindle it does not know, it tries each display interface in turn.
+- Settings › Device shows the Kindle model, with the firmware under it.
+- `rinky sim --panel WxH` renders the simulator at another screen size.
+
 ## [0.4.3] - 2026-11-04
 
 ### Added

@@ -68,7 +68,7 @@ mod kindle {
     use crate::geom::{Point, Rect, Rotation};
     use crate::input::{InputEvent, PowerEvent, TouchPhase};
     use crate::journal::{Entry, Journal};
-    use crate::kindle_mtk::{self, fb, input, services::LipcServices, system, KindleOptions};
+    use crate::kindle::{self, fb, input, services::LipcServices, system, KindleOptions};
     use crate::lipc::Lipc;
     use crate::screen::{RefreshClass, Screen};
     use crate::services::{Battery, Clock, Light, Wifi};
@@ -102,7 +102,7 @@ mod kindle {
     }
 
     fn open_full() -> Result<Device> {
-        kindle_mtk::open(KindleOptions { power_events: true, ..Default::default() })
+        kindle::open(KindleOptions { power_events: true, ..Default::default() })
     }
 
     fn mark(canvas: &mut Canvas, p: Point, n: u32) -> Rect {
@@ -144,12 +144,22 @@ mod kindle {
     }
 
     fn info() -> Result<()> {
+        let sys = SysRoot::system();
+        let model = crate::kindle::model::Model::detect(&sys);
+        let serial = sys.read("/proc/usid").unwrap_or_default();
+        out!("model: {} (code {:?})", model.describe(), crate::kindle::model::device_code(&serial));
         let devs = input::list_devices();
         for d in &devs {
-            out!("input: {:<16} {:<7} abs {} mt {}", d.name, d.event, d.has_abs, d.has_mt);
+            out!("input: {:<16} {:<7} abs {} mt {} keys {}", d.name, d.event, d.has_abs, d.has_mt, d.key_bits);
+        }
+        if let Some(d) = input::power_key_device(&devs) {
+            out!("power key: {} ({})", d.name, d.event);
+        }
+        if let Some(d) = model.page_keys.and_then(|c| input::page_key_device(&devs, c)) {
+            out!("page keys: {} ({})", d.name, d.event);
         }
         let ov = crate::evdev::TouchOverride::parse(&std::env::var("RINKY_TOUCH").unwrap_or_default());
-        let fbs = fb::MtkScreen::open_passive()?;
+        let fbs = fb::KindleFb::open_passive()?;
         let size = fbs.panel_size();
         match input::TouchDev::open(size.w, size.h, false, &ov) {
             Ok(mut t) => {
@@ -159,7 +169,6 @@ mod kindle {
             Err(e) => out!("touch: {e}"),
         }
         out!("fb: {}x{} grayscale {} rotate {}", size.w, size.h, fbs.grayscale()?, fbs.hw_rotate()?);
-        let sys = SysRoot::system();
         out!("udc: {:?}", crate::usb::read_udc(&sys));
         out!("transport: {:?}", input::detect_transport(&Lipc::new()));
         out!("battery: {:?}", crate::battery::read_sysfs(&sys));
@@ -285,7 +294,7 @@ mod kindle {
             Some("test") => {
                 let out = opt(args, "--out").unwrap_or("/tmp/rinky/night");
                 std::fs::create_dir_all(out)?;
-                let mut s = fb::MtkScreen::open()?;
+                let mut s = fb::KindleFb::open()?;
                 let size = s.size();
                 let mut c = Canvas::new(size.w as usize, size.h as usize);
                 page(&mut c, "night mode test", &["day: black on white".into()]);
@@ -310,7 +319,7 @@ mod kindle {
                 Ok(0)
             }
             Some(v @ ("on" | "off")) => {
-                let mut s = fb::MtkScreen::open()?;
+                let mut s = fb::KindleFb::open()?;
                 s.set_night_mode(v == "on")?;
                 s.refresh_all()?;
                 out!("night {v}: grayscale {} (exits now; the flag is restored on exit)", s.grayscale()?);
@@ -325,7 +334,7 @@ mod kindle {
 
     fn screenshot(args: &[String]) -> Result<()> {
         let file = args.first().ok_or_else(|| DeviceError::Backend("screenshot needs FILE.png".into()))?;
-        let s = fb::MtkScreen::open_passive()?;
+        let s = fb::KindleFb::open_passive()?;
         s.screenshot()?.save_png(std::path::Path::new(file))?;
         out!("{file}: {}x{}", s.size().w, s.size().h);
         Ok(())
@@ -578,7 +587,7 @@ mod kindle {
     }
 
     fn clock(args: &[String]) -> Result<i32> {
-        let mut c = kindle_mtk::services::KindleClock { lipc: Lipc::new(), ntp_server: KindleOptions::default().ntp_server };
+        let mut c = kindle::services::KindleClock { lipc: Lipc::new(), ntp_server: KindleOptions::default().ntp_server };
         match args.first().map(String::as_str) {
             Some("now") | None => out!("local {} (utc {})", c.local_now().format(), crate::clock::DateTime::from_unix(crate::clock::unix_secs(c.now()), 0).format()),
             Some("ntp") => {

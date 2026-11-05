@@ -663,9 +663,10 @@ pub fn startup_report(device: &ink_device::Device, settings: &Settings, paths: &
     let panel = device.screen.panel_size();
     let size = device.screen.size();
     log::info!(
-        "device: backend {} model {:?}; framebuffer panel {}x{} logical {}x{} rotation {:?} night {}",
+        "device: backend {} model {:?} firmware {:?}; framebuffer panel {}x{} logical {}x{} rotation {:?} night {}",
         device.info.backend,
         device.info.model,
+        device.info.firmware,
         panel.w,
         panel.h,
         size.w,

@@ -104,7 +104,9 @@ pub const HALL_DIR: &str = "/sys/devices/platform/eink_hall";
 /// and `hall_hw_state` values is not documented, so they never drive sleep).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HallInfo {
-    /// `HALL_DIR` exists.
+    /// The folder read (the model's; [`HALL_DIR`] by default).
+    pub dir: String,
+    /// The folder exists.
     pub present: bool,
     /// `hall_enable` (`1` = the driver sends events; `0` = muted). Never written by us.
     pub enable: Option<String>,
@@ -117,9 +119,15 @@ pub struct HallInfo {
 impl HallInfo {
     /// Reads the files under [`HALL_DIR`].
     pub fn read(sys: &crate::sysfs::SysRoot) -> HallInfo {
-        let get = |f: &str| sys.read(&format!("{HALL_DIR}/{f}")).ok().map(|s| s.trim().to_string());
+        HallInfo::read_at(sys, HALL_DIR)
+    }
+
+    /// Reads the files under `dir` (older Kindles: `wario_hall0`, `rex_hall`).
+    pub fn read_at(sys: &crate::sysfs::SysRoot, dir: &str) -> HallInfo {
+        let get = |f: &str| sys.read(&format!("{dir}/{f}")).ok().map(|s| s.trim().to_string());
         HallInfo {
-            present: sys.exists(HALL_DIR),
+            dir: dir.to_string(),
+            present: sys.exists(dir),
             enable: get("hall_enable"),
             detect: get("hall_detect"),
             hw_state: get("hall_hw_state"),
@@ -134,11 +142,12 @@ impl HallInfo {
     /// One log line.
     pub fn describe(&self) -> String {
         if !self.present {
-            return format!("cover: no hall sensor at {HALL_DIR}");
+            return format!("cover: no hall sensor at {}", self.dir);
         }
         let v = |o: &Option<String>| o.clone().unwrap_or_else(|| "?".into());
         format!(
-            "cover: hall sensor {HALL_DIR}: hall_enable={} hall_detect={} hall_hw_state={}{}",
+            "cover: hall sensor {}: hall_enable={} hall_detect={} hall_hw_state={}{}",
+            self.dir,
             v(&self.enable),
             v(&self.detect),
             v(&self.hw_state),

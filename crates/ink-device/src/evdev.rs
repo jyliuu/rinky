@@ -118,6 +118,15 @@ pub struct DevInfo {
     pub has_abs: bool,
     /// Reports `ABS_MT_POSITION_X` (a multi-touch screen).
     pub has_mt: bool,
+    /// The `B: KEY=` bitmap as printed (see [`DevInfo::has_key`]).
+    pub key_bits: String,
+}
+
+impl DevInfo {
+    /// The device can send this key code.
+    pub fn has_key(&self, code: u16) -> bool {
+        bitmap_has(&self.key_bits, code as usize)
+    }
 }
 
 /// Parses the text of `/proc/bus/input/devices` (bitmap words as an ARM32 kernel
@@ -136,6 +145,8 @@ pub fn parse_devices(text: &str) -> Vec<DevInfo> {
             } else if let Some(a) = line.strip_prefix("B: ABS=") {
                 d.has_abs = a.trim() != "0";
                 d.has_mt = bitmap_has(a, ABS_MT_POSITION_X as usize);
+            } else if let Some(k) = line.strip_prefix("B: KEY=") {
+                d.key_bits = k.trim().to_string();
             }
         }
         if !d.event.is_empty() {
@@ -977,6 +988,16 @@ fts_ts: 1792868250693 ms type 0 code 0 value 0";
     const EMU_DEVICES: &str = "I: Bus=0019\nN: Name=\"bd71828-pwrkey\"\nH: Handlers=event0 ktch \nB: EV=3\n\n\
         I: Bus=0018\nN: Name=\"fts_ts\"\nH: Handlers=event1 ktch \nB: ABS=2618000 0\n\n\
         I: Bus=0018 Vendor=1949 Product=0417\nN: Name=\"gesture_tap\"\nH: Handlers=event2 ktch \nB: EV=3\n";
+
+    #[test]
+    fn key_bitmaps() {
+        // An Oasis-like key device: KEY_PAGEUP (104), KEY_PAGEDOWN (109), KEY_POWER (116)
+        // are bits 8, 13 and 20 of the fourth word.
+        let devs = parse_devices("N: Name=\"gpio-keys\"\nH: Handlers=kbd event2\nB: EV=3\nB: KEY=102100 0 0 0\n");
+        assert!(devs[0].has_key(104) && devs[0].has_key(109) && devs[0].has_key(116));
+        assert!(!devs[0].has_key(105) && !devs[0].has_key(65) && !devs[0].has_key(300));
+        assert!(!parse_devices(PT_MT_DEVICES)[0].has_key(116), "no KEY= line");
+    }
 
     #[test]
     fn device_list_parsing_and_choice() {

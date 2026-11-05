@@ -102,6 +102,21 @@ pub struct LipcServices {
     live: Arc<LiveWriter>,
 }
 
+impl LipcServices {
+    /// The model has a warmth light (true without the input loop: `rinky device`).
+    fn has_warmth(&self) -> bool {
+        self.shared.as_ref().is_none_or(|s| s.borrow().screen.model.warmth)
+    }
+
+    fn check_warmth(&self) -> Result<()> {
+        if self.has_warmth() {
+            Ok(())
+        } else {
+            Err(DeviceError::Unsupported("warmth (no natural light on this model)"))
+        }
+    }
+}
+
 impl std::fmt::Debug for LipcServices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LipcServices").field("lipc", &self.lipc).finish_non_exhaustive()
@@ -276,6 +291,7 @@ impl Light for LipcServices {
     }
 
     fn warmth(&self) -> Result<u32> {
+        self.check_warmth()?;
         if let Some(v) = self.known(|k| k.warmth) {
             return Ok(v);
         }
@@ -285,6 +301,7 @@ impl Light for LipcServices {
     }
 
     fn set_warmth(&mut self, level: u32) -> Result<()> {
+        self.check_warmth()?;
         let (lo, hi) = self.warmth_range();
         let level = level.clamp(lo, hi);
         self.remember(|k| k.warmth = Some(level));
@@ -297,6 +314,7 @@ impl Light for LipcServices {
     }
 
     fn set_warmth_live(&mut self, level: u32) -> Result<()> {
+        self.check_warmth()?;
         let (lo, hi) = self.warmth_range();
         let level = level.clamp(lo, hi);
         self.remember(|k| k.warmth = Some(level));
@@ -304,6 +322,7 @@ impl Light for LipcServices {
     }
 
     fn amber_schedule(&self) -> Result<AmberSchedule> {
+        self.check_warmth()?;
         if let Some(s) = self.known(|k| k.schedule.clone()) {
             return Ok(s);
         }
@@ -325,6 +344,7 @@ impl Light for LipcServices {
     }
 
     fn set_amber_schedule(&mut self, s: &AmberSchedule) -> Result<()> {
+        self.check_warmth()?;
         self.remember(|k| k.schedule = Some(s.clone()));
         self.lipc.set_str(POWERD, "amberSchedMode", s.mode.as_powerd())?;
         self.lipc.set_str(POWERD, "amberSchedStartTime", &s.start.to_powerd())?;

@@ -1,8 +1,8 @@
 # rinky user guide
 
-rinky is an e-book reader for the Kindle Paperwhite 12th generation (2024, also
-called PW6 or PW12) on firmware 5.19.x. While it runs it replaces the Kindle's own
-screens; when you exit, the Kindle's Home screen comes back.
+rinky is an e-book reader for Kindle e-readers, developed on the Kindle Paperwhite
+12th generation (2024, also called PW6 or PW12) on firmware 5.19.x. While it runs it
+replaces the Kindle's own screens; when you exit, the Kindle's Home screen comes back.
 
 > **How to read this guide.** Lines marked **To be completed at integration** are
 > placeholders for features that are still being built. Everything else describes the
@@ -26,8 +26,23 @@ Contents:
 
 You need:
 
-- A Kindle Paperwhite 12th gen on firmware 5.19.x. Check it under
-  *Settings > Device Options > Device Info*.
+- A Kindle with a 300 ppi screen. Check the model under
+  *Settings > Device Options > Device Info*. Only the Paperwhite 12th gen (firmware
+  5.19.x) has been tested; on the others rinky should work but nobody has tried yet:
+
+  | Kindle | rinky |
+  |---|---|
+  | Paperwhite 12th gen (2024) | tested |
+  | Paperwhite 5 and Signature Edition, Kindle 11th and 12th gen, Colorsoft, Scribe | untested (same display controller as the tested model) |
+  | Paperwhite 4, Oasis 2, Oasis 3 | untested |
+  | Paperwhite 3, Voyage, Oasis 1 | untested; their last firmware is old and rinky may not start |
+  | Paperwhite 1 and 2, Kindle 7th, 8th and 10th gen | not supported: their screens have too few pixels for rinky's layout |
+
+  On the Voyage and the Oasis models the page keys turn pages. Models without a warm
+  light have no Warmth slider. On a Colorsoft, rinky shows grayscale. On models other
+  than the Paperwhite 12th gen, night mode inverts the picture in software, so it may
+  ghost a little more. If rinky does not recognise your Kindle, it says "unknown model"
+  in `rinky/rinky.log` and tries each display interface in turn.
 - A **jailbroken** Kindle (for example WinterBreak or AdBreak, followed by the jb.sh
   hotfix). rinky cannot run on a Kindle that is not jailbroken.
 - One way to start it:
@@ -594,6 +609,21 @@ the message.
 - The jailbreak must allow programs to run from the Kindle drive. Run
   `/mnt/us/rinky/rinky version` over SSH. If it prints *Permission denied*,
   the jailbreak is incomplete. Run the jailbreak's hotfix again.
+
+### The screen does not update, or rinky names the wrong Kindle
+
+rinky reads the model from the serial number and writes it near the top of
+`rinky/rinky.log` (`model: ...`); `/mnt/us/rinky/rinky device info` over SSH prints it
+too. If it is wrong, start rinky over SSH with the model named, for example:
+
+```sh
+RINKY_MODEL=PaperWhite4 sh /mnt/us/rinky/rinky-ctl.sh start
+```
+
+The names are those in the table under [Before you start](#1-before-you-start) as
+KOReader spells them: `PaperWhite3`, `PaperWhite4`, `PaperWhite5`, `PaperWhite6`,
+`Voyage`, `Oasis`, `Oasis2`, `Oasis3`, `Basic4`, `Basic5`, `Scribe`, `ColorSoft`.
+Please open an issue with the log either way.
 
 ### Taps land in the wrong place
 

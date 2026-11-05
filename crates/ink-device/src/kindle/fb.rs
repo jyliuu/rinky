@@ -1,8 +1,15 @@
-//! Kindle MT8113 e-ink framebuffer: `/dev/fb0` mmap + lab126 MTK refresh ioctls.
+//! Kindle e-ink framebuffer: `/dev/fb0` mmap + the lab126 refresh ioctls.
+//!
+//! Four controller interfaces ([`Epdc`], picked by [`Model`]): the MediaTek one of the
+//! PW5 and newer (`struct mxcfb_update_data_mtk`, 96 bytes; everything below was
+//! measured on the PW12 with it), and the i.MX ones of older Kindles: Rex (PW4, 80
+//! bytes), Zelda (Oasis 2 and 3, 88 bytes) and the original `mxcfb_update_data` (Voyage,
+//! PW3, Oasis 1, 72 bytes). On i.MX, night mode inverts in software with the day
+//! waveforms, there is no page-turn sweep and no fast mode; an unknown Kindle's
+//! interface is found by sending a GC16 PARTIAL of an unchanged corner with each.
 //!
 //! Struct layouts and request numbers come from KOReader's
-//! `base/ffi/mxcfb_kindle_h.lua` (`struct mxcfb_update_data_mtk`, 96 bytes) and
-//! `framebuffer_mxcfb.lua` / `framebuffer_linux.lua`:
+//! `base/ffi/mxcfb_kindle_h.lua` and `framebuffer_mxcfb.lua` / `framebuffer_linux.lua`:
 //! - night mode is global: the `grayscale` field of `fb_var_screeninfo` set to
 //!   `GRAYSCALE_8BIT_INVERTED` (2) with `FBIOPUT_VSCREENINFO`; the MTK driver then
 //!   inverts in hardware and picks its night waveforms; page updates (REAGL) and UI
@@ -33,9 +40,11 @@
 //! Every change of a global flag is journaled first ([`crate::journal`]) so the
 //! launcher can undo it after a crash (`rinky device restore`).
 
+use super::model::{Epdc, Model};
 use crate::canvas::Canvas;
 use crate::geom::{Rect, Rotation, Size};
 use crate::journal::{Entry, Journal};
+use crate::sysfs::SysRoot;
 use crate::screen::{copy_to_panel, InFlightUpdates, RefreshClass, Screen, Waits, Wave};
 use crate::{DeviceError, Result};
 use std::fs::{File, OpenOptions};
@@ -46,6 +55,12 @@ const FBIOGET_VSCREENINFO: u32 = 0x4600;
 const FBIOPUT_VSCREENINFO: u32 = 0x4601;
 const FBIOGET_FSCREENINFO: u32 = 0x4602;
 const MXCFB_SEND_UPDATE_MTK: u32 = 0x4060_462e;
+/// `_IOW('F', 0x2E, struct mxcfb_update_data_rex)` (80 bytes).
+const MXCFB_SEND_UPDATE_REX: u32 = 0x4050_462e;
+/// `_IOW('F', 0x2E, struct mxcfb_update_data_zelda)` (88 bytes).
+const MXCFB_SEND_UPDATE_ZELDA: u32 = 0x4058_462e;
+/// `_IOW('F', 0x2E, struct mxcfb_update_data)` (72 bytes).
+const MXCFB_SEND_UPDATE: u32 = 0x4048_462e;
 const MXCFB_WAIT_FOR_UPDATE_COMPLETE: u32 = 0xc008_462f;
 /// `_IOW('F', 0x37, u32)`: wait until the driver submitted the update with this marker
 /// (KOReader `mxcfb_kindle_h.lua`, FBInk `wait_for_submission_kindle`).
@@ -54,6 +69,8 @@ const MXCFB_SET_UPDATE_FLAGS_MTK: u32 = 0x4004_463b;
 
 const VAR_GRAYSCALE: usize = 7;
 const VAR_ACTIVATE: usize = 21;
+const VAR_XRES: usize = 0;
+const VAR_YRES: usize = 1;
 const VAR_ROTATE: usize = 34;
 /// `GRAYSCALE_8BIT`.
 pub const GRAYSCALE_8BIT: u32 = 1;
@@ -63,6 +80,12 @@ pub const GRAYSCALE_8BIT_INVERTED: u32 = 2;
 const UPDATE_MODE_PARTIAL: u32 = 0;
 const UPDATE_MODE_FULL: u32 = 1;
 const TEMP_USE_AMBIENT: u32 = 0x1000;
+/// `TEMP_USE_AUTO`, what KOReader sends with the original `mxcfb_update_data`.
+const TEMP_USE_AUTO: u32 = 0x1001;
+/// The original i.MX interface's REAGL waveform (`WAVEFORM_MODE_REAGL`).
+pub const LEGACY_WAVEFORM_REAGL: u32 = 8;
+/// The original i.MX interface's `WAVEFORM_MODE_GC16_FAST` (KOReader's `ui` mode there).
+pub const LEGACY_WAVEFORM_GC16_FAST: u32 = 3;
 /// MTK waveform numbers (`MTK_WAVEFORM_MODE_*`).
 pub const WAVEFORM_DU: u32 = 1;
 /// GC16.
@@ -152,6 +175,77 @@ pub fn waveform_with(class: RefreshClass, night: bool, night_ui: NightUi) -> (u3
     }
 }
 
+/// [`waveform_with`] for a controller. The i.MX ones get the day waveforms KOReader uses
+/// there (night mode is software inversion on them, so `night` is false in practice).
+pub fn waveform_epdc(epdc: Epdc, class: RefreshClass, night: bool, night_ui: NightUi) -> (u32, u32) {
+    match epdc {
+        Epdc::Mtk => waveform_with(class, night, night_ui),
+        // ZELDA_GLR16 and ZELDA_GL16 have the MTK numbers (4, 3); GC16 and DU too.
+        Epdc::Zelda | Epdc::Rex => waveform_with(class, false, night_ui),
+        Epdc::Legacy => match class {
+            RefreshClass::Gc16 => (WAVEFORM_GC16, UPDATE_MODE_FULL),
+            RefreshClass::Reagl => (LEGACY_WAVEFORM_REAGL, UPDATE_MODE_FULL),
+            RefreshClass::Gl16 => (LEGACY_WAVEFORM_GC16_FAST, UPDATE_MODE_PARTIAL),
+            RefreshClass::Du => (WAVEFORM_DU, UPDATE_MODE_PARTIAL),
+        },
+    }
+}
+
+/// The refresh ioctl of a controller.
+pub fn send_update_request(epdc: Epdc) -> u32 {
+    match epdc {
+        Epdc::Mtk => MXCFB_SEND_UPDATE_MTK,
+        Epdc::Rex => MXCFB_SEND_UPDATE_REX,
+        Epdc::Zelda => MXCFB_SEND_UPDATE_ZELDA,
+        Epdc::Legacy => MXCFB_SEND_UPDATE,
+    }
+}
+
+/// The refresh struct for a controller, in u32 words (the ioctl copies as many bytes
+/// as its request number says: 72, 80, 88 or 96).
+///
+/// - `mxcfb_update_data`: [0..4] region, [4] waveform, [5] mode, [6] marker, [7]
+///   hist_bw, [8] hist_gray, [9] temp, [10] flags, [11..18] alt_buffer_data.
+/// - `_rex`: [0..7] as above up to the marker, [7] temp, [8] flags, [9] dither_mode,
+///   [10] quant_bit, [11..18] alt_buffer_data, [18] hist_bw, [19] hist_gray; `_zelda`
+///   adds [20] ts_pxp, [21] ts_epdc.
+/// - `_mtk`: see [`update_data`].
+///
+/// History waveforms as KOReader: DU for black and white, GC16_FAST (legacy) or GC16
+/// for gray, and the REAGL waveform for both when that is the update's own.
+pub fn update_data_epdc(epdc: Epdc, r: Rect, waveform: u32, mode: u32, marker: u32, swipe: Option<u32>) -> [u32; 24] {
+    if epdc == Epdc::Mtk {
+        return update_data(r, waveform, mode, marker, swipe);
+    }
+    let mut d = [0u32; 24];
+    d[0] = r.y as u32;
+    d[1] = r.x as u32;
+    d[2] = r.w;
+    d[3] = r.h;
+    d[4] = waveform;
+    d[5] = mode;
+    d[6] = marker;
+    let flags = if waveform == WAVEFORM_DU { EPDC_FLAG_FORCE_MONOCHROME } else { 0 };
+    if epdc == Epdc::Legacy {
+        let (bw, gray) = match waveform {
+            LEGACY_WAVEFORM_REAGL => (waveform, waveform),
+            WAVEFORM_GC16 => (WAVEFORM_DU, WAVEFORM_GC16),
+            _ => (WAVEFORM_DU, LEGACY_WAVEFORM_GC16_FAST),
+        };
+        d[7] = bw;
+        d[8] = gray;
+        d[9] = TEMP_USE_AUTO;
+        d[10] = flags;
+    } else {
+        d[7] = TEMP_USE_AMBIENT;
+        d[8] = flags;
+        let (bw, gray) = if waveform == WAVEFORM_GLR16 { (waveform, waveform) } else { (WAVEFORM_DU, WAVEFORM_GC16) };
+        d[18] = bw;
+        d[19] = gray;
+    }
+    d
+}
+
 /// The `swipe_data.direction` for a logical wave on a rotated screen.
 pub fn swipe_direction(wave: Wave, rotation: Rotation, panel: Size) -> u32 {
     match wave.panel_step(rotation, panel) {
@@ -196,7 +290,13 @@ fn env_on(name: &str) -> bool {
 }
 
 /// The mapped framebuffer.
-pub struct MtkScreen {
+pub struct KindleFb {
+    /// The model this runs on.
+    pub model: Model,
+    /// Its refresh interface (probed for an unknown model).
+    pub epdc: Epdc,
+    /// `rotate` as the framework left it, when rinky turned the panel upright.
+    original_rotate: Option<u32>,
     file: File,
     map: *mut u8,
     map_len: usize,
@@ -239,7 +339,7 @@ pub struct MtkScreen {
     pub night_ui: NightUi,
 }
 
-impl MtkScreen {
+impl KindleFb {
     /// Opens and maps `/dev/fb0`. Fails unless it is an 8 bpp framebuffer.
     pub fn open() -> Result<Self> {
         Self::open_with(Some(Journal::default()))
@@ -257,11 +357,28 @@ impl MtkScreen {
     }
 
     fn open_inner(journal: Option<Journal>, passive: bool) -> Result<Self> {
+        let model = Model::detect(&SysRoot::system());
         let file = OpenOptions::new().read(true).write(true).open("/dev/fb0")?;
         let fd = file.as_raw_fd();
 
         let mut var = [0u32; 40];
         ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
+        // An Oasis or Scribe can be left in landscape by the framework (accelerometer):
+        // turn the panel upright, as rinky rotates in software.
+        let mut original_rotate = None;
+        if !passive && var[VAR_XRES] > var[VAR_YRES] {
+            let was = var[VAR_ROTATE];
+            if let Some(j) = &journal {
+                let _ = j.record(Entry::Fb { key: "rotate".into(), value: was as i64 });
+            }
+            match make_upright(fd, &mut var) {
+                Some(r) => {
+                    log::info!("fb0: was landscape (rotate {was}); now rotate {r}");
+                    original_rotate = Some(was);
+                }
+                None => log::warn!("fb0: landscape (rotate {was}) and no rotate value turns it upright"),
+            }
+        }
         let mut fix = [0u8; 80];
         ioctl(fd, FBIOGET_FSCREENINFO, fix.as_mut_ptr().cast())?;
 
@@ -285,7 +402,12 @@ impl MtkScreen {
             return Err(std::io::Error::last_os_error().into());
         }
         let original = var[VAR_GRAYSCALE];
-        let fb = MtkScreen {
+        let epdc = if model.is_unknown() && !passive { probe_epdc(fd).unwrap_or(Epdc::Mtk) } else { model.epdc };
+        log::info!("model: {}; refresh interface {}", model.describe(), epdc.name());
+        let fb = KindleFb {
+            model,
+            epdc,
+            original_rotate,
             file,
             map: map.cast(),
             map_len: smem_len,
@@ -297,7 +419,9 @@ impl MtkScreen {
             rotation: Rotation::Portrait,
             night: false,
             hw_night: original == GRAYSCALE_8BIT_INVERTED,
-            prefer_hw_night: true,
+            // The grayscale flag is how the MTK driver does night mode; KOReader inverts
+            // per update on i.MX (EPDC_FLAG_ENABLE_INVERSION), rinky in software there.
+            prefer_hw_night: epdc == Epdc::Mtk,
             // A previous run that died in night mode left the flag set: day is 1.
             original_grayscale: if original == GRAYSCALE_8BIT_INVERTED { GRAYSCALE_8BIT } else { original },
             journal,
@@ -324,11 +448,13 @@ impl MtkScreen {
             fb.hw_night = false;
         }
         // Stop the driver from silently turning partial updates into REAGL ones.
-        if let Some(j) = &fb.journal {
-            let _ = j.record(Entry::Fb { key: "fastmode".into(), value: 0 });
-        }
-        if let Err(e) = set_fast_mode(fb.file.as_raw_fd(), true) {
-            log::warn!("MXCFB_SET_UPDATE_FLAGS_MTK failed: {e}");
+        if fb.epdc == Epdc::Mtk {
+            if let Some(j) = &fb.journal {
+                let _ = j.record(Entry::Fb { key: "fastmode".into(), value: 0 });
+            }
+            if let Err(e) = set_fast_mode(fb.file.as_raw_fd(), true) {
+                log::warn!("MXCFB_SET_UPDATE_FLAGS_MTK failed: {e}");
+            }
         }
         Ok(fb)
     }
@@ -439,12 +565,13 @@ impl MtkScreen {
         let w = self.in_flight.before(r, Instant::now());
         self.wait(w);
         self.marker = self.marker.wrapping_add(1).max(1);
-        let mut d = update_data(r, waveform, mode, self.marker, swipe);
-        let flags = d[8];
+        let swipe = swipe.filter(|_| self.epdc == Epdc::Mtk);
+        let mut d = update_data_epdc(self.epdc, r, waveform, mode, self.marker, swipe);
+        let flags = if self.epdc == Epdc::Legacy { d[10] } else { d[8] };
         let fd = self.file.as_raw_fd();
         let t = Instant::now();
-        ioctl(fd, MXCFB_SEND_UPDATE_MTK, d.as_mut_ptr().cast())
-            .map_err(|e| DeviceError::Backend(format!("MXCFB_SEND_UPDATE_MTK: {e}")))?;
+        ioctl(fd, send_update_request(self.epdc), d.as_mut_ptr().cast())
+            .map_err(|e| DeviceError::Backend(format!("MXCFB_SEND_UPDATE ({}): {e}", self.epdc.name())))?;
         let submit_us = t.elapsed().as_micros();
         self.updates += 1;
         self.last_waveform = (waveform, mode);
@@ -469,14 +596,14 @@ impl MtkScreen {
         self.refresh_panel_swipe(r, class, None)
     }
 
-    /// [`MtkScreen::refresh_panel`] with the page-turn wave (`swipe`: a
+    /// [`KindleFb::refresh_panel`] with the page-turn wave (`swipe`: a
     /// `swipe_data.direction`). The waveform is the same as without it: with the night
     /// flag set the driver keeps its night waveforms during the sweep (KOReader
     /// `framebuffer_mxcfb.lua`: the grayscale flag makes it "use the proper waveform mode
     /// during animated swipes"), so GLKW16/GCK16 stay as chosen.
     pub fn refresh_panel_swipe(&mut self, r: Rect, class: RefreshClass, swipe: Option<u32>) -> Result<()> {
-        let (mut waveform, mode) = waveform_with(class, self.hw_night, self.night_ui);
-        if self.gl16_auto && class == RefreshClass::Gl16 && !self.hw_night {
+        let (mut waveform, mode) = waveform_epdc(self.epdc, class, self.hw_night, self.night_ui);
+        if self.gl16_auto && class == RefreshClass::Gl16 && !self.hw_night && self.epdc == Epdc::Mtk {
             waveform = WAVEFORM_AUTO;
         }
         self.send_update(r, waveform, mode, swipe)
@@ -539,12 +666,20 @@ impl MtkScreen {
             }
             self.hw_night = false;
         }
-        if let Err(e) = set_fast_mode(self.file.as_raw_fd(), false) {
-            log::warn!("fast mode off: {e}");
+        if self.epdc == Epdc::Mtk {
+            if let Err(e) = set_fast_mode(self.file.as_raw_fd(), false) {
+                log::warn!("fast mode off: {e}");
+            }
+        }
+        if let Some(was) = self.original_rotate.take() {
+            if let Err(e) = set_rotate(self.file.as_raw_fd(), was) {
+                log::warn!("restoring rotate {was}: {e}");
+            }
         }
         if let Some(j) = &self.journal {
             let _ = j.forget(&Entry::Fb { key: "grayscale".into(), value: 0 });
             let _ = j.forget(&Entry::Fb { key: "fastmode".into(), value: 0 });
+            let _ = j.forget(&Entry::Fb { key: "rotate".into(), value: 0 });
         }
     }
 }
@@ -554,8 +689,51 @@ fn set_fast_mode(fd: i32, on: bool) -> std::io::Result<()> {
     ioctl(fd, MXCFB_SET_UPDATE_FLAGS_MTK, (&mut flags as *mut u32).cast())
 }
 
+fn set_rotate(fd: i32, rotate: u32) -> std::io::Result<()> {
+    let mut var = [0u32; 40];
+    ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
+    var[VAR_ROTATE] = rotate;
+    var[VAR_ACTIVATE] = 0;
+    ioctl(fd, FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())
+}
+
+/// Tries the `rotate` values until the panel is portrait; returns the one that is.
+/// `var` holds the driver's state afterwards.
+fn make_upright(fd: i32, var: &mut [u32; 40]) -> Option<u32> {
+    let was = var[VAR_ROTATE];
+    for r in [0, 2, 1, 3].into_iter().filter(|r| *r != was) {
+        if set_rotate(fd, r).is_ok() && ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast()).is_ok() && var[VAR_XRES] < var[VAR_YRES]
+        {
+            return Some(r);
+        }
+    }
+    let _ = set_rotate(fd, was);
+    let _ = ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast());
+    None
+}
+
+/// Finds an unknown Kindle's refresh interface: the first one whose ioctl takes a
+/// GC16 PARTIAL of the unchanged top-left 16 x 16 pixels (nothing visible changes).
+/// The request number encodes the struct size, so a wrong one is refused.
+fn probe_epdc(fd: i32) -> Option<Epdc> {
+    let r = Rect::new(0, 0, 16, 16);
+    for (i, epdc) in Epdc::PROBE_ORDER.into_iter().enumerate() {
+        let mut d = update_data_epdc(epdc, r, WAVEFORM_GC16, UPDATE_MODE_PARTIAL, 0x7fff_0000 + i as u32, None);
+        match ioctl(fd, send_update_request(epdc), d.as_mut_ptr().cast()) {
+            Ok(()) => {
+                log::info!("fb0: unknown model; the {} refresh ioctl works", epdc.name());
+                return Some(epdc);
+            }
+            Err(e) => log::info!("fb0: probe {}: {e}", epdc.name()),
+        }
+    }
+    log::warn!("fb0: no refresh ioctl accepted; assuming MTK");
+    None
+}
+
 /// Puts the framebuffer flags back after a crash (`rinky device restore`):
-/// grayscale to day (or the journaled value), fast mode off. Returns what it did.
+/// grayscale to day (or the journaled value), the framework's rotation, fast mode off
+/// (MTK). Returns what it did.
 pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
     let file = OpenOptions::new().read(true).write(true).open("/dev/fb0")?;
     let fd = file.as_raw_fd();
@@ -575,12 +753,21 @@ pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
         ioctl(fd, FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())?;
         done.push(format!("grayscale -> {want}"));
     }
-    set_fast_mode(fd, false)?;
-    done.push("fast mode off".into());
+    if let Some(r) = entries.iter().find_map(|e| match e {
+        Entry::Fb { key, value } if key == "rotate" => Some(*value as u32),
+        _ => None,
+    }) {
+        set_rotate(fd, r)?;
+        done.push(format!("rotate -> {r}"));
+    }
+    if Model::detect(&SysRoot::system()).epdc == Epdc::Mtk {
+        set_fast_mode(fd, false)?;
+        done.push("fast mode off".into());
+    }
     Ok(done)
 }
 
-impl Screen for MtkScreen {
+impl Screen for KindleFb {
     fn panel_size(&self) -> Size {
         Size::new(self.width as u32, self.height as u32)
     }
@@ -666,7 +853,7 @@ impl Screen for MtkScreen {
     }
 }
 
-impl MtkScreen {
+impl KindleFb {
     /// [`Screen::update`] with an optional page-turn wave (`swipe_data.direction`).
     fn update_swipe(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass, swipe: Option<u32>) -> Result<()> {
         let (rotation, invert, panel, stride) = (self.rotation, self.sw_invert(), self.panel_size(), self.stride);
@@ -684,7 +871,7 @@ impl MtkScreen {
     }
 }
 
-impl Drop for MtkScreen {
+impl Drop for KindleFb {
     fn drop(&mut self) {
         if !self.passive {
             self.wait_idle();
@@ -712,6 +899,37 @@ mod tests {
         assert_eq!(waveform_for(RefreshClass::Du, true), (WAVEFORM_DU, UPDATE_MODE_PARTIAL));
         assert_eq!(waveform_for(RefreshClass::Gl16, false), (WAVEFORM_GL16, UPDATE_MODE_PARTIAL));
         assert_eq!(waveform_for(RefreshClass::Reagl, false), (WAVEFORM_GLR16, UPDATE_MODE_FULL));
+    }
+
+    #[test]
+    fn imx_layouts_and_waveforms() {
+        // Request numbers carry the struct sizes KOReader's headers give.
+        let size = |req: u32| (req >> 16) & 0x3fff;
+        assert_eq!(size(send_update_request(Epdc::Legacy)), 72);
+        assert_eq!(size(send_update_request(Epdc::Rex)), 80);
+        assert_eq!(size(send_update_request(Epdc::Zelda)), 88);
+        assert_eq!(size(send_update_request(Epdc::Mtk)), 96);
+        let r = Rect::new(10, 20, 300, 400);
+        // Original i.MX: history before temp and flags.
+        let (wf, mode) = waveform_epdc(Epdc::Legacy, RefreshClass::Reagl, false, NightUi::Glkw16);
+        assert_eq!((wf, mode), (LEGACY_WAVEFORM_REAGL, UPDATE_MODE_FULL));
+        let d = update_data_epdc(Epdc::Legacy, r, wf, mode, 5, Some(SWIPE_LEFT));
+        assert_eq!(&d[..11], &[20, 10, 300, 400, 8, 1, 5, 8, 8, TEMP_USE_AUTO, 0]);
+        assert!(d[11..].iter().all(|w| *w == 0), "no swipe outside MTK");
+        let d = update_data_epdc(Epdc::Legacy, r, WAVEFORM_DU, UPDATE_MODE_PARTIAL, 6, None);
+        assert_eq!((d[7], d[8], d[10]), (WAVEFORM_DU, LEGACY_WAVEFORM_GC16_FAST, EPDC_FLAG_FORCE_MONOCHROME));
+        assert_eq!(waveform_epdc(Epdc::Legacy, RefreshClass::Gl16, false, NightUi::Glkw16), (3, UPDATE_MODE_PARTIAL));
+        // Rex / Zelda: temp and flags first, history after alt_buffer_data.
+        let (wf, mode) = waveform_epdc(Epdc::Rex, RefreshClass::Reagl, false, NightUi::Glkw16);
+        let d = update_data_epdc(Epdc::Rex, r, wf, mode, 7, None);
+        assert_eq!(&d[4..11], &[WAVEFORM_GLR16, UPDATE_MODE_FULL, 7, TEMP_USE_AMBIENT, 0, 0, 0]);
+        assert_eq!((d[18], d[19]), (WAVEFORM_GLR16, WAVEFORM_GLR16));
+        let d = update_data_epdc(Epdc::Zelda, r, WAVEFORM_GL16, UPDATE_MODE_PARTIAL, 8, None);
+        assert_eq!((d[18], d[19], d[20], d[21]), (WAVEFORM_DU, WAVEFORM_GC16, 0, 0));
+        // No night waveforms on i.MX (night mode is software inversion there).
+        assert_eq!(waveform_epdc(Epdc::Zelda, RefreshClass::Gc16, true, NightUi::Glkw16), (WAVEFORM_GC16, UPDATE_MODE_FULL));
+        // MTK is unchanged.
+        assert_eq!(update_data_epdc(Epdc::Mtk, r, 4, 1, 9, None), update_data(r, 4, 1, 9, None));
     }
 
     #[test]

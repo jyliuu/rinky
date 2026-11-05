@@ -1374,7 +1374,7 @@ impl SettingsScreen {
     fn build_device(&mut self, cx: &mut AppCtx, content: Rect) {
         let s = &cx.services;
         let device = Card::new(s.info.model.clone(), "")
-            .subtitle(format!("Backend: {}", s.info.backend))
+            .subtitle(if s.info.firmware.is_empty() { format!("Backend: {}", s.info.backend) } else { s.info.firmware.clone() })
             .body(format!("rinky {}", update::current_version()));
         let mut cards = vec![(device, DEVICE_CARD_H)];
         let battery = match s.battery.info() {

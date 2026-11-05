@@ -16,6 +16,7 @@ pub const USAGE: &str = "usage:
   rinky sim BOOK|DIR [options]          host simulator window (minifb); DIR: library on DIR
       --ghost              simulate ghosting
       --scale F            window scale (default: fit the screen)
+      --panel WxH          panel size (default 1272x1696, the PW12; e.g. 1072x1448 for a PW4)
       --script FILE        scripted input instead of the mouse; quits at the end
       --shots DIR          where `shot NAME` script steps write PNGs
       --headless --out DIR no window: write PNGs (`shot` steps; --frames: every update)
@@ -75,7 +76,7 @@ fn log_target(cmd: Option<&str>) -> crate::logging::LogTarget {
 #[cfg(target_os = "linux")]
 pub fn splash(lines: &[&str]) -> anyhow::Result<()> {
     use ink_device::{RefreshClass, Screen};
-    let mut fb = ink_device::kindle_mtk::fb::MtkScreen::open_passive()?;
+    let mut fb = ink_device::kindle::fb::KindleFb::open_passive()?;
     let size = fb.size();
     let mut canvas = Canvas::new(size.w as usize, size.h as usize);
     ink_device::font::draw_lines_centered(&mut canvas, 6, 0, lines);
@@ -132,6 +133,7 @@ struct SimArgs {
     out: Option<PathBuf>,
     frames: bool,
     kindle: bool,
+    panel: Option<ink_device::Size>,
 }
 
 fn parse_sim_args(args: &[String]) -> anyhow::Result<(Vec<String>, SimArgs)> {
@@ -150,6 +152,13 @@ fn parse_sim_args(args: &[String]) -> anyhow::Result<(Vec<String>, SimArgs)> {
                 let f: f32 = v.parse().map_err(|e| anyhow::anyhow!("--scale {v}: {e}"))?;
                 anyhow::ensure!(f.is_finite() && f > 0.0 && f <= 8.0, "--scale {v}: must be a number in (0, 8]");
                 s.scale = Some(f);
+            }
+            "--panel" => {
+                let v = val("--panel")?;
+                let (w, h) = v.split_once('x').ok_or_else(|| anyhow::anyhow!("--panel {v}: expected WxH"))?;
+                let (w, h): (u32, u32) = (w.parse()?, h.parse()?);
+                anyhow::ensure!((200..=4000).contains(&w) && (200..=4000).contains(&h), "--panel {v}: out of range");
+                s.panel = Some(ink_device::Size::new(w, h));
             }
             "--script" => s.script = Some(PathBuf::from(val("--script")?)),
             "--shots" => s.shots = Some(PathBuf::from(val("--shots")?)),
@@ -185,11 +194,11 @@ fn open_kindle() -> anyhow::Result<ink_device::Device> {
 fn open_kindle_with(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
     #[cfg(target_os = "linux")]
     {
-        let mut opts = ink_device::kindle_mtk::KindleOptions { power_events: true, ..Default::default() };
+        let mut opts = ink_device::kindle::KindleOptions { power_events: true, ..Default::default() };
         if !device_sleep {
             opts.sleep = None;
         }
-        Ok(ink_device::kindle_mtk::open(opts)?)
+        Ok(ink_device::kindle::open(opts)?)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -219,18 +228,20 @@ fn open_sim_device(s: &SimArgs) -> anyhow::Result<ink_device::Device> {
 
 fn open_host_device(s: &SimArgs) -> anyhow::Result<ink_device::Device> {
     if s.headless {
+        let defaults = ink_device::headless::HeadlessOptions::default();
         let opts = ink_device::headless::HeadlessOptions {
             ghosting: s.ghost,
             out_dir: s.out.clone().or_else(|| s.shots.clone()),
             save_frames: s.frames,
             script: script_steps(&s.script)?.unwrap_or_default(),
-            ..Default::default()
+            panel: s.panel.unwrap_or(defaults.panel),
         };
         return Ok(ink_device::headless::open(opts).0);
     }
     #[cfg(not(target_arch = "arm"))]
     {
         let opts = ink_device::sim::SimOptions {
+            panel: s.panel,
             scale: s.scale,
             ghosting: s.ghost,
             script: script_steps(&s.script)?,
@@ -281,7 +292,7 @@ fn evdump_deadline(now: std::time::Instant, arg: Option<&String>) -> anyhow::Res
 
 #[cfg(target_os = "linux")]
 fn evdump(deadline: std::time::Instant) -> anyhow::Result<()> {
-    use ink_device::kindle_mtk::input::list_devices;
+    use ink_device::kindle::input::list_devices;
     use std::io::Read;
     let devs = list_devices();
     println!("{devs:?}");
@@ -553,7 +564,7 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
             #[cfg(target_os = "linux")]
             {
                 use ink_device::Screen;
-                ink_device::kindle_mtk::open_screen()?.refresh_all()?;
+                ink_device::kindle::open_screen()?.refresh_all()?;
                 Ok(0)
             }
             #[cfg(not(target_os = "linux"))]
@@ -562,7 +573,7 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
         Some("inject") if rest.first().map(String::as_str) == Some("power") => {
             #[cfg(target_os = "linux")]
             {
-                let dev = ink_device::kindle_mtk::input::inject_key("pwrkey", ink_device::evdev::KEY_POWER)?;
+                let dev = ink_device::kindle::input::inject_key("pwrkey", ink_device::evdev::KEY_POWER)?;
                 println!("injected KEY_POWER press+release into {dev}");
                 Ok(0)
             }
@@ -574,7 +585,7 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
             {
                 use ink_device::{RefreshClass, Screen};
                 let img = Canvas::load_png(Path::new(&rest[0]))?;
-                let mut fb = ink_device::kindle_mtk::open_screen()?;
+                let mut fb = ink_device::kindle::open_screen()?;
                 let size = fb.size();
                 let mut canvas = Canvas::new(size.w as usize, size.h as usize);
                 let (x, y) = ((size.w as i32 - img.width as i32) / 2, (size.h as i32 - img.height as i32) / 2);

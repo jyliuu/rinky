@@ -1,5 +1,6 @@
-//! Kindle PW12 backend (MT8113, firmware 5.19.x): `/dev/fb0` with MTK refresh ioctls,
-//! evdev touch and power key, lipc services and events, kernel uevents. Linux only.
+//! Kindle backend (firmware 5.x; tested on the PW12, MT8113, 5.19.x): `/dev/fb0` with
+//! the model's refresh ioctls ([`model`]), evdev touch, power and page keys, lipc
+//! services and events, kernel uevents. Linux only.
 //!
 //! The screen, the input loop and the services share one [`Shared`] state, so the
 //! input loop can draw the screensaver or the USB lock screen and keep the app's
@@ -8,6 +9,7 @@
 
 pub mod fb;
 pub mod input;
+pub mod model;
 pub mod services;
 pub mod system;
 
@@ -99,7 +101,7 @@ impl Default for KindleOptions {
 
 /// State shared by the screen, the input loop and the services.
 pub(crate) struct Shared {
-    pub(crate) screen: fb::MtkScreen,
+    pub(crate) screen: fb::KindleFb,
     /// Raw panel content under the screensaver or lock screen (app updates go here).
     pub(crate) shadow: Option<Canvas>,
     pub(crate) asleep: bool,
@@ -186,14 +188,14 @@ impl Screen for KindleScreen {
 }
 
 /// Opens the screen only (for `rinky refresh` and screenshots).
-pub fn open_screen() -> Result<fb::MtkScreen> {
-    fb::MtkScreen::open()
+pub fn open_screen() -> Result<fb::KindleFb> {
+    fb::KindleFb::open()
 }
 
 /// Opens the whole device.
 pub fn open(opts: KindleOptions) -> Result<Device> {
     let journal = Journal::at(&opts.journal);
-    let screen = fb::MtkScreen::open_with(Some(journal.clone()))?;
+    let screen = fb::KindleFb::open_with(Some(journal.clone()))?;
     let shared = Rc::new(RefCell::new(Shared {
         screen,
         shadow: None,
@@ -227,9 +229,10 @@ pub fn open(opts: KindleOptions) -> Result<Device> {
     // Light levels and Wi-Fi state for the control center, read once off the UI
     // thread after start-up (the first book page comes first).
     svc.refresh_after(Duration::from_secs(3));
-    let model = std::fs::read_to_string("/etc/version.txt").unwrap_or_default().lines().next().unwrap_or("").to_string();
+    let firmware = std::fs::read_to_string("/etc/version.txt").unwrap_or_default().lines().next().unwrap_or("").to_string();
+    let model = shared.borrow().screen.model.name.to_string();
     Ok(Device {
-        info: DeviceInfo { backend: "kindle_mtk", model },
+        info: DeviceInfo { backend: "kindle", model, firmware },
         screen: Box::new(KindleScreen(shared)),
         input: Box::new(input),
         light: Box::new(svc.clone()),

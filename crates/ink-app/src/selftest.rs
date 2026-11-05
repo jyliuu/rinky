@@ -83,7 +83,7 @@ pub fn run(opts: &SelftestOptions) -> u32 {
         if opts.screen {
             r.check("device.screen", || {
                 use ink_device::{Canvas, RefreshClass, Screen};
-                let mut fb = ink_device::kindle_mtk::open_screen()?;
+                let mut fb = ink_device::kindle::open_screen()?;
                 let size = fb.panel_size();
                 let mut canvas = Canvas::new(size.w as usize, size.h as usize);
                 let mut fonts = ink_text::Fonts::load();
@@ -102,7 +102,7 @@ pub fn run(opts: &SelftestOptions) -> u32 {
             r.skip("device.screen", "pass --screen to draw the test pattern");
         }
         r.check("device.input", || {
-            let devs = ink_device::kindle_mtk::input::list_devices();
+            let devs = ink_device::kindle::input::list_devices();
             let touch = devs.iter().find(|d| d.has_abs).map(|d| d.name.clone());
             let power = devs.iter().find(|d| d.name.contains("pwrkey")).map(|d| d.name.clone());
             anyhow::ensure!(touch.is_some(), "no touch device in {devs:?}");
@@ -212,7 +212,7 @@ fn net_checks(r: &mut Report, opts: &SelftestOptions, base: &str) {
         None => None,
     };
     #[cfg(target_os = "linux")]
-    let svc = std::cell::RefCell::new(ink_device::kindle_mtk::services::LipcServices::default());
+    let svc = std::cell::RefCell::new(ink_device::kindle::services::LipcServices::default());
     #[cfg(target_os = "linux")]
     let wifi = || {
         use ink_device::Wifi;

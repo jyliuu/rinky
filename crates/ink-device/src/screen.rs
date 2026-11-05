@@ -162,7 +162,7 @@ impl Waits {
 /// - updates elsewhere on the panel: no wait at all, so a page turn never waits for a
 ///   key highlight in another corner, and never for the completion of DU slide frames.
 ///
-/// It only decides; the backend does the ioctls (`kindle_mtk/fb.rs`).
+/// It only decides; the backend does the ioctls (`kindle/fb.rs`).
 #[derive(Clone, Debug, Default)]
 pub struct InFlightUpdates {
     list: Vec<InFlight>,

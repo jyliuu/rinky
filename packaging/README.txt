@@ -1,7 +1,10 @@
-rinky - e-book reader for the Kindle Paperwhite 12th gen (firmware 5.19.x)
-=============================================================================
+rinky - e-book reader for Kindle e-readers (firmware 5.x)
+==========================================================
 
-Needs a jailbroken Kindle. The full manual is user-guide.md in this folder.
+Needs a jailbroken Kindle. Tested on the Paperwhite 12th gen (firmware 5.19.x); the
+other Kindles with a 300 ppi screen (Paperwhite 3 and newer, Voyage, Oasis, Scribe,
+Colorsoft, Kindle 11th and 12th gen) should work but are untested. The full manual,
+with the list of models, is user-guide.md in this folder.
 
 Install (pick one)
 ------------------
