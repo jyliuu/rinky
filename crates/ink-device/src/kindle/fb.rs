@@ -466,6 +466,11 @@ impl KindleFb {
         Ok(var)
     }
 
+    /// The page-turn sweep is used (MTK models that take it, [`Model::swipe`]).
+    pub fn page_wave(&self) -> bool {
+        self.epdc == Epdc::Mtk && self.model.swipe
+    }
+
     /// The driver's `grayscale` field now.
     pub fn grayscale(&self) -> Result<u32> {
         Ok(self.var()?[VAR_GRAYSCALE])
@@ -566,7 +571,7 @@ impl KindleFb {
         let w = self.in_flight.before(r, Instant::now());
         self.wait(w);
         self.marker = self.marker.wrapping_add(1).max(1);
-        let swipe = swipe.filter(|_| self.epdc == Epdc::Mtk && self.model.swipe);
+        let swipe = swipe.filter(|_| self.page_wave());
         let mut d = update_data_epdc(self.epdc, r, waveform, mode, self.marker, swipe);
         let flags = if self.epdc == Epdc::Legacy { d[10] } else { d[8] };
         let fd = self.file.as_raw_fd();

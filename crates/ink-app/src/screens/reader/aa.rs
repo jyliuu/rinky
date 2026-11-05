@@ -151,6 +151,8 @@ pub struct AaExtras {
     pub header: String,
     /// Page turn wave (`reader.page_animation`: `on` / `off`).
     pub wave: bool,
+    /// The panel can sweep a page turn (the toggle is shown).
+    pub wave_supported: bool,
     /// Night mode.
     pub night: bool,
     /// Full refresh every N page turns (0 = never).
@@ -169,6 +171,7 @@ impl Default for AaExtras {
             footer: "full".into(),
             header: "none".into(),
             wave: true,
+            wave_supported: true,
             night: false,
             flash_every: 8,
             link_return: None,
@@ -523,6 +526,7 @@ impl ReaderScreen {
         let settings = cx.settings_update.as_ref().unwrap_or(cx.settings);
         let mut extras = AaExtras::from_settings(settings);
         extras.night = cx.screen.night_mode();
+        extras.wave_supported = cx.services.info.page_wave;
         extras.families = fonts::picker_names();
         extras.link_return = self.link_return_page().map(|p| p + 1);
         let size = cx.screen.size();
@@ -1301,17 +1305,20 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
             Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, ctl(Field::ParaSpace, Inner::Seg(Segmented::new(&PARA_SPACINGS.map(|x| x.1), "seg")), PARA_SPACINGS.iter().map(|x| format!("aa-pspace:{}", x.0)).collect())),
             Row::one("indent", Some("First-line indent"), CONTROL_H, ctl(Field::Indent, seg(&INDENTS.map(|x| x.1)), INDENTS.iter().map(|x| format!("aa-indent:{}", x.0)).collect())),
         ],
-        _ => vec![
-            Row::one("wave", None, CONTROL_H, toggle(Field::Wave, "Page turn wave", s.extras.wave, "aa-anim")),
-            Row::one("statusbars", None, CONTROL_H, Box::new(Button::new("Status bars…", "aa-statusbars"))),
-            Row::one(
+        _ => [
+            s.extras.wave_supported.then(|| Row::one("wave", None, CONTROL_H, toggle(Field::Wave, "Page turn wave", s.extras.wave, "aa-anim"))),
+            Some(Row::one("statusbars", None, CONTROL_H, Box::new(Button::new("Status bars…", "aa-statusbars")))),
+            Some(Row::one(
                 "flash",
                 Some("Full refresh every"),
                 CONTROL_H,
                 ctl(Field::Flash, Inner::Seg(Segmented::new(&FLASHES.iter().map(|x| x.1).collect::<Vec<_>>(), "seg")), FLASHES.iter().map(|x| format!("aa-flash:{}", x.0)).collect()),
-            ),
-            Row::one("night", None, CONTROL_H, toggle(Field::Night, "Night mode", s.extras.night, "aa-night")),
-        ],
+            )),
+            Some(Row::one("night", None, CONTROL_H, toggle(Field::Night, "Night mode", s.extras.night, "aa-night"))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
     }
 }
 

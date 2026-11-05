@@ -43,8 +43,8 @@ You need:
   than the Paperwhite 12th gen, night mode inverts the picture in software, so it may
   ghost a little more. If rinky does not recognise your Kindle, it says "unknown model"
   in `rinky/rinky.log` and tries each display interface in turn.
-- A **jailbroken** Kindle (for example WinterBreak or AdBreak, followed by the jb.sh
-  hotfix). rinky cannot run on a Kindle that is not jailbroken.
+- A **jailbroken** Kindle. rinky cannot run on a Kindle that is not jailbroken. See
+  [Getting your Kindle ready](#getting-your-kindle-ready) below.
 - One way to start it:
   - **KUAL** (Kindle Unified Application Launcher), recommended. rinky adds an
     *rinky* entry to KUAL.
@@ -63,6 +63,51 @@ What rinky changes on your Kindle:
   (`/mnt/us/koreader`) are not touched. [Uninstall](#8-uninstall) removes all of the
   above.
 
+### Getting your Kindle ready
+
+The steps are the same on every Kindle; what differs is which jailbreak your firmware
+needs and how the Kindle shows up on your computer.
+
+1. **Find the firmware version.** On the Kindle: *Settings > Device Options > Device
+   Info* (on older firmware: *Menu > Settings > Menu > Device Info*). Write down the
+   model and the version, for example *Kindle Paperwhite (10th Generation)* and
+   *5.18.1*.
+2. **Jailbreak.** Which jailbreak works depends on the firmware version, not on the
+   model. [kindlemodding.org](https://kindlemodding.org/) lists them and walks you
+   through the one for your version. Recent firmware uses WinterBreak or AdBreak
+   followed by the jb.sh hotfix. Do not let the Kindle update its firmware before you
+   are done: turn on airplane mode, because a firmware update can close the hole the
+   jailbreak needs.
+3. **Install KUAL** (and MRPI, which installs it) from the same site. Use the KUAL
+   build it gives for your firmware. Firmware 5.16.3 and newer needs the newer
+   *hard-float* KUAL; the Paperwhite 3, Voyage and Oasis 1 stay on older firmware and
+   use the older KUAL. rinky itself is the same package for both: the `kindlehf` in its
+   file name does not matter.
+4. **Connect the Kindle by USB** to copy rinky over (step 2 of [Install](#2-install)):
+
+   | Kindle | Shows up as |
+   |---|---|
+   | Paperwhite 3 and 4, Voyage, Oasis 1 to 3 | a USB drive named *Kindle*, on any computer |
+   | Paperwhite 5 and newer, Kindle 11th gen and newer, Scribe, Colorsoft | an MTP device, like a phone: on Windows under *This PC*; on a Mac use an MTP app such as [OpenMTP](https://openmtp.ganeshrvel.com/) |
+
+   Some firmware updates switched older models to MTP too. If no drive appears, use
+   the MTP way.
+
+Notes for some models:
+
+- **Voyage and Oasis:** the page keys turn pages in rinky. On the Voyage they are the
+  pressure-sensitive bezel keys, which rinky switches on while it runs.
+- **Kindles without a warm light** (Paperwhite 3 and 4, Voyage, Oasis 1 and 2, Kindle
+  11th and 12th gen): rinky has no Warmth slider.
+- **Scribe:** the pen does nothing in rinky; use your finger.
+- **Colorsoft and Scribe Colorsoft:** rinky shows grayscale.
+- **Untested models:** if something goes wrong (the screen does not change, taps land
+  in the wrong place, the Kindle does not wake from sleep), hold the power button for
+  about 40 seconds to restart the Kindle; rinky does not start again by itself. Please
+  then open an issue with `rinky/rinky.log` from the Kindle drive.
+
+### Download
+
 Download the install package `rinky-<version>-kindlehf.tar.gz` from the project's
 releases page. If you want to check the download, compare its SHA-256 with the
 `SHA256SUMS` file of the same release. Example:
@@ -77,10 +122,11 @@ There are two ways to install. Both end with the same files on the Kindle.
 1. Unpack the archive on your computer. On macOS, double-click it. On Linux, run
    `tar -xzf rinky-<version>-kindlehf.tar.gz`. On Windows, use 7-Zip. You get two
    folders: `rinky` and `extensions`.
-2. Connect the Kindle by USB. Newer Kindles, the Paperwhite 12th generation among
-   them, connect as an MTP device (like a phone), not as a drive. On Windows the Kindle
-   appears in File Explorer under *This PC*. macOS Finder does not show MTP devices, so
-   use an MTP app (for example OpenMTP). Older Kindles show up as a drive named *Kindle*.
+2. Connect the Kindle by USB. Older Kindles (Paperwhite 3 and 4, Voyage, Oasis) show
+   up as a drive named *Kindle*. Newer ones, the Paperwhite 5 and later among them,
+   connect as an MTP device (like a phone): on Windows the Kindle appears in File
+   Explorer under *This PC*; macOS Finder does not show MTP devices, so use an MTP app
+   (for example OpenMTP). See [Getting your Kindle ready](#getting-your-kindle-ready).
 3. Copy the folder `rinky` to the top level of the Kindle's storage.
 4. If you use KUAL: open `extensions` from the archive and copy the folder
    `extensions/rinky` into the Kindle's `extensions` folder. If the Kindle has no
@@ -113,7 +159,7 @@ The installer:
   copy worked. If the Kindle is full, it stops with *"cannot write ... (no space
   left?); nothing was changed"*, deletes its temporary copies and leaves the installed
   version as it was. It needs free space for one full copy of the package (about
-  5 MB) on top of the installed version (the in-app update needs about 10 MB, see
+  14 MB) on top of the installed version (the in-app update needs about 30 MB, see
   [Update](#7-update));
 - runs one at a time: a second install or update started meanwhile stops with
   *"another install or update is running"*;
@@ -501,9 +547,9 @@ What the update does:
 5. From *Settings > Update* rinky then restarts into the new version. From KUAL or
    SSH the new version runs the next time you start rinky.
 
-The update needs about 10 MB free on the Kindle: the unpacked package in
-`/mnt/us/rinky/.update` (about 5 MB) and the installer's copies next to the old
-files (about 5 MB) exist at the same time. Both are deleted when the update ends.
+The update needs about 30 MB free on the Kindle: the unpacked package in
+`/mnt/us/rinky/.update` (about 14 MB) and the installer's copies next to the old
+files (about 14 MB) exist at the same time. Both are deleted when the update ends.
 
 Only one update runs at a time. If you tap *Update rinky* again while an update
 runs, the second one stops at once with *"another update is running"*.

@@ -518,6 +518,8 @@ pub struct MainValues {
     pub night: bool,
     /// Page turn wave on.
     pub wave: bool,
+    /// The panel cannot sweep a page turn: no "Page turn wave" toggle.
+    pub wave_hidden: bool,
     /// Default layout (text size, spacing).
     pub layout: String,
     /// Navigation bar items.
@@ -569,7 +571,9 @@ pub fn main_rows(v: &MainValues) -> Vec<Row> {
     let m = |s: &str| section_modules(v, s);
     let mut rows = vec![Row::header("Reading")];
     rows.extend(m("Reading").into_iter().take(1));
-    rows.push(Row::toggle("Page turn wave", v.wave, "anim").icon(Icon::Book).subtitle("The screen sweeps the new page in"));
+    if !v.wave_hidden {
+        rows.push(Row::toggle("Page turn wave", v.wave, "anim").icon(Icon::Book).subtitle("The screen sweeps the new page in"));
+    }
     rows.extend(m("Reading").into_iter().skip(1));
     rows.push(Row::nav(Icon::Font, "Default layout", "page:layout").value(&v.layout));
     rows.push(Row::nav(Icon::Sync, "Full refresh", "page:refresh").value(&v.refresh));
@@ -1164,6 +1168,7 @@ impl SettingsScreen {
             rotation: rotation_name(crate::app::settings_rotation(st)).into(),
             night: st.device.night_mode,
             wave: page_wave(st),
+            wave_hidden: !cx.services.info.page_wave,
             layout: format!("{} px · {:.1}", r.font_px.round(), r.line_spacing),
             nav: crate::plugin_entries::nav_chosen(st, cx.plugins).iter().map(|n| crate::plugin_entries::nav_label(cx.plugins, n)).collect::<Vec<_>>().join(", "),
             folders: match st.library_dirs.len() {

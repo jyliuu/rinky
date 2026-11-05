@@ -104,6 +104,9 @@ pub struct DeviceInfo {
     pub model: String,
     /// Firmware (first line of `/etc/version.txt`); empty off the device.
     pub firmware: String,
+    /// The panel sweeps a page turn in ([`Screen::update_wave`]); without it the
+    /// "Page turn wave" setting is hidden.
+    pub page_wave: bool,
 }
 
 /// One implementation of every device service.

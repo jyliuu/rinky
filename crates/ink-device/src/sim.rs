@@ -328,7 +328,7 @@ pub fn open(opts: SimOptions) -> Result<Device> {
         script_delay: opts.script_delay.unwrap_or(Duration::from_millis(150)),
     };
     Ok(Device {
-        info: DeviceInfo { backend: "sim", model: "simulated PW12 (minifb)".into(), firmware: String::new() },
+        info: DeviceInfo { backend: "sim", model: "simulated PW12 (minifb)".into(), firmware: String::new(), page_wave: true },
         screen: Box::new(SimScreen(shared)),
         input: Box::new(input),
         light: Box::new(Unsupported),

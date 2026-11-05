@@ -230,9 +230,12 @@ pub fn open(opts: KindleOptions) -> Result<Device> {
     // thread after start-up (the first book page comes first).
     svc.refresh_after(Duration::from_secs(3));
     let firmware = std::fs::read_to_string("/etc/version.txt").unwrap_or_default().lines().next().unwrap_or("").to_string();
-    let model = shared.borrow().screen.model.name.to_string();
+    let (model, page_wave) = {
+        let sh = shared.borrow();
+        (sh.screen.model.name.to_string(), sh.screen.page_wave())
+    };
     Ok(Device {
-        info: DeviceInfo { backend: "kindle", model, firmware },
+        info: DeviceInfo { backend: "kindle", model, firmware, page_wave },
         screen: Box::new(KindleScreen(shared)),
         input: Box::new(input),
         light: Box::new(svc.clone()),

@@ -93,18 +93,33 @@ with Amazon's firmware), not on real devices:
 On a Colorsoft, rinky shows grayscale. If you try rinky on a model marked untested,
 please open an issue with `rinky/rinky.log` from the Kindle, whether it worked or not.
 
-1. Download `rinky-<version>-kindle.zip` from the [latest release](../../releases/latest)
+The steps are the same on every Kindle:
+
+1. Jailbreak it and install KUAL. Which jailbreak works depends on the firmware version
+   (*Settings › Device Options › Device Info*); [kindlemodding.org](https://kindlemodding.org/)
+   picks the right one and has the KUAL build for your firmware. The Paperwhite 3,
+   Voyage and Oasis 1 stay on older firmware and use the older KUAL; rinky's package is
+   the same for all.
+2. Download `rinky-<version>-kindle.zip` from the [latest release](../../releases/latest)
    and unzip it. It contains two folders, `rinky` and `extensions`.
-2. Connect the Kindle by USB and copy both folders to the top level of its storage. On a
-   Mac, use an MTP app such as [OpenMTP](https://openmtp.ganeshrvel.com/).
-3. Eject the Kindle, open KUAL and choose **rinky › Start rinky**.
+3. Connect the Kindle by USB and copy both folders to the top level of its storage.
+   The Paperwhite 3 and 4, Voyage and Oasis show up as a drive named *Kindle*. Newer
+   Kindles connect over MTP like a phone; on a Mac, use an MTP app such as
+   [OpenMTP](https://openmtp.ganeshrvel.com/).
+4. Eject the Kindle, open KUAL and choose **rinky › Start rinky**.
+
+The [user guide](docs/user-guide.md#getting-your-kindle-ready) has notes for each
+model (page keys, warm light, Scribe, Colorsoft).
 
 Choose which folders the library shows under **Settings › Library folders**; the
 Kindle's `documents` folder is included by default. **Settings › Exit to Kindle** returns to the Kindle's
 own screens.
 
-To update, choose **KUAL › rinky › Update rinky** with Wi-Fi on. The download is checked
-against the release's SHA-256, and settings, notes and positions are kept.
+To update, turn Wi-Fi on and choose **Settings › Update › Check for update** in rinky,
+then **Install and restart** (or **KUAL › rinky › Update rinky**). The download is
+checked against the release's SHA-256, and settings, notes and positions are kept. This
+works the same on every model; it was tried in the emulator on the Paperwhite 3 and 4,
+Oasis 3 and Kindle 12th gen.
 
 Dictionaries go in `rinky/dict/<name>/` on the Kindle, as StarDict files (`.ifo`, `.idx`,
 `.dict` or `.dict.dz`).

@@ -15,9 +15,13 @@ All notable changes to rinky are listed here. The format is based on
   (Voyage, Oasis) and lights. On a Kindle it does not know, it tries each display
   interface in turn.
 - Settings › Device shows the Kindle model, with the firmware under it.
+- The user guide explains how to get each Kindle ready (jailbreak, KUAL, USB drive or
+  MTP) and what differs between models.
 - `rinky sim --panel WxH` renders the simulator at another screen size.
 
 ### Changed
+- The "Page turn wave" switch is shown only on Kindles whose screen can sweep a page
+  in (Paperwhite 5 and 12th gen).
 - rinky and its SSH server are built for the Cortex-A9, the oldest processor of the
   supported Kindles. The build for the Paperwhite 12th gen's Cortex-A53 stopped with
   "Illegal instruction" on older models.

@@ -264,7 +264,7 @@ pub fn open(opts: HeadlessOptions) -> (Device, HeadlessProbe) {
         uncovered: Vec::new(),
     }));
     let device = Device {
-        info: DeviceInfo { backend: "headless", model: "simulated PW12".into(), firmware: String::new() },
+        info: DeviceInfo { backend: "headless", model: "simulated PW12".into(), firmware: String::new(), page_wave: true },
         screen: Box::new(HeadlessScreen(shared.clone())),
         input: Box::new(HeadlessInput { shared: shared.clone(), player: ScriptPlayer::new(&opts.script) }),
         light: Box::new(Unsupported),
