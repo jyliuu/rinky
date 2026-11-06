@@ -42,8 +42,6 @@ use std::time::Duration;
 /// warmth schedule exist only on a Kindle; a Kobo ignores them.
 #[derive(Clone, Debug)]
 pub struct ReaderOptions {
-    /// Kindle or Kobo ([`Platform::detect`]).
-    pub platform: Platform,
     /// Grab the touchscreen (`EVIOCGRAB`) so the framework does not see taps.
     pub grab_touch: bool,
     /// Subscribe to powerd, wifid, cmd, volumd, hal and time events
@@ -82,11 +80,10 @@ fn env(k: &str) -> Option<String> {
 impl Default for ReaderOptions {
     fn default() -> Self {
         let run = env("RINKY_RUN").unwrap_or_else(|| "/tmp/rinky".into());
-        let platform = Platform::detect();
         let ntp_server = if env("RINKY_NTP").as_deref() == Some("0") {
             None
         } else {
-            env("RINKY_NTP_SERVER").or_else(|| match platform {
+            env("RINKY_NTP_SERVER").or_else(|| match crate::platform::current() {
                 Platform::Kindle => {
                     std::fs::read_to_string("/etc/sysconfig/ntp").ok().and_then(|t| crate::clock::ntp_server_from_config(&t))
                 }
@@ -94,7 +91,6 @@ impl Default for ReaderOptions {
             })
         };
         ReaderOptions {
-            platform,
             grab_touch: true,
             power_events: false,
             lipc: Lipc::new(),
@@ -132,6 +128,83 @@ pub(crate) struct Shared {
     pub(crate) journal: Journal,
     pub(crate) sleep_enabled: bool,
     pub(crate) usb_enabled: bool,
+}
+
+/// What the services of either platform need from [`Shared`]: the requests they queue
+/// for the input loop and the state it keeps. `None` without the input loop (`rinky
+/// device`).
+#[derive(Clone, Default)]
+pub(crate) struct SharedHandle(pub(crate) Option<Rc<RefCell<Shared>>>);
+
+impl SharedHandle {
+    /// Queues a request for the input loop.
+    pub(crate) fn request(&self, r: input::Request) -> Result<()> {
+        let s = self.0.as_ref().ok_or(crate::DeviceError::Unsupported("needs the running input loop"))?;
+        s.borrow_mut().requests.push_back(r);
+        Ok(())
+    }
+
+    /// rinky's own sleep controller runs.
+    pub(crate) fn sleep_enabled(&self) -> bool {
+        self.0.as_ref().is_some_and(|s| s.borrow().sleep_enabled)
+    }
+
+    /// The model (none without the input loop).
+    pub(crate) fn model(&self) -> Option<model::Model> {
+        self.0.as_ref().map(|s| s.borrow().screen.model)
+    }
+
+    /// Records a restore journal entry.
+    pub(crate) fn journal(&self, e: crate::journal::Entry) {
+        if let Some(s) = &self.0 {
+            let _ = s.borrow().journal.record(e);
+        }
+    }
+
+    pub(crate) fn set_screensaver(&self, saver: Screensaver) -> Result<()> {
+        let s = self.0.as_ref().ok_or(crate::DeviceError::Unsupported("screensaver needs the running input loop"))?;
+        log::info!("screensaver: {}", saver.describe());
+        s.borrow_mut().screensaver = saver;
+        Ok(())
+    }
+
+    pub(crate) fn auto_sleep(&self) -> Option<Duration> {
+        self.0.as_ref().and_then(|s| s.borrow().auto_sleep)
+    }
+
+    pub(crate) fn sleep_state(&self) -> SleepState {
+        self.0.as_ref().map(|s| s.borrow().sleep_state).unwrap_or_default()
+    }
+
+    /// The USB cable as the input loop saw it last, else read now.
+    pub(crate) fn cable(&self, sys: &SysRoot) -> UsbCable {
+        match &self.0 {
+            Some(s) => s.borrow().cable,
+            None => {
+                let udc = crate::usb::read_udc(sys).map(|(_, s)| s);
+                crate::usb::cable_from(udc.as_deref(), crate::battery::external_power(sys), None)
+            }
+        }
+    }
+
+    /// The drive mode state the input loop keeps.
+    pub(crate) fn drive_state(&self) -> Option<DriveModeState> {
+        self.0.as_ref().map(|s| s.borrow().drive_state)
+    }
+
+    pub(crate) fn usb_enabled(&self) -> bool {
+        self.0.as_ref().is_some_and(|s| s.borrow().usb_enabled)
+    }
+}
+
+/// Runs a suspend routine and logs its progress lines.
+pub(crate) fn logged_suspend(suspend: system::SuspendFn, sys: &SysRoot, wake_after: Option<Duration>) -> Result<()> {
+    let mut lines = Vec::new();
+    let r = suspend(sys, wake_after, &mut |s| lines.push(s));
+    for l in lines {
+        log::info!("suspend: {l}");
+    }
+    r.map(|_| ())
 }
 
 /// The screen as the app sees it: while the screensaver or the USB lock screen is up,
@@ -212,11 +285,12 @@ pub fn open_screen() -> Result<fb::Framebuffer> {
 /// Opens the whole device: the shared screen and input loop, and the platform's
 /// services.
 pub fn open(opts: ReaderOptions) -> Result<Device> {
-    let kindle = opts.platform == Platform::Kindle;
     let journal = Journal::at(&opts.journal);
     let screen = fb::Framebuffer::open_with(Some(journal.clone()))?;
+    let platform = screen.model.platform;
     // Amazon's services: lipc events, volumd's USB drive mode, powerd's warmth schedule.
-    let lipc_events = kindle && opts.power_events;
+    let lipc = (platform == Platform::Kindle).then(|| opts.lipc.clone());
+    let lipc_events = lipc.is_some() && opts.power_events;
     let usb = opts.usb.filter(|_| lipc_events);
     let shared = Rc::new(RefCell::new(Shared {
         screen,
@@ -241,21 +315,25 @@ pub fn open(opts: ReaderOptions) -> Result<Device> {
         low_battery: opts.low_battery,
         // On a Kobo the Wi-Fi service syncs the clock itself when it connects.
         ntp_server: opts.ntp_server.clone().filter(|_| lipc_events),
-        amber: kindle && opts.amber,
+        amber: lipc.is_some() && opts.amber,
         heartbeat: opts.heartbeat.clone(),
+        suspend: match platform {
+            Platform::Kindle => system::kernel_suspend,
+            Platform::Kobo => kobo::suspend,
+        },
     };
     if let Some(dir) = opts.heartbeat.as_ref().and_then(|p| p.parent()) {
         let _ = std::fs::create_dir_all(dir);
     }
-    let input = Box::new(input::ReaderInput::open(shared.clone(), opts.lipc.clone(), opts.sys.clone(), loop_opts)?);
+    let input = Box::new(input::ReaderInput::open(shared.clone(), lipc.clone(), opts.sys.clone(), loop_opts)?);
     let (model, page_wave) = {
         let sh = shared.borrow();
         (sh.screen.model.name.to_string(), sh.screen.page_wave())
     };
-    let info = DeviceInfo { backend: opts.platform.id(), model, firmware: firmware(opts.platform), page_wave };
-    let clock = Box::new(system::DeviceClock { lipc: kindle.then(|| opts.lipc.clone()), ntp_server: opts.ntp_server.clone() });
+    let info = DeviceInfo { backend: platform.id(), model, firmware: firmware(platform), page_wave };
+    let clock = Box::new(system::DeviceClock { lipc, ntp_server: opts.ntp_server.clone() });
     let screen = Box::new(ReaderScreen(shared.clone()));
-    Ok(match opts.platform {
+    Ok(match platform {
         Platform::Kindle => {
             let svc = kindle::LipcServices::new(opts.lipc, Some(shared), opts.sys);
             // Light levels and Wi-Fi state for the control center, read once off the UI

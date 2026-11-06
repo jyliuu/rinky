@@ -742,6 +742,7 @@ dependencies = [
  "ink-device",
  "ink-doc",
  "ink-formats",
+ "ink-platform",
  "ink-store",
  "ink-text",
  "libc",

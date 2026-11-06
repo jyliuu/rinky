@@ -42,7 +42,7 @@ pub struct KoreaderDirs {
 impl KoreaderDirs {
     /// The Kindle location, `/mnt/us/koreader`.
     pub fn kindle() -> Self {
-        KoreaderDirs { root: PathBuf::from("/mnt/us/koreader") }
+        KoreaderDirs { root: ink_platform::Platform::Kindle.koreader_dir() }
     }
 
     /// KOReader on this e-reader (`/mnt/us/koreader`, `/mnt/onboard/.adds/koreader`).

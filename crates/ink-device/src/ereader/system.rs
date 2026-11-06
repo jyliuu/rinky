@@ -125,8 +125,11 @@ pub fn kernel_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn F
     suspend_with(sys, rtc_wake, true, log)
 }
 
+/// How a platform suspends: the RTC alarm, then progress lines to `log`.
+pub type SuspendFn = fn(&SysRoot, Option<Duration>, &mut dyn FnMut(String)) -> Result<Resume>;
+
 /// [`kernel_suspend`], with or without the `wakeup_count` handshake.
-fn suspend_with(sys: &SysRoot, rtc_wake: Option<Duration>, wakeup_count: bool, log: &mut dyn FnMut(String)) -> Result<Resume> {
+pub(crate) fn suspend_with(sys: &SysRoot, rtc_wake: Option<Duration>, wakeup_count: bool, log: &mut dyn FnMut(String)) -> Result<Resume> {
     let alarm = match rtc_wake {
         Some(d) => match arm_rtc(sys, d) {
             Ok(t) => Some(t),
@@ -137,20 +140,20 @@ fn suspend_with(sys: &SysRoot, rtc_wake: Option<Duration>, wakeup_count: bool, l
         },
         None => None,
     };
-    let count = if wakeup_count { read_wakeup_count_ex(sys, Duration::from_secs(2)) } else { WakeupCount::Failed("not used on Kobo".into()) };
-    match count {
-        WakeupCount::Value(count) => {
-            if let Err(e) = sys.write("/sys/power/wakeup_count", &count) {
-                clear_rtc(sys);
-                return Err(DeviceError::Backend(format!("wakeup event pending (wakeup_count {count}): {e}")));
+    if wakeup_count {
+        match read_wakeup_count_ex(sys, Duration::from_secs(2)) {
+            WakeupCount::Value(count) => {
+                if let Err(e) = sys.write("/sys/power/wakeup_count", &count) {
+                    clear_rtc(sys);
+                    return Err(DeviceError::Backend(format!("wakeup event pending (wakeup_count {count}): {e}")));
+                }
             }
+            WakeupCount::Blocked => log("wakeup_count blocked for 2 s (a wakeup source is active); suspending anyway".into()),
+            WakeupCount::StillBlocked => {
+                log("wakeup_count blocked since an earlier attempt (a wakeup source is active); suspending anyway".into())
+            }
+            WakeupCount::Failed(e) => log(format!("wakeup_count unreadable ({e}); suspending anyway")),
         }
-        WakeupCount::Blocked => log("wakeup_count blocked for 2 s (a wakeup source is active); suspending anyway".into()),
-        WakeupCount::StillBlocked => {
-            log("wakeup_count blocked since an earlier attempt (a wakeup source is active); suspending anyway".into())
-        }
-        WakeupCount::Failed(e) if wakeup_count => log(format!("wakeup_count unreadable ({e}); suspending anyway")),
-        WakeupCount::Failed(_) => {}
     }
     // SAFETY: sync(2) has no arguments and cannot fail.
     unsafe { libc::sync() };
@@ -158,7 +161,7 @@ fn suspend_with(sys: &SysRoot, rtc_wake: Option<Duration>, wakeup_count: bool, l
     let mono0 = Instant::now();
     let state = suspend_state(&sys.read("/sys/power/state").unwrap_or_default());
     if state != "mem" {
-        log(format!("suspend: the kernel offers no mem; using {state}"));
+        log(format!("the kernel offers no mem; using {state}"));
     }
     let r = sys.write("/sys/power/state", state);
     let slept = SystemTime::now().duration_since(wall0).unwrap_or_else(|_| mono0.elapsed());
@@ -182,35 +185,19 @@ pub fn suspend_state(offered: &str) -> &'static str {
     ["mem", "standby", "freeze"].into_iter().find(|s| has(s)).unwrap_or("mem")
 }
 
-/// Suspends a Kobo as KOReader does (`Kobo:suspend`): Wi-Fi off, `1` to
-/// `/sys/power/state-extended` (the NTX drivers prepare for sleep), 2 s, then the
-/// [`kernel_suspend`] sequence without the `wakeup_count` handshake (KOReader leaves it
-/// out on Kobo; on the Tolino emulator its write failed with EINVAL every time), then
-/// `0` back. A MediaTek Kobo's kernel hangs when it suspends while charging: refused
-/// then.
-pub fn kobo_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(String)) -> Result<Resume> {
-    if crate::ereader::kobo::wifi::is_up() {
-        log("wifi: turning off before suspend".into());
-        if let Err(e) = crate::ereader::kobo::wifi::stop() {
-            log(format!("wifi: {e}"));
-        }
-    }
-    let mtk = std::path::Path::new("/proc/hwtcon").exists();
-    if mtk && crate::battery::charging(sys) {
-        return Err(DeviceError::Backend("charging: a MediaTek Kobo does not suspend while charging".into()));
-    }
-    if let Err(e) = sys.write("/sys/power/state-extended", "1") {
-        log(format!("state-extended 1: {e}"));
-    }
-    std::thread::sleep(Duration::from_secs(2));
-    let r = suspend_with(sys, rtc_wake, false, log);
-    if let Err(e) = sys.write("/sys/power/state-extended", "0") {
-        log(format!("state-extended 0: {e}"));
-    }
-    if r.is_ok() {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    r
+
+/// The `/proc/<pid>` folders of the running processes with one of these names (names
+/// longer than the kernel's 15-character `comm` match on their first 15).
+pub fn processes_named(names: &[&str]) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
+    rd.flatten()
+        .filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
+        .filter(|e| {
+            let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+            names.iter().any(|n| comm.trim() == &n[..n.len().min(15)])
+        })
+        .map(|e| e.path())
+        .collect()
 }
 
 /// Frontlight LED class devices (`/sys/class/backlight/*`), e.g. `fp9967-bl1`

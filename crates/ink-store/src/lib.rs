@@ -409,7 +409,7 @@ pub struct Paths {
 impl Paths {
     /// The Kindle layout.
     pub fn kindle() -> Self {
-        Paths { root: PathBuf::from("/mnt/us/rinky") }
+        Paths { root: ink_platform::Platform::Kindle.install_root() }
     }
 
     /// The layout of the e-reader this runs on (Kindle or Kobo).

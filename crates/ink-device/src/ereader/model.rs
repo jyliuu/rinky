@@ -17,6 +17,7 @@
 //! generation Basic) are [`Tier::Unsupported`]. A Kindle whose code is not in the table
 //! gets [`Model::unknown`]: the refresh ioctl is then found by trying them in turn.
 
+use crate::evdev::TouchTransform;
 use crate::platform::Platform;
 use crate::sysfs::SysRoot;
 
@@ -46,6 +47,34 @@ impl Epdc {
     /// The order in which an unknown Kindle's controller is probed (newest first).
     pub const PROBE_ORDER: [Epdc; 4] = [Epdc::Mtk, Epdc::Rex, Epdc::Zelda, Epdc::Legacy];
 
+    /// Index of the `flags` word in the refresh struct ([`super::fb::update_data_epdc`]).
+    pub fn flags_word(self) -> usize {
+        match self {
+            Epdc::Legacy => 10,
+            Epdc::KoboMtk => 7,
+            Epdc::Mtk | Epdc::Rex | Epdc::Zelda | Epdc::KoboMxcfb => 8,
+        }
+    }
+
+    /// How night mode works on this controller.
+    pub fn night(self) -> NightMethod {
+        match self {
+            Epdc::Mtk => NightMethod::GrayscaleFlag,
+            Epdc::KoboMxcfb => NightMethod::UpdateFlag,
+            Epdc::Legacy | Epdc::Rex | Epdc::Zelda | Epdc::KoboMtk => NightMethod::Software,
+        }
+    }
+
+    /// The file and text that wake a Kobo's EPDC before a refresh (KOReader
+    /// `kobo_nxp_wakeup_epdc`, `kobo_mtk_wakeup_epdc`).
+    pub fn wake(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Epdc::KoboMxcfb => Some(("/sys/class/graphics/fb0/power_state", "1,0")),
+            Epdc::KoboMtk => Some(("/proc/hwtcon/cmd", "fiti_power 1")),
+            _ => None,
+        }
+    }
+
     /// Short name for logs.
     pub fn name(self) -> &'static str {
         match self {
@@ -57,6 +86,18 @@ impl Epdc {
             Epdc::KoboMtk => "kobo-hwtcon",
         }
     }
+}
+
+/// How a controller does night mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NightMethod {
+    /// The global `grayscale` flag `GRAYSCALE_8BIT_INVERTED`; the driver inverts and
+    /// picks its night waveforms (Kindle MTK).
+    GrayscaleFlag,
+    /// `EPDC_FLAG_ENABLE_INVERSION` on each update, with the night waveforms (Kobo i.MX).
+    UpdateFlag,
+    /// rinky inverts the pixels and keeps the day waveforms.
+    Software,
 }
 
 /// How well rinky knows a model.
@@ -101,10 +142,9 @@ pub struct Model {
     pub tier: Tier,
     /// Kindle or Kobo.
     pub platform: Platform,
-    /// Touch transforms `(swap, mirror_x, mirror_y)` for the upright panel (Kobo:
-    /// KOReader's `touch_switch_xy`, `touch_mirrored_x`, `touch_mirrored_y`). `None`:
-    /// worked out from the axis ranges (Kindle).
-    pub touch: Option<(bool, bool, bool)>,
+    /// Touch transforms for the upright panel (Kobo). `None`: worked out from the
+    /// axis ranges (Kindle).
+    pub touch: Option<TouchTransform>,
     /// The framebuffer `rotate` value that shows the panel upright (Kobo: FBInk's
     /// `rotationMap[FB_ROTATE_UR]`). `None`: any portrait one (Kindle).
     pub upright: Option<u32>,
@@ -284,7 +324,11 @@ const KOBO_COVER: Option<u16> = Some(59);
 /// Kobo page keys: 194 (`RPgFwd`) turns forward, 193 (`RPgBack`) back.
 const KOBO_KEYS: Option<(u16, u16)> = Some((194, 193));
 /// Swap the axes, then mirror x: most Kobos (KOReader's defaults).
-const SWAP_MIRROR_X: Option<(bool, bool, bool)> = Some((true, true, false));
+const SWAP_MIRROR_X: Option<TouchTransform> = Some(TouchTransform { swap: true, mirror_x: true, mirror_y: false });
+/// Swap only: the Libra 2.
+const SWAP: Option<TouchTransform> = Some(TouchTransform { swap: true, mirror_x: false, mirror_y: false });
+/// Swap, then mirror y: the Libra Colour and Tolino Vision Color.
+const SWAP_MIRROR_Y: Option<TouchTransform> = Some(TouchTransform { swap: true, mirror_x: false, mirror_y: true });
 
 const fn kobo(id: &'static str, name: &'static str, codes: &'static [&'static str], epdc: Epdc) -> Model {
     Model {
@@ -324,7 +368,7 @@ pub const KOBO_MODELS: &[Model] = &[
     // Libra 2: touch not mirrored; two hardware revisions (frontlight chip found in sysfs).
     Model {
         upright: Some(1),
-        touch: Some((true, false, false)),
+        touch: SWAP,
         page_keys: KOBO_KEYS,
         gsensor: true,
         reliable_wait: false,
@@ -333,7 +377,7 @@ pub const KOBO_MODELS: &[Model] = &[
     // Libra Colour: Kaleido 3, shown in grayscale; touch mirrored in y.
     Model {
         upright: Some(1),
-        touch: Some((true, false, true)),
+        touch: SWAP_MIRROR_Y,
         page_keys: KOBO_KEYS,
         gsensor: true,
         ..kobo("LibraColour", "Kobo Libra Colour", &["390"], Epdc::KoboMtk)
@@ -342,7 +386,7 @@ pub const KOBO_MODELS: &[Model] = &[
     Model { upright: Some(3), ..kobo("ClaraColour", "Kobo Clara Colour", &["393"], Epdc::KoboMtk) },
     Model {
         upright: Some(1),
-        touch: Some((true, false, true)),
+        touch: SWAP_MIRROR_Y,
         page_keys: KOBO_KEYS,
         gsensor: true,
         ..kobo("TolinoVisionColor", "Tolino Vision Color", &["690"], Epdc::KoboMtk)
@@ -391,7 +435,7 @@ impl Model {
     /// The running e-reader: `RINKY_MODEL`, else on a Kobo the model number in
     /// `/mnt/onboard/.kobo/version`, on a Kindle `/proc/usid`.
     pub fn detect(sys: &SysRoot) -> Model {
-        Model::detect_on(Platform::detect(), sys)
+        Model::detect_on(crate::platform::current(), sys)
     }
 
     /// [`Model::detect`] for a given platform.
@@ -401,7 +445,12 @@ impl Model {
         }
         match platform {
             Platform::Kindle => Model::from_serial(&sys.read("/proc/usid").unwrap_or_default()),
-            Platform::Kobo => Model::from_kobo_version(&sys.read("/mnt/onboard/.kobo/version").unwrap_or_default()),
+            Platform::Kobo => {
+                let m = Model::from_kobo_version(&sys.read("/mnt/onboard/.kobo/version").unwrap_or_default());
+                // An unknown Kobo: the framebuffer driver's name tells MTK from i.MX.
+                let mtk = m.is_unknown() && sys.read("/sys/class/graphics/fb0/name").is_ok_and(|n| n.contains("hwtcon"));
+                Model { epdc: if mtk { Epdc::KoboMtk } else { m.epdc }, ..m }
+            }
         }
     }
 
@@ -413,8 +462,8 @@ impl Model {
         KOBO_MODELS.iter().find(|m| m.codes.contains(&code)).copied().unwrap_or_else(Model::unknown_kobo)
     }
 
-    /// A Kobo whose number is not in [`KOBO_MODELS`]: the refresh interface comes from
-    /// the framebuffer driver's name ([`Model::unknown_kobo_with`]).
+    /// A Kobo whose number is not in [`KOBO_MODELS`] (i.MX; [`Model::detect_on`] turns it
+    /// into MTK when the framebuffer driver is hwtcon).
     pub const fn unknown_kobo() -> Model {
         Model { tier: Tier::Unsupported("not in rinky's Kobo table"), ..kobo("KoboUnknown", "Kobo (unknown model)", &[], Epdc::KoboMxcfb) }
     }
@@ -476,11 +525,11 @@ mod tests {
         let v = "N418123456789,4.1.15,4.38.23852,4.1.15,4.1.15,00000000-0000-0000-0000-000000000388\n";
         let m = Model::from_kobo_version(v);
         assert_eq!((m.id, m.epdc, m.platform), ("Libra2", Epdc::KoboMxcfb, Platform::Kobo));
-        assert_eq!((m.upright, m.touch, m.page_keys, m.cover_key), (Some(1), Some((true, false, false)), Some((194, 193)), Some(59)));
+        assert_eq!((m.upright, m.touch, m.page_keys, m.cover_key), (Some(1), SWAP, Some((194, 193)), Some(59)));
         assert!(!m.reliable_wait && m.warmth);
         // The emulator's Tolino Shine 5: Kobo Clara BW + 300.
         let t = Model::from_kobo_version("TQEMU00000000,4.9.77,5.12.232736,4.9.77,4.9.77,00000000-0000-0000-0000-000000000691");
-        assert_eq!((t.id, t.epdc, t.upright, t.touch), ("TolinoShine5", Epdc::KoboMtk, Some(3), Some((true, true, false))));
+        assert_eq!((t.id, t.epdc, t.upright, t.touch), ("TolinoShine5", Epdc::KoboMtk, Some(3), SWAP_MIRROR_X));
         assert_eq!(Model::from_kobo_version("x,y,z,00000000-0000-0000-0000-000000000999").id, "KoboUnknown");
         assert_eq!(Model::by_name_or_code("libra2").unwrap().id, "Libra2");
         assert_eq!(Model::by_name_or_code("390").unwrap().id, "LibraColour");

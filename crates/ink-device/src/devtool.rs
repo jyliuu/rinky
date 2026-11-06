@@ -106,7 +106,7 @@ mod kindle {
     }
 
     fn kobo() -> bool {
-        crate::platform::Platform::detect() == crate::platform::Platform::Kobo
+        crate::platform::current() == crate::platform::Platform::Kobo
     }
 
     /// Light, battery and Wi-Fi of this e-reader without the input loop.
@@ -534,7 +534,17 @@ mod kindle {
                     out!("{p:?}");
                 }
             }
-            Some("enable") => w.set_enabled(args.get(1).map(String::as_str) == Some("1"))?,
+            Some("enable") => {
+                let on = args.get(1).map(String::as_str) == Some("1");
+                w.set_enabled(on)?;
+                // Turning on may finish in the background (Kobo): wait for it here, as
+                // this process ends after the command.
+                let end = Instant::now() + Duration::from_secs(25);
+                while on && Instant::now() < end && Wifi::state(w.as_ref()).is_ok_and(|s| s.state != "CONNECTED") {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                out!("{:?}", Wifi::state(w.as_ref())?);
+            }
             Some("airplane") => {
                 if let Some(v) = args.get(1) {
                     w.set_airplane_mode(v == "1")?;

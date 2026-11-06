@@ -102,17 +102,7 @@ mod kindle {
     use std::time::{Duration, Instant};
 
     fn running(names: &[&str]) -> Vec<(String, bool)> {
-        let mut comms = Vec::new();
-        if let Ok(rd) = std::fs::read_dir("/proc") {
-            for e in rd.flatten() {
-                if e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(c) = std::fs::read_to_string(e.path().join("comm")) {
-                        comms.push(c.trim().to_string());
-                    }
-                }
-            }
-        }
-        names.iter().map(|n| (n.to_string(), comms.iter().any(|c| c == &n[..n.len().min(15)]))).collect()
+        names.iter().map(|n| (n.to_string(), !system::processes_named(&[n]).is_empty())).collect()
     }
 
     pub(super) fn all(r: &mut Runner, opts: &Options) {

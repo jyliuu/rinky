@@ -6,13 +6,6 @@ use crate::face::{collection_faces, map_file, FaceInfo};
 use rustybuzz::ttf_parser;
 use std::path::{Path, PathBuf};
 
-/// The e-reader's font folders, in order (earlier folders win a family name): its
-/// system fonts (Bookerly, Amazon Ember, ... on a Kindle; Nickel's on a Kobo; read on
-/// the device, never copied or packaged), the user's fonts and rinky's own folder.
-/// Missing folders are skipped by the scan.
-pub fn device_font_dirs() -> Vec<PathBuf> {
-    ink_platform::current().font_dirs()
-}
 
 /// A font file found on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]

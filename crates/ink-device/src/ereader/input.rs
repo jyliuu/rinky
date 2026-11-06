@@ -1,5 +1,5 @@
-//! The Kindle input loop: touch, power key, lipc events, kernel uevents and the USB
-//! gadget state, multiplexed with `poll(2)`, plus the device-side policies that run
+//! The e-reader input loop: touch, power, page and cover keys, lipc events (Kindle),
+//! kernel uevents and the USB gadget state, multiplexed with `poll(2)`, plus the device-side policies that run
 //! inside it (sleep and wake, USB drive mode, low battery, warmth schedule, NTP on
 //! Wi-Fi connect) and the heartbeat the watchdog reads.
 //!
@@ -23,7 +23,6 @@ use crate::input::{Input, InputEvent, Key, KeyEvent, PowerEvent, Timestamp, Touc
 use crate::journal::Entry;
 use crate::light::AmberScheduler;
 use crate::lipc::{EventHub, Lipc, LipcValue};
-use crate::platform::Platform;
 use crate::screen::RefreshClass;
 use crate::sleep::{Resume, SleepController, SleepPlatform, SleepState};
 use crate::sysfs::SysRoot;
@@ -370,22 +369,20 @@ pub struct LoopOptions {
     pub amber: bool,
     /// Heartbeat file.
     pub heartbeat: Option<PathBuf>,
+    /// How this platform suspends ([`system::kernel_suspend`] on a Kindle,
+    /// [`super::kobo::suspend`] on a Kobo).
+    pub suspend: system::SuspendFn,
 }
 
-/// The key device, its page keys `(next, previous)` and its cover key.
-type KeyDevice = (File, Option<(u16, u16)>, Option<u16>);
-
-/// Kindle input and the device policies.
+/// Input and the device policies.
 pub struct ReaderInput {
     shared: Rc<RefCell<Shared>>,
     touch: TouchDev,
     power: Option<File>,
-    /// Running on a Kobo (sleep without powerd, no lipc).
-    kobo: bool,
-    /// The key device with the page keys `(next, previous)` and the sleep cover key
-    /// (Kobo), as far as the model has them.
-    page_keys: Option<KeyDevice>,
-    lipc: Lipc,
+    /// The device with the model's page keys and sleep cover key.
+    key_dev: Option<File>,
+    /// Amazon's services (Kindle only).
+    lipc: Option<Lipc>,
     sys: SysRoot,
     opts: LoopOptions,
     hub: Option<(EventHub, OwnedFd)>,
@@ -411,11 +408,11 @@ pub struct ReaderInput {
 }
 
 struct Plat<'a> {
-    kobo: bool,
     shared: &'a RefCell<Shared>,
     touch: &'a mut TouchDev,
     sys: &'a SysRoot,
-    lipc: &'a Lipc,
+    lipc: Option<&'a Lipc>,
+    suspend: system::SuspendFn,
     light_saved: &'a mut Vec<(String, i64)>,
 }
 
@@ -494,7 +491,7 @@ impl SleepPlatform for Plat<'_> {
             // A crash while asleep must not leave the light off: the launcher re-sets
             // powerd's level, which makes powerd drive the LEDs again. (Kobo: Nickel
             // sets its own level when it starts.)
-            if let Some(v) = (!self.kobo).then(|| self.lipc.get_int("com.lab126.powerd", "flIntensity").ok()).flatten() {
+            if let Some(v) = self.lipc.and_then(|l| l.get_int("com.lab126.powerd", "flIntensity").ok()) {
                 let sh = self.shared.borrow();
                 let _ = sh.journal.record(Entry::LipcInt {
                     publisher: "com.lab126.powerd".into(),
@@ -509,11 +506,7 @@ impl SleepPlatform for Plat<'_> {
 
     fn suspend(&mut self, rtc_wake: Option<Duration>) -> Result<Resume> {
         let mut lines = Vec::new();
-        let r = if self.kobo {
-            system::kobo_suspend(self.sys, rtc_wake, &mut |s| lines.push(s))
-        } else {
-            system::kernel_suspend(self.sys, rtc_wake, &mut |s| lines.push(s))
-        };
+        let r = (self.suspend)(self.sys, rtc_wake, &mut |s| lines.push(s));
         for l in lines {
             log::info!("suspend: {l}");
         }
@@ -525,20 +518,19 @@ impl SleepPlatform for Plat<'_> {
     }
 
     fn defer_powerd(&mut self, d: Duration) {
-        if self.kobo {
-            return;
-        }
+        let Some(lipc) = self.lipc else { return };
         // Best effort: with lab126_gui stopped powerd refuses (lipcPropErrInvalidState);
         // the deferral is kept by rinky's own controller either way.
-        if let Err(e) = self.lipc.set_int("com.lab126.powerd", "deferSuspend", d.as_secs() as i64) {
+        if let Err(e) = lipc.set_int("com.lab126.powerd", "deferSuspend", d.as_secs() as i64) {
             log::info!("sleep: powerd deferSuspend {} not set ({e}); deferred by rinky only", d.as_secs());
         }
     }
 }
 
 impl ReaderInput {
-    /// Opens touch, power key and the event sources.
-    pub(crate) fn open(shared: Rc<RefCell<Shared>>, lipc: Lipc, sys: SysRoot, opts: LoopOptions) -> Result<Self> {
+    /// Opens touch, power and key devices and the event sources; `lipc` is Amazon's
+    /// services (`None` on a Kobo).
+    pub(crate) fn open(shared: Rc<RefCell<Shared>>, lipc: Option<Lipc>, sys: SysRoot, opts: LoopOptions) -> Result<Self> {
         let size = crate::Screen::panel_size(&shared.borrow().screen);
         let model = shared.borrow().screen.model;
         let mut ov = TouchOverride::parse(&std::env::var("RINKY_TOUCH").unwrap_or_default());
@@ -557,11 +549,11 @@ impl ReaderInput {
             (None, Some(cover)) => devs.iter().find(|d| !d.has_abs && d.has_key(cover)),
             (None, None) => None,
         };
-        let page_keys = key_dev.and_then(|d| {
+        let key_dev = key_dev.and_then(|d| {
             log::info!("keys: {} ({}), pages {:?} (next, previous), cover {:?}", d.name, d.event, model.page_keys, model.cover_key);
-            Some((File::open(format!("/dev/input/{}", d.event)).ok()?, model.page_keys, model.cover_key))
+            File::open(format!("/dev/input/{}", d.event)).ok()
         });
-        if model.pressure_keys && model.platform == Platform::Kindle {
+        if let Some(lipc) = lipc.as_ref().filter(|_| model.pressure_keys) {
             // The Voyage's side keys stay off while the framework is stopped (KOReader).
             for p in ["fsrkeypadEnable", "fsrkeypadPrevEnable", "fsrkeypadNextEnable"] {
                 if let Err(e) = lipc.set_int("com.lab126.deviced", p, 1) {
@@ -571,11 +563,10 @@ impl ReaderInput {
         }
         let now = Instant::now();
         let mut me = ReaderInput {
-            kobo: model.platform == Platform::Kobo,
             shared,
             touch,
             power,
-            page_keys,
+            key_dev,
             lipc: lipc.clone(),
             sys,
             hub: None,
@@ -599,7 +590,7 @@ impl ReaderInput {
             app_touch: AppContacts::default(),
             opts,
         };
-        if me.opts.lipc_events {
+        if let Some(lipc) = lipc.filter(|_| me.opts.lipc_events) {
             if let Some((rd, wr)) = make_pipe() {
                 let mut hub = EventHub::new(lipc, move || {
                     let _ = (&wr).write_all(&[1]);
@@ -619,9 +610,9 @@ impl ReaderInput {
         }
         let cable = me.read_cable();
         me.shared.borrow_mut().cable = cable;
-        if let Some(policy) = me.opts.usb {
-            let transport = detect_transport(&me.lipc);
-            let (m, acts) = UsbManager::new(LipcVolumd(me.lipc.clone()), policy, transport, cable);
+        if let (Some(policy), Some(lipc)) = (me.opts.usb, me.lipc.clone()) {
+            let transport = detect_transport(&lipc);
+            let (m, acts) = UsbManager::new(LipcVolumd(lipc), policy, transport, cable);
             me.usb = Some(m);
             me.run_usb_actions(acts);
         }
@@ -638,7 +629,7 @@ impl ReaderInput {
             me.opts.sleep.as_ref().map(|c| (c.auto_sleep, c.suspend)),
             me.opts.sleep.as_ref().map(|c| c.cover)
         );
-        if me.opts.sleep.is_some() && model.platform == Platform::Kindle {
+        if me.opts.sleep.is_some() {
             me.keep_powerd_out_of_screensaver();
         }
         // Read only: KOReader's hall toggle writes hall_enable; rinky never does.
@@ -659,12 +650,13 @@ impl ReaderInput {
     /// Kindle's picture over the book cover after a timeout or a cover close. Sets
     /// `preventScreenSaver` (journaled: the launcher puts the old value back).
     fn keep_powerd_out_of_screensaver(&mut self) {
-        let old = self.lipc.get_int("com.lab126.powerd", "preventScreenSaver");
+        let Some(lipc) = &self.lipc else { return };
+        let old = lipc.get_int("com.lab126.powerd", "preventScreenSaver");
         if let Ok(v) = old {
             let sh = self.shared.borrow();
             let _ = sh.journal.record(Entry::LipcInt { publisher: "com.lab126.powerd".into(), prop: "preventScreenSaver".into(), value: v });
         }
-        match self.lipc.set_int("com.lab126.powerd", "preventScreenSaver", 1) {
+        match lipc.set_int("com.lab126.powerd", "preventScreenSaver", 1) {
             Ok(()) => log::info!("sleep: powerd preventScreenSaver 1 (was {old:?})"),
             Err(e) => log::warn!("sleep: powerd preventScreenSaver not set: {e}"),
         }
@@ -689,11 +681,11 @@ impl ReaderInput {
         (
             self.sleep.as_mut(),
             Plat {
-                kobo: self.kobo,
                 shared: &self.shared,
                 touch: &mut self.touch,
                 sys: &self.sys,
-                lipc: &self.lipc,
+                lipc: self.lipc.as_ref(),
+                suspend: self.opts.suspend,
                 light_saved: &mut self.light_saved,
             },
         )
@@ -786,7 +778,8 @@ impl ReaderInput {
         if !self.opts.amber || self.shared.borrow().asleep || !self.shared.borrow().screen.model.warmth {
             return;
         }
-        let sched = match super::kindle::read_amber_schedule(&self.lipc) {
+        let Some(lipc) = &self.lipc else { return };
+        let sched = match super::kindle::read_amber_schedule(lipc) {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -799,7 +792,7 @@ impl ReaderInput {
         let base = match self.amber_base {
             Some(b) => b,
             None => {
-                let cur = self.lipc.get_int("com.lab126.powerd", "currentAmberLevel").unwrap_or(0).max(0) as u32;
+                let cur = lipc.get_int("com.lab126.powerd", "currentAmberLevel").unwrap_or(0).max(0) as u32;
                 let b = if sched.in_window(t) { 0 } else { cur };
                 self.amber_base = Some(b);
                 b
@@ -807,7 +800,7 @@ impl ReaderInput {
         };
         if let Some(w) = self.amber.tick(&sched, t, base) {
             say!("amber: schedule {}..{} level {} at {t}: warmth {w}", sched.start, sched.end, sched.level);
-            let _ = self.lipc.set_int("com.lab126.powerd", "currentAmberLevel", w as i64);
+            let _ = lipc.set_int("com.lab126.powerd", "currentAmberLevel", w as i64);
         }
     }
 
@@ -843,7 +836,9 @@ impl ReaderInput {
                         Ok(rtc) => {
                             let delta = s.offset_ms / 1000;
                             say!("ntp: clock set ({delta:+} s); {rtc}");
-                            let _ = self.lipc.send_event("com.lab126.time", "timeChanged", &[LipcValue::Int(delta)]);
+                            if let Some(lipc) = &self.lipc {
+                                let _ = lipc.send_event("com.lab126.time", "timeChanged", &[LipcValue::Int(delta)]);
+                            }
                             self.queue.push_back(InputEvent::Power(PowerEvent::TimeChanged(delta)));
                         }
                         Err(e) => say!("ntp: setting the clock failed: {e}"),
@@ -975,12 +970,12 @@ impl ReaderInput {
 
     /// A page key: `Key::PageNext` / `Key::PagePrev` while awake (and unlocked).
     fn handle_page_key(&mut self, ev: RawEvent, now: Instant) {
-        let Some((_, pages, cover)) = self.page_keys else { return };
-        if ev.ty == EV_KEY && Some(ev.code) == cover && ev.value != 2 {
+        let model = self.shared.borrow().screen.model;
+        if ev.ty == EV_KEY && Some(ev.code) == model.cover_key && ev.value != 2 {
             self.handle_cover(ev.value == 1, CoverSource::Key, now);
             return;
         }
-        let Some((next, prev)) = pages else { return };
+        let Some((next, prev)) = model.page_keys else { return };
         let key = match ev.code {
             c if ev.ty == EV_KEY && c == next => Key::PageNext,
             c if ev.ty == EV_KEY && c == prev => Key::PagePrev,
@@ -1188,7 +1183,7 @@ impl Input for ReaderInput {
                 fds.len() - 1
             };
             let power_idx = self.power.as_ref().map(|p| add(p.as_raw_fd(), libc::POLLIN));
-            let keys_idx = self.page_keys.as_ref().map(|(f, _, _)| add(f.as_raw_fd(), libc::POLLIN));
+            let keys_idx = self.key_dev.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLIN));
             let lipc_idx = self.hub.as_ref().map(|(_, rd)| add(rd.as_raw_fd(), libc::POLLIN));
             let uevent_idx = self.uevent.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLIN));
             let udc_idx = self.udc.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLPRI | libc::POLLERR));
@@ -1225,8 +1220,8 @@ impl Input for ReaderInput {
             }
             if let Some(i) = keys_idx {
                 if fds[i].revents & libc::POLLIN != 0 {
-                    let evs = match self.page_keys.as_mut() {
-                        Some((f, _, _)) => read_raw(f)?,
+                    let evs = match self.key_dev.as_mut() {
+                        Some(f) => read_raw(f)?,
                         None => Vec::new(),
                     };
                     for ev in evs {

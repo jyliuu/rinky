@@ -243,11 +243,23 @@ impl TouchProfile {
     }
 }
 
+/// How raw touch coordinates map onto the upright screen: swap the axes first, then
+/// mirror (KOReader's `touch_switch_xy`, `touch_mirrored_x`, `touch_mirrored_y`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TouchTransform {
+    /// Raw x is the screen's y and the other way round.
+    pub swap: bool,
+    /// Flip x (after the swap).
+    pub mirror_x: bool,
+    /// Flip y (after the swap).
+    pub mirror_y: bool,
+}
+
 /// Parsed `RINKY_TOUCH` value: comma-separated tokens.
 ///
 /// | Token | Meaning |
 /// | --- | --- |
-/// | `swap`, `mirror_x`, `mirror_y` | axis transforms; any of these (or `none`) replaces the profile's transforms |
+/// | `swap`, `mirror_x`, `mirror_y` | axis transforms ([`TouchTransform`]); any of these (or `none`) replaces the profile's transforms |
 /// | `none` | no swap or mirror |
 /// | `pixels` / `scale` | raw units are pixels / scale by the reported range |
 /// | `profile=NAME` | use profile `pt_mt`, `fts_ts`, `cyttsp` or `generic` |
@@ -255,8 +267,8 @@ impl TouchProfile {
 /// | `range=X0:X1,Y0:Y1` is not supported; use `scale` with the driver's own range |
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TouchOverride {
-    /// Replacement transforms `(swap, mirror_x, mirror_y)`, when any transform token is given.
-    pub transforms: Option<(bool, bool, bool)>,
+    /// Replacement transforms, when any transform token is given.
+    pub transforms: Option<TouchTransform>,
     /// Forced coordinate mode.
     pub pixels: Option<bool>,
     /// Forced profile.
@@ -292,7 +304,7 @@ impl TouchOverride {
             }
         }
         if any {
-            o.transforms = Some((swap, mx, my));
+            o.transforms = Some(TouchTransform { swap, mirror_x: mx, mirror_y: my });
         }
         o
     }
@@ -362,10 +374,10 @@ impl TouchMapping {
 
     /// Applies an `RINKY_TOUCH` override.
     pub fn with_override(mut self, ov: &TouchOverride) -> Self {
-        if let Some((s, mx, my)) = ov.transforms {
-            self.swap_xy = s;
-            self.mirror_x = mx;
-            self.mirror_y = my;
+        if let Some(t) = ov.transforms {
+            self.swap_xy = t.swap;
+            self.mirror_x = t.mirror_x;
+            self.mirror_y = t.mirror_y;
         }
         if let Some(p) = ov.pixels {
             self.pixels = p;

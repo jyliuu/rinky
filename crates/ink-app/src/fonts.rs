@@ -54,7 +54,7 @@ const CACHE_VERSION: u64 = 1;
 
 /// The folders scanned for text fonts, in order (earlier folders win a family name).
 pub fn font_dirs() -> Vec<PathBuf> {
-    let mut dirs = registry::device_font_dirs();
+    let mut dirs = ink_platform::current().font_dirs();
     if let Ok(v) = std::env::var(ENV_DIRS) {
         dirs.extend(v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }

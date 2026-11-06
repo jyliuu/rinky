@@ -286,16 +286,8 @@ pub const INDENTS: [(f32, &str); 5] = [(-1.0, "Book's own"), (0.0, "None"), (1.0
 /// Text weights on the default layout page, `(level, name)`.
 pub const WEIGHTS: [(u8, &str); 3] = [(0, "Normal"), (1, "Darker"), (2, "Darkest")];
 
-/// Folders under `/mnt/us` offered on the library folders page besides the chosen ones
-/// (`/mnt/onboard` on a Kobo: [`folder_root`]).
-pub const FOLDER_ROOT: &str = "/mnt/us";
-
-/// The user storage whose folders the library folders page offers.
-pub fn folder_root() -> &'static str {
-    ink_platform::current().user_root()
-}
-
-/// The library folders offered: the chosen ones, then the folders in [`FOLDER_ROOT`]
+/// The library folders offered: the chosen ones, then the folders in `root` (the
+/// user storage)
 /// (hidden ones and rinky's own skipped), at most 40.
 pub fn folder_choices(chosen: &[std::path::PathBuf], root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out: Vec<std::path::PathBuf> = chosen.to_vec();
@@ -1028,7 +1020,7 @@ impl SettingsScreen {
             _ => None,
         };
         if page == Page::Folders {
-            self.folders = folder_choices(&current_settings(cx).library_dirs, std::path::Path::new(folder_root()));
+            self.folders = folder_choices(&current_settings(cx).library_dirs, std::path::Path::new(ink_platform::current().user_root()));
         }
         self.page = page;
         self.list = None;

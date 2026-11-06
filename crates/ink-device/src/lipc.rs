@@ -429,6 +429,12 @@ impl Lipc {
     }
 }
 
+/// Runs any tool with [`Lipc::run`]'s guards (a timeout that kills its process group,
+/// pipes drained on threads); returns stdout.
+pub fn run_tool(tool: &str, args: &[&str], timeout: Duration) -> Result<String> {
+    Lipc::new().run(tool, args, timeout)
+}
+
 /// Spawns, retrying a few times on `ETXTBSY` (a script that was just written can be
 /// briefly held open by a child another thread is forking).
 fn spawn_retry(cmd: &mut Command) -> std::io::Result<Child> {

@@ -13,14 +13,17 @@
 //!   with `wpa_cli`.
 //! - DHCP: `dhcpcd` when the firmware has it, else busybox `udhcpc`.
 
+use crate::ereader::system::processes_named;
 use crate::services::{WifiNetwork, WifiState};
 use crate::{DeviceError, Result};
-use std::process::Command;
-use std::sync::Mutex;
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const WPA_CONF: &str = "/mnt/onboard/.kobo/wpa_supplicant.conf";
 const NICKEL_CONF: &str = "/mnt/onboard/.kobo/Kobo/Kobo eReader.conf";
+/// Limit for a tool that should answer at once (`wpa_cli`, `insmod`, `ifconfig`).
+const TOOL_TIMEOUT: Duration = Duration::from_secs(15);
 /// `CM_WIFI_CTRL` on `/dev/ntx_io`.
 const NTX_WIFI_CTRL: libc::c_ulong = 208;
 
@@ -59,13 +62,8 @@ pub fn firmware_env(name: &str) -> Option<String> {
     if let Some(v) = saved.lines().find_map(|l| l.strip_prefix(name).and_then(|r| r.strip_prefix('='))).filter(|v| !v.is_empty()) {
         return Some(v.to_string());
     }
-    let procs = std::fs::read_dir("/proc").ok()?;
-    for p in procs.flatten() {
-        let comm = std::fs::read_to_string(p.path().join("comm")).unwrap_or_default();
-        if !matches!(comm.trim(), "udevd" | "nickel" | "systemd-udevd") {
-            continue;
-        }
-        let env = std::fs::read(p.path().join("environ")).unwrap_or_default();
+    for dir in processes_named(&["udevd", "nickel", "systemd-udevd"]) {
+        let env = std::fs::read(dir.join("environ")).unwrap_or_default();
         for kv in env.split(|b| *b == 0) {
             let kv = String::from_utf8_lossy(kv);
             if let Some(v) = kv.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
@@ -78,10 +76,16 @@ pub fn firmware_env(name: &str) -> Option<String> {
     None
 }
 
+/// The chip's module, interface and platform, worked out once ([`read_env`]).
+pub fn env() -> &'static WifiEnv {
+    static ENV: OnceLock<WifiEnv> = OnceLock::new();
+    ENV.get_or_init(read_env)
+}
+
 /// The chip's module, interface and platform. Without Nickel's environment: the one
 /// folder in `/drivers` is the platform, and a MediaTek one (`mt66xx`) means
 /// `wlan_drv_gen4m`.
-pub fn env() -> WifiEnv {
+fn read_env() -> WifiEnv {
     let platform = firmware_env("PLATFORM").unwrap_or_else(|| {
         let dirs: Vec<String> =
             std::fs::read_dir("/drivers").into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
@@ -99,13 +103,38 @@ pub fn env() -> WifiEnv {
 }
 
 fn run(prog: &str, args: &[&str]) -> Result<String> {
-    let out = Command::new(prog).args(args).output().map_err(|e| DeviceError::Backend(format!("{prog}: {e}")))?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(DeviceError::Backend(format!("{prog} {}: {} {}", args.join(" "), out.status, err.trim())));
+    crate::lipc::run_tool(prog, args, TOOL_TIMEOUT)
+}
+
+/// Runs a tool that leaves a daemon behind (`wpa_supplicant -B`, a DHCP client) with its
+/// output to /dev/null, so the daemon holds no pipe of ours; kills it after `limit`.
+fn run_daemon(prog: &str, args: &[&str], limit: Duration) -> Result<()> {
+    let mut child = Command::new(prog)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| DeviceError::Backend(format!("{prog}: {e}")))?;
+    let end = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() { Ok(()) } else { Err(DeviceError::Backend(format!("{prog} {}: {status}", args.join(" ")))) };
+        }
+        if Instant::now() >= end {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(DeviceError::Timeout(format!("{prog} after {limit:?}")));
+        }
+        pause(100);
     }
-    Ok(text)
+}
+
+/// A value from Nickel's settings file (`Key=value` lines).
+pub(crate) fn nickel_setting(key: &str) -> Option<String> {
+    let conf = std::fs::read_to_string(NICKEL_CONF).ok()?;
+    let prefix = format!("{key}=");
+    conf.lines().find_map(|l| l.strip_prefix(&prefix)).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 fn module_loaded(name: &str) -> bool {
@@ -186,23 +215,14 @@ impl WifiEnv {
 
 /// The interface exists and is up.
 pub fn is_up() -> bool {
-    let e = env();
-    std::fs::read_to_string(format!("/sys/class/net/{}/flags", e.interface))
+    std::fs::read_to_string(format!("/sys/class/net/{}/flags", env().interface))
         .ok()
         .and_then(|f| u32::from_str_radix(f.trim().trim_start_matches("0x"), 16).ok())
         .is_some_and(|f| f & 1 != 0)
 }
 
 fn wpa_running() -> bool {
-    std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|p| {
-        std::fs::read_to_string(p.path().join("comm")).is_ok_and(|c| c.trim() == "wpa_supplicant")
-    })
-}
-
-/// The regulatory domain Nickel uses (`WifiRegulatoryDomain=` in its settings).
-fn country() -> Option<String> {
-    let conf = std::fs::read_to_string(NICKEL_CONF).ok()?;
-    conf.lines().find_map(|l| l.strip_prefix("WifiRegulatoryDomain=")).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    !processes_named(&["wpa_supplicant"]).is_empty()
 }
 
 /// Powers the radio, loads the driver, brings the interface up and starts
@@ -236,7 +256,7 @@ pub fn start() -> Result<()> {
     pause(250);
     if !e.mtk() {
         let mut params = Vec::new();
-        if let Some(cc) = country() {
+        if let Some(cc) = nickel_setting("WifiRegulatoryDomain") {
             match e.module.as_str() {
                 "8821cs" => params.push(format!("rtw_country_code={cc}")),
                 "moal" => params.push(format!("reg_alpha2={cc}")),
@@ -258,7 +278,7 @@ pub fn start() -> Result<()> {
         let mut args = vec!["-D", driver];
         args.extend_from_slice(extra);
         args.extend_from_slice(&["-i", &e.interface, "-c", conf, "-C", "/var/run/wpa_supplicant", "-B"]);
-        run("wpa_supplicant", &args)?;
+        run_daemon("wpa_supplicant", &args, TOOL_TIMEOUT)?;
     }
     Ok(())
 }
@@ -272,7 +292,7 @@ pub fn stop() -> Result<()> {
     }
     let e = env();
     log::info!("wifi: off");
-    release_ip(&e);
+    release_ip(e);
     let _ = e.wpa(&["terminate"]);
     let _ = run("ifconfig", &[&e.interface, "down"]);
     match e.module.as_str() {
@@ -313,15 +333,15 @@ fn release_ip(e: &WifiEnv) {
 /// Gets an address (blocks up to 30 s).
 pub fn obtain_ip() -> Result<()> {
     let e = env();
-    release_ip(&e);
+    release_ip(e);
     if std::path::Path::new("/sbin/dhcpcd").exists() {
-        run("dhcpcd", &["-d", "-t", "30", "-w", &e.interface])?;
+        run_daemon("dhcpcd", &["-d", "-t", "30", "-w", &e.interface], Duration::from_secs(35))?;
     } else {
         let host = run("hostname", &["-s"]).map(|h| h.trim().to_string()).unwrap_or_default();
         let host = if host.is_empty() || host == "(none)" { "kobo".to_string() } else { host };
         let hn = format!("hostname:{host}");
         // -q: quit once leased; -b: keep trying in the background otherwise.
-        run("udhcpc", &["-S", "-i", &e.interface, "-s", "/etc/udhcpc.d/default.script", "-x", &hn, "-b", "-q"])?;
+        run_daemon("udhcpc", &["-S", "-i", &e.interface, "-s", "/etc/udhcpc.d/default.script", "-x", &hn, "-b", "-q"], Duration::from_secs(35))?;
     }
     Ok(())
 }
@@ -358,7 +378,7 @@ pub fn state() -> WifiState {
         return WifiState { enabled: false, state: "NA".into(), essid: None, signal: None };
     }
     let e = env();
-    let kv = status(&e);
+    let kv = status(e);
     let wpa = get(&kv, "wpa_state").unwrap_or("");
     let ip = get(&kv, "ip_address").is_some();
     let essid = get(&kv, "ssid").map(str::to_string);
@@ -422,22 +442,24 @@ pub fn scan() -> Result<Vec<WifiNetwork>> {
     let e = env();
     e.wpa(&["scan"])?;
     let start = Instant::now();
-    let mut last = Vec::new();
+    let mut raw = String::new();
     while start.elapsed() < Duration::from_secs(8) {
         pause(1000);
-        last = scan_results()?;
-        if !last.is_empty() && start.elapsed() >= Duration::from_secs(3) {
+        raw = e.wpa(&["scan_results"])?;
+        if raw.lines().count() > 1 && start.elapsed() >= Duration::from_secs(3) {
             break;
         }
     }
-    Ok(last)
+    Ok(parse_scan(&raw, &known_names()))
 }
 
 /// The last scan's results.
 pub fn scan_results() -> Result<Vec<WifiNetwork>> {
-    let e = env();
-    let known: Vec<String> = networks().unwrap_or_default().into_iter().map(|(_, s)| s).collect();
-    Ok(parse_scan(&e.wpa(&["scan_results"])?, &known))
+    Ok(parse_scan(&env().wpa(&["scan_results"])?, &known_names()))
+}
+
+fn known_names() -> Vec<String> {
+    networks().unwrap_or_default().into_iter().map(|(_, s)| s).collect()
 }
 
 /// `"text"` as wpa_supplicant wants a string value.
@@ -445,14 +467,20 @@ fn quoted(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Saves a network (replacing one of the same name) and returns its id.
-pub fn save_network(essid: &str, password: Option<&str>) -> Result<i64> {
-    let e = env();
+/// Removes every saved network with this name.
+fn remove_named(e: &WifiEnv, essid: &str) -> Result<()> {
     for (id, s) in networks()? {
         if s == essid {
             e.wpa(&["remove_network", &id.to_string()])?;
         }
     }
+    Ok(())
+}
+
+/// Saves a network (replacing one of the same name) and returns its id.
+pub fn save_network(essid: &str, password: Option<&str>) -> Result<i64> {
+    let e = env();
+    remove_named(e, essid)?;
     let id: i64 = e.wpa(&["add_network"])?.trim().parse().map_err(|_| DeviceError::Backend("add_network: no id".into()))?;
     let ids = id.to_string();
     e.wpa(&["set_network", &ids, "ssid", &quoted(essid)])?;
@@ -470,23 +498,19 @@ pub fn save_network(essid: &str, password: Option<&str>) -> Result<i64> {
 /// Forgets a saved network.
 pub fn forget(essid: &str) -> Result<()> {
     let e = env();
-    for (id, s) in networks()? {
-        if s == essid {
-            e.wpa(&["remove_network", &id.to_string()])?;
-        }
-    }
+    remove_named(e, essid)?;
     let _ = e.wpa(&["save_config"]);
     Ok(())
 }
 
-/// Joins a saved network, waits for the association (20 s) and gets an address.
-pub fn connect(essid: &str) -> Result<()> {
+/// The id of the saved network with this name.
+pub fn network_id(essid: &str) -> Result<Option<i64>> {
+    Ok(networks()?.into_iter().find(|(_, s)| s == essid).map(|(id, _)| id))
+}
+
+/// Joins saved network `id`, waits for the association (20 s) and gets an address.
+pub fn connect(id: i64) -> Result<()> {
     let e = env();
-    let id = networks()?
-        .into_iter()
-        .find(|(_, s)| s == essid)
-        .map(|(id, _)| id)
-        .ok_or_else(|| DeviceError::Backend(format!("no saved network {essid}")))?;
     e.wpa(&["select_network", &id.to_string()])?;
     let r = wait_associated(Duration::from_secs(20));
     // select_network disables the others; enable them again (in memory only) so
@@ -501,7 +525,7 @@ pub fn wait_associated(limit: Duration) -> Result<()> {
     let e = env();
     let start = Instant::now();
     loop {
-        if get(&status(&e), "wpa_state") == Some("COMPLETED") {
+        if get(&status(e), "wpa_state") == Some("COMPLETED") {
             return Ok(());
         }
         if start.elapsed() >= limit {
@@ -514,7 +538,7 @@ pub fn wait_associated(limit: Duration) -> Result<()> {
 /// Disconnects (the radio stays on).
 pub fn disconnect() -> Result<()> {
     let e = env();
-    release_ip(&e);
+    release_ip(e);
     e.wpa(&["disconnect"]).map(|_| ())
 }
 

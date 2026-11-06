@@ -747,7 +747,7 @@ impl FontBook {
 
 /// The e-reader's font directories plus `extra` (searched first).
 pub fn font_dirs(extra: Option<&Path>) -> Vec<PathBuf> {
-    let mut v = ink_text::registry::device_font_dirs();
+    let mut v = ink_platform::current().font_dirs();
     if let Some(e) = extra {
         v.insert(0, e.to_path_buf());
     }

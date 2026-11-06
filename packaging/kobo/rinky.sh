@@ -40,10 +40,13 @@ if [ "$RINKY_DETACHED" != 1 ]; then
 fi
 echo $$ >"$RUN/launcher.pid"
 cd / || exit 1
-if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt 2000000 ]; then
+# Rotated at 2 MiB, as rinky itself does (and the Kindle launcher).
+if [ "$(wc -c <"$LOG" 2>/dev/null || echo 0)" -ge 2097152 ]; then
     mv -f "$LOG.1" "$LOG.2" 2>/dev/null
     mv -f "$LOG" "$LOG.1"
 fi
+# For every rinky run below.
+export RINKY_RUN="$RUN" RINKY_HOME="$DIR" RINKY_PLATFORM=kobo
 log "start: $*"
 
 copy_binary() {
@@ -69,7 +72,7 @@ NICKEL_PID=$(pid_of nickel)
 FROM_NICKEL=false
 [ -n "$NICKEL_PID" ] && FROM_NICKEL=true
 FROM_KFMON=false
-pidof kfmon >/dev/null 2>&1 && FROM_KFMON=true
+[ -n "$(pid_of kfmon)" ] && FROM_KFMON=true
 import_env "$NICKEL_PID"
 [ -z "$PLATFORM" ] || [ -z "$PRODUCT" ] && import_env "$(pid_of udevd)"
 [ -z "$PRODUCT" ] && [ -x /bin/kobo_config.sh ] && PRODUCT=$(/bin/kobo_config.sh 2>/dev/null) && export PRODUCT
@@ -89,11 +92,11 @@ if [ "$FROM_NICKEL" = true ]; then
     killall -q -TERM nickel hindenburg sickel fickel strickel fontickel adobehost foxitpdf iink dhcpcd-dbus dhcpcd \
         bluealsa bluetoothd fmon nanoclock.lua memorylogger QtWebEngineProcess 2>/dev/null
     n=0
-    while pidof nickel >/dev/null 2>&1 && [ $n -lt 20 ]; do
+    while [ -n "$(pid_of nickel)" ] && [ $n -lt 20 ]; do
         usleep 250000 2>/dev/null || sleep 1
         n=$((n + 1))
     done
-    pidof nickel >/dev/null 2>&1 && log "nickel still running after 5 s"
+    [ -n "$(pid_of nickel)" ] && log "nickel still running after 5 s"
     rm -f /tmp/nickel-hardware-status
 fi
 
@@ -107,7 +110,7 @@ case "$1" in
 esac
 while :; do
     log "run: $BIN $*"
-    RINKY_RUN=$RUN RINKY_HOME=$DIR RINKY_LOG_FILE=$LOG RINKY_PLATFORM=kobo "$BIN" "$@" >>"$LOG" 2>&1
+    RINKY_LOG_FILE=$LOG "$BIN" "$@" >>"$LOG" 2>&1
     status=$?
     log "rinky exited with status $status"
     [ -e "$RUN/restart" ] || break
@@ -117,8 +120,8 @@ while :; do
 done
 
 # 4. Put things back and start Nickel.
-RINKY_RUN=$RUN RINKY_PLATFORM=kobo "$BIN" device restore >>"$LOG" 2>&1
-RINKY_RUN=$RUN RINKY_PLATFORM=kobo "$BIN" device wifi enable 0 >>"$LOG" 2>&1
+"$BIN" device restore >>"$LOG" 2>&1
+"$BIN" device wifi enable 0 >>"$LOG" 2>&1
 rm -f "$RUN/restart-capable" "$RUN/launcher.pid" "$RUN/bin/rinky" "$RUN/nickel.env"
 sync
 

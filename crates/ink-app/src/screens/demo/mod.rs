@@ -25,7 +25,7 @@ mod tests;
 
 use crate::router::{AppCtx, AppScreen, Route, ScreenRegistry, Transition};
 use ink_device::{Canvas, Key, Point, Rect, RefreshClass, Rotation, Size};
-use ink_text::registry::{device_font_dirs, scan_fonts, summary};
+use ink_text::registry::{scan_fonts, summary};
 use ink_text::Style;
 use ink_ui::controls::Align;
 use ink_ui::input::InputResult;
@@ -71,7 +71,7 @@ pub fn font_dirs() -> Vec<PathBuf> {
         return v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect();
     }
     #[allow(unused_mut)]
-    let mut dirs = device_font_dirs();
+    let mut dirs = ink_platform::current().font_dirs();
     // Host builds only: the Kindle binary carries no path of the build machine.
     #[cfg(not(target_arch = "arm"))]
     {

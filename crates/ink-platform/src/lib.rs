@@ -99,9 +99,10 @@ impl Platform {
     }
 }
 
-/// [`Platform::detect`], for the many callers that only need the current one.
+/// The platform this process runs on: [`Platform::detect`], once.
 pub fn current() -> Platform {
-    Platform::detect()
+    static CURRENT: std::sync::OnceLock<Platform> = std::sync::OnceLock::new();
+    *CURRENT.get_or_init(Platform::detect)
 }
 
 #[cfg(test)]
