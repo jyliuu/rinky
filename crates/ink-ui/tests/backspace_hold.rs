@@ -4,7 +4,7 @@
 //!
 //! The raw protocol-B records of the emulator's fts_ts controller go through the same
 //! chain as on the device: `TouchDecoder` -> `AppContacts` -> an input that waits like
-//! `KindleInput::next_event` (its wait decision is `ink_device::input::wait_step`) ->
+//! `ReaderInput::next_event` (its wait decision is `ink_device::input::wait_step`) ->
 //! `GestureRecognizer` -> `Keyboard`. Time is virtual. A loop pass that changed the text
 //! costs 200 ms (a redraw on the slow emulator), longer than the 150 ms repeat interval, so
 //! the repeat timer is overdue whenever the loop asks for input.
@@ -48,7 +48,7 @@ impl SlowDevice {
 }
 
 impl Input for SlowDevice {
-    /// The control flow of `KindleInput::next_event` with a virtual `poll()`.
+    /// The control flow of `ReaderInput::next_event` with a virtual `poll()`.
     fn next_event(&mut self, timeout: Option<Duration>) -> ink_device::Result<Option<InputEvent>> {
         let caller = timeout.map(|t| self.instant() + t);
         let mut polled = false;

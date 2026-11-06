@@ -47,7 +47,7 @@ pub mod input;
 pub mod journal;
 pub mod light;
 pub mod lipc;
-pub mod platform;
+pub use ink_platform as platform;
 pub mod screen;
 pub mod screensaver;
 pub mod script;
@@ -60,9 +60,7 @@ pub mod usb;
 pub mod wifi;
 
 #[cfg(target_os = "linux")]
-pub mod kindle;
-#[cfg(target_os = "linux")]
-pub mod kobo;
+pub mod ereader;
 #[cfg(all(feature = "sim", not(target_arch = "arm")))]
 pub mod sim;
 

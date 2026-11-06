@@ -12,6 +12,7 @@ publish.workspace = true
 doctest = false
 
 [dependencies]
+ink-platform.workspace = true
 ink-device.workspace = true
 fontdue.workspace = true
 unicode-linebreak.workspace = true

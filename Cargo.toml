@@ -22,6 +22,7 @@ publish = false
 [workspace.dependencies]
 # Internal crates.
 ink-device = { path = "crates/ink-device" }
+ink-platform = { path = "crates/ink-platform" }
 ink-text = { path = "crates/ink-text" }
 ink-ui = { path = "crates/ink-ui" }
 ink-doc = { path = "crates/ink-doc" }

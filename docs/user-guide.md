@@ -22,166 +22,54 @@ Contents:
 10. [Files rinky writes](#10-files-rinky-writes)
 11. [License](#11-license)
 
-This guide is written for the Kindle. On a Kobo, rinky works the same once it runs;
-installing, starting and a few details differ: see [rinky on Kobo](kobo.md).
+This guide is written for the Kindle; on a Kobo rinky works the same once it runs, and
+[rinky on Kobo](kobo.md) lists what differs.
 
 ## 1. Before you start
 
-You need:
+Which e-readers rinky runs on, which package to download and how to get the device
+ready (jailbreak and KUAL on a Kindle, NickelMenu on a Kobo) are in the
+[install guide](install.md#1-which-device-which-package).
 
-- A Kindle with a 300 ppi screen. Check the model under
-  *Settings > Device Options > Device Info*. Only the Paperwhite 12th gen (firmware
-  5.19.x) has been tested on a real device. Four more ran in an emulator with Amazon's
-  firmware; the rest share a display interface with one of those:
+What rinky changes on your e-reader:
 
-  | Kindle | rinky |
-  |---|---|
-  | Paperwhite 12th gen (2024) | tested on the device |
-  | Paperwhite 4, Oasis 3, Paperwhite 3, Kindle 12th gen (2024) | runs in the emulator |
-  | Paperwhite 5 and Signature Edition, Kindle 11th gen, Colorsoft, Scribe, Oasis 2, Voyage, Oasis 1 | untested |
-  | Paperwhite 1 and 2, Kindle 7th, 8th and 10th gen | not supported: their screens have too few pixels for rinky's layout |
-
-  On the Voyage and the Oasis models the page keys turn pages. Models without a warm
-  light have no Warmth slider. On a Colorsoft, rinky shows grayscale. On models other
-  than the Paperwhite 12th gen, night mode inverts the picture in software, so it may
-  ghost a little more. If rinky does not recognise your Kindle, it says "unknown model"
-  in `rinky/rinky.log` and tries each display interface in turn.
-- A **jailbroken** Kindle. rinky cannot run on a Kindle that is not jailbroken. See
-  [Getting your Kindle ready](#getting-your-kindle-ready) below.
-- One way to start it:
-  - **KUAL** (Kindle Unified Application Launcher), recommended. rinky adds an
-    *rinky* entry to KUAL.
-  - or **SSH** access to the Kindle (for example from the jailbreak's tools, or the SSH
-    server in KOReader).
-- Wi-Fi, only for updates.
-
-What rinky changes on your Kindle:
-
-- It adds the folder `rinky` (program and its data) and the KUAL entry
-  `extensions/rinky` on the Kindle drive.
+- It adds its folder (`rinky` on a Kindle, `.adds/rinky` on a Kobo) and its menu entry
+  (`extensions/rinky` for KUAL, `.adds/nm/rinky` for NickelMenu).
 - Next to each book you open it keeps a small file `<book>.sdr/rinky.<ext>.json`
-  (for example `rinky.epub.json` or `rinky.pdf.json`; reading position, notes). The `.sdr` folder is the one KOReader uses; rinky never changes
-  KOReader's files in it.
-- Nothing else. The Kindle's system files, the Kindle library and KOReader
-  (`/mnt/us/koreader`) are not touched. [Uninstall](#8-uninstall) removes all of the
-  above.
-
-### Getting your Kindle ready
-
-The steps are the same on every Kindle; what differs is which jailbreak your firmware
-needs and how the Kindle shows up on your computer.
-
-1. **Find the firmware version.** On the Kindle: *Settings > Device Options > Device
-   Info* (on older firmware: *Menu > Settings > Menu > Device Info*). Write down the
-   model and the version, for example *Kindle Paperwhite (10th Generation)* and
-   *5.18.1*.
-2. **Jailbreak.** Which jailbreak works depends on the firmware version, not on the
-   model. [kindlemodding.org](https://kindlemodding.org/) lists them and walks you
-   through the one for your version. Recent firmware uses WinterBreak or AdBreak
-   followed by the jb.sh hotfix. Do not let the Kindle update its firmware before you
-   are done: turn on airplane mode, because a firmware update can close the hole the
-   jailbreak needs.
-3. **Install KUAL** (and MRPI, which installs it) from the same site. Use the KUAL
-   build it gives for your firmware. Firmware 5.16.3 and newer needs the newer
-   *hard-float* KUAL; the Paperwhite 3, Voyage and Oasis 1 stay on older firmware and
-   use the older KUAL. rinky itself is the same package for both: the `kindlehf` in its
-   file name does not matter.
-4. **Connect the Kindle by USB** to copy rinky over (step 2 of [Install](#2-install)):
-
-   | Kindle | Shows up as |
-   |---|---|
-   | Paperwhite 3 and 4, Voyage, Oasis 1 to 3 | a USB drive named *Kindle*, on any computer |
-   | Paperwhite 5 and newer, Kindle 11th gen and newer, Scribe, Colorsoft | an MTP device, like a phone: on Windows under *This PC*; on a Mac use an MTP app such as [OpenMTP](https://openmtp.ganeshrvel.com/) |
-
-   Some firmware updates switched older models to MTP too. If no drive appears, use
-   the MTP way.
-
-Notes for some models:
-
-- **Voyage and Oasis:** the page keys turn pages in rinky. On the Voyage they are the
-  pressure-sensitive bezel keys, which rinky switches on while it runs.
-- **Kindles without a warm light** (Paperwhite 3 and 4, Voyage, Oasis 1 and 2, Kindle
-  11th and 12th gen): rinky has no Warmth slider.
-- **Scribe:** the pen does nothing in rinky; use your finger.
-- **Colorsoft and Scribe Colorsoft:** rinky shows grayscale.
-- **Untested models:** if something goes wrong (the screen does not change, taps land
-  in the wrong place, the Kindle does not wake from sleep), hold the power button for
-  about 40 seconds to restart the Kindle; rinky does not start again by itself. Please
-  then open an issue with `rinky/rinky.log` from the Kindle drive.
-
-### Download
-
-Download the install package `rinky-<version>-kindlehf.tar.gz` from the project's
-releases page. If you want to check the download, compare its SHA-256 with the
-`SHA256SUMS` file of the same release. Example:
-`shasum -a 256 rinky-0.4.3-kindlehf.tar.gz` on a Mac, or `sha256sum ...` on Linux.
+  (for example `rinky.epub.json` or `rinky.pdf.json`; reading position, notes). The
+  `.sdr` folder is the one KOReader uses; rinky never changes KOReader's files in it.
+- Nothing else. The system files, the e-reader's own library and KOReader are not
+  touched. [Uninstall](#8-uninstall) removes all of the above.
 
 ## 2. Install
 
-There are two ways to install. Both end with the same files on the Kindle.
+See the [install guide](install.md): [Kindle](install.md#2-kindle),
+[Kobo and Tolino](install.md#3-kobo-and-tolino). Over SSH, the installer
+(`rinky/install.sh`, in both packages):
 
-### A. Over USB (no shell needed)
-
-1. Unpack the archive on your computer. On macOS, double-click it. On Linux, run
-   `tar -xzf rinky-<version>-kindlehf.tar.gz`. On Windows, use 7-Zip. You get two
-   folders: `rinky` and `extensions`.
-2. Connect the Kindle by USB. Older Kindles (Paperwhite 3 and 4, Voyage, Oasis) show
-   up as a drive named *Kindle*. Newer ones, the Paperwhite 5 and later among them,
-   connect as an MTP device (like a phone): on Windows the Kindle appears in File
-   Explorer under *This PC*; macOS Finder does not show MTP devices, so use an MTP app
-   (for example OpenMTP). See [Getting your Kindle ready](#getting-your-kindle-ready).
-3. Copy the folder `rinky` to the top level of the Kindle's storage.
-4. If you use KUAL: open `extensions` from the archive and copy the folder
-   `extensions/rinky` into the Kindle's `extensions` folder. If the Kindle has no
-   `extensions` folder, KUAL is not installed and you can skip this step.
-5. Eject the Kindle.
-
-When you install over USB, nothing records whether you created the `extensions` folder
-yourself. If you created it only for rinky, delete it by hand after an uninstall.
-The first start from KUAL records which book `.sdr` folders already exist, as the
-installer does (see [Uninstall](#8-uninstall)).
-
-### B. Over SSH
-
-Copy the package to the Kindle (over USB into the top level of the drive, or with
-`scp`), then on the Kindle:
-
-```sh
-mkdir -p /mnt/us/.rinky-pkg
-tar -xzf /mnt/us/rinky-<version>-kindlehf.tar.gz -C /mnt/us/.rinky-pkg
-sh /mnt/us/.rinky-pkg/rinky/install.sh
-rm -rf /mnt/us/.rinky-pkg /mnt/us/rinky-<version>-kindlehf.tar.gz
-```
-
-The installer:
-
-- checks the package files against their checksums, then copies them to
-  `/mnt/us/rinky` and `/mnt/us/extensions/rinky`;
+- checks the package files against their checksums, then copies them to rinky's
+  folder and its menu entry;
 - installs all files or none: it first copies every file next to the old one under a
   temporary name (`<name>.new<number>`), and replaces the old files only when every
-  copy worked. If the Kindle is full, it stops with *"cannot write ... (no space
+  copy worked. If the device is full, it stops with *"cannot write ... (no space
   left?); nothing was changed"*, deletes its temporary copies and leaves the installed
   version as it was. It needs free space for one full copy of the package (about
   14 MB) on top of the installed version (the in-app update needs about 30 MB, see
   [Update](#7-update));
 - runs one at a time: a second install or update started meanwhile stops with
   *"another install or update is running"*;
-- notes which book `.sdr` folders exist before rinky first runs (in
-  `/mnt/us/rinky/.install-sdr`), so the uninstaller keeps them;
-- creates `/mnt/us/extensions` if it does not exist, and records that in
-  `/mnt/us/rinky/.install-state` so the uninstaller can remove it again;
 - keeps your settings, notes and plugins when you install over an older version;
-- refuses to run while rinky is running. Exit rinky first.
+- on a Kindle, notes which book `.sdr` folders exist before rinky first runs (in
+  `/mnt/us/rinky/.install-sdr`) so the uninstaller keeps them, creates
+  `/mnt/us/extensions` if it is missing (recorded in `/mnt/us/rinky/.install-state` so
+  the uninstaller can remove it again), and refuses to run while rinky runs.
 
-### Check the install
-
-```sh
-sh /mnt/us/rinky/rinky-ctl.sh status    # prints the installed version
-/mnt/us/rinky/rinky version
-```
+Check the install on a Kindle with `sh /mnt/us/rinky/rinky-ctl.sh status`; on any
+device `rinky version` in rinky's folder prints the version.
 
 ## 3. Start rinky
 
+- **Kobo:** NickelMenu > *rinky* ([install guide](install.md#3-kobo-and-tolino)).
 - **KUAL:** open KUAL, then choose *rinky > Start rinky*.
 - **SSH:** `sh /mnt/us/rinky/rinky-ctl.sh start` opens the library.
   `sh /mnt/us/rinky/rinky-ctl.sh start /mnt/us/Books/book.epub` opens that

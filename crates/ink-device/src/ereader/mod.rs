@@ -1,6 +1,11 @@
-//! Kindle backend (firmware 5.x; tested on the PW12, MT8113, 5.19.x): `/dev/fb0` with
-//! the model's refresh ioctls ([`model`]), evdev touch, power and page keys, lipc
-//! services and events, kernel uevents. Linux only.
+//! The e-reader backend: Kindles (firmware 5.x) and Kobos, one binary. Linux only.
+//!
+//! What both have in common is here: `/dev/fb0` with the model's refresh ioctls
+//! ([`fb`], [`model`]), evdev touch, power, page and cover keys, sleep with the
+//! screensaver and kernel suspend ([`input`], [`system`]). What differs is the system
+//! software around rinky, behind the service traits: on a Kindle Amazon's `lipc`
+//! services ([`kindle`]), on a Kobo sysfs, `ntx_io` and `wpa_supplicant` ([`kobo`]).
+//! [`open`] picks them by [`Platform`].
 //!
 //! The screen, the input loop and the services share one [`Shared`] state, so the
 //! input loop can draw the screensaver or the USB lock screen and keep the app's
@@ -9,8 +14,9 @@
 
 pub mod fb;
 pub mod input;
+pub mod kindle;
+pub mod kobo;
 pub mod model;
-pub mod services;
 pub mod system;
 
 use crate::canvas::Canvas;
@@ -22,6 +28,8 @@ use crate::screensaver::Screensaver;
 use crate::sleep::{SleepConfig, SleepState};
 use crate::sysfs::SysRoot;
 use crate::usb::{DriveModeState, UsbCable, UsbPolicy};
+use crate::platform::Platform;
+use crate::services::{Battery, Clock, Light, Power, Usb, Wifi};
 use crate::{Device, DeviceInfo, Result};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -30,9 +38,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 /// Options for [`open`]. `Default` reads the `RINKY_*` environment variables
-/// documented on each field.
+/// documented on each field. The lipc events, the USB drive policy and powerd's
+/// warmth schedule exist only on a Kindle; a Kobo ignores them.
 #[derive(Clone, Debug)]
-pub struct KindleOptions {
+pub struct ReaderOptions {
+    /// Kindle or Kobo ([`Platform::detect`]).
+    pub platform: Platform,
     /// Grab the touchscreen (`EVIOCGRAB`) so the framework does not see taps.
     pub grab_touch: bool,
     /// Subscribe to powerd, wifid, cmd, volumd, hal and time events
@@ -49,8 +60,9 @@ pub struct KindleOptions {
     pub usb: Option<UsbPolicy>,
     /// Low-battery warning in percent (`RINKY_LOW_BATTERY`, default 10).
     pub low_battery: u8,
-    /// NTP server queried when Wi-Fi connects (`RINKY_NTP_SERVER`, default
-    /// `NTP_SERVER` from `/etc/sysconfig/ntp`; `RINKY_NTP=0` disables).
+    /// NTP server queried when Wi-Fi connects (`RINKY_NTP_SERVER`, default `NTP_SERVER`
+    /// from `/etc/sysconfig/ntp` on a Kindle, `pool.ntp.org` on a Kobo; `RINKY_NTP=0`
+    /// disables).
     pub ntp_server: Option<String>,
     /// Apply powerd's warmth schedule while the framework is stopped
     /// (`RINKY_AMBER=0` disables).
@@ -67,17 +79,22 @@ fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
-impl Default for KindleOptions {
+impl Default for ReaderOptions {
     fn default() -> Self {
         let run = env("RINKY_RUN").unwrap_or_else(|| "/tmp/rinky".into());
+        let platform = Platform::detect();
         let ntp_server = if env("RINKY_NTP").as_deref() == Some("0") {
             None
         } else {
-            env("RINKY_NTP_SERVER").or_else(|| {
-                std::fs::read_to_string("/etc/sysconfig/ntp").ok().and_then(|t| crate::clock::ntp_server_from_config(&t))
+            env("RINKY_NTP_SERVER").or_else(|| match platform {
+                Platform::Kindle => {
+                    std::fs::read_to_string("/etc/sysconfig/ntp").ok().and_then(|t| crate::clock::ntp_server_from_config(&t))
+                }
+                Platform::Kobo => Some("pool.ntp.org".into()),
             })
         };
-        KindleOptions {
+        ReaderOptions {
+            platform,
             grab_touch: true,
             power_events: false,
             lipc: Lipc::new(),
@@ -101,7 +118,7 @@ impl Default for KindleOptions {
 
 /// State shared by the screen, the input loop and the services.
 pub(crate) struct Shared {
-    pub(crate) screen: fb::KindleFb,
+    pub(crate) screen: fb::Framebuffer,
     /// Raw panel content under the screensaver or lock screen (app updates go here).
     pub(crate) shadow: Option<Canvas>,
     pub(crate) asleep: bool,
@@ -119,9 +136,9 @@ pub(crate) struct Shared {
 
 /// The screen as the app sees it: while the screensaver or the USB lock screen is up,
 /// updates go to the shadow buffer and appear when it is removed.
-pub struct KindleScreen(pub(crate) Rc<RefCell<Shared>>);
+pub struct ReaderScreen(pub(crate) Rc<RefCell<Shared>>);
 
-impl Screen for KindleScreen {
+impl Screen for ReaderScreen {
     fn panel_size(&self) -> Size {
         self.0.borrow().screen.panel_size()
     }
@@ -188,14 +205,19 @@ impl Screen for KindleScreen {
 }
 
 /// Opens the screen only (for `rinky refresh` and screenshots).
-pub fn open_screen() -> Result<fb::KindleFb> {
-    fb::KindleFb::open()
+pub fn open_screen() -> Result<fb::Framebuffer> {
+    fb::Framebuffer::open()
 }
 
-/// Opens the whole device.
-pub fn open(opts: KindleOptions) -> Result<Device> {
+/// Opens the whole device: the shared screen and input loop, and the platform's
+/// services.
+pub fn open(opts: ReaderOptions) -> Result<Device> {
+    let kindle = opts.platform == Platform::Kindle;
     let journal = Journal::at(&opts.journal);
-    let screen = fb::KindleFb::open_with(Some(journal.clone()))?;
+    let screen = fb::Framebuffer::open_with(Some(journal.clone()))?;
+    // Amazon's services: lipc events, volumd's USB drive mode, powerd's warmth schedule.
+    let lipc_events = kindle && opts.power_events;
+    let usb = opts.usb.filter(|_| lipc_events);
     let shared = Rc::new(RefCell::new(Shared {
         screen,
         shadow: None,
@@ -209,40 +231,71 @@ pub fn open(opts: KindleOptions) -> Result<Device> {
         cable: UsbCable::None,
         journal,
         sleep_enabled: opts.sleep.is_some(),
-        usb_enabled: opts.usb.is_some(),
+        usb_enabled: usb.is_some(),
     }));
     let loop_opts = input::LoopOptions {
         grab_touch: opts.grab_touch,
-        lipc_events: opts.power_events,
+        lipc_events,
         sleep: opts.sleep.clone(),
-        usb: if opts.power_events { opts.usb } else { None },
+        usb,
         low_battery: opts.low_battery,
-        ntp_server: opts.ntp_server.clone(),
-        amber: opts.amber,
+        // On a Kobo the Wi-Fi service syncs the clock itself when it connects.
+        ntp_server: opts.ntp_server.clone().filter(|_| lipc_events),
+        amber: kindle && opts.amber,
         heartbeat: opts.heartbeat.clone(),
     };
     if let Some(dir) = opts.heartbeat.as_ref().and_then(|p| p.parent()) {
         let _ = std::fs::create_dir_all(dir);
     }
-    let input = input::KindleInput::open(shared.clone(), opts.lipc.clone(), opts.sys.clone(), loop_opts)?;
-    let svc = services::LipcServices::new(opts.lipc.clone(), Some(shared.clone()), opts.sys.clone());
-    // Light levels and Wi-Fi state for the control center, read once off the UI
-    // thread after start-up (the first book page comes first).
-    svc.refresh_after(Duration::from_secs(3));
-    let firmware = std::fs::read_to_string("/etc/version.txt").unwrap_or_default().lines().next().unwrap_or("").to_string();
+    let input = Box::new(input::ReaderInput::open(shared.clone(), opts.lipc.clone(), opts.sys.clone(), loop_opts)?);
     let (model, page_wave) = {
         let sh = shared.borrow();
         (sh.screen.model.name.to_string(), sh.screen.page_wave())
     };
-    Ok(Device {
-        info: DeviceInfo { backend: "kindle", model, firmware, page_wave },
-        screen: Box::new(KindleScreen(shared)),
-        input: Box::new(input),
+    let info = DeviceInfo { backend: opts.platform.id(), model, firmware: firmware(opts.platform), page_wave };
+    let clock = Box::new(system::DeviceClock { lipc: kindle.then(|| opts.lipc.clone()), ntp_server: opts.ntp_server.clone() });
+    let screen = Box::new(ReaderScreen(shared.clone()));
+    Ok(match opts.platform {
+        Platform::Kindle => {
+            let svc = kindle::LipcServices::new(opts.lipc, Some(shared), opts.sys);
+            // Light levels and Wi-Fi state for the control center, read once off the UI
+            // thread after start-up (the first book page comes first).
+            svc.refresh_after(Duration::from_secs(3));
+            with_services(info, screen, input, clock, svc)
+        }
+        Platform::Kobo => with_services(info, screen, input, clock, kobo::KoboServices::new(Some(shared), opts.sys, opts.ntp_server)),
+    })
+}
+
+/// A [`Device`] whose light, battery, power, Wi-Fi and USB are all `svc`.
+fn with_services<S>(info: DeviceInfo, screen: Box<ReaderScreen>, input: Box<input::ReaderInput>, clock: Box<dyn Clock>, svc: S) -> Device
+where
+    S: Light + Battery + Power + Wifi + Usb + Clone + 'static,
+{
+    Device {
+        info,
+        screen,
+        input,
         light: Box::new(svc.clone()),
         battery: Box::new(svc.clone()),
         power: Box::new(svc.clone()),
         wifi: Box::new(svc.clone()),
         usb: Box::new(svc),
-        clock: Box::new(services::KindleClock { lipc: opts.lipc, ntp_server: opts.ntp_server }),
-    })
+        clock,
+    }
+}
+
+/// The firmware version: the first line of `/etc/version.txt` on a Kindle, the third
+/// field of `/mnt/onboard/.kobo/version` on a Kobo; empty when missing.
+pub fn firmware(platform: Platform) -> String {
+    let (file, field) = match platform {
+        Platform::Kindle => ("/etc/version.txt", None),
+        Platform::Kobo => ("/mnt/onboard/.kobo/version", Some(2)),
+    };
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let line = text.lines().next().unwrap_or("").trim();
+    match field {
+        Some(i) => line.split(',').nth(i).unwrap_or("").to_string(),
+        None => line.to_string(),
+    }
 }

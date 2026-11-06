@@ -29,7 +29,6 @@ pub mod koreader;
 pub mod library;
 pub mod lua;
 pub mod md5;
-pub mod platform;
 pub mod plugin;
 pub mod prefs;
 pub mod selftest;
@@ -413,9 +412,9 @@ impl Paths {
         Paths { root: PathBuf::from("/mnt/us/rinky") }
     }
 
-    /// The layout of the e-reader this runs on (Kindle or Kobo, [`platform`]).
+    /// The layout of the e-reader this runs on (Kindle or Kobo).
     pub fn device() -> Self {
-        Paths { root: platform::install_root() }
+        Paths { root: ink_platform::current().install_root() }
     }
 
     /// `settings.toml`.

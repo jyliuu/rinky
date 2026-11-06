@@ -95,7 +95,7 @@ pub fn run(opts: &Options) -> Vec<Check> {
 #[cfg(target_os = "linux")]
 mod kindle {
     use super::{Options, Runner};
-    use crate::kindle::{fb, input, services::LipcServices, system};
+    use crate::ereader::{fb, input, kindle::LipcServices, system};
     use crate::lipc::{EventHub, Lipc, LipcValue};
     use crate::services::{Battery, Light, Wifi};
     use crate::sysfs::SysRoot;
@@ -236,7 +236,7 @@ mod kindle {
         r.check("input.touch", || {
             let devs = input::list_devices();
             let ov = crate::evdev::TouchOverride::parse(&std::env::var("RINKY_TOUCH").unwrap_or_default());
-            let s = fb::KindleFb::open_passive().map_err(|e| e.to_string())?;
+            let s = fb::Framebuffer::open_passive().map_err(|e| e.to_string())?;
             let size = crate::Screen::panel_size(&s);
             let mut t = input::TouchDev::open(size.w, size.h, false, &ov).map_err(|e| format!("{e}; devices {devs:?}"))?;
             let seed = t.seed();
@@ -249,13 +249,13 @@ mod kindle {
 
         // Framebuffer.
         r.check("fb.flags", || {
-            let s = fb::KindleFb::open_passive().map_err(|e| e.to_string())?;
+            let s = fb::Framebuffer::open_passive().map_err(|e| e.to_string())?;
             let size = crate::Screen::panel_size(&s);
             Ok(format!("{}x{} grayscale {} rotate {}", size.w, size.h, s.grayscale().map_err(|e| e.to_string())?, s.hw_rotate().map_err(|e| e.to_string())?))
         });
         if opts.write {
             r.check("fb.night_flag", || {
-                let mut s = fb::KindleFb::open().map_err(|e| e.to_string())?;
+                let mut s = fb::Framebuffer::open().map_err(|e| e.to_string())?;
                 crate::Screen::set_night_mode(&mut s, true).map_err(|e| e.to_string())?;
                 let on = s.grayscale().map_err(|e| e.to_string())?;
                 let hw = s.hw_night();

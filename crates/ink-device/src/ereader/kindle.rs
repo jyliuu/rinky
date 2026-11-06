@@ -5,12 +5,11 @@
 use super::input::Request;
 use super::Shared;
 use crate::battery;
-use crate::clock::NtpSample;
 use crate::journal::Entry;
 use crate::light::{AmberMode, AmberSchedule, DayTime};
 use crate::lipc::Lipc;
 use crate::screensaver::Screensaver;
-use crate::services::{Battery, BatteryState, Clock, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
+use crate::services::{Battery, BatteryState, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
 use crate::sleep::SleepState;
 use crate::sysfs::SysRoot;
 use crate::usb::{DriveModeState, UsbCable};
@@ -20,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 const POWERD: &str = "com.lab126.powerd";
 const WIFID: &str = "com.lab126.wifid";
@@ -603,37 +602,3 @@ impl Usb for LipcServices {
     }
 }
 
-/// The system clock, settable, with NTP.
-#[derive(Clone, Debug, Default)]
-pub struct KindleClock {
-    /// lipc runner (for the `timeChanged` event).
-    pub lipc: Lipc,
-    /// Default NTP server.
-    pub ntp_server: Option<String>,
-}
-
-impl Clock for KindleClock {
-    fn set_time(&mut self, t: SystemTime) -> Result<()> {
-        let before = SystemTime::now();
-        let rtc = super::system::set_system_time(t)?;
-        log::info!("clock set; {rtc}");
-        let delta = match t.duration_since(before) {
-            Ok(d) => d.as_secs() as i64,
-            Err(e) => -(e.duration().as_secs() as i64),
-        };
-        let _ = self.lipc.send_event("com.lab126.time", "timeChanged", &[crate::lipc::LipcValue::Int(delta)]);
-        Ok(())
-    }
-
-    fn sync_ntp(&mut self, server: Option<&str>) -> Result<NtpSample> {
-        let server = server
-            .map(str::to_string)
-            .or_else(|| self.ntp_server.clone())
-            .ok_or(DeviceError::Unsupported("no NTP server configured"))?;
-        let s = crate::clock::sntp_query(&server, Duration::from_secs(10))?;
-        if s.offset_ms.abs() >= 1000 {
-            self.set_time(s.time)?;
-        }
-        Ok(s)
-    }
-}

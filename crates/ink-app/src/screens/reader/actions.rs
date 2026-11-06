@@ -306,8 +306,8 @@ impl ReaderScreen {
         let mut o = Overlay::new(OverlayKind::Popup);
         o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
         let dialog = ink_ui::Dialog {
-            title: format!("Exit to {}?", ink_store::platform::device_name()),
-            body: format!("rinky closes and the {} home screen starts.", ink_store::platform::device_name()),
+            title: format!("Exit to {}?", ink_platform::current().device_name()),
+            body: format!("rinky closes and the {} home screen starts.", ink_platform::current().device_name()),
             buttons: vec![("Cancel".into(), "close".into()), ("Exit".into(), EXIT_CONFIRMED.into())],
         };
         let frame = ink_ui::Dialog::frame(size);

@@ -189,9 +189,9 @@ pub fn suspend_state(offered: &str) -> &'static str {
 /// `0` back. A MediaTek Kobo's kernel hangs when it suspends while charging: refused
 /// then.
 pub fn kobo_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(String)) -> Result<Resume> {
-    if crate::kobo::wifi::is_up() {
+    if crate::ereader::kobo::wifi::is_up() {
         log("wifi: turning off before suspend".into());
-        if let Err(e) = crate::kobo::wifi::stop() {
+        if let Err(e) = crate::ereader::kobo::wifi::stop() {
             log(format!("wifi: {e}"));
         }
     }
@@ -284,6 +284,44 @@ pub fn set_system_time(t: SystemTime) -> Result<String> {
     }
     log::warn!("rtc: not written: {}", tried.join("; "));
     Ok(format!("RTC not written ({})", tried.join("; ")))
+}
+
+/// The system clock, settable, with NTP. On a Kindle a change is announced to the
+/// framework with lipc `com.lab126.time timeChanged`.
+#[derive(Clone, Debug, Default)]
+pub struct DeviceClock {
+    /// lipc runner (Kindle only).
+    pub lipc: Option<crate::lipc::Lipc>,
+    /// Default NTP server.
+    pub ntp_server: Option<String>,
+}
+
+impl crate::services::Clock for DeviceClock {
+    fn set_time(&mut self, t: SystemTime) -> Result<()> {
+        let before = SystemTime::now();
+        let rtc = set_system_time(t)?;
+        log::info!("clock set; {rtc}");
+        if let Some(lipc) = &self.lipc {
+            let delta = match t.duration_since(before) {
+                Ok(d) => d.as_secs() as i64,
+                Err(e) => -(e.duration().as_secs() as i64),
+            };
+            let _ = lipc.send_event("com.lab126.time", "timeChanged", &[crate::lipc::LipcValue::Int(delta)]);
+        }
+        Ok(())
+    }
+
+    fn sync_ntp(&mut self, server: Option<&str>) -> Result<crate::clock::NtpSample> {
+        let server = server
+            .map(str::to_string)
+            .or_else(|| self.ntp_server.clone())
+            .ok_or(DeviceError::Unsupported("no NTP server configured"))?;
+        let s = crate::clock::sntp_query(&server, Duration::from_secs(10))?;
+        if s.offset_ms.abs() >= 1000 {
+            self.set_time(s.time)?;
+        }
+        Ok(s)
+    }
 }
 
 #[cfg(test)]

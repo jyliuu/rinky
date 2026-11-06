@@ -16,6 +16,7 @@ name = "rinky"
 path = "src/main.rs"
 
 [dependencies]
+ink-platform.workspace = true
 ink-device.workspace = true
 ink-text.workspace = true
 ink-ui.workspace = true

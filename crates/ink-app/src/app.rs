@@ -659,7 +659,7 @@ mod edge_tests {
     }
 }
 
-/// The app loop with an input that waits like the device (`KindleInput`): it returns to
+/// The app loop with an input that waits like the device (`ReaderInput`): it returns to
 /// the loop only when its timeout passes (real time) or input arrives. The sim scripts
 /// (`wait MS`) only move a virtual clock and never wait.
 #[cfg(test)]

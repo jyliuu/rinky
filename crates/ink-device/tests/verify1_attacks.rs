@@ -465,7 +465,7 @@ fn hostile_screensaver_images_fall_back_to_a_panel_canvas() {
 #[cfg(target_os = "linux")]
 #[test]
 fn blocked_wakeup_count_reads_do_not_pile_up_threads() {
-    use ink_device::kindle::system::read_wakeup_count;
+    use ink_device::ereader::system::read_wakeup_count;
     use ink_device::sysfs::SysRoot;
     // Only the reader threads (named `wakeup_count`): other tests of this binary run in
     // parallel and start threads of their own, which made a count of all threads flaky.

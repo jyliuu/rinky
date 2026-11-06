@@ -86,7 +86,6 @@ fi
 case "$VERSION" in
   ''|*[!A-Za-z0-9._-]*) die "bad version '$VERSION'" ;;
 esac
-NAME=rinky-$VERSION-kindlehf
 log "rinky $VERSION (commit $COMMIT, dirty=$DIRTY)"
 
 # Build.
@@ -124,119 +123,100 @@ for b in "$BIN" "$DROPBEAR"; do
   fi
 done
 
-# Stage.
+# Stage, seal and archive one package per platform. Both carry the same binary.
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/rinky-package.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
-P=$STAGE/rinky
-E=$STAGE/extensions/rinky
-mkdir -p "$P" "$E/bin"
-
-install -m 755 "$BIN" "$P/rinky"
-install -m 755 scripts/rinky.sh "$P/rinky.sh"
-install -m 755 scripts/rinky-watchdog.sh "$P/rinky-watchdog.sh"
-install -m 755 packaging/rinky-ctl.sh "$P/rinky-ctl.sh"
-install -m 755 packaging/install.sh "$P/install.sh"
-install -m 755 packaging/uninstall.sh "$P/uninstall.sh"
-install -m 644 packaging/README.txt "$P/README.txt"
-install -m 644 docs/user-guide.md "$P/user-guide.md"
-install -m 644 LICENSE "$P/LICENSE"
-install -m 644 fonts/LICENSE-Noto "$P/LICENSE-Noto"
-install -m 644 packaging/dropbear/LICENSE "$P/LICENSE-dropbear"
-mkdir -p "$P/bin"
-install -m 755 "$DROPBEAR" "$P/bin/dropbearmulti"
-install -m 755 packaging/dropbear/scp "$P/bin/scp"
-mkdir -p "$P/fonts"
-install -m 644 fonts/ui/NotoSans-Regular.ttf "$P/fonts/NotoSans-Regular.ttf"
-install -m 644 packaging/kual/rinky/menu.json "$E/menu.json"
-sed "s/@VERSION@/$VERSION/" packaging/kual/rinky/config.xml >"$E/config.xml"
-chmod 644 "$E/config.xml"
-install -m 755 packaging/kual/rinky/bin/kual.sh "$E/bin/kual.sh"
-
-cat >"$P/VERSION" <<EOF
-version=$VERSION
-commit=$COMMIT
-dirty=$DIRTY
-built=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-target=$TARGET
-profile=$PROFILE
-EOF
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
 
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 
-# FILES: every file in the package (sorted); SHA256SUMS: every file but itself.
-(cd "$STAGE" && { find rinky extensions -type f; echo rinky/FILES; echo rinky/SHA256SUMS; } | LC_ALL=C sort -u >rinky/FILES)
-(cd "$STAGE" && grep -vx 'rinky/SHA256SUMS' rinky/FILES | while IFS= read -r f; do sha256 "$f"; done >rinky/SHA256SUMS)
+# common ROOT: the files every package has in ROOT/rinky.
+common() {
+  local p=$1/rinky
+  mkdir -p "$p/fonts"
+  install -m 755 "$BIN" "$p/rinky"
+  install -m 755 packaging/install.sh "$p/install.sh"
+  install -m 644 packaging/README.txt "$p/README.txt"
+  install -m 644 docs/user-guide.md "$p/user-guide.md"
+  install -m 644 docs/install.md "$p/install.md"
+  install -m 644 LICENSE "$p/LICENSE"
+  install -m 644 fonts/LICENSE-Noto "$p/LICENSE-Noto"
+  install -m 644 fonts/ui/NotoSans-Regular.ttf "$p/fonts/NotoSans-Regular.ttf"
+  printf '%s\n' "version=$VERSION" "commit=$COMMIT" "dirty=$DIRTY" "built=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    "target=$TARGET" "profile=$PROFILE" >"$p/VERSION"
+}
 
-# Archive: plain ustar, root-owned, no macOS metadata (AppleDouble ._ files, xattrs),
-# which busybox tar on the Kindle and the in-app updater both read.
-mkdir -p "$OUT"
-OUT=$(cd "$OUT" && pwd)
-PKG=$OUT/$NAME.tar.gz
-rm -f "$PKG" "$PKG.sha256"
-LIST=$(cd "$STAGE" && { find rinky extensions -type d; cat rinky/FILES; } | LC_ALL=C sort -u)
-if tar --version 2>/dev/null | grep -q bsdtar; then
-  (cd "$STAGE" && echo "$LIST" | COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
-      --no-xattrs --no-mac-metadata --no-recursion -czf "$PKG" -T -)
-else
-  (cd "$STAGE" && echo "$LIST" | tar --format=ustar --owner=0 --group=0 --numeric-owner --no-recursion \
-      -czf "$PKG" -T -)
-fi
+# seal ROOT DIR...: rinky/FILES lists every file under the DIRs (sorted, itself and
+# SHA256SUMS included); rinky/SHA256SUMS has every file but itself.
+seal() {
+  local root=$1; shift
+  (cd "$root" && { find "$@" -type f; echo rinky/FILES; echo rinky/SHA256SUMS; } | LC_ALL=C sort -u >rinky/FILES)
+  (cd "$root" && grep -vx 'rinky/SHA256SUMS' rinky/FILES | while IFS= read -r f; do sha256 "$f"; done >rinky/SHA256SUMS)
+}
 
-# Self-check: the archive lists exactly the staged files, no ._ entries.
-listed=$(tar -tzf "$PKG" | grep -v '/$' | LC_ALL=C sort)
-[ "$listed" = "$(LC_ALL=C sort "$STAGE/rinky/FILES")" ] || die "archive contents differ from FILES"
-if tar -tzf "$PKG" | grep -q '\(^\|/\)\._'; then die "archive contains AppleDouble ._ files"; fi
+# archive ROOT TAR DIR...: plain ustar, root-owned, no macOS metadata (AppleDouble ._
+# files, xattrs), which busybox tar and the in-app updater both read; then checks the
+# archive lists exactly rinky/FILES, and writes TAR.sha256.
+archive() {
+  local root=$1 tar=$2 list; shift 2
+  list=$(cd "$root" && { find "$@" -type d; cat rinky/FILES; } | LC_ALL=C sort -u)
+  rm -f "$tar" "$tar.sha256"
+  if tar --version 2>/dev/null | grep -q bsdtar; then
+    (cd "$root" && echo "$list" | COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
+        --no-xattrs --no-mac-metadata --no-recursion -czf "$tar" -T -)
+  else
+    (cd "$root" && echo "$list" | tar --format=ustar --owner=0 --group=0 --numeric-owner --no-recursion -czf "$tar" -T -)
+  fi
+  [ "$(tar -tzf "$tar" | grep -v '/$' | LC_ALL=C sort)" = "$(LC_ALL=C sort "$root/rinky/FILES")" ] ||
+    die "$(basename "$tar"): archive contents differ from FILES"
+  if tar -tzf "$tar" | grep -q '\(^\|/\)\._'; then die "$(basename "$tar") contains AppleDouble ._ files"; fi
+  (cd "$OUT" && sha256 "$(basename "$tar")" >"$(basename "$tar").sha256")
+}
 
-# Zip of the same tree for USB installs (Windows and macOS open zips without tools).
-ZIP=$OUT/rinky-$VERSION-kindle.zip
-rm -f "$ZIP"
-(cd "$STAGE" && LC_ALL=C sort rinky/FILES | TZ=UTC zip -q -X -D "$ZIP" -@)
+# zipdir ROOT ZIP: every file under ROOT, for copying over USB (Windows and macOS open
+# zips without tools).
+zipdir() {
+  rm -f "$2"
+  (cd "$1" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | TZ=UTC zip -q -X -D "$2" -@)
+}
 
-# The Kobo package: the same binary; the Kobo launcher instead of the Kindle's three
-# scripts, the NickelMenu entry (nm/rinky) instead of the KUAL menu, no dropbear.
-# rinky/ installs to /mnt/onboard/.adds/rinky, nm/rinky to /mnt/onboard/.adds/nm/rinky
-# (install.sh tells the two packages apart by nm/rinky).
-KNAME=rinky-$VERSION-kobo
-KSTAGE=$STAGE/kobo
-KP=$KSTAGE/rinky
-mkdir -p "$KP/fonts" "$KSTAGE/nm"
-install -m 755 "$BIN" "$KP/rinky"
-install -m 755 packaging/kobo/rinky.sh "$KP/rinky.sh"
-install -m 755 packaging/install.sh "$KP/install.sh"
-install -m 644 packaging/README.txt "$KP/README.txt"
-install -m 644 docs/user-guide.md "$KP/user-guide.md"
-install -m 644 LICENSE "$KP/LICENSE"
-install -m 644 fonts/LICENSE-Noto "$KP/LICENSE-Noto"
-install -m 644 fonts/ui/NotoSans-Regular.ttf "$KP/fonts/NotoSans-Regular.ttf"
-install -m 644 packaging/kobo/nm-rinky "$KSTAGE/nm/rinky"
-cp "$P/VERSION" "$KP/VERSION"
-(cd "$KSTAGE" && { find rinky nm -type f; echo rinky/FILES; echo rinky/SHA256SUMS; } | LC_ALL=C sort -u >rinky/FILES)
-(cd "$KSTAGE" && grep -vx 'rinky/SHA256SUMS' rinky/FILES | while IFS= read -r f; do sha256 "$f"; done >rinky/SHA256SUMS)
-KPKG=$OUT/$KNAME.tar.gz
-rm -f "$KPKG" "$KPKG.sha256"
-KLIST=$(cd "$KSTAGE" && { find rinky nm -type d; cat rinky/FILES; } | LC_ALL=C sort -u)
-if tar --version 2>/dev/null | grep -q bsdtar; then
-  (cd "$KSTAGE" && echo "$KLIST" | COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
-      --no-xattrs --no-mac-metadata --no-recursion -czf "$KPKG" -T -)
-else
-  (cd "$KSTAGE" && echo "$KLIST" | tar --format=ustar --owner=0 --group=0 --numeric-owner --no-recursion \
-      -czf "$KPKG" -T -)
-fi
-listed=$(tar -tzf "$KPKG" | grep -v '/$' | LC_ALL=C sort)
-[ "$listed" = "$(LC_ALL=C sort "$KSTAGE/rinky/FILES")" ] || die "Kobo archive contents differ from FILES"
-# Zip for USB installs, laid out as the Kobo drive: .adds/rinky and .adds/nm/rinky.
-KZ=$STAGE/kobo-zip
-mkdir -p "$KZ/.adds/nm"
-cp -R "$KP" "$KZ/.adds/rinky"
-cp "$KSTAGE/nm/rinky" "$KZ/.adds/nm/rinky"
-KZIP=$OUT/$KNAME.zip
-rm -f "$KZIP"
-(cd "$KZ" && { find .adds -type f | LC_ALL=C sort; } | TZ=UTC zip -q -X -D "$KZIP" -@)
+# Kindle: rinky/ -> /mnt/us/rinky, extensions/rinky/ (the KUAL menu) -> /mnt/us/extensions.
+K=$STAGE/kindle
+common "$K"
+install -m 755 scripts/rinky.sh "$K/rinky/rinky.sh"
+install -m 755 scripts/rinky-watchdog.sh "$K/rinky/rinky-watchdog.sh"
+install -m 755 packaging/rinky-ctl.sh "$K/rinky/rinky-ctl.sh"
+install -m 755 packaging/uninstall.sh "$K/rinky/uninstall.sh"
+install -m 644 packaging/dropbear/LICENSE "$K/rinky/LICENSE-dropbear"
+mkdir -p "$K/rinky/bin" "$K/extensions/rinky/bin"
+install -m 755 "$DROPBEAR" "$K/rinky/bin/dropbearmulti"
+install -m 755 packaging/dropbear/scp "$K/rinky/bin/scp"
+install -m 644 packaging/kual/rinky/menu.json "$K/extensions/rinky/menu.json"
+sed "s/@VERSION@/$VERSION/" packaging/kual/rinky/config.xml >"$K/extensions/rinky/config.xml"
+chmod 644 "$K/extensions/rinky/config.xml"
+install -m 755 packaging/kual/rinky/bin/kual.sh "$K/extensions/rinky/bin/kual.sh"
+seal "$K" rinky extensions
+PKG=$OUT/rinky-$VERSION-kindlehf.tar.gz
+archive "$K" "$PKG" rinky extensions
+zipdir "$K" "$OUT/rinky-$VERSION-kindle.zip"
 
-(cd "$OUT" && sha256 "$NAME.tar.gz" >"$NAME.tar.gz.sha256" && sha256 "$KNAME.tar.gz" >"$KNAME.tar.gz.sha256" &&
-  { cat "$NAME.tar.gz.sha256"; sha256 "$(basename "$ZIP")"; cat "$KNAME.tar.gz.sha256"; sha256 "$KNAME.zip"; } >SHA256SUMS)
-log "$(wc -l <"$STAGE/rinky/FILES" | tr -d ' ') files, $(du -k "$PKG" | cut -f1) KiB"
-log "sha256 $(head -1 "$OUT/SHA256SUMS" | cut -d' ' -f1)"
-log "kobo: $(wc -l <"$KSTAGE/rinky/FILES" | tr -d ' ') files, $(du -k "$KPKG" | cut -f1) KiB"
+# Kobo: rinky/ -> /mnt/onboard/.adds/rinky, nm/rinky (the NickelMenu entry) ->
+# /mnt/onboard/.adds/nm/rinky; install.sh tells the packages apart by nm/rinky. The
+# zip is laid out as the Kobo drive: .adds/rinky and .adds/nm/rinky.
+B=$STAGE/kobo
+common "$B"
+install -m 755 packaging/kobo/rinky.sh "$B/rinky/rinky.sh"
+mkdir -p "$B/nm" "$STAGE/kobo-drive/.adds"
+install -m 644 packaging/kobo/nm-rinky "$B/nm/rinky"
+seal "$B" rinky nm
+KPKG=$OUT/rinky-$VERSION-kobo.tar.gz
+archive "$B" "$KPKG" rinky nm
+cp -R "$B/rinky" "$B/nm" "$STAGE/kobo-drive/.adds/"
+zipdir "$STAGE/kobo-drive" "$OUT/rinky-$VERSION-kobo.zip"
+
+(cd "$OUT" && cat "$(basename "$PKG").sha256" "$(basename "$KPKG").sha256" >SHA256SUMS &&
+  sha256 "rinky-$VERSION-kindle.zip" "rinky-$VERSION-kobo.zip" >>SHA256SUMS)
+for d in "$K" "$B"; do log "$(basename "$d"): $(wc -l <"$d/rinky/FILES" | tr -d ' ') files"; done
 echo "$PKG"
 echo "$KPKG"

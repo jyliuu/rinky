@@ -6,9 +6,13 @@ use crate::face::{collection_faces, map_file, FaceInfo};
 use rustybuzz::ttf_parser;
 use std::path::{Path, PathBuf};
 
-/// Directories searched on the e-reader, in order (user fonts first): the Kindle's,
-/// then the Kobo's (a missing folder is skipped).
-pub const KINDLE_FONT_DIRS: &[&str] = &["/mnt/us/fonts", "/usr/java/lib/fonts", "/mnt/onboard/fonts", "/usr/local/Kobo/fonts"];
+/// The e-reader's font folders, in order (earlier folders win a family name): its
+/// system fonts (Bookerly, Amazon Ember, ... on a Kindle; Nickel's on a Kobo; read on
+/// the device, never copied or packaged), the user's fonts and rinky's own folder.
+/// Missing folders are skipped by the scan.
+pub fn device_font_dirs() -> Vec<PathBuf> {
+    ink_platform::current().font_dirs()
+}
 
 /// A font file found on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,20 +142,6 @@ pub fn summary<P: AsRef<Path>>(dirs: &[P], entries: &[FontEntry]) -> Vec<String>
         })
         .collect()
 }
-
-/// Directories the reader loads text fonts from at runtime, in order: the Kindle's
-/// system fonts (Bookerly, Amazon Ember, Caecilia, ...; never copied or packaged, only
-/// read on the device), the user's fonts and rinky's own font folder; then the same on
-/// a Kobo (Nickel's fonts, `/mnt/onboard/fonts`, rinky's folder). Missing folders are
-/// skipped.
-pub const READER_FONT_DIRS: &[&str] = &[
-    "/usr/java/lib/fonts",
-    "/mnt/us/fonts",
-    "/mnt/us/rinky/fonts",
-    "/usr/local/Kobo/fonts",
-    "/mnt/onboard/fonts",
-    "/mnt/onboard/.adds/rinky/fonts",
-];
 
 /// One face of an installed family: file, face index and weight.
 #[derive(Clone, Debug, PartialEq, Eq)]

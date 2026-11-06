@@ -344,7 +344,7 @@ fn env_on(name: &str) -> bool {
 }
 
 /// The mapped framebuffer.
-pub struct KindleFb {
+pub struct Framebuffer {
     /// The model this runs on.
     pub model: Model,
     /// Its refresh interface (probed for an unknown model).
@@ -399,7 +399,7 @@ pub struct KindleFb {
     pub night_ui: NightUi,
 }
 
-impl KindleFb {
+impl Framebuffer {
     /// Opens and maps `/dev/fb0`. Fails unless it is an 8 bpp framebuffer.
     pub fn open() -> Result<Self> {
         Self::open_with(Some(Journal::default()))
@@ -516,7 +516,7 @@ impl KindleFb {
         let original = var[VAR_GRAYSCALE];
         let epdc = if model.is_unknown() && !kobo && !passive { probe_epdc(fd).unwrap_or(Epdc::Mtk) } else { model_epdc };
         log::info!("model: {}; refresh interface {}", model.describe(), epdc.name());
-        let fb = KindleFb {
+        let fb = Framebuffer {
             model,
             epdc,
             original_rotate,
@@ -746,7 +746,7 @@ impl KindleFb {
         self.refresh_panel_swipe(r, class, None)
     }
 
-    /// [`KindleFb::refresh_panel`] with the page-turn wave (`swipe`: a
+    /// [`Framebuffer::refresh_panel`] with the page-turn wave (`swipe`: a
     /// `swipe_data.direction`). The waveform is the same as without it: with the night
     /// flag set the driver keeps its night waveforms during the sweep (KOReader
     /// `framebuffer_mxcfb.lua`: the grayscale flag makes it "use the proper waveform mode
@@ -970,7 +970,7 @@ pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
     Ok(done)
 }
 
-impl Screen for KindleFb {
+impl Screen for Framebuffer {
     fn panel_size(&self) -> Size {
         Size::new(self.width as u32, self.height as u32)
     }
@@ -1060,7 +1060,7 @@ impl Screen for KindleFb {
     }
 }
 
-impl KindleFb {
+impl Framebuffer {
     /// [`Screen::update`] with an optional page-turn wave (`swipe_data.direction`).
     fn update_swipe(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass, swipe: Option<u32>) -> Result<()> {
         let (rotation, invert, panel, stride) = (self.rotation, self.sw_invert(), self.panel_size(), self.stride);
@@ -1078,7 +1078,7 @@ impl KindleFb {
     }
 }
 
-impl Drop for KindleFb {
+impl Drop for Framebuffer {
     fn drop(&mut self) {
         if !self.passive {
             self.wait_idle();

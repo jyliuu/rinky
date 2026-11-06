@@ -664,6 +664,7 @@ dependencies = [
  "ink-html",
  "ink-mupdf",
  "ink-net",
+ "ink-platform",
  "ink-plugin",
  "ink-stats",
  "ink-store",
@@ -686,6 +687,7 @@ dependencies = [
 name = "ink-device"
 version = "0.4.3"
 dependencies = [
+ "ink-platform",
  "libc",
  "log",
  "minifb",
@@ -786,6 +788,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ink-platform"
+version = "0.4.3"
+
+[[package]]
 name = "ink-plugin"
 version = "0.4.3"
 dependencies = [
@@ -816,6 +822,7 @@ dependencies = [
 name = "ink-store"
 version = "0.4.3"
 dependencies = [
+ "ink-platform",
  "libc",
  "md-5",
  "rusqlite",
@@ -832,6 +839,7 @@ dependencies = [
  "fontdue",
  "hyphenation",
  "ink-device",
+ "ink-platform",
  "libc",
  "log",
  "rustybuzz",

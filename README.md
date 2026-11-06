@@ -77,80 +77,25 @@ reading.
 
 ## Install
 
-On a **Kobo**, see [rinky on Kobo](docs/kobo.md): no jailbreak, started from
-NickelMenu; Kobo support is new and has run in an emulator only. The rest of this
-section is about Kindles.
+rinky runs on Kindles (jailbroken, with KUAL) and Kobos (with NickelMenu) that have a
+300 ppi screen. The [install guide](docs/install.md) lists every model and walks through
+each step; in short:
 
-You need a jailbroken Kindle (see [kindlemodding.org](https://kindlemodding.org/)) with
-KUAL installed. rinky is developed on the Paperwhite 12th generation (2024) on firmware
-5.19.x and runs on the other Kindles with a 300 ppi screen. Apart from the Paperwhite
-12th gen, they have been tried in an emulator ([eink-emulator](https://github.com/katadelos/eink-emulator)
-with Amazon's firmware), not on real devices:
+| | Kindle | Kobo |
+|---|---|---|
+| Tested | Paperwhite 12th gen on the device; Paperwhite 3 and 4, Oasis 3, Kindle 12th gen in an emulator | Libra 2 and Tolino Shine 5 (Clara BW inside) in an emulator |
+| Prepare | jailbreak and KUAL ([kindlemodding.org](https://kindlemodding.org/)) | [NickelMenu](https://pgaskin.net/NickelMenu/) (no jailbreak) |
+| Download | `rinky-<version>-kindle.zip` | `rinky-<version>-kobo.zip` |
+| Copy over USB | `rinky` and `extensions` to the top of the Kindle drive | `.adds` to the top of the Kobo drive (hidden folder) |
+| Start | KUAL › rinky › Start rinky | NickelMenu › rinky |
 
-| Kindle | Status |
-|---|---|
-| Paperwhite 12th gen (2024) | tested on the device |
-| Paperwhite 4 (5.18.1), Oasis 3 (5.18.2), Paperwhite 3 (5.16.2), Kindle 12th gen (2024, 5.20.2) | runs in the emulator: books open, taps and page keys turn pages, restart works |
-| Paperwhite 5 and Signature Edition, Kindle 11th gen, Colorsoft, Scribe (all three), Oasis 2 | untested; same display interface as a model above |
-| Voyage, Oasis 1 | untested; same display interface as the Paperwhite 3 |
-| Paperwhite 1 and 2, Kindle 7th, 8th and 10th gen | not supported (lower-resolution screens) |
+Downloads are on the [latest release](../../releases/latest). **Settings › Update** in
+rinky installs newer versions over Wi-Fi, keeping settings, notes and positions.
+**Settings › Exit to Kindle** (or *to Kobo*) returns to the e-reader's own screens.
 
-On a Colorsoft, rinky shows grayscale. If you try rinky on a model marked untested,
-please open an issue with `rinky/rinky.log` from the Kindle, whether it worked or not.
-
-The steps are the same on every Kindle:
-
-1. Jailbreak it and install KUAL. Which jailbreak works depends on the firmware version
-   (*Settings › Device Options › Device Info*); [kindlemodding.org](https://kindlemodding.org/)
-   picks the right one and has the KUAL build for your firmware. The Paperwhite 3,
-   Voyage and Oasis 1 stay on older firmware and use the older KUAL; rinky's package is
-   the same for all.
-2. Download `rinky-<version>-kindle.zip` from the [latest release](../../releases/latest)
-   and unzip it. It contains two folders, `rinky` and `extensions`.
-3. Connect the Kindle by USB and copy both folders to the top level of its storage.
-   The Paperwhite 3 and 4, Voyage and Oasis show up as a drive named *Kindle*. Newer
-   Kindles connect over MTP like a phone; on a Mac, use an MTP app such as
-   [OpenMTP](https://openmtp.ganeshrvel.com/).
-4. Eject the Kindle, open KUAL and choose **rinky › Start rinky**.
-
-The [user guide](docs/user-guide.md#getting-your-kindle-ready) has notes for each
-model (page keys, warm light, Scribe, Colorsoft).
-
-Choose which folders the library shows under **Settings › Library folders**; the
-Kindle's `documents` folder is included by default. **Settings › Exit to Kindle** returns to the Kindle's
-own screens.
-
-To update, turn Wi-Fi on and choose **Settings › Update › Check for update** in rinky,
-then **Install and restart** (or **KUAL › rinky › Update rinky**). The download is
-checked against the release's SHA-256, and settings, notes and positions are kept. This
-works the same on every model; it was tried in the emulator on the Paperwhite 3 and 4,
-Oasis 3 and Kindle 12th gen.
-
-Dictionaries go in `rinky/dict/<name>/` on the Kindle, as StarDict files (`.ifo`, `.idx`,
-`.dict` or `.dict.dz`).
-
-<details>
-<summary>Install over SSH instead</summary>
-
-Copy `rinky-<version>-kindlehf.tar.gz` to the Kindle, then:
-
-```sh
-mkdir -p /mnt/us/.rinky-pkg
-tar -xzf /mnt/us/rinky-<version>-kindlehf.tar.gz -C /mnt/us/.rinky-pkg
-sh /mnt/us/.rinky-pkg/rinky/install.sh
-rm -rf /mnt/us/.rinky-pkg /mnt/us/rinky-<version>-kindlehf.tar.gz
-```
-
-This also adds a **rinky** tile to the Kindle library, so you can start it without KUAL.
-</details>
-
-<details>
-<summary>Uninstall</summary>
-
-**KUAL › rinky › Uninstall rinky** removes everything rinky added. Choose *keep notes
-and settings* to remove only the program. KOReader and the Kindle's own files are
-never touched.
-</details>
+Dictionaries go in rinky's folder under `dict/<name>/`, as StarDict files (`.ifo`,
+`.idx`, `.dict` or `.dict.dz`). If you try rinky on a model marked untested, please
+open an issue with `rinky.log` from rinky's folder, whether it worked or not.
 
 The [user guide](docs/user-guide.md) covers everything else, including troubleshooting.
 

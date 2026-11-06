@@ -7,7 +7,7 @@
 //! (`/tmp/rinky/heartbeat`, a counter) moves while the app waits for input; a
 //! stuck app stops calling `next_event` and the heartbeat stops.
 
-use super::fb::KindleFb;
+use super::fb::Framebuffer;
 use super::system;
 use super::Shared;
 use crate::battery::{self, LowBatteryMonitor};
@@ -351,7 +351,7 @@ pub enum Request {
     Warmth(u32),
 }
 
-/// Options of the input loop (see [`super::KindleOptions`]).
+/// Options of the input loop (see [`super::ReaderOptions`]).
 #[derive(Clone, Debug)]
 pub struct LoopOptions {
     /// Grab the touchscreen.
@@ -376,7 +376,7 @@ pub struct LoopOptions {
 type KeyDevice = (File, Option<(u16, u16)>, Option<u16>);
 
 /// Kindle input and the device policies.
-pub struct KindleInput {
+pub struct ReaderInput {
     shared: Rc<RefCell<Shared>>,
     touch: TouchDev,
     power: Option<File>,
@@ -536,7 +536,7 @@ impl SleepPlatform for Plat<'_> {
     }
 }
 
-impl KindleInput {
+impl ReaderInput {
     /// Opens touch, power key and the event sources.
     pub(crate) fn open(shared: Rc<RefCell<Shared>>, lipc: Lipc, sys: SysRoot, opts: LoopOptions) -> Result<Self> {
         let size = crate::Screen::panel_size(&shared.borrow().screen);
@@ -570,7 +570,7 @@ impl KindleInput {
             }
         }
         let now = Instant::now();
-        let mut me = KindleInput {
+        let mut me = ReaderInput {
             kobo: model.platform == Platform::Kobo,
             shared,
             touch,
@@ -786,7 +786,7 @@ impl KindleInput {
         if !self.opts.amber || self.shared.borrow().asleep || !self.shared.borrow().screen.model.warmth {
             return;
         }
-        let sched = match super::services::read_amber_schedule(&self.lipc) {
+        let sched = match super::kindle::read_amber_schedule(&self.lipc) {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -1155,7 +1155,7 @@ impl KindleInput {
     }
 }
 
-impl Input for KindleInput {
+impl Input for ReaderInput {
     fn coalesce_moves(&self) -> bool {
         true
     }
@@ -1298,7 +1298,7 @@ impl Input for KindleInput {
     }
 }
 
-impl Drop for KindleInput {
+impl Drop for ReaderInput {
     fn drop(&mut self) {
         if let Some(m) = self.usb.as_mut() {
             for a in m.release() {
@@ -1325,7 +1325,7 @@ impl Drop for KindleInput {
     }
 }
 
-impl KindleFb {
+impl Framebuffer {
     /// The panel orientation size (for callers without the trait in scope).
     pub fn size_px(&self) -> (u32, u32) {
         let s = crate::Screen::panel_size(self);

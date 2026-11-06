@@ -10,9 +10,12 @@
 //!   exists (the Libra 2 had two hardware revisions with different chips). The value is
 //!   inverted (10 = coolest) on every model rinky knows.
 
+
+pub mod wifi;
+
 use crate::battery;
-use crate::kindle::input::Request;
-use crate::kindle::Shared;
+use super::input::Request;
+use super::Shared;
 use crate::screensaver::Screensaver;
 use crate::services::{Battery, BatteryState, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
 use crate::sleep::SleepState;
@@ -84,7 +87,7 @@ impl KoboServices {
     fn connect_in_background(&self) {
         let ntp = self.ntp_server.clone();
         let spawned = std::thread::Builder::new().name("wifi-connect".into()).spawn(move || {
-            match super::wifi::wait_associated(Duration::from_secs(15)).and_then(|()| super::wifi::obtain_ip()) {
+            match wifi::wait_associated(Duration::from_secs(15)).and_then(|()| wifi::obtain_ip()) {
                 Ok(()) => {
                     log::info!("wifi: connected");
                     if let Some(server) = ntp {
@@ -103,7 +106,7 @@ impl KoboServices {
 /// Sets the clock from an NTP server when it is off by a second or more.
 fn sync_clock(server: &str) {
     match crate::clock::sntp_query(server, Duration::from_secs(10)) {
-        Ok(s) if s.offset_ms.abs() >= 1000 => match crate::kindle::system::set_system_time(s.time) {
+        Ok(s) if s.offset_ms.abs() >= 1000 => match super::system::set_system_time(s.time) {
             Ok(rtc) => log::info!("ntp: clock set from {server} (off by {} ms); {rtc}", s.offset_ms),
             Err(e) => log::warn!("ntp: {e}"),
         },
@@ -129,7 +132,7 @@ impl Light for KoboServices {
         if self.sys.path(WHITE).exists() {
             return Ok(self.sys.write(WHITE, &level.to_string())?);
         }
-        super::wifi::ntx_io(NTX_FRONTLIGHT, level as libc::c_int)?;
+        wifi::ntx_io(NTX_FRONTLIGHT, level as libc::c_int)?;
         self.ioctl_level.set(Some(level));
         Ok(())
     }
@@ -178,7 +181,7 @@ impl Power for KoboServices {
 
     fn suspend(&mut self, wake_after: Option<Duration>) -> Result<()> {
         let mut lines = Vec::new();
-        let r = crate::kindle::system::kobo_suspend(&self.sys, wake_after, &mut |s| lines.push(s));
+        let r = super::system::kobo_suspend(&self.sys, wake_after, &mut |s| lines.push(s));
         for l in lines {
             log::info!("suspend: {l}");
         }
@@ -218,32 +221,32 @@ impl Power for KoboServices {
 
 impl Wifi for KoboServices {
     fn state(&self) -> Result<WifiState> {
-        Ok(super::wifi::state())
+        Ok(wifi::state())
     }
 
     fn set_enabled(&mut self, on: bool) -> Result<()> {
         if on {
-            super::wifi::start()?;
+            wifi::start()?;
             self.connect_in_background();
             Ok(())
         } else {
-            super::wifi::stop()
+            wifi::stop()
         }
     }
 
     fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
-        super::wifi::scan()
+        wifi::scan()
     }
 
     fn scan_list(&self) -> Result<Vec<WifiNetwork>> {
-        super::wifi::scan_results()
+        wifi::scan_results()
     }
 
     fn connect(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
-        if password.is_some() || !super::wifi::networks()?.iter().any(|(_, s)| s == essid) {
-            super::wifi::save_network(essid, password)?;
+        if password.is_some() || !wifi::networks()?.iter().any(|(_, s)| s == essid) {
+            wifi::save_network(essid, password)?;
         }
-        super::wifi::connect(essid)?;
+        wifi::connect(essid)?;
         if let Some(server) = self.ntp_server.clone() {
             let _ = std::thread::Builder::new().name("ntp".into()).spawn(move || sync_clock(&server));
         }
@@ -251,24 +254,24 @@ impl Wifi for KoboServices {
     }
 
     fn disconnect(&mut self) -> Result<()> {
-        super::wifi::disconnect()
+        wifi::disconnect()
     }
 
     fn profiles(&self) -> Result<Vec<WifiProfile>> {
-        Ok(super::wifi::networks()?.into_iter().map(|(netid, essid)| WifiProfile { essid, netid, secured: true }).collect())
+        Ok(wifi::networks()?.into_iter().map(|(netid, essid)| WifiProfile { essid, netid, secured: true }).collect())
     }
 
     fn create_profile(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
-        super::wifi::save_network(essid, password).map(|_| ())
+        wifi::save_network(essid, password).map(|_| ())
     }
 
     fn delete_profile(&mut self, essid: &str) -> Result<()> {
-        super::wifi::forget(essid)
+        wifi::forget(essid)
     }
 
     /// A Kobo has no airplane switch apart from the radio: airplane mode is the radio off.
     fn airplane_mode(&self) -> Result<bool> {
-        Ok(!super::wifi::is_up())
+        Ok(!wifi::is_up())
     }
 
     fn set_airplane_mode(&mut self, on: bool) -> Result<()> {

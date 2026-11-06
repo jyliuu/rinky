@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 /// Usage text.
 pub const USAGE: &str = "usage:
   rinky render BOOK OUTDIR [PAGES] [--settings FILE]  write the first PAGES pages (default 5) as PNG
-  rinky run BOOK                        read on the Kindle screen
-  rinky library                         library screen on the Kindle (phase 4 stub)
+  rinky run BOOK                        read on the e-reader screen
+  rinky library                         library screen on the e-reader
   rinky sim BOOK|DIR [options]          host simulator window (minifb); DIR: library on DIR
       --ghost              simulate ghosting
       --scale F            window scale (default: fit the screen)
@@ -77,7 +77,7 @@ fn log_target(cmd: Option<&str>) -> crate::logging::LogTarget {
 #[cfg(target_os = "linux")]
 pub fn splash(lines: &[&str]) -> anyhow::Result<()> {
     use ink_device::{RefreshClass, Screen};
-    let mut fb = ink_device::kindle::fb::KindleFb::open_passive()?;
+    let mut fb = ink_device::ereader::fb::Framebuffer::open_passive()?;
     let size = fb.size();
     let mut canvas = Canvas::new(size.w as usize, size.h as usize);
     ink_device::font::draw_lines_centered(&mut canvas, 6, 0, lines);
@@ -186,28 +186,25 @@ fn script_steps(path: &Option<PathBuf>) -> anyhow::Result<Option<Vec<ink_device:
     }
 }
 
-fn open_kindle() -> anyhow::Result<ink_device::Device> {
-    open_kindle_with(true)
+fn open_device() -> anyhow::Result<ink_device::Device> {
+    open_device_with(true)
 }
 
 /// `device_sleep`: the device layer handles the power key, cover and inactivity
 /// (screensaver + suspend); `false` delivers `Key::Power` to the caller (spike).
-fn open_kindle_with(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
+fn open_device_with(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
     #[cfg(target_os = "linux")]
     {
-        let mut opts = ink_device::kindle::KindleOptions { power_events: true, ..Default::default() };
+        let mut opts = ink_device::ereader::ReaderOptions { power_events: true, ..Default::default() };
         if !device_sleep {
             opts.sleep = None;
         }
-        if ink_device::platform::Platform::detect() == ink_device::platform::Platform::Kobo {
-            return Ok(ink_device::kobo::open(opts)?);
-        }
-        Ok(ink_device::kindle::open(opts)?)
+        Ok(ink_device::ereader::open(opts)?)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = device_sleep;
-        anyhow::bail!("this needs the Kindle framebuffer; use `rinky sim` on the host")
+        anyhow::bail!("this needs the e-reader's framebuffer; use `rinky sim` on the host")
     }
 }
 
@@ -223,7 +220,7 @@ impl ink_device::services::Battery for SimBattery {
 
 fn open_sim_device(s: &SimArgs) -> anyhow::Result<ink_device::Device> {
     if s.kindle {
-        return open_kindle();
+        return open_device();
     }
     let mut device = open_host_device(s)?;
     device.battery = Box::new(SimBattery);
@@ -255,7 +252,7 @@ fn open_host_device(s: &SimArgs) -> anyhow::Result<ink_device::Device> {
         Ok(ink_device::sim::open(opts)?)
     }
     #[cfg(target_arch = "arm")]
-    anyhow::bail!("the simulator window is not available on the Kindle; use --headless")
+    anyhow::bail!("the simulator window is not available on the e-reader; use --headless")
 }
 
 /// Writes the first `count` pages of `book` as PNG (prototype-compatible output).
@@ -296,7 +293,7 @@ fn evdump_deadline(now: std::time::Instant, arg: Option<&String>) -> anyhow::Res
 
 #[cfg(target_os = "linux")]
 fn evdump(deadline: std::time::Instant) -> anyhow::Result<()> {
-    use ink_device::kindle::input::list_devices;
+    use ink_device::ereader::input::list_devices;
     use std::io::Read;
     let devs = list_devices();
     println!("{devs:?}");
@@ -492,14 +489,14 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
         }
         Some("run") if !rest.is_empty() => {
             let (settings, paths) = load_settings();
-            let device = open_kindle()?;
+            let device = open_device()?;
             app_start(&device, &settings, &paths);
             App::new(device, settings, paths).run(Route::Reader(PathBuf::from(&rest[0])))?;
             Ok(0)
         }
         Some("library") => {
             let (settings, paths) = load_settings();
-            let device = open_kindle()?;
+            let device = open_device()?;
             app_start(&device, &settings, &paths);
             App::new(device, settings, paths).run(Route::Library)?;
             Ok(0)
@@ -562,34 +559,34 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
                 Ok(0)
             }
             #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`splash` needs the Kindle framebuffer")
+            anyhow::bail!("`splash` needs the e-reader framebuffer")
         }
         Some("refresh") => {
             #[cfg(target_os = "linux")]
             {
                 use ink_device::Screen;
-                ink_device::kindle::open_screen()?.refresh_all()?;
+                ink_device::ereader::open_screen()?.refresh_all()?;
                 Ok(0)
             }
             #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`refresh` needs the Kindle framebuffer")
+            anyhow::bail!("`refresh` needs the e-reader framebuffer")
         }
         Some("inject") if rest.first().map(String::as_str) == Some("power") => {
             #[cfg(target_os = "linux")]
             {
-                let dev = ink_device::kindle::input::inject_key("pwrkey", ink_device::evdev::KEY_POWER)?;
+                let dev = ink_device::ereader::input::inject_key("pwrkey", ink_device::evdev::KEY_POWER)?;
                 println!("injected KEY_POWER press+release into {dev}");
                 Ok(0)
             }
             #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`inject` needs the Kindle input devices")
+            anyhow::bail!("`inject` needs the e-reader input devices")
         }
         Some("screensaver") if !rest.is_empty() => {
             #[cfg(target_os = "linux")]
             {
                 use ink_device::{RefreshClass, Screen};
                 let img = Canvas::load_png(Path::new(&rest[0]))?;
-                let mut fb = ink_device::kindle::open_screen()?;
+                let mut fb = ink_device::ereader::open_screen()?;
                 let size = fb.size();
                 let mut canvas = Canvas::new(size.w as usize, size.h as usize);
                 let (x, y) = ((size.w as i32 - img.width as i32) / 2, (size.h as i32 - img.height as i32) / 2);
@@ -599,7 +596,7 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
                 Ok(0)
             }
             #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`screensaver` needs the Kindle framebuffer")
+            anyhow::bail!("`screensaver` needs the e-reader framebuffer")
         }
         Some("evdump") => {
             #[cfg(target_os = "linux")]
@@ -608,7 +605,7 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
                 Ok(0)
             }
             #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`evdump` needs the Kindle input devices")
+            anyhow::bail!("`evdump` needs the e-reader input devices")
         }
         Some("spike-suspend") => {
             let mut image = None;
@@ -630,7 +627,7 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
                     other => anyhow::bail!("unknown spike-suspend option {other}"),
                 }
             }
-            crate::spike::run(open_kindle_with(false)?, image.as_deref(), limit, suspend)?;
+            crate::spike::run(open_device_with(false)?, image.as_deref(), limit, suspend)?;
             Ok(0)
         }
         Some("koreader-sync") => koreader_sync(rest),

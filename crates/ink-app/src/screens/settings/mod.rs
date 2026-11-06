@@ -292,7 +292,7 @@ pub const FOLDER_ROOT: &str = "/mnt/us";
 
 /// The user storage whose folders the library folders page offers.
 pub fn folder_root() -> &'static str {
-    ink_store::platform::user_root()
+    ink_platform::current().user_root()
 }
 
 /// The library folders offered: the chosen ones, then the folders in [`FOLDER_ROOT`]
@@ -617,7 +617,7 @@ pub fn main_rows(v: &MainValues) -> Vec<Row> {
     rows.push(Row::nav(Icon::Download, "Update", "page:update").value(&v.version));
     rows.extend(m("About"));
     rows.push(Row::toggle("Ask before exit", v.confirm_exit, "confirm-exit").icon(Icon::Info));
-    let device = ink_store::platform::device_name();
+    let device = ink_platform::current().device_name();
     rows.push(
         Row::item(format!("Exit to {device}"), "exit").icon(Icon::Home).subtitle(format!("Close rinky, start the {device} home screen")),
     );
@@ -1226,7 +1226,7 @@ impl SettingsScreen {
             pngs.sort();
             values.extend(pngs.into_iter().take(50));
         }
-        let mut rows = vec![Row::header(format!("Shown while the {} sleeps", ink_store::platform::device_name()))];
+        let mut rows = vec![Row::header(format!("Shown while the {} sleeps", ink_platform::current().device_name()))];
         rows.extend(values.iter().map(|v| Row::choice(screensaver_name(v), *v == now, format!("saver:{v}"))));
         rows.push(Row::note(format!("PNG pictures in {} are listed too.", dir.display())));
         self.add_rows(rows, content);
@@ -1597,11 +1597,11 @@ impl SettingsScreen {
     fn confirm(&mut self, what: Confirm) {
         let (title, body, ok) = match &what {
             Confirm::Exit => {
-                let device = ink_store::platform::device_name();
+                let device = ink_platform::current().device_name();
                 (format!("Exit to {device}?"), format!("rinky closes and the {device} home screen starts."), "Exit")
             }
             Confirm::Forget(e) => {
-                (format!("Forget {e}?"), format!("The saved password is removed from the {}.", ink_store::platform::device_name()), "Forget")
+                (format!("Forget {e}?"), format!("The saved password is removed from the {}.", ink_platform::current().device_name()), "Forget")
             }
         };
         let scrim = self.tree.add(None, Box::new(Scrim::new("")), Rect::from_size(self.size));

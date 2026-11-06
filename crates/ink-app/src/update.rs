@@ -60,21 +60,9 @@ pub const DEFAULT_RELEASE_URL: &str = match option_env!("RINKY_RELEASE_URL") {
 };
 /// Name of the checksum asset (`sha256sum` format).
 pub const SUMS_ASSET: &str = "SHA256SUMS";
-/// Package asset names start with this ...
+/// Package asset names start with this and end with the platform's
+/// [`ink_platform::Platform::package_suffix`].
 pub const PACKAGE_PREFIX: &str = "rinky-";
-/// ... and end with this (the Kindle package) ...
-pub const PACKAGE_SUFFIX: &str = "-kindlehf.tar.gz";
-/// ... or this, on a Kobo.
-pub const KOBO_PACKAGE_SUFFIX: &str = "-kobo.tar.gz";
-
-/// The package suffix of the e-reader this runs on.
-pub fn package_suffix() -> &'static str {
-    if ink_store::platform::on_kobo() {
-        KOBO_PACKAGE_SUFFIX
-    } else {
-        PACKAGE_SUFFIX
-    }
-}
 /// Default download limit for the package.
 pub const MAX_PACKAGE_BYTES: u64 = 64 << 20;
 /// Limit for the unpacked package.
@@ -305,7 +293,7 @@ fn is_hex64(s: &str) -> bool {
 /// True for `rinky-<version>-kindlehf.tar.gz` (on a Kobo `rinky-<version>-kobo.tar.gz`)
 /// with a plain file name.
 pub fn is_package_name(name: &str) -> bool {
-    let suffix = package_suffix();
+    let suffix = ink_platform::current().package_suffix();
     name.len() > PACKAGE_PREFIX.len() + suffix.len()
         && name.starts_with(PACKAGE_PREFIX)
         && name.ends_with(suffix)
@@ -337,7 +325,7 @@ pub fn parse_release(body: &[u8]) -> Result<Release> {
     }
     let mut packages: Vec<&Asset> = assets.iter().filter(|a| is_package_name(&a.name)).collect();
     // Prefer the package whose name carries the tag's version.
-    let suffix = package_suffix();
+    let suffix = ink_platform::current().package_suffix();
     let exact = format!("{PACKAGE_PREFIX}{version}{suffix}");
     if packages.len() > 1 {
         packages.retain(|a| a.name == exact);
@@ -345,7 +333,7 @@ pub fn parse_release(body: &[u8]) -> Result<Release> {
     let package = match packages.as_slice() {
         [one] => (*one).clone(),
         [] => return Err(UpdateError::Release(format!("{tag} has no asset named {PACKAGE_PREFIX}<version>{suffix}"))),
-        _ => return Err(UpdateError::Release(format!("{tag} has several {} packages", ink_store::platform::device_name()))),
+        _ => return Err(UpdateError::Release(format!("{tag} has several {} packages", ink_platform::current().device_name()))),
     };
     let sums = assets.iter().find(|a| a.name == SUMS_ASSET).cloned();
     Ok(Release { tag: tag.to_string(), version, package, sums })
