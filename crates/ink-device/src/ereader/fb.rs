@@ -88,6 +88,7 @@ const VAR_GRAYSCALE: usize = 7;
 const VAR_ACTIVATE: usize = 21;
 const VAR_XRES: usize = 0;
 const VAR_YRES: usize = 1;
+const VAR_YOFFSET: usize = 5;
 const VAR_ROTATE: usize = 34;
 /// `GRAYSCALE_8BIT`.
 pub const GRAYSCALE_8BIT: u32 = 1;
@@ -402,8 +403,7 @@ impl Framebuffer {
         let file = OpenOptions::new().read(true).write(true).open("/dev/fb0")?;
         let fd = file.as_raw_fd();
 
-        let mut var = [0u32; 40];
-        ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
+        let mut var = get_var(fd)?;
         let mut original_rotate = None;
         if !passive {
             let was = var[VAR_ROTATE];
@@ -429,7 +429,7 @@ impl Framebuffer {
             } else if target.is_some() {
                 log::warn!("fb0: landscape (rotate {was}) and no rotate value turns it upright");
             }
-            ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
+            var = get_var(fd)?;
         }
         // Kobos boot at 16 (i.MX) or 32 bpp (MTK): 8 bpp gray, as KOReader (`fbdepth -d 8`).
         let mut original_depth = None;
@@ -443,13 +443,13 @@ impl Framebuffer {
             let formats = model.epdc.mdp_formats();
             let mdp = formats.and_then(|_| mdp_src_format());
             set_depth(fd, 8, formats.map(|(gray, _)| gray))?;
-            ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
+            var = get_var(fd)?;
             log::info!("fb0: switched from {bpp} to {} bpp", var[VAR_BPP]);
             original_depth = Some((bpp, mdp));
         }
         let mut fix = [0u8; 80];
         ioctl(fd, FBIOGET_FSCREENINFO, fix.as_mut_ptr().cast())?;
-        let (xres, yres, yoffset, bpp) = (var[0] as usize, var[1] as usize, var[5] as usize, var[6]);
+        let (xres, yres, yoffset, bpp) = (var[VAR_XRES] as usize, var[VAR_YRES] as usize, var[VAR_YOFFSET] as usize, var[VAR_BPP]);
         let smem_len = u32::from_ne_bytes([fix[20], fix[21], fix[22], fix[23]]) as usize;
         let stride = u32::from_ne_bytes([fix[44], fix[45], fix[46], fix[47]]) as usize;
         if bpp != 8 {
@@ -554,7 +554,8 @@ impl Framebuffer {
         Ok(())
     }
 
-    /// True when night mode is done by the driver (grayscale flag), not in software.
+    /// True when the controller inverts ([`Epdc::night`]: the grayscale flag or a flag on
+    /// each update), not rinky in software.
     pub fn hw_night(&self) -> bool {
         self.hw_night
     }
@@ -668,10 +669,10 @@ impl Framebuffer {
                 log::warn!("MXCFB_WAIT_FOR_UPDATE_COMPLETE failed: {e}");
             }
             let complete_us = t.elapsed().as_micros();
-            log::debug!("fb0: update {:?} wf {waveform} mode {mode} flags {flags:#x} swipe {} marker {} submit_us {submit_us} complete_us {complete_us}", r, d[18], self.marker);
+            log::debug!("fb0: update {:?} wf {waveform} mode {mode} flags {flags:#x} swipe {swipe:?} marker {} submit_us {submit_us} complete_us {complete_us}", r, self.marker);
         } else {
             self.in_flight.sent(r, self.marker, full, Instant::now());
-            log::debug!("fb0: update {:?} wf {waveform} mode {mode} flags {flags:#x} swipe {} marker {} submit_us {submit_us}", r, d[18], self.marker);
+            log::debug!("fb0: update {:?} wf {waveform} mode {mode} flags {flags:#x} swipe {swipe:?} marker {} submit_us {submit_us}", r, self.marker);
         }
         Ok(())
     }
@@ -887,13 +888,10 @@ pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
         done.push(format!("bpp -> {bpp}"));
     } else {
         let want = journaled("grayscale").unwrap_or(GRAYSCALE_8BIT);
-        let mut var = [0u32; 40];
-        ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
+        let var = get_var(fd)?;
         // Meaningful only at 8 bpp: a Kobo rinky already put back to 32 bpp keeps 0.
         if var[VAR_BPP] == 8 && var[VAR_GRAYSCALE] != want {
-            var[VAR_GRAYSCALE] = want;
-            var[VAR_ACTIVATE] = 0;
-            ioctl(fd, FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())?;
+            update_var(fd, |v| v[VAR_GRAYSCALE] = want)?;
             done.push(format!("grayscale -> {want}"));
         }
     }

@@ -13,12 +13,11 @@
 pub mod wifi;
 
 use super::input::Request;
-use super::model::Model;
 use super::system::{self, DeviceClock};
 use super::{Shared, SharedHandle};
 use crate::battery;
 use crate::screensaver::Screensaver;
-use crate::services::{Battery, BatteryState, Clock, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
+use crate::services::{Battery, BatteryState, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
 use crate::sleep::{Resume, SleepState};
 use crate::sysfs::SysRoot;
 use crate::usb::{DriveModeState, UsbCable};
@@ -45,7 +44,7 @@ pub(crate) fn nickel_setting(key: &str) -> Option<String> {
 }
 
 /// `ioctl(/dev/ntx_io, cmd, arg)`, the argument passed by value (KOReader `ntx_io.lua`).
-pub fn ntx_io(cmd: libc::c_ulong, arg: libc::c_int) -> Result<()> {
+pub(crate) fn ntx_io(cmd: libc::c_ulong, arg: libc::c_int) -> Result<()> {
     let path = c"/dev/ntx_io";
     // SAFETY: plain open/ioctl/close on a NUL-terminated path; the ioctl takes an int.
     unsafe {
@@ -111,7 +110,7 @@ impl std::fmt::Debug for KoboServices {
 }
 
 impl KoboServices {
-    pub(crate) fn new(shared: Option<Rc<RefCell<Shared>>>, sys: SysRoot, ntp_server: Option<String>) -> Self {
+    pub(crate) fn new(shared: Option<Rc<RefCell<Shared>>>, sys: SysRoot, clock: DeviceClock) -> Self {
         let shared = SharedHandle(shared);
         let warmth = shared.model().is_none_or(|m| m.warmth);
         let mixer = MIXERS.into_iter().find(|p| warmth && sys.path(p).exists());
@@ -124,28 +123,10 @@ impl KoboServices {
             white,
             mixer,
             ioctl_level: Rc::new(Cell::new(nickel_level)),
-            clock: DeviceClock { lipc: None, ntp_server },
+            clock,
         }
     }
 
-}
-
-/// Sets the clock from NTP (when it is off by a second or more), logging the outcome.
-fn sync_clock(mut clock: DeviceClock) {
-    if clock.ntp_server.is_none() {
-        return;
-    }
-    match clock.sync_ntp(None) {
-        Ok(s) => log::info!("ntp: {} offset {} ms", s.server, s.offset_ms),
-        Err(e) => log::info!("ntp: {e}"),
-    }
-}
-
-/// [`sync_clock`] on a thread (the NTP query takes up to 10 s).
-fn sync_clock_in_background(clock: DeviceClock) {
-    if let Err(e) = std::thread::Builder::new().name("ntp".into()).spawn(move || sync_clock(clock)) {
-        log::warn!("ntp: no thread: {e}");
-    }
 }
 
 impl Light for KoboServices {
@@ -210,8 +191,7 @@ impl Power for KoboServices {
     }
 
     fn suspend(&mut self, wake_after: Option<Duration>) -> Result<()> {
-        let model = self.shared.model().unwrap_or_else(|| Model::detect(&self.sys));
-        super::logged_suspend(suspend, &self.sys, &model, wake_after).map(|_| ())
+        self.shared.suspend(suspend, &self.sys, wake_after)
     }
 
     fn set_screensaver(&mut self, s: Screensaver) -> Result<()> {
@@ -248,7 +228,7 @@ impl Wifi for KoboServices {
     fn set_enabled(&mut self, on: bool) -> Result<()> {
         if on {
             let clock = self.clock.clone();
-            wifi::start_in_background(move || sync_clock(clock));
+            wifi::start_in_background(move || clock.sync_in_background());
             Ok(())
         } else {
             wifi::stop()
@@ -269,7 +249,7 @@ impl Wifi for KoboServices {
             _ => wifi::save_network(essid, password)?,
         };
         wifi::connect(id)?;
-        sync_clock_in_background(self.clock.clone());
+        self.clock.sync_in_background();
         Ok(())
     }
 

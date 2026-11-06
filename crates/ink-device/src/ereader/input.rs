@@ -11,7 +11,6 @@ use super::system;
 use super::Shared;
 use crate::battery::{self, LowBatteryMonitor};
 use crate::canvas::Canvas;
-use crate::clock::NtpSample;
 use crate::events::{self, CoverSource, HallInfo, UeventSignal, Uevent};
 use crate::evdev::{
     choose_touch_device, AppContacts, DevInfo, RawEvent, SlotSeed, TouchDecoder, TouchMapping, TouchOverride, TouchProfile,
@@ -21,7 +20,7 @@ use crate::evdev::{
 use crate::input::{Input, InputEvent, Key, KeyEvent, PowerEvent, Timestamp, TouchFrame};
 use crate::journal::Entry;
 use crate::light::AmberScheduler;
-use crate::lipc::{EventHub, Lipc, LipcValue};
+use crate::lipc::{EventHub, Lipc};
 use crate::screen::RefreshClass;
 use crate::sleep::{Resume, SleepController, SleepPlatform, SleepState};
 use crate::sysfs::SysRoot;
@@ -34,7 +33,6 @@ use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 const EVIOCGRAB: u32 = 0x4004_4590;
@@ -351,8 +349,8 @@ pub struct LoopOptions {
     pub usb: Option<usb::UsbPolicy>,
     /// Low-battery warning level.
     pub low_battery: u8,
-    /// NTP server for a sync when Wi-Fi connects (`None` = no sync).
-    pub ntp_server: Option<String>,
+    /// Sets the clock from NTP when Wi-Fi connects (Kindle: on wifid's CONNECTED).
+    pub clock: system::DeviceClock,
     /// Apply powerd's warmth schedule.
     pub amber: bool,
     /// Heartbeat file.
@@ -385,7 +383,6 @@ pub struct ReaderInput {
     amber: AmberScheduler,
     amber_next: Instant,
     amber_base: Option<u32>,
-    ntp_rx: Option<mpsc::Receiver<Result<NtpSample>>>,
     wifi_state: String,
     heartbeat: u64,
     heartbeat_at: Option<Instant>,
@@ -559,7 +556,6 @@ impl ReaderInput {
             amber: AmberScheduler::default(),
             amber_next: now + AMBER_EVERY,
             amber_base: None,
-            ntp_rx: None,
             wifi_state: String::new(),
             heartbeat: 0,
             heartbeat_at: None,
@@ -782,51 +778,6 @@ impl ReaderInput {
         }
     }
 
-    fn start_ntp(&mut self) {
-        let Some(server) = self.opts.ntp_server.clone() else { return };
-        if self.ntp_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.ntp_rx = Some(rx);
-        say!("ntp: Wi-Fi connected, querying {server}");
-        std::thread::spawn(move || {
-            let _ = tx.send(crate::clock::sntp_query(&server, Duration::from_secs(10)));
-        });
-    }
-
-    fn ntp_check(&mut self) {
-        let Some(rx) = &self.ntp_rx else { return };
-        let r = match rx.try_recv() {
-            Ok(r) => r,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.ntp_rx = None;
-                return;
-            }
-        };
-        self.ntp_rx = None;
-        match r {
-            Ok(s) => {
-                say!("ntp: {} offset {} ms, delay {} ms, stratum {}", s.server, s.offset_ms, s.delay_ms, s.stratum);
-                if s.offset_ms.abs() >= 1000 {
-                    match system::set_system_time(s.time) {
-                        Ok(rtc) => {
-                            let delta = s.offset_ms / 1000;
-                            say!("ntp: clock set ({delta:+} s); {rtc}");
-                            if let Some(lipc) = &self.lipc {
-                                let _ = lipc.send_event("com.lab126.time", "timeChanged", &[LipcValue::Int(delta)]);
-                            }
-                            self.queue.push_back(InputEvent::Power(PowerEvent::TimeChanged(delta)));
-                        }
-                        Err(e) => say!("ntp: setting the clock failed: {e}"),
-                    }
-                }
-            }
-            Err(e) => say!("ntp: {e}"),
-        }
-    }
-
     fn requests(&mut self, now: Instant) {
         let reqs: Vec<Request> = self.shared.borrow_mut().requests.drain(..).collect();
         for r in reqs {
@@ -1034,7 +985,7 @@ impl ReaderInput {
                     InputEvent::Power(PowerEvent::WifiState(s)) => {
                         let was = std::mem::replace(&mut self.wifi_state, s.clone());
                         if s == "CONNECTED" && was != "CONNECTED" {
-                            self.start_ntp();
+                            self.opts.clock.sync_in_background();
                         }
                     }
                     InputEvent::Power(PowerEvent::Lipc { publisher, name, .. })
@@ -1107,7 +1058,6 @@ impl ReaderInput {
         if now >= self.amber_next {
             self.amber_check(now);
         }
-        self.ntp_check();
     }
 
     fn next_deadline(&self, caller: Option<Instant>, now: Instant) -> Instant {
@@ -1120,9 +1070,6 @@ impl ReaderInput {
         }
         if self.usb.as_ref().is_some_and(|m| m.busy()) {
             d = d.min(self.usb_next_tick);
-        }
-        if self.ntp_rx.is_some() {
-            d = d.min(now + Duration::from_millis(250));
         }
         d.min(self.battery_next).min(self.amber_next).max(now)
     }

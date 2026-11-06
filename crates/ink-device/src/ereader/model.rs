@@ -1,21 +1,24 @@
 //! E-reader models (Kindle and Kobo): which one this is and what differs between them.
 //!
-//! The model comes from the serial number in `/proc/usid`, decoded as KOReader does
-//! (`frontend/device/kindle/device.lua`): serials starting with `B` or `9` carry a
-//! 2-character code at characters 3-4, newer ones (`G...`) a 3-character code at
-//! characters 4-6, compared as text. `RINKY_MODEL` overrides it with a code or a
-//! model name (`RINKY_MODEL=PW4`).
+//! [`Model::detect`]: `RINKY_MODEL` (a code or a model name, `RINKY_MODEL=PW4`), else
+//! - Kindle: the serial number in `/proc/usid`, decoded as KOReader does
+//!   (`frontend/device/kindle/device.lua`): serials starting with `B` or `9` carry a
+//!   2-character code at characters 3-4, newer ones (`G...`) a 3-character code at
+//!   characters 4-6, compared as text;
+//! - Kobo: the model number at the end of `/mnt/onboard/.kobo/version` ([`KOBO_MODELS`]).
 //!
-//! What differs, all from KOReader and koreader-base (`ffi/framebuffer_mxcfb.lua`,
-//! `ffi/mxcfb_kindle_h.lua`):
-//! - the e-ink controller's refresh ioctl ([`Epdc`]): four struct layouts;
+//! What differs, all from KOReader, koreader-base (`ffi/framebuffer_mxcfb.lua`,
+//! `ffi/mxcfb_kindle_h.lua`, `ffi/mxcfb_kobo_h.lua`) and FBInk:
+//! - the e-ink controller's refresh ioctl ([`Epdc`]): six struct layouts;
 //! - natural light (warmth) or not, page keys and their direction, the hall sensor's
-//!   sysfs folder, an accelerometer.
+//!   sysfs folder or the cover key, an accelerometer;
+//! - on a Kobo the upright `rotate` value and the touch transforms.
 //!
 //! Screen size is not here: it is read from the framebuffer. rinky's UI is laid out
 //! for 300 ppi, so the 212 ppi and 167 ppi models (PW1, PW2, the 7th, 8th and 10th
 //! generation Basic) are [`Tier::Unsupported`]. A Kindle whose code is not in the table
-//! gets [`Model::unknown`]: the refresh ioctl is then found by trying them in turn.
+//! gets [`Model::unknown`]: the refresh ioctl is then found by trying them in turn; an
+//! unknown Kobo's comes from its framebuffer driver's name.
 
 use crate::evdev::TouchTransform;
 use crate::platform::Platform;
@@ -412,7 +415,7 @@ impl Model {
         Model { warmth: true, hall_dir: EINK_HALL, ..m("Unknown", "Kindle (unknown model)", &[], Epdc::Mtk) }
     }
 
-    /// Not from the table: the refresh ioctl must be probed.
+    /// Not from the table (an unknown Kindle's refresh ioctl is then probed).
     pub fn is_unknown(&self) -> bool {
         self.codes.is_empty()
     }
@@ -445,15 +448,10 @@ impl Model {
     /// The running e-reader: `RINKY_MODEL`, else on a Kobo the model number in
     /// `/mnt/onboard/.kobo/version`, on a Kindle `/proc/usid`.
     pub fn detect(sys: &SysRoot) -> Model {
-        Model::detect_on(crate::platform::current(), sys)
-    }
-
-    /// [`Model::detect`] for a given platform.
-    pub fn detect_on(platform: Platform, sys: &SysRoot) -> Model {
         if let Some(m) = std::env::var("RINKY_MODEL").ok().and_then(|v| Model::by_name_or_code(&v)) {
             return m;
         }
-        match platform {
+        match crate::platform::current() {
             Platform::Kindle => Model::from_serial(&sys.read("/proc/usid").unwrap_or_default()),
             Platform::Kobo => {
                 let m = Model::from_kobo_version(&sys.read("/mnt/onboard/.kobo/version").unwrap_or_default());
@@ -472,7 +470,7 @@ impl Model {
         KOBO_MODELS.iter().find(|m| m.codes.contains(&code)).copied().unwrap_or_else(Model::unknown_kobo)
     }
 
-    /// A Kobo whose number is not in [`KOBO_MODELS`] (i.MX; [`Model::detect_on`] turns it
+    /// A Kobo whose number is not in [`KOBO_MODELS`] (i.MX; [`Model::detect`] turns it
     /// into MTK when the framebuffer driver is hwtcon).
     pub const fn unknown_kobo() -> Model {
         Model { tier: Tier::Unsupported("not in rinky's Kobo table"), ..kobo("KoboUnknown", "Kobo (unknown model)", &[], Epdc::KoboMxcfb) }

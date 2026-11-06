@@ -76,7 +76,7 @@ fn env(k: &str) -> Option<String> {
 
 impl Default for ReaderOptions {
     fn default() -> Self {
-        let run = env("RINKY_RUN").unwrap_or_else(|| "/tmp/rinky".into());
+        let run = ink_platform::run_dir();
         let ntp_server = if env("RINKY_NTP").as_deref() == Some("0") {
             None
         } else {
@@ -101,8 +101,8 @@ impl Default for ReaderOptions {
             low_battery: env("RINKY_LOW_BATTERY").and_then(|v| v.parse().ok()).unwrap_or(10),
             ntp_server,
             amber: env("RINKY_AMBER").as_deref() != Some("0"),
-            heartbeat: Some(PathBuf::from(format!("{run}/heartbeat"))),
-            journal: PathBuf::from(format!("{run}/restore")),
+            heartbeat: Some(run.join("heartbeat")),
+            journal: run.join("restore"),
             sys: SysRoot::system(),
         }
     }
@@ -188,6 +188,12 @@ impl SharedHandle {
         self.0.as_ref().map(|s| s.borrow().drive_state)
     }
 
+    /// Suspends now with `f` (`Power::suspend`), for this model.
+    pub(crate) fn suspend(&self, f: system::SuspendFn, sys: &SysRoot, wake_after: Option<Duration>) -> Result<()> {
+        let model = self.model().unwrap_or_else(|| model::Model::detect(sys));
+        logged_suspend(f, sys, &model, wake_after).map(|_| ())
+    }
+
     pub(crate) fn usb_enabled(&self) -> bool {
         self.0.as_ref().is_some_and(|s| s.borrow().usb_enabled)
     }
@@ -240,9 +246,7 @@ impl Screen for ReaderScreen {
         let now_sw = sh.screen.sw_invert();
         if was_sw != now_sw {
             if let Some(shadow) = sh.shadow.as_mut() {
-                for p in &mut shadow.pixels {
-                    *p = 255 - *p;
-                }
+                shadow.invert();
             }
         }
         Ok(())
@@ -316,7 +320,7 @@ pub fn open(opts: ReaderOptions) -> Result<Device> {
         sleep: opts.sleep.clone(),
         usb,
         low_battery: opts.low_battery,
-        ntp_server: opts.ntp_server.clone(),
+        clock: system::DeviceClock { lipc: lipc.clone(), ntp_server: opts.ntp_server.clone() },
         amber: opts.amber,
         heartbeat: opts.heartbeat.clone(),
         suspend: match platform {
@@ -333,7 +337,7 @@ pub fn open(opts: ReaderOptions) -> Result<Device> {
         (sh.screen.model.name.to_string(), sh.screen.page_wave())
     };
     let info = DeviceInfo { backend: platform.id(), model, firmware: firmware(platform), page_wave };
-    let clock = Box::new(system::DeviceClock { lipc, ntp_server: opts.ntp_server.clone() });
+    let clock = system::DeviceClock { lipc, ntp_server: opts.ntp_server.clone() };
     let screen = Box::new(ReaderScreen(shared.clone()));
     Ok(match platform {
         Platform::Kindle => {
@@ -341,9 +345,12 @@ pub fn open(opts: ReaderOptions) -> Result<Device> {
             // Light levels and Wi-Fi state for the control center, read once off the UI
             // thread after start-up (the first book page comes first).
             svc.refresh_after(Duration::from_secs(3));
-            with_services(info, screen, input, clock, svc)
+            with_services(info, screen, input, Box::new(clock), svc)
         }
-        Platform::Kobo => with_services(info, screen, input, clock, kobo::KoboServices::new(Some(shared), opts.sys, opts.ntp_server)),
+        Platform::Kobo => {
+            let svc = kobo::KoboServices::new(Some(shared), opts.sys, clock.clone());
+            with_services(info, screen, input, Box::new(clock), svc)
+        }
     })
 }
 

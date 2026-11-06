@@ -400,8 +400,7 @@ impl Power for LipcServices {
     }
 
     fn suspend(&mut self, wake_after: Option<Duration>) -> Result<()> {
-        let model = self.shared.model().unwrap_or_else(|| super::model::Model::detect(&self.sys));
-        super::logged_suspend(super::system::kernel_suspend, &self.sys, &model, wake_after).map(|_| ())
+        self.shared.suspend(super::system::kernel_suspend, &self.sys, wake_after)
     }
 
     fn set_screensaver(&mut self, s: Screensaver) -> Result<()> {

@@ -70,7 +70,7 @@ fn value_of<'a>(line: &'a str, name: &str) -> Option<&'a str> {
 /// A variable from rinky's environment (the launcher copies Nickel's), else from the
 /// launcher's saved copy, else from the environment of a firmware process that has it
 /// (`udevd`, `nickel`).
-pub fn firmware_env(name: &str) -> Option<String> {
+fn firmware_env(name: &str) -> Option<String> {
     if let Some(v) = std::env::var(name).ok().filter(|v| !v.is_empty()) {
         return Some(v);
     }
@@ -217,7 +217,7 @@ fn wpa_running() -> bool {
 
 /// Powers the radio, loads the driver, brings the interface up and starts
 /// `wpa_supplicant` (which joins a known network by itself).
-pub fn start() -> Result<()> {
+fn start() -> Result<()> {
     let _g = lock();
     changed();
     let e = env();
@@ -347,7 +347,7 @@ fn release_ip(e: &WifiEnv) {
 }
 
 /// Gets an address (blocks up to 30 s).
-pub fn obtain_ip() -> Result<()> {
+fn obtain_ip() -> Result<()> {
     changed();
     let e = env();
     release_ip(e);
@@ -377,7 +377,7 @@ fn get<'a>(kv: &'a [(String, String)], key: &str) -> Option<&'a str> {
 }
 
 /// Signal bars 0..=5 from an RSSI in dBm.
-pub fn bars(rssi: i32) -> u8 {
+fn bars(rssi: i32) -> u8 {
     match rssi {
         r if r >= -55 => 5,
         r if r >= -65 => 4,
@@ -428,7 +428,7 @@ fn read_state() -> WifiState {
 
 /// Parses `wpa_cli scan_results` (`bssid / frequency / signal level / flags / ssid`),
 /// strongest first, one entry per name.
-pub fn parse_scan(text: &str, known: &[String]) -> Vec<WifiNetwork> {
+fn parse_scan(text: &str, known: &[String]) -> Vec<WifiNetwork> {
     let mut v: Vec<(i32, WifiNetwork)> = Vec::new();
     for l in text.lines().filter(|l| l.contains('\t')) {
         let f: Vec<&str> = l.split('\t').collect();
@@ -452,7 +452,7 @@ pub fn parse_scan(text: &str, known: &[String]) -> Vec<WifiNetwork> {
 }
 
 /// Saved networks: `(id, ssid)` from `wpa_cli list_networks`.
-pub fn parse_networks(text: &str) -> Vec<(i64, String)> {
+fn parse_networks(text: &str) -> Vec<(i64, String)> {
     text.lines()
         .skip(1)
         .filter_map(|l| {
@@ -553,7 +553,7 @@ pub fn connect(id: i64) -> Result<()> {
 }
 
 /// Waits until `wpa_supplicant` is associated.
-pub fn wait_associated(limit: Duration) -> Result<()> {
+fn wait_associated(limit: Duration) -> Result<()> {
     let e = env();
     let start = Instant::now();
     loop {

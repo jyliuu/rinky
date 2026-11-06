@@ -283,6 +283,27 @@ pub struct DeviceClock {
     pub ntp_server: Option<String>,
 }
 
+impl DeviceClock {
+    /// Sets the clock from NTP on a thread (the query takes up to 10 s), when a server is
+    /// configured: after Wi-Fi connects.
+    pub fn sync_in_background(&self) {
+        if self.ntp_server.is_none() {
+            return;
+        }
+        let mut clock = self.clone();
+        let spawned = std::thread::Builder::new().name("ntp".into()).spawn(move || {
+            use crate::services::Clock;
+            match clock.sync_ntp(None) {
+                Ok(s) => log::info!("ntp: {} offset {} ms, delay {} ms", s.server, s.offset_ms, s.delay_ms),
+                Err(e) => log::info!("ntp: {e}"),
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("ntp: no thread: {e}");
+        }
+    }
+}
+
 impl crate::services::Clock for DeviceClock {
     fn set_time(&mut self, t: SystemTime) -> Result<()> {
         let before = SystemTime::now();

@@ -115,7 +115,7 @@ mod device {
 
     fn services(lipc: Lipc) -> Box<dyn Services> {
         if kobo() {
-            Box::new(crate::ereader::kobo::KoboServices::new(None, SysRoot::system(), None))
+            Box::new(crate::ereader::kobo::KoboServices::new(None, SysRoot::system(), system::DeviceClock::default()))
         } else {
             Box::new(LipcServices::standalone(lipc))
         }
@@ -643,8 +643,8 @@ mod device {
     }
 
     fn restore() -> Result<()> {
-        let path = std::env::var("RINKY_RUN").map(|r| format!("{r}/restore")).unwrap_or_else(|_| crate::journal::DEFAULT_PATH.into());
-        let j = Journal::at(&path);
+        let j = Journal::default();
+        let path = j.path().to_path_buf();
         let entries = j.entries();
         let lipc = Lipc::new();
         for e in &entries {
