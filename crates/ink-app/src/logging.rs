@@ -174,7 +174,7 @@ pub fn set_home(dir: &Path) {
 }
 
 fn home() -> PathBuf {
-    lock(&HOME).clone().unwrap_or_else(|| Paths::kindle().root)
+    lock(&HOME).clone().unwrap_or_else(|| Paths::device().root)
 }
 
 /// The log file, when logging to a file.
@@ -679,7 +679,7 @@ pub fn startup_report(device: &ink_device::Device, settings: &Settings, paths: &
         None => log::info!("memory: /proc/meminfo not available"),
     }
     let root = paths.root.display().to_string();
-    log::info!("disk: {}; {}; {}; {}", disk_line("/var"), disk_line("/tmp"), disk_line("/mnt/us"), disk_line(&root));
+    log::info!("disk: {}; {}; {}; {}", disk_line("/var"), disk_line("/tmp"), disk_line(ink_store::platform::user_root()), disk_line(&root));
     log::info!("settings: {}", settings_summary(settings));
     log::info!(
         "log: {} level {} (rotated at {} MB, {KEEP_ROTATED} old files kept)",
@@ -792,7 +792,7 @@ pub fn write_debug_report(paths: &Paths) -> std::io::Result<(PathBuf, usize)> {
         log.display(),
         level(),
         disk_line("/var"),
-        disk_line("/mnt/us")
+        disk_line(ink_store::platform::user_root())
     );
     std::fs::write(dir.join("summary.txt"), summary)?;
     count += 1;

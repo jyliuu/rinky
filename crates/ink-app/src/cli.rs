@@ -49,13 +49,14 @@ pub const USAGE: &str = "usage:
   rinky version
 environment: RINKY_TOUCH=swap,mirror_x,mirror_y  RINKY_LOG=debug|info|warn (or RUST_LOG)
              RINKY_LOG_FILE=FILE (run/library default: $RINKY_HOME/rinky.log)
-             RINKY_HOME=/mnt/us/rinky (settings.toml, library.json)";
+             RINKY_HOME=/mnt/us/rinky, on a Kobo /mnt/onboard/.adds/rinky (settings.toml, library.json)
+             RINKY_PLATFORM=kindle|kobo (default: a Kobo when /mnt/onboard/.kobo exists)";
 
-/// The install folder: `RINKY_HOME`, else `/mnt/us/rinky`.
+/// The install folder: `RINKY_HOME`, else `/mnt/us/rinky` (Kobo: `/mnt/onboard/.adds/rinky`).
 fn home_dir() -> PathBuf {
     match std::env::var_os("RINKY_HOME") {
         Some(h) if !h.is_empty() => PathBuf::from(h),
-        _ => Paths::kindle().root,
+        _ => Paths::device().root,
     }
 }
 
@@ -197,6 +198,9 @@ fn open_kindle_with(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
         let mut opts = ink_device::kindle::KindleOptions { power_events: true, ..Default::default() };
         if !device_sleep {
             opts.sleep = None;
+        }
+        if ink_device::platform::Platform::detect() == ink_device::platform::Platform::Kobo {
+            return Ok(ink_device::kobo::open(opts)?);
         }
         Ok(ink_device::kindle::open(opts)?)
     }
@@ -410,7 +414,7 @@ fn is_book_file(p: &Path) -> bool {
 fn koreader_sync(args: &[String]) -> anyhow::Result<i32> {
     use ink_store::koreader::{self, KoreaderDirs};
     let mut dry_run = false;
-    let mut ko = KoreaderDirs::kindle();
+    let mut ko = KoreaderDirs::device();
     let mut roots = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {

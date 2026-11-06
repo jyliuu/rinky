@@ -42,6 +42,7 @@
 //! launcher can undo it after a crash (`rinky device restore`).
 
 use super::model::{Epdc, Model};
+use crate::platform::Platform;
 use crate::canvas::Canvas;
 use crate::geom::{Rect, Rotation, Size};
 use crate::journal::{Entry, Journal};
@@ -63,6 +64,16 @@ const MXCFB_SEND_UPDATE_ZELDA: u32 = 0x4058_462e;
 /// `_IOW('F', 0x2E, struct mxcfb_update_data)` (72 bytes).
 const MXCFB_SEND_UPDATE: u32 = 0x4048_462e;
 const MXCFB_WAIT_FOR_UPDATE_COMPLETE: u32 = 0xc008_462f;
+/// Kobo `HWTCON_SEND_UPDATE`: `_IOW('F', 0x2E, struct hwtcon_update_data)` (36 bytes).
+const HWTCON_SEND_UPDATE: u32 = 0x4024_462e;
+const VAR_BPP: usize = 6;
+/// Kobo i.MX waveform numbers (`mxcfb_kobo_h.lua`) that differ from the MTK ones.
+const KOBO_WAVEFORM_GL16: u32 = 5;
+const KOBO_WAVEFORM_REAGL: u32 = 6;
+const KOBO_WAVEFORM_GCK16: u32 = 9;
+const KOBO_WAVEFORM_GLKW16: u32 = 10;
+/// Kobo i.MX `EPDC_FLAG_ENABLE_INVERSION`: hardware night mode, per update.
+const KOBO_EPDC_FLAG_ENABLE_INVERSION: u32 = 1;
 /// `_IOW('F', 0x37, u32)`: wait until the driver submitted the update with this marker
 /// (KOReader `mxcfb_kindle_h.lua`, FBInk `wait_for_submission_kindle`).
 const MXCFB_WAIT_FOR_UPDATE_SUBMISSION: u32 = 0x4004_4637;
@@ -183,6 +194,23 @@ pub fn waveform_epdc(epdc: Epdc, class: RefreshClass, night: bool, night_ui: Nig
         Epdc::Mtk => waveform_with(class, night, night_ui),
         // ZELDA_GLR16 and ZELDA_GL16 have the MTK numbers (4, 3); GC16 and DU too.
         Epdc::Zelda | Epdc::Rex => waveform_with(class, false, night_ui),
+        // Kobo i.MX (KOReader `refresh_kobo_mk7` and `mxc_update`): REAGL is FULL; at
+        // night (inversion flag) the eclipse waveforms, GLKW16 partial and GCK16 flash.
+        Epdc::KoboMxcfb => match (class, night) {
+            (RefreshClass::Gc16, false) => (WAVEFORM_GC16, UPDATE_MODE_FULL),
+            (RefreshClass::Gc16, true) => (KOBO_WAVEFORM_GCK16, UPDATE_MODE_FULL),
+            (RefreshClass::Reagl, false) => (KOBO_WAVEFORM_REAGL, UPDATE_MODE_FULL),
+            (RefreshClass::Gl16, false) => (KOBO_WAVEFORM_GL16, UPDATE_MODE_PARTIAL),
+            (RefreshClass::Reagl | RefreshClass::Gl16, true) => (KOBO_WAVEFORM_GLKW16, UPDATE_MODE_PARTIAL),
+            (RefreshClass::Du, _) => (WAVEFORM_DU, UPDATE_MODE_PARTIAL),
+        },
+        // Kobo hwtcon: MTK numbers; REAGL must be FULL (KOReader `refresh_kobo_mtk`).
+        Epdc::KoboMtk => match class {
+            RefreshClass::Gc16 => (WAVEFORM_GC16, UPDATE_MODE_FULL),
+            RefreshClass::Reagl => (WAVEFORM_GLR16, UPDATE_MODE_FULL),
+            RefreshClass::Gl16 => (WAVEFORM_GL16, UPDATE_MODE_PARTIAL),
+            RefreshClass::Du => (WAVEFORM_DU, UPDATE_MODE_PARTIAL),
+        },
         Epdc::Legacy => match class {
             RefreshClass::Gc16 => (WAVEFORM_GC16, UPDATE_MODE_FULL),
             RefreshClass::Reagl => (LEGACY_WAVEFORM_REAGL, UPDATE_MODE_FULL),
@@ -198,7 +226,8 @@ pub fn send_update_request(epdc: Epdc) -> u32 {
         Epdc::Mtk => MXCFB_SEND_UPDATE_MTK,
         Epdc::Rex => MXCFB_SEND_UPDATE_REX,
         Epdc::Zelda => MXCFB_SEND_UPDATE_ZELDA,
-        Epdc::Legacy => MXCFB_SEND_UPDATE,
+        Epdc::Legacy | Epdc::KoboMxcfb => MXCFB_SEND_UPDATE,
+        Epdc::KoboMtk => HWTCON_SEND_UPDATE,
     }
 }
 
@@ -219,6 +248,30 @@ pub fn update_data_epdc(epdc: Epdc, r: Rect, waveform: u32, mode: u32, marker: u
         return update_data(r, waveform, mode, marker, swipe);
     }
     let mut d = [0u32; 24];
+    if epdc == Epdc::KoboMxcfb {
+        // {rect; waveform_mode, update_mode, update_marker; temp; flags; dither_mode;
+        // quant_bit; alt_buffer_data}: no dithering (EPDC_FLAG_USE_DITHERING_PASSTHROUGH).
+        d[0] = r.y as u32;
+        d[1] = r.x as u32;
+        d[2] = r.w;
+        d[3] = r.h;
+        d[4] = waveform;
+        d[5] = mode;
+        d[6] = marker;
+        d[7] = TEMP_USE_AMBIENT;
+        return d;
+    }
+    if epdc == Epdc::KoboMtk {
+        // {rect; waveform_mode, update_mode, update_marker, flags; dither_mode}
+        d[0] = r.y as u32;
+        d[1] = r.x as u32;
+        d[2] = r.w;
+        d[3] = r.h;
+        d[4] = waveform;
+        d[5] = mode;
+        d[6] = marker;
+        return d;
+    }
     d[0] = r.y as u32;
     d[1] = r.x as u32;
     d[2] = r.w;
@@ -298,6 +351,12 @@ pub struct KindleFb {
     pub epdc: Epdc,
     /// `rotate` as the framework left it, when rinky turned the panel upright.
     original_rotate: Option<u32>,
+    /// The bits per pixel before rinky switched a Kobo framebuffer (16 or 32 bpp) to 8.
+    original_bpp: Option<u32>,
+    /// The MTK `mdp_src_format` before rinky set `Y8` (Kobo).
+    original_mdp: Option<String>,
+    /// The Kobo EPDC wake file is missing or refused a write: not tried again.
+    epdc_wake_missing: bool,
     file: File,
     map: *mut u8,
     map_len: usize,
@@ -364,25 +423,77 @@ impl KindleFb {
 
         let mut var = [0u32; 40];
         ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
-        // An Oasis or Scribe can be left in landscape by the framework (accelerometer):
-        // turn the panel upright, as rinky rotates in software.
+        let kobo = model.platform == Platform::Kobo;
+        // A Kobo of unknown number: the driver's name tells MTK from i.MX.
+        let model_epdc = if kobo && model.is_unknown() {
+            let name = std::fs::read_to_string("/sys/class/graphics/fb0/name").unwrap_or_default();
+            if name.contains("hwtcon") { Epdc::KoboMtk } else { Epdc::KoboMxcfb }
+        } else {
+            model.epdc
+        };
         let mut original_rotate = None;
-        if !passive && var[VAR_XRES] > var[VAR_YRES] {
+        if !passive {
             let was = var[VAR_ROTATE];
-            if let Some(j) = &journal {
-                let _ = j.record(Entry::Fb { key: "rotate".into(), value: was as i64 });
-            }
-            match make_upright(fd, &mut var) {
-                Some(r) => {
-                    log::info!("fb0: was landscape (rotate {was}); now rotate {r}");
-                    original_rotate = Some(was);
+            match model.upright {
+                // Kobo panels are mounted rotated: the one value that is upright (FBInk's
+                // rotation map), whatever Nickel or the accelerometer left.
+                Some(r) if r != was => {
+                    if let Some(j) = &journal {
+                        let _ = j.record(Entry::Fb { key: "rotate".into(), value: was as i64 });
+                    }
+                    match set_rotate(fd, r).and_then(|()| ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())) {
+                        Ok(()) => {
+                            log::info!("fb0: rotate {was} -> {r} (upright)");
+                            original_rotate = Some(was);
+                        }
+                        Err(e) => log::warn!("fb0: rotate {r}: {e}"),
+                    }
                 }
-                None => log::warn!("fb0: landscape (rotate {was}) and no rotate value turns it upright"),
+                Some(_) => {}
+                // An Oasis or Scribe can be left in landscape by the framework
+                // (accelerometer): turn the panel upright, as rinky rotates in software.
+                None if var[VAR_XRES] > var[VAR_YRES] => {
+                    if let Some(j) = &journal {
+                        let _ = j.record(Entry::Fb { key: "rotate".into(), value: was as i64 });
+                    }
+                    match make_upright(fd, &mut var) {
+                        Some(r) => {
+                            log::info!("fb0: was landscape (rotate {was}); now rotate {r}");
+                            original_rotate = Some(was);
+                        }
+                        None => log::warn!("fb0: landscape (rotate {was}) and no rotate value turns it upright"),
+                    }
+                }
+                None => {}
             }
         }
         let mut fix = [0u8; 80];
         ioctl(fd, FBIOGET_FSCREENINFO, fix.as_mut_ptr().cast())?;
-
+        let mut original_bpp = None;
+        let mut original_mdp = None;
+        let bpp = var[VAR_BPP];
+        // Kobos boot at 16 (i.MX) or 32 bpp (MTK): 8 bpp gray, as KOReader (`fbdepth -d 8`).
+        if kobo && bpp != 8 && !passive {
+            if let Some(j) = &journal {
+                let _ = j.record(Entry::Fb { key: "bpp".into(), value: bpp as i64 });
+            }
+            if model_epdc == Epdc::KoboMtk {
+                // The MTK driver resets bits_per_pixel to its MDP source format unless
+                // that is switched first (FBInk `set_fbinfo`).
+                original_mdp = mdp_src_format();
+                set_mdp_src_format("Y8");
+            }
+            var[VAR_BPP] = 8;
+            var[VAR_GRAYSCALE] = GRAYSCALE_8BIT;
+            // red, green, blue {offset 0, length 8, msb_right 0}; no transparency.
+            var[8..20].copy_from_slice(&[0, 8, 0, 0, 8, 0, 0, 8, 0, 0, 0, 0]);
+            var[VAR_ACTIVATE] = 0;
+            ioctl(fd, FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())?;
+            ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
+            ioctl(fd, FBIOGET_FSCREENINFO, fix.as_mut_ptr().cast())?;
+            log::info!("fb0: switched from {bpp} to {} bpp", var[VAR_BPP]);
+            original_bpp = Some(bpp);
+        }
         let (xres, yres, yoffset, bpp) = (var[0] as usize, var[1] as usize, var[5] as usize, var[6]);
         let smem_len = u32::from_ne_bytes([fix[20], fix[21], fix[22], fix[23]]) as usize;
         let stride = u32::from_ne_bytes([fix[44], fix[45], fix[46], fix[47]]) as usize;
@@ -403,12 +514,15 @@ impl KindleFb {
             return Err(std::io::Error::last_os_error().into());
         }
         let original = var[VAR_GRAYSCALE];
-        let epdc = if model.is_unknown() && !passive { probe_epdc(fd).unwrap_or(Epdc::Mtk) } else { model.epdc };
+        let epdc = if model.is_unknown() && !kobo && !passive { probe_epdc(fd).unwrap_or(Epdc::Mtk) } else { model_epdc };
         log::info!("model: {}; refresh interface {}", model.describe(), epdc.name());
         let fb = KindleFb {
             model,
             epdc,
             original_rotate,
+            original_bpp,
+            original_mdp,
+            epdc_wake_missing: false,
             file,
             map: map.cast(),
             map_len: smem_len,
@@ -422,7 +536,7 @@ impl KindleFb {
             hw_night: original == GRAYSCALE_8BIT_INVERTED,
             // The grayscale flag is how the MTK driver does night mode; KOReader inverts
             // per update on i.MX (EPDC_FLAG_ENABLE_INVERSION), rinky in software there.
-            prefer_hw_night: epdc == Epdc::Mtk,
+            prefer_hw_night: matches!(epdc, Epdc::Mtk | Epdc::KoboMxcfb),
             // A previous run that died in night mode left the flag set: day is 1.
             original_grayscale: if original == GRAYSCALE_8BIT_INVERTED { GRAYSCALE_8BIT } else { original },
             journal,
@@ -547,12 +661,34 @@ impl KindleFb {
             }
         }
         for m in w.completion {
+            if !self.model.reliable_wait {
+                // The driver's wait can hang for 5 s (Libra 2): a short pause instead,
+                // as KOReader's `stub_mxc_wait_for_update_complete`.
+                std::thread::sleep(std::time::Duration::from_micros(2500));
+                continue;
+            }
             let t = Instant::now();
             let mut marker = [m, 0u32];
             if let Err(e) = ioctl(fd, MXCFB_WAIT_FOR_UPDATE_COMPLETE, marker.as_mut_ptr().cast()) {
                 log::debug!("MXCFB_WAIT_FOR_UPDATE_COMPLETE {m}: {e}");
             }
             log::debug!("fb0: deferred completion wait marker {m} {} us", t.elapsed().as_micros());
+        }
+    }
+
+    /// Kobo: wakes the EPDC before a refresh, as KOReader does (`power_state` on the
+    /// i.MX models that have it, `fiti_power 1` on MTK). Kindles need nothing.
+    fn wake_epdc(&mut self) {
+        let (path, cmd) = match self.epdc {
+            Epdc::KoboMxcfb => ("/sys/class/graphics/fb0/power_state", "1,0"),
+            Epdc::KoboMtk => ("/proc/hwtcon/cmd", "fiti_power 1"),
+            _ => return,
+        };
+        if !self.epdc_wake_missing {
+            if let Err(e) = std::fs::write(path, cmd) {
+                log::info!("fb0: {path}: {e}; not written again");
+                self.epdc_wake_missing = true;
+            }
         }
     }
 
@@ -573,7 +709,15 @@ impl KindleFb {
         self.marker = self.marker.wrapping_add(1).max(1);
         let swipe = swipe.filter(|_| self.page_wave());
         let mut d = update_data_epdc(self.epdc, r, waveform, mode, self.marker, swipe);
-        let flags = if self.epdc == Epdc::Legacy { d[10] } else { d[8] };
+        if self.epdc == Epdc::KoboMxcfb && self.hw_night {
+            d[8] |= KOBO_EPDC_FLAG_ENABLE_INVERSION;
+        }
+        let flags = match self.epdc {
+            Epdc::Legacy => d[10],
+            Epdc::KoboMtk => d[7],
+            _ => d[8],
+        };
+        self.wake_epdc();
         let fd = self.file.as_raw_fd();
         let t = Instant::now();
         ioctl(fd, send_update_request(self.epdc), d.as_mut_ptr().cast())
@@ -582,7 +726,7 @@ impl KindleFb {
         self.updates += 1;
         self.last_waveform = (waveform, mode);
         let full = mode == UPDATE_MODE_FULL;
-        if full && !self.defer_full_wait {
+        if full && !self.defer_full_wait && self.model.reliable_wait {
             let mut marker = [self.marker, 0u32];
             if let Err(e) = ioctl(fd, MXCFB_WAIT_FOR_UPDATE_COMPLETE, marker.as_mut_ptr().cast()) {
                 log::warn!("MXCFB_WAIT_FOR_UPDATE_COMPLETE failed: {e}");
@@ -666,12 +810,12 @@ impl KindleFb {
         if self.passive {
             return;
         }
-        if self.hw_night {
+        if self.hw_night && self.epdc != Epdc::KoboMxcfb {
             if let Err(e) = self.set_grayscale(self.original_grayscale) {
                 log::warn!("restoring grayscale: {e}");
             }
-            self.hw_night = false;
         }
+        self.hw_night = false;
         if self.epdc == Epdc::Mtk {
             if let Err(e) = set_fast_mode(self.file.as_raw_fd(), false) {
                 log::warn!("fast mode off: {e}");
@@ -682,10 +826,25 @@ impl KindleFb {
                 log::warn!("restoring rotate {was}: {e}");
             }
         }
+        if let Some(was) = self.original_bpp.take() {
+            if let Some(f) = self.original_mdp.take() {
+                set_mdp_src_format(&f);
+            }
+            let r = self.var().and_then(|mut var| {
+                var[VAR_BPP] = was;
+                var[VAR_GRAYSCALE] = 0;
+                var[VAR_ACTIVATE] = 0;
+                ioctl(self.file.as_raw_fd(), FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast()).map_err(Into::into)
+            });
+            if let Err(e) = r {
+                log::warn!("restoring {was} bpp: {e}");
+            }
+        }
         if let Some(j) = &self.journal {
             let _ = j.forget(&Entry::Fb { key: "grayscale".into(), value: 0 });
             let _ = j.forget(&Entry::Fb { key: "fastmode".into(), value: 0 });
             let _ = j.forget(&Entry::Fb { key: "rotate".into(), value: 0 });
+            let _ = j.forget(&Entry::Fb { key: "bpp".into(), value: 0 });
         }
     }
 }
@@ -693,6 +852,27 @@ impl KindleFb {
 fn set_fast_mode(fd: i32, on: bool) -> std::io::Result<()> {
     let mut flags = UPDATE_FLAGS_FAST_MODE | if on { UPDATE_FLAGS_MODE_FAST_FLAG } else { 0 };
     ioctl(fd, MXCFB_SET_UPDATE_FLAGS_MTK, (&mut flags as *mut u32).cast())
+}
+
+/// Kobo MTK: the hwtcon device folders in sysfs.
+fn hwtcon_dirs() -> Vec<std::path::PathBuf> {
+    let Ok(dir) = std::fs::read_dir("/sys/devices/platform") else { return Vec::new() };
+    dir.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".hwtcon")).map(|e| e.path()).collect()
+}
+
+/// Kobo MTK: the pixel format hwtcon reads the framebuffer as now.
+fn mdp_src_format() -> Option<String> {
+    let d = hwtcon_dirs().into_iter().next()?;
+    std::fs::read_to_string(d.join("mdp_src_format")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Kobo MTK: the pixel format hwtcon reads the framebuffer as (`Y8`, `ABGR32`).
+fn set_mdp_src_format(format: &str) {
+    for d in hwtcon_dirs() {
+        if let Err(e) = std::fs::write(d.join("mdp_src_format"), format) {
+            log::warn!("mdp_src_format {format}: {e}");
+        }
+    }
 }
 
 fn set_rotate(fd: i32, rotate: u32) -> std::io::Result<()> {
@@ -753,7 +933,9 @@ pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
             _ => None,
         })
         .unwrap_or(GRAYSCALE_8BIT);
-    if var[VAR_GRAYSCALE] != want {
+    // The grayscale flag means something only at 8 bpp: a Kobo that rinky already put
+    // back to 32 bpp must keep 0 (the MTK driver turns its pixel format to Y8 otherwise).
+    if var[VAR_BPP] == 8 && var[VAR_GRAYSCALE] != want {
         var[VAR_GRAYSCALE] = want;
         var[VAR_ACTIVATE] = 0;
         ioctl(fd, FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())?;
@@ -765,6 +947,21 @@ pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
     }) {
         set_rotate(fd, r)?;
         done.push(format!("rotate -> {r}"));
+    }
+    // Kobo: the bit depth Nickel expects (and on MTK the pixel format with it).
+    if let Some(bpp) = entries.iter().find_map(|e| match e {
+        Entry::Fb { key, value } if key == "bpp" => Some(*value as u32),
+        _ => None,
+    }) {
+        if bpp == 32 && !hwtcon_dirs().is_empty() {
+            set_mdp_src_format("ABGR32");
+        }
+        ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
+        var[VAR_BPP] = bpp;
+        var[VAR_GRAYSCALE] = 0;
+        var[VAR_ACTIVATE] = 0;
+        ioctl(fd, FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())?;
+        done.push(format!("bpp -> {bpp}"));
     }
     if Model::detect(&SysRoot::system()).epdc == Epdc::Mtk {
         set_fast_mode(fd, false)?;
@@ -797,7 +994,10 @@ impl Screen for KindleFb {
         }
         // Flip what is on the framebuffer now, so the next partial update matches.
         let was_sw = self.sw_invert();
-        if on && self.prefer_hw_night {
+        if self.epdc == Epdc::KoboMxcfb {
+            // A flag on each update, nothing global to set.
+            self.hw_night = on;
+        } else if on && self.prefer_hw_night {
             if let Some(j) = &self.journal {
                 let _ = j.record(Entry::Fb { key: "grayscale".into(), value: self.original_grayscale as i64 });
             }
@@ -823,11 +1023,12 @@ impl Screen for KindleFb {
         let flag = self.grayscale().unwrap_or(u32::MAX);
         let how = match (on, self.hw_night) {
             (false, _) => "day",
+            (true, true) if self.epdc == Epdc::KoboMxcfb => "inversion flag on each update, night waveforms",
             (true, true) => "hardware grayscale flag, night waveforms",
             (true, false) => "software inversion, day waveforms",
         };
         log::info!("night mode {} ({how}; grayscale flag {flag})", if on { "on" } else { "off" });
-        if self.hw_night != (flag == GRAYSCALE_8BIT_INVERTED) {
+        if self.epdc != Epdc::KoboMxcfb && self.hw_night != (flag == GRAYSCALE_8BIT_INVERTED) {
             log::warn!("night mode: grayscale flag {flag} does not match hardware night {}", self.hw_night);
         }
         Ok(())
@@ -936,6 +1137,24 @@ mod tests {
         assert_eq!(waveform_epdc(Epdc::Zelda, RefreshClass::Gc16, true, NightUi::Glkw16), (WAVEFORM_GC16, UPDATE_MODE_FULL));
         // MTK is unchanged.
         assert_eq!(update_data_epdc(Epdc::Mtk, r, 4, 1, 9, None), update_data(r, 4, 1, 9, None));
+    }
+
+    #[test]
+    fn kobo_layouts_and_waveforms() {
+        let size = |req: u32| (req >> 16) & 0x3fff;
+        assert_eq!(send_update_request(Epdc::KoboMxcfb), 0x4048_462e);
+        assert_eq!(size(send_update_request(Epdc::KoboMtk)), 36);
+        let r = Rect::new(10, 20, 300, 400);
+        let d = update_data_epdc(Epdc::KoboMxcfb, r, KOBO_WAVEFORM_REAGL, UPDATE_MODE_FULL, 7, None);
+        assert_eq!(&d[..11], &[20, 10, 300, 400, 6, 1, 7, TEMP_USE_AMBIENT, 0, 0, 0]);
+        let d = update_data_epdc(Epdc::KoboMtk, r, WAVEFORM_GL16, UPDATE_MODE_PARTIAL, 8, None);
+        assert_eq!(&d[..9], &[20, 10, 300, 400, 3, 0, 8, 0, 0]);
+        let wf = |c, n| waveform_epdc(Epdc::KoboMxcfb, c, n, NightUi::Glkw16);
+        assert_eq!(wf(RefreshClass::Reagl, false), (KOBO_WAVEFORM_REAGL, UPDATE_MODE_FULL));
+        assert_eq!(wf(RefreshClass::Gl16, false), (KOBO_WAVEFORM_GL16, UPDATE_MODE_PARTIAL));
+        assert_eq!(wf(RefreshClass::Gc16, true), (KOBO_WAVEFORM_GCK16, UPDATE_MODE_FULL));
+        assert_eq!(wf(RefreshClass::Reagl, true), (KOBO_WAVEFORM_GLKW16, UPDATE_MODE_PARTIAL));
+        assert_eq!(waveform_epdc(Epdc::KoboMtk, RefreshClass::Reagl, false, NightUi::Glkw16), (WAVEFORM_GLR16, UPDATE_MODE_FULL));
     }
 
     #[test]

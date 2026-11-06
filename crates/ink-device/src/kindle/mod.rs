@@ -119,7 +119,7 @@ pub(crate) struct Shared {
 
 /// The screen as the app sees it: while the screensaver or the USB lock screen is up,
 /// updates go to the shadow buffer and appear when it is removed.
-pub struct KindleScreen(Rc<RefCell<Shared>>);
+pub struct KindleScreen(pub(crate) Rc<RefCell<Shared>>);
 
 impl Screen for KindleScreen {
     fn panel_size(&self) -> Size {

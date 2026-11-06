@@ -122,6 +122,11 @@ pub fn clear_rtc(sys: &SysRoot) {
 
 /// Suspends now (see the module comment). `log` receives progress lines.
 pub fn kernel_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(String)) -> Result<Resume> {
+    suspend_with(sys, rtc_wake, true, log)
+}
+
+/// [`kernel_suspend`], with or without the `wakeup_count` handshake.
+fn suspend_with(sys: &SysRoot, rtc_wake: Option<Duration>, wakeup_count: bool, log: &mut dyn FnMut(String)) -> Result<Resume> {
     let alarm = match rtc_wake {
         Some(d) => match arm_rtc(sys, d) {
             Ok(t) => Some(t),
@@ -132,7 +137,8 @@ pub fn kernel_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn F
         },
         None => None,
     };
-    match read_wakeup_count_ex(sys, Duration::from_secs(2)) {
+    let count = if wakeup_count { read_wakeup_count_ex(sys, Duration::from_secs(2)) } else { WakeupCount::Failed("not used on Kobo".into()) };
+    match count {
         WakeupCount::Value(count) => {
             if let Err(e) = sys.write("/sys/power/wakeup_count", &count) {
                 clear_rtc(sys);
@@ -143,13 +149,18 @@ pub fn kernel_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn F
         WakeupCount::StillBlocked => {
             log("wakeup_count blocked since an earlier attempt (a wakeup source is active); suspending anyway".into())
         }
-        WakeupCount::Failed(e) => log(format!("wakeup_count unreadable ({e}); suspending anyway")),
+        WakeupCount::Failed(e) if wakeup_count => log(format!("wakeup_count unreadable ({e}); suspending anyway")),
+        WakeupCount::Failed(_) => {}
     }
     // SAFETY: sync(2) has no arguments and cannot fail.
     unsafe { libc::sync() };
     let wall0 = SystemTime::now();
     let mono0 = Instant::now();
-    let r = sys.write("/sys/power/state", "mem");
+    let state = suspend_state(&sys.read("/sys/power/state").unwrap_or_default());
+    if state != "mem" {
+        log(format!("suspend: the kernel offers no mem; using {state}"));
+    }
+    let r = sys.write("/sys/power/state", state);
     let slept = SystemTime::now().duration_since(wall0).unwrap_or_else(|_| mono0.elapsed());
     clear_rtc(sys);
     match r {
@@ -162,6 +173,44 @@ pub fn kernel_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn F
         }
         Err(e) => Err(DeviceError::Io(e)),
     }
+}
+
+/// The deepest sleep `/sys/power/state` offers: `mem`, else `standby`, else `freeze`
+/// (the emulated MT8113 Tolino lists only `freeze`). An empty or unreadable list: `mem`.
+pub fn suspend_state(offered: &str) -> &'static str {
+    let has = |s: &str| offered.split_whitespace().any(|o| o == s);
+    ["mem", "standby", "freeze"].into_iter().find(|s| has(s)).unwrap_or("mem")
+}
+
+/// Suspends a Kobo as KOReader does (`Kobo:suspend`): Wi-Fi off, `1` to
+/// `/sys/power/state-extended` (the NTX drivers prepare for sleep), 2 s, then the
+/// [`kernel_suspend`] sequence without the `wakeup_count` handshake (KOReader leaves it
+/// out on Kobo; on the Tolino emulator its write failed with EINVAL every time), then
+/// `0` back. A MediaTek Kobo's kernel hangs when it suspends while charging: refused
+/// then.
+pub fn kobo_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(String)) -> Result<Resume> {
+    if crate::kobo::wifi::is_up() {
+        log("wifi: turning off before suspend".into());
+        if let Err(e) = crate::kobo::wifi::stop() {
+            log(format!("wifi: {e}"));
+        }
+    }
+    let mtk = std::path::Path::new("/proc/hwtcon").exists();
+    if mtk && crate::battery::charging(sys) {
+        return Err(DeviceError::Backend("charging: a MediaTek Kobo does not suspend while charging".into()));
+    }
+    if let Err(e) = sys.write("/sys/power/state-extended", "1") {
+        log(format!("state-extended 1: {e}"));
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let r = suspend_with(sys, rtc_wake, false, log);
+    if let Err(e) = sys.write("/sys/power/state-extended", "0") {
+        log(format!("state-extended 0: {e}"));
+    }
+    if r.is_ok() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    r
 }
 
 /// Frontlight LED class devices (`/sys/class/backlight/*`), e.g. `fp9967-bl1`
@@ -235,4 +284,17 @@ pub fn set_system_time(t: SystemTime) -> Result<String> {
     }
     log::warn!("rtc: not written: {}", tried.join("; "));
     Ok(format!("RTC not written ({})", tried.join("; ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deepest_offered_suspend_state() {
+        assert_eq!(suspend_state("freeze mem\n"), "mem");
+        assert_eq!(suspend_state("freeze standby"), "standby");
+        assert_eq!(suspend_state("freeze\n"), "freeze");
+        assert_eq!(suspend_state(""), "mem");
+    }
 }

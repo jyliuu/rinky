@@ -463,6 +463,10 @@ pub struct TouchDecoder {
     has_tracking: bool,
     /// The device sent `ABS_MT_POSITION_*`: its `ABS_X`/`ABS_Y` emulation is ignored.
     has_mt_pos: bool,
+    /// A `TRACKING_ID -1` was seen. Until then a `BTN_TOUCH 0` ends every contact:
+    /// Kobo's "snow" panels (Clara HD and BW, Forma, Libra H2O) never send the -1
+    /// (KOReader `handleTouchEvSnow`).
+    saw_release: bool,
     /// Between `SYN_DROPPED` and the next `SYN_REPORT`: everything is discarded.
     dropping: bool,
     /// A `SYN_DROPPED` was handled; the backend should re-seed from the kernel.
@@ -478,6 +482,7 @@ impl TouchDecoder {
             slots: [SlotState::default(); SLOTS],
             has_tracking: false,
             has_mt_pos: false,
+            saw_release: false,
             dropping: false,
             resync: false,
         }
@@ -544,9 +549,22 @@ impl TouchDecoder {
             return None;
         }
         match (ev.ty, ev.code) {
-            (EV_ABS, ABS_MT_TRACKING_ID) => self.has_tracking = true,
+            (EV_ABS, ABS_MT_TRACKING_ID) => {
+                self.has_tracking = true;
+                if ev.value < 0 {
+                    self.saw_release = true;
+                }
+            }
             (EV_ABS, ABS_MT_POSITION_X) | (EV_ABS, ABS_MT_POSITION_Y) => self.has_mt_pos = true,
-            (EV_KEY, BTN_TOUCH) if self.has_tracking => return None,
+            (EV_KEY, BTN_TOUCH) if self.has_tracking => {
+                if ev.value == 0 && !self.saw_release {
+                    for s in self.slots.iter_mut().filter(|s| s.down || s.began) {
+                        s.ended = true;
+                        s.end_pos = s.pos;
+                    }
+                }
+                return None;
+            }
             (EV_ABS, ABS_X) | (EV_ABS, ABS_Y) if self.has_mt_pos => return None,
             _ => {}
         }
@@ -692,6 +710,28 @@ mod tests {
     fn run(events: &[RawEvent]) -> Vec<TouchFrame> {
         let mut d = TouchDecoder::new(TouchMapping::identity(1272, 1696));
         events.iter().filter_map(|e| d.feed(*e)).collect()
+    }
+
+    #[test]
+    fn snow_lift_is_btn_touch() {
+        // Kobo Clara BW: tracking id 0 at every touch, never -1; BTN_TOUCH 0 lifts.
+        let tap = |t: u64, x: i32| {
+            [
+                ev(t, EV_KEY, BTN_TOUCH, 1),
+                ev(t, EV_ABS, ABS_MT_TRACKING_ID, 0),
+                ev(t, EV_ABS, ABS_MT_POSITION_X, x),
+                ev(t, EV_ABS, ABS_MT_POSITION_Y, 200),
+                ev(t, EV_SYN, 2, 0), // SYN_MT_REPORT
+                ev(t, EV_SYN, SYN_REPORT, 0),
+                ev(t + 90, EV_ABS, ABS_MT_POSITION_X, x),
+                ev(t + 90, EV_KEY, BTN_TOUCH, 0),
+                ev(t + 90, EV_SYN, SYN_REPORT, 0),
+            ]
+        };
+        let events: Vec<RawEvent> = tap(0, 100).into_iter().chain(tap(1000, 300)).collect();
+        let phases: Vec<(TouchPhase, i32)> =
+            run(&events).iter().flat_map(|f| f.contacts.iter().map(|c| (c.phase, c.x))).collect();
+        assert_eq!(phases, [(TouchPhase::Down, 100), (TouchPhase::Up, 100), (TouchPhase::Down, 300), (TouchPhase::Up, 300)]);
     }
 
     #[test]

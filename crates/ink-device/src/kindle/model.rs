@@ -17,6 +17,7 @@
 //! generation Basic) are [`Tier::Unsupported`]. A Kindle whose code is not in the table
 //! gets [`Model::unknown`]: the refresh ioctl is then found by trying them in turn.
 
+use crate::platform::Platform;
 use crate::sysfs::SysRoot;
 
 /// The e-ink controller interface: struct layout and ioctl of a refresh.
@@ -31,6 +32,14 @@ pub enum Epdc {
     Rex,
     /// `mxcfb_update_data_mtk` (96 bytes), MediaTek: PW5 and newer.
     Mtk,
+    /// Kobo's `mxcfb_update_data_v2` (72 bytes), i.MX6SLL "Mark 7" and later: Clara
+    /// HD and 2E, Forma, Libra H2O and 2 (koreader-base `mxcfb_kobo_h.lua`). Same
+    /// request number as [`Epdc::Legacy`], another layout: never probed, only from the
+    /// model table.
+    KoboMxcfb,
+    /// Kobo's `hwtcon_update_data` (36 bytes), MediaTek: Clara BW and Colour, Libra
+    /// Colour, the Tolinos of 2024 (FBInk `mtk-kobo.h`).
+    KoboMtk,
 }
 
 impl Epdc {
@@ -44,6 +53,8 @@ impl Epdc {
             Epdc::Zelda => "mxcfb-zelda",
             Epdc::Rex => "mxcfb-rex",
             Epdc::Mtk => "mtk",
+            Epdc::KoboMxcfb => "kobo-mxcfb",
+            Epdc::KoboMtk => "kobo-hwtcon",
         }
     }
 }
@@ -88,6 +99,21 @@ pub struct Model {
     pub hall_dir: Option<&'static str>,
     /// Support level.
     pub tier: Tier,
+    /// Kindle or Kobo.
+    pub platform: Platform,
+    /// Touch transforms `(swap, mirror_x, mirror_y)` for the upright panel (Kobo:
+    /// KOReader's `touch_switch_xy`, `touch_mirrored_x`, `touch_mirrored_y`). `None`:
+    /// worked out from the axis ranges (Kindle).
+    pub touch: Option<(bool, bool, bool)>,
+    /// The framebuffer `rotate` value that shows the panel upright (Kobo: FBInk's
+    /// `rotationMap[FB_ROTATE_UR]`). `None`: any portrait one (Kindle).
+    pub upright: Option<u32>,
+    /// Sleep cover key code (Kobo: `KEY_F1`, a press when the cover closes).
+    pub cover_key: Option<u16>,
+    /// The driver's wait-for-update ioctl can be trusted. The Libra 2, Libra H2O,
+    /// Clara 2E and Nia's time out after 5 s now and then (KOReader
+    /// `hasReliableMxcWaitFor`): rinky never waits for completion on them.
+    pub reliable_wait: bool,
 }
 
 const WARIO_HALL: Option<&str> = Some("/sys/devices/system/wario_hall/wario_hall0");
@@ -112,6 +138,11 @@ const fn m(id: &'static str, name: &'static str, codes: &'static [&'static str],
         swipe: false,
         hall_dir: None,
         tier: Tier::Untested,
+        platform: Platform::Kindle,
+        touch: None,
+        upright: None,
+        cover_key: None,
+        reliable_wait: true,
     }
 }
 
@@ -248,6 +279,78 @@ pub const MODELS: &[Model] = &[
     },
 ];
 
+/// Kobo `KEY_F1`: the sleep cover (pressed = closed).
+const KOBO_COVER: Option<u16> = Some(59);
+/// Kobo page keys: 194 (`RPgFwd`) turns forward, 193 (`RPgBack`) back.
+const KOBO_KEYS: Option<(u16, u16)> = Some((194, 193));
+/// Swap the axes, then mirror x: most Kobos (KOReader's defaults).
+const SWAP_MIRROR_X: Option<(bool, bool, bool)> = Some((true, true, false));
+
+const fn kobo(id: &'static str, name: &'static str, codes: &'static [&'static str], epdc: Epdc) -> Model {
+    Model {
+        platform: Platform::Kobo,
+        warmth: true,
+        cover_key: KOBO_COVER,
+        touch: SWAP_MIRROR_X,
+        ..m(id, name, codes, epdc)
+    }
+}
+
+/// The Kobos with a 300 ppi screen and a display interface rinky drives, from KOReader
+/// (`frontend/device/kobo/device.lua`) and FBInk (`fbink_device_id.c`). Codes are the
+/// model numbers (the last three digits of `/mnt/onboard/.kobo/version`); a Tolino
+/// made by Kobo has the Kobo number plus 300. All warm-light models; touch, rotation
+/// and keys per model. The older ones (Glo HD, Aura ONE, the i.MX6SL boards) and the
+/// sunxi ones (Elipsa, Sage) are not here: other refresh interfaces.
+pub const KOBO_MODELS: &[Model] = &[
+    // Clara HD: snow touch protocol; FBInk's default map (UR is native CW).
+    Model { upright: Some(1), ..kobo("ClaraHD", "Kobo Clara HD", &["376"], Epdc::KoboMxcfb) },
+    // Forma: page keys; UR is native CCW.
+    Model {
+        upright: Some(3),
+        page_keys: KOBO_KEYS,
+        gsensor: true,
+        ..kobo("Forma", "Kobo Forma", &["377", "380"], Epdc::KoboMxcfb)
+    },
+    // Libra H2O: the only Kobo whose panel is natively portrait.
+    Model {
+        upright: Some(0),
+        page_keys: KOBO_KEYS,
+        gsensor: true,
+        reliable_wait: false,
+        ..kobo("LibraH2O", "Kobo Libra H2O", &["384"], Epdc::KoboMxcfb)
+    },
+    Model { upright: Some(3), reliable_wait: false, ..kobo("Clara2E", "Kobo Clara 2E", &["386"], Epdc::KoboMxcfb) },
+    // Libra 2: touch not mirrored; two hardware revisions (frontlight chip found in sysfs).
+    Model {
+        upright: Some(1),
+        touch: Some((true, false, false)),
+        page_keys: KOBO_KEYS,
+        gsensor: true,
+        reliable_wait: false,
+        ..kobo("Libra2", "Kobo Libra 2", &["388"], Epdc::KoboMxcfb)
+    },
+    // Libra Colour: Kaleido 3, shown in grayscale; touch mirrored in y.
+    Model {
+        upright: Some(1),
+        touch: Some((true, false, true)),
+        page_keys: KOBO_KEYS,
+        gsensor: true,
+        ..kobo("LibraColour", "Kobo Libra Colour", &["390"], Epdc::KoboMtk)
+    },
+    Model { upright: Some(3), ..kobo("ClaraBW", "Kobo Clara BW", &["391", "395"], Epdc::KoboMtk) },
+    Model { upright: Some(3), ..kobo("ClaraColour", "Kobo Clara Colour", &["393"], Epdc::KoboMtk) },
+    Model {
+        upright: Some(1),
+        touch: Some((true, false, true)),
+        page_keys: KOBO_KEYS,
+        gsensor: true,
+        ..kobo("TolinoVisionColor", "Tolino Vision Color", &["690"], Epdc::KoboMtk)
+    },
+    Model { upright: Some(3), ..kobo("TolinoShine5", "Tolino Shine (5th gen)", &["691", "695"], Epdc::KoboMtk) },
+    Model { upright: Some(3), ..kobo("TolinoShineColor", "Tolino Shine Color", &["693"], Epdc::KoboMtk) },
+];
+
 impl Model {
     /// A Kindle whose code is not in [`MODELS`]: the controller is probed, warmth is
     /// tried, nothing model-specific is assumed.
@@ -271,7 +374,13 @@ impl Model {
     pub fn by_name_or_code(s: &str) -> Option<Model> {
         let s = s.trim();
         let id = s.strip_prefix("Kindle").unwrap_or(s);
-        MODELS.iter().find(|m| m.id.eq_ignore_ascii_case(id)).copied().or_else(|| Model::by_code(s))
+        MODELS
+            .iter()
+            .chain(KOBO_MODELS)
+            .find(|m| m.id.eq_ignore_ascii_case(id) || m.id.eq_ignore_ascii_case(s))
+            .copied()
+            .or_else(|| Model::by_code(s))
+            .or_else(|| KOBO_MODELS.iter().find(|m| m.codes.contains(&s)).copied())
     }
 
     /// The model this serial number belongs to; [`Model::unknown`] otherwise.
@@ -279,13 +388,35 @@ impl Model {
         device_code(serial).and_then(Model::by_code).unwrap_or_else(Model::unknown)
     }
 
-    /// The running Kindle: `RINKY_MODEL`, else `/proc/usid`.
+    /// The running e-reader: `RINKY_MODEL`, else on a Kobo the model number in
+    /// `/mnt/onboard/.kobo/version`, on a Kindle `/proc/usid`.
     pub fn detect(sys: &SysRoot) -> Model {
+        Model::detect_on(Platform::detect(), sys)
+    }
+
+    /// [`Model::detect`] for a given platform.
+    pub fn detect_on(platform: Platform, sys: &SysRoot) -> Model {
         if let Some(m) = std::env::var("RINKY_MODEL").ok().and_then(|v| Model::by_name_or_code(&v)) {
             return m;
         }
-        let serial = sys.read("/proc/usid").unwrap_or_default();
-        Model::from_serial(&serial)
+        match platform {
+            Platform::Kindle => Model::from_serial(&sys.read("/proc/usid").unwrap_or_default()),
+            Platform::Kobo => Model::from_kobo_version(&sys.read("/mnt/onboard/.kobo/version").unwrap_or_default()),
+        }
+    }
+
+    /// A Kobo from its `version` file (`SERIAL,kernel,firmware,…,00000000-0000-0000-0000-000000000388`):
+    /// the last three digits are the model number; [`Model::unknown_kobo`] otherwise.
+    pub fn from_kobo_version(version: &str) -> Model {
+        let id = version.trim();
+        let code = id.get(id.len().saturating_sub(3)..).unwrap_or("");
+        KOBO_MODELS.iter().find(|m| m.codes.contains(&code)).copied().unwrap_or_else(Model::unknown_kobo)
+    }
+
+    /// A Kobo whose number is not in [`KOBO_MODELS`]: the refresh interface comes from
+    /// the framebuffer driver's name ([`Model::unknown_kobo_with`]).
+    pub const fn unknown_kobo() -> Model {
+        Model { tier: Tier::Unsupported("not in rinky's Kobo table"), ..kobo("KoboUnknown", "Kobo (unknown model)", &[], Epdc::KoboMxcfb) }
     }
 
     /// One log line: name, id, controller and support level.
@@ -336,6 +467,28 @@ mod tests {
             for c in m.codes {
                 assert!(seen.insert(*c), "{c} twice");
                 assert_eq!(Model::by_code(c).unwrap().id, m.id);
+            }
+        }
+    }
+
+    #[test]
+    fn kobo_models_from_the_version_file() {
+        let v = "N418123456789,4.1.15,4.38.23852,4.1.15,4.1.15,00000000-0000-0000-0000-000000000388\n";
+        let m = Model::from_kobo_version(v);
+        assert_eq!((m.id, m.epdc, m.platform), ("Libra2", Epdc::KoboMxcfb, Platform::Kobo));
+        assert_eq!((m.upright, m.touch, m.page_keys, m.cover_key), (Some(1), Some((true, false, false)), Some((194, 193)), Some(59)));
+        assert!(!m.reliable_wait && m.warmth);
+        // The emulator's Tolino Shine 5: Kobo Clara BW + 300.
+        let t = Model::from_kobo_version("TQEMU00000000,4.9.77,5.12.232736,4.9.77,4.9.77,00000000-0000-0000-0000-000000000691");
+        assert_eq!((t.id, t.epdc, t.upright, t.touch), ("TolinoShine5", Epdc::KoboMtk, Some(3), Some((true, true, false))));
+        assert_eq!(Model::from_kobo_version("x,y,z,00000000-0000-0000-0000-000000000999").id, "KoboUnknown");
+        assert_eq!(Model::by_name_or_code("libra2").unwrap().id, "Libra2");
+        assert_eq!(Model::by_name_or_code("390").unwrap().id, "LibraColour");
+        let mut seen = std::collections::HashSet::new();
+        for m in KOBO_MODELS {
+            assert!(m.upright.is_some() && m.touch.is_some() && m.platform == Platform::Kobo, "{}", m.id);
+            for c in m.codes {
+                assert!(seen.insert(*c), "{c} twice");
             }
         }
     }

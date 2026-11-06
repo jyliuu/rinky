@@ -45,6 +45,16 @@ impl KoreaderDirs {
         KoreaderDirs { root: PathBuf::from("/mnt/us/koreader") }
     }
 
+    /// KOReader on this e-reader: `/mnt/us/koreader`, or `/mnt/onboard/.adds/koreader`
+    /// on a Kobo.
+    pub fn device() -> Self {
+        if crate::platform::on_kobo() {
+            KoreaderDirs { root: PathBuf::from("/mnt/onboard/.adds/koreader") }
+        } else {
+            KoreaderDirs::kindle()
+        }
+    }
+
     /// `settings/`.
     pub fn settings_dir(&self) -> PathBuf {
         self.root.join("settings")

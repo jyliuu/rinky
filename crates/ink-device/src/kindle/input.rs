@@ -23,6 +23,7 @@ use crate::input::{Input, InputEvent, Key, KeyEvent, PowerEvent, Timestamp, Touc
 use crate::journal::Entry;
 use crate::light::AmberScheduler;
 use crate::lipc::{EventHub, Lipc, LipcValue};
+use crate::platform::Platform;
 use crate::screen::RefreshClass;
 use crate::sleep::{Resume, SleepController, SleepPlatform, SleepState};
 use crate::sysfs::SysRoot;
@@ -371,13 +372,19 @@ pub struct LoopOptions {
     pub heartbeat: Option<PathBuf>,
 }
 
+/// The key device, its page keys `(next, previous)` and its cover key.
+type KeyDevice = (File, Option<(u16, u16)>, Option<u16>);
+
 /// Kindle input and the device policies.
 pub struct KindleInput {
     shared: Rc<RefCell<Shared>>,
     touch: TouchDev,
     power: Option<File>,
-    /// Page keys (Voyage, Oasis) and their (next, previous) codes.
-    page_keys: Option<(File, (u16, u16))>,
+    /// Running on a Kobo (sleep without powerd, no lipc).
+    kobo: bool,
+    /// The key device with the page keys `(next, previous)` and the sleep cover key
+    /// (Kobo), as far as the model has them.
+    page_keys: Option<KeyDevice>,
     lipc: Lipc,
     sys: SysRoot,
     opts: LoopOptions,
@@ -404,6 +411,7 @@ pub struct KindleInput {
 }
 
 struct Plat<'a> {
+    kobo: bool,
     shared: &'a RefCell<Shared>,
     touch: &'a mut TouchDev,
     sys: &'a SysRoot,
@@ -484,8 +492,9 @@ impl SleepPlatform for Plat<'_> {
             });
         } else {
             // A crash while asleep must not leave the light off: the launcher re-sets
-            // powerd's level, which makes powerd drive the LEDs again.
-            if let Ok(v) = self.lipc.get_int("com.lab126.powerd", "flIntensity") {
+            // powerd's level, which makes powerd drive the LEDs again. (Kobo: Nickel
+            // sets its own level when it starts.)
+            if let Some(v) = (!self.kobo).then(|| self.lipc.get_int("com.lab126.powerd", "flIntensity").ok()).flatten() {
                 let sh = self.shared.borrow();
                 let _ = sh.journal.record(Entry::LipcInt {
                     publisher: "com.lab126.powerd".into(),
@@ -500,7 +509,11 @@ impl SleepPlatform for Plat<'_> {
 
     fn suspend(&mut self, rtc_wake: Option<Duration>) -> Result<Resume> {
         let mut lines = Vec::new();
-        let r = system::kernel_suspend(self.sys, rtc_wake, &mut |s| lines.push(s));
+        let r = if self.kobo {
+            system::kobo_suspend(self.sys, rtc_wake, &mut |s| lines.push(s))
+        } else {
+            system::kernel_suspend(self.sys, rtc_wake, &mut |s| lines.push(s))
+        };
         for l in lines {
             log::info!("suspend: {l}");
         }
@@ -512,6 +525,9 @@ impl SleepPlatform for Plat<'_> {
     }
 
     fn defer_powerd(&mut self, d: Duration) {
+        if self.kobo {
+            return;
+        }
         // Best effort: with lab126_gui stopped powerd refuses (lipcPropErrInvalidState);
         // the deferral is kept by rinky's own controller either way.
         if let Err(e) = self.lipc.set_int("com.lab126.powerd", "deferSuspend", d.as_secs() as i64) {
@@ -524,20 +540,28 @@ impl KindleInput {
     /// Opens touch, power key and the event sources.
     pub(crate) fn open(shared: Rc<RefCell<Shared>>, lipc: Lipc, sys: SysRoot, opts: LoopOptions) -> Result<Self> {
         let size = crate::Screen::panel_size(&shared.borrow().screen);
-        let ov = TouchOverride::parse(&std::env::var("RINKY_TOUCH").unwrap_or_default());
+        let model = shared.borrow().screen.model;
+        let mut ov = TouchOverride::parse(&std::env::var("RINKY_TOUCH").unwrap_or_default());
+        if ov.transforms.is_none() {
+            // Kobo: the model's transforms for the upright panel.
+            ov.transforms = model.touch;
+        }
         let touch = TouchDev::open(size.w, size.h, opts.grab_touch, &ov)?;
         let devs = list_devices();
-        let model = shared.borrow().screen.model;
         let power = power_key_device(&devs).and_then(|d| {
             log::info!("power key: {} ({})", d.name, d.event);
             File::open(format!("/dev/input/{}", d.event)).ok()
         });
-        let page_keys = model.page_keys.and_then(|codes| {
-            let d = page_key_device(&devs, codes)?;
-            log::info!("page keys: {} ({}), next {} previous {}", d.name, d.event, codes.0, codes.1);
-            Some((File::open(format!("/dev/input/{}", d.event)).ok()?, codes))
+        let key_dev = match (model.page_keys, model.cover_key) {
+            (Some(codes), _) => page_key_device(&devs, codes),
+            (None, Some(cover)) => devs.iter().find(|d| !d.has_abs && d.has_key(cover)),
+            (None, None) => None,
+        };
+        let page_keys = key_dev.and_then(|d| {
+            log::info!("keys: {} ({}), pages {:?} (next, previous), cover {:?}", d.name, d.event, model.page_keys, model.cover_key);
+            Some((File::open(format!("/dev/input/{}", d.event)).ok()?, model.page_keys, model.cover_key))
         });
-        if model.pressure_keys {
+        if model.pressure_keys && model.platform == Platform::Kindle {
             // The Voyage's side keys stay off while the framework is stopped (KOReader).
             for p in ["fsrkeypadEnable", "fsrkeypadPrevEnable", "fsrkeypadNextEnable"] {
                 if let Err(e) = lipc.set_int("com.lab126.deviced", p, 1) {
@@ -547,6 +571,7 @@ impl KindleInput {
         }
         let now = Instant::now();
         let mut me = KindleInput {
+            kobo: model.platform == Platform::Kobo,
             shared,
             touch,
             power,
@@ -613,7 +638,7 @@ impl KindleInput {
             me.opts.sleep.as_ref().map(|c| (c.auto_sleep, c.suspend)),
             me.opts.sleep.as_ref().map(|c| c.cover)
         );
-        if me.opts.sleep.is_some() {
+        if me.opts.sleep.is_some() && model.platform == Platform::Kindle {
             me.keep_powerd_out_of_screensaver();
         }
         // Read only: KOReader's hall toggle writes hall_enable; rinky never does.
@@ -664,6 +689,7 @@ impl KindleInput {
         (
             self.sleep.as_mut(),
             Plat {
+                kobo: self.kobo,
                 shared: &self.shared,
                 touch: &mut self.touch,
                 sys: &self.sys,
@@ -949,7 +975,12 @@ impl KindleInput {
 
     /// A page key: `Key::PageNext` / `Key::PagePrev` while awake (and unlocked).
     fn handle_page_key(&mut self, ev: RawEvent, now: Instant) {
-        let Some((_, (next, prev))) = self.page_keys else { return };
+        let Some((_, pages, cover)) = self.page_keys else { return };
+        if ev.ty == EV_KEY && Some(ev.code) == cover && ev.value != 2 {
+            self.handle_cover(ev.value == 1, CoverSource::Key, now);
+            return;
+        }
+        let Some((next, prev)) = pages else { return };
         let key = match ev.code {
             c if ev.ty == EV_KEY && c == next => Key::PageNext,
             c if ev.ty == EV_KEY && c == prev => Key::PagePrev,
@@ -1157,7 +1188,7 @@ impl Input for KindleInput {
                 fds.len() - 1
             };
             let power_idx = self.power.as_ref().map(|p| add(p.as_raw_fd(), libc::POLLIN));
-            let keys_idx = self.page_keys.as_ref().map(|(f, _)| add(f.as_raw_fd(), libc::POLLIN));
+            let keys_idx = self.page_keys.as_ref().map(|(f, _, _)| add(f.as_raw_fd(), libc::POLLIN));
             let lipc_idx = self.hub.as_ref().map(|(_, rd)| add(rd.as_raw_fd(), libc::POLLIN));
             let uevent_idx = self.uevent.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLIN));
             let udc_idx = self.udc.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLPRI | libc::POLLERR));
@@ -1195,7 +1226,7 @@ impl Input for KindleInput {
             if let Some(i) = keys_idx {
                 if fds[i].revents & libc::POLLIN != 0 {
                     let evs = match self.page_keys.as_mut() {
-                        Some((f, _)) => read_raw(f)?,
+                        Some((f, _, _)) => read_raw(f)?,
                         None => Vec::new(),
                     };
                     for ev in evs {

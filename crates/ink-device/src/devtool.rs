@@ -102,7 +102,27 @@ mod kindle {
     }
 
     fn open_full() -> Result<Device> {
-        kindle::open(KindleOptions { power_events: true, ..Default::default() })
+        let opts = KindleOptions { power_events: true, ..Default::default() };
+        if kobo() {
+            return crate::kobo::open(opts);
+        }
+        kindle::open(opts)
+    }
+
+    fn kobo() -> bool {
+        crate::platform::Platform::detect() == crate::platform::Platform::Kobo
+    }
+
+    /// Light, battery and Wi-Fi of this e-reader without the input loop.
+    trait Services: Light + Battery + Wifi {}
+    impl<T: Light + Battery + Wifi> Services for T {}
+
+    fn services(lipc: Lipc) -> Box<dyn Services> {
+        if kobo() {
+            Box::new(crate::kobo::services::KoboServices::new(None, SysRoot::system(), None))
+        } else {
+            Box::new(LipcServices::standalone(lipc))
+        }
     }
 
     fn mark(canvas: &mut Canvas, p: Point, n: u32) -> Rect {
@@ -146,8 +166,14 @@ mod kindle {
     fn info() -> Result<()> {
         let sys = SysRoot::system();
         let model = crate::kindle::model::Model::detect(&sys);
-        let serial = sys.read("/proc/usid").unwrap_or_default();
-        out!("model: {} (code {:?})", model.describe(), crate::kindle::model::device_code(&serial));
+        if kobo() {
+            out!("model: {} (Kobo {:?}, firmware {})", model.describe(), model.codes.first(), crate::kobo::firmware());
+            let w = crate::kobo::wifi::env();
+            out!("wifi: module {} interface {} platform {}", w.module, w.interface, w.platform);
+        } else {
+            let serial = sys.read("/proc/usid").unwrap_or_default();
+            out!("model: {} (code {:?})", model.describe(), crate::kindle::model::device_code(&serial));
+        }
         let devs = input::list_devices();
         for d in &devs {
             out!("input: {:<16} {:<7} abs {} mt {} keys {}", d.name, d.event, d.has_abs, d.has_mt, d.key_bits);
@@ -485,7 +511,7 @@ mod kindle {
     }
 
     fn wifi(args: &[String]) -> Result<i32> {
-        let mut w = LipcServices::standalone(Lipc::new().with_timeout(Duration::from_secs(10)));
+        let mut w = services(Lipc::new().with_timeout(Duration::from_secs(10)));
         let password = || -> Result<Option<String>> {
             if flag(args, "--password-stdin") {
                 let mut s = String::new();
@@ -496,7 +522,7 @@ mod kindle {
             }
         };
         match args.first().map(String::as_str) {
-            Some("status") | None => out!("{:?}", Wifi::state(&w)?),
+            Some("status") | None => out!("{:?}", Wifi::state(w.as_ref())?),
             Some("scan") => {
                 for n in w.scan()? {
                     out!("{n:?}");
@@ -523,7 +549,7 @@ mod kindle {
                 let essid = args.get(1).ok_or_else(|| DeviceError::Backend("connect needs ESSID".into()))?;
                 let t = Instant::now();
                 w.connect(essid, password()?.as_deref())?;
-                out!("connected to {essid} in {} ms: {:?}", t.elapsed().as_millis(), Wifi::state(&w)?);
+                out!("connected to {essid} in {} ms: {:?}", t.elapsed().as_millis(), Wifi::state(w.as_ref())?);
             }
             Some("create") => {
                 let essid = args.get(1).ok_or_else(|| DeviceError::Backend("create needs ESSID".into()))?;
@@ -544,7 +570,7 @@ mod kindle {
     }
 
     fn light(args: &[String]) -> Result<()> {
-        let mut l = LipcServices::standalone(Lipc::new());
+        let mut l = services(Lipc::new());
         if let Some(b) = args.first().and_then(|v| v.parse().ok()) {
             l.set_brightness(b)?;
         }
@@ -579,15 +605,19 @@ mod kindle {
     }
 
     fn battery() -> Result<()> {
-        let b = LipcServices::standalone(Lipc::new());
+        let b = services(Lipc::new());
         out!("{:?}", b.info()?);
+        if kobo() {
+            return Ok(());
+        }
         let lipc = Lipc::new();
         out!("powerd battLevel {:?} isCharging {:?}", lipc.get_int("com.lab126.powerd", "battLevel"), lipc.get_int("com.lab126.powerd", "isCharging"));
         Ok(())
     }
 
     fn clock(args: &[String]) -> Result<i32> {
-        let mut c = kindle::services::KindleClock { lipc: Lipc::new(), ntp_server: KindleOptions::default().ntp_server };
+        let ntp_server = if kobo() { Some("pool.ntp.org".to_string()) } else { KindleOptions::default().ntp_server };
+        let mut c = kindle::services::KindleClock { lipc: Lipc::new(), ntp_server };
         match args.first().map(String::as_str) {
             Some("now") | None => out!("local {} (utc {})", c.local_now().format(), crate::clock::DateTime::from_unix(crate::clock::unix_secs(c.now()), 0).format()),
             Some("ntp") => {
@@ -614,6 +644,7 @@ mod kindle {
         let lipc = Lipc::new();
         for e in &entries {
             let r = match e {
+                Entry::LipcInt { .. } | Entry::LipcStr { .. } if kobo() => continue,
                 Entry::LipcInt { publisher, prop, value } => lipc.set_int(publisher, prop, *value),
                 Entry::LipcStr { publisher, prop, value } => lipc.set_str(publisher, prop, value),
                 Entry::Fb { .. } => continue,

@@ -22,6 +22,9 @@ Contents:
 10. [Files rinky writes](#10-files-rinky-writes)
 11. [License](#11-license)
 
+This guide is written for the Kindle. On a Kobo, rinky works the same once it runs;
+installing, starting and a few details differ: see [rinky on Kobo](kobo.md).
+
 ## 1. Before you start
 
 You need:

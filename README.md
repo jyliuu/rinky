@@ -6,13 +6,14 @@
 </p>
 
 <p align="center">
-  An e-book reader for Kindle e-readers, written in Rust.
+  An e-book reader for Kindle and Kobo e-readers, written in Rust.
 </p>
 
 <p align="center">
   <a href="../../releases/latest">Download</a> ·
   <a href="#install">Install</a> ·
   <a href="docs/user-guide.md">User guide</a> ·
+  <a href="docs/kobo.md">Kobo</a> ·
   <a href="docs/plugins.md">Plugins</a>
 </p>
 
@@ -75,6 +76,10 @@ turns don't stall, and long books are paginated in the background while you star
 reading.
 
 ## Install
+
+On a **Kobo**, see [rinky on Kobo](docs/kobo.md): no jailbreak, started from
+NickelMenu; Kobo support is new and has run in an emulator only. The rest of this
+section is about Kindles.
 
 You need a jailbroken Kindle (see [kindlemodding.org](https://kindlemodding.org/)) with
 KUAL installed. rinky is developed on the Paperwhite 12th generation (2024) on firmware

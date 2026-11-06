@@ -5,15 +5,17 @@
 //! 1. GET the release description from the configured URL. The format is GitHub's
 //!    `GET /repos/OWNER/REPO/releases/latest` answer: `tag_name` and
 //!    `assets[].{name, browser_download_url, size, digest}`.
-//! 2. Pick the package asset `rinky-<version>-kindlehf.tar.gz` (built by
-//!    `scripts/package.sh`) and find its SHA-256: the `SHA256SUMS` asset of the release
+//! 2. Pick the package asset `rinky-<version>-kindlehf.tar.gz`, on a Kobo
+//!    `rinky-<version>-kobo.tar.gz` (both built by `scripts/package.sh`), and find its
+//!    SHA-256: the `SHA256SUMS` asset of the release
 //!    and/or the asset's `digest` (`sha256:<hex>`, which GitHub fills in). No checksum:
 //!    refuse. Both present and different: refuse.
 //! 3. Download the package with a size limit, hashing while writing. A wrong size or
 //!    hash deletes the download and refuses.
 //! 4. Unpack it (gzip + ustar) with checks: only regular files and directories under
-//!    `rinky/` and `extensions/rinky/`, no absolute paths, no `..`. The file is
-//!    hashed again while it is unpacked and must still have the expected SHA-256; the
+//!    `rinky/` and `extensions/rinky/` (`nm/rinky` in the Kobo package), no absolute
+//!    paths, no `..`. The file is hashed again while it is unpacked and must still have
+//!    the expected SHA-256; the
 //!    gzip CRC is checked too. The package's `rinky/VERSION` must name the release's
 //!    version.
 //! 5. Run the package's own `rinky/install.sh --upgrade`, the same installer as a
@@ -60,8 +62,19 @@ pub const DEFAULT_RELEASE_URL: &str = match option_env!("RINKY_RELEASE_URL") {
 pub const SUMS_ASSET: &str = "SHA256SUMS";
 /// Package asset names start with this ...
 pub const PACKAGE_PREFIX: &str = "rinky-";
-/// ... and end with this.
+/// ... and end with this (the Kindle package) ...
 pub const PACKAGE_SUFFIX: &str = "-kindlehf.tar.gz";
+/// ... or this, on a Kobo.
+pub const KOBO_PACKAGE_SUFFIX: &str = "-kobo.tar.gz";
+
+/// The package suffix of the e-reader this runs on.
+pub fn package_suffix() -> &'static str {
+    if ink_store::platform::on_kobo() {
+        KOBO_PACKAGE_SUFFIX
+    } else {
+        PACKAGE_SUFFIX
+    }
+}
 /// Default download limit for the package.
 pub const MAX_PACKAGE_BYTES: u64 = 64 << 20;
 /// Limit for the unpacked package.
@@ -289,11 +302,13 @@ fn is_hex64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// True for `rinky-<version>-kindlehf.tar.gz` with a plain file name.
+/// True for `rinky-<version>-kindlehf.tar.gz` (on a Kobo `rinky-<version>-kobo.tar.gz`)
+/// with a plain file name.
 pub fn is_package_name(name: &str) -> bool {
-    name.len() > PACKAGE_PREFIX.len() + PACKAGE_SUFFIX.len()
+    let suffix = package_suffix();
+    name.len() > PACKAGE_PREFIX.len() + suffix.len()
         && name.starts_with(PACKAGE_PREFIX)
-        && name.ends_with(PACKAGE_SUFFIX)
+        && name.ends_with(suffix)
         && !name.contains("..")
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
@@ -322,14 +337,15 @@ pub fn parse_release(body: &[u8]) -> Result<Release> {
     }
     let mut packages: Vec<&Asset> = assets.iter().filter(|a| is_package_name(&a.name)).collect();
     // Prefer the package whose name carries the tag's version.
-    let exact = format!("{PACKAGE_PREFIX}{version}{PACKAGE_SUFFIX}");
+    let suffix = package_suffix();
+    let exact = format!("{PACKAGE_PREFIX}{version}{suffix}");
     if packages.len() > 1 {
         packages.retain(|a| a.name == exact);
     }
     let package = match packages.as_slice() {
         [one] => (*one).clone(),
-        [] => return Err(UpdateError::Release(format!("{tag} has no asset named {PACKAGE_PREFIX}<version>{PACKAGE_SUFFIX}"))),
-        _ => return Err(UpdateError::Release(format!("{tag} has several Kindle packages"))),
+        [] => return Err(UpdateError::Release(format!("{tag} has no asset named {PACKAGE_PREFIX}<version>{suffix}"))),
+        _ => return Err(UpdateError::Release(format!("{tag} has several {} packages", ink_store::platform::device_name()))),
     };
     let sums = assets.iter().find(|a| a.name == SUMS_ASSET).cloned();
     Ok(Release { tag: tag.to_string(), version, package, sums })
@@ -545,8 +561,8 @@ fn safe_entry_path(name: &str) -> Result<String> {
     if n.is_empty() || parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
         return bad("empty, . or .. component");
     }
-    if !matches!(parts.as_slice(), ["rinky", ..] | ["extensions"] | ["extensions", "rinky", ..]) {
-        return bad("outside rinky/ and extensions/rinky/");
+    if !matches!(parts.as_slice(), ["rinky", ..] | ["extensions"] | ["extensions", "rinky", ..] | ["nm"] | ["nm", "rinky"]) {
+        return bad("outside rinky/, extensions/rinky/ and nm/rinky");
     }
     Ok(n.to_string())
 }

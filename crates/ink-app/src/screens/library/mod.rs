@@ -361,7 +361,7 @@ impl LibraryScreen {
             search_due: None,
             opened: None,
             import_result: None,
-            ko: KoreaderDirs::kindle(),
+            ko: KoreaderDirs::device(),
             last_paint: Instant::now(),
             prefs: None,
             refusal: None,

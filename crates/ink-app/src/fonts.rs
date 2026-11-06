@@ -59,7 +59,7 @@ pub fn font_dirs() -> Vec<PathBuf> {
         dirs.extend(v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
     // Never KOReader's folders.
-    dirs.retain(|d| !d.starts_with("/mnt/us/koreader"));
+    dirs.retain(|d| !d.starts_with("/mnt/us/koreader") && !d.starts_with("/mnt/onboard/.adds/koreader"));
     dirs.dedup();
     dirs
 }
@@ -241,8 +241,15 @@ pub enum UiFallback {
 /// Noto Sans Regular shipped with rinky (all IPA of the Oxford dictionaries, a sans
 /// face like most UI fonts), the embedded Noto Serif, then two Kindle system fonts for
 /// symbols (`Kindle_Symbol`: arrows, ▪, suits; `code2000`: ∫ ≠ ◇ ✗ and the rest).
-pub const UI_FALLBACKS: &[&str] =
-    &["/mnt/us/rinky/fonts/NotoSans-Regular.ttf", "builtin", "/usr/java/lib/fonts/Kindle_Symbol.ttf", "/usr/java/lib/fonts/code2000.ttf"];
+/// On a Kobo the Noto Sans file is in rinky's folder there; the Kindle symbol fonts are
+/// simply missing.
+pub const UI_FALLBACKS: &[&str] = &[
+    "/mnt/us/rinky/fonts/NotoSans-Regular.ttf",
+    "/mnt/onboard/.adds/rinky/fonts/NotoSans-Regular.ttf",
+    "builtin",
+    "/usr/java/lib/fonts/Kindle_Symbol.ttf",
+    "/usr/java/lib/fonts/code2000.ttf",
+];
 
 /// Environment variable replacing [`UI_FALLBACKS`]: colon-separated font files, the word
 /// `builtin` for the embedded Noto Serif (tests and the host).

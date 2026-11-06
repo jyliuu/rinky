@@ -18,6 +18,15 @@ All notable changes to rinky are listed here. The format is based on
 - The user guide explains how to get each Kindle ready (jailbreak, KUAL, USB drive or
   MTP) and what differs between models.
 - `rinky sim --panel WxH` renders the simulator at another screen size.
+- rinky runs on Kobo e-readers with a 300 ppi screen: Libra 2, Clara HD, Clara 2E,
+  Forma, Libra H2O, Clara BW and Colour, Libra Colour, and the Tolinos made by Kobo.
+  It is the same binary; a Kobo package (`rinky-<version>-kobo.zip`, `.tar.gz`)
+  installs it in `.adds/rinky` with a NickelMenu entry. The launcher stops Kobo's own
+  software while rinky runs and starts it again afterwards. Light, warmth, battery,
+  sleep and Wi-Fi (with the Kobo's saved networks) work without it; the in-app update
+  fetches the Kobo package. Tried in an emulator on the Libra 2 (Kobo firmware 4.38)
+  and the Tolino Shine 5 (the Clara BW inside); untested on real Kobos. See
+  `docs/kobo.md`.
 
 ### Changed
 - The "Page turn wave" switch is shown only on Kindles whose screen can sweep a page

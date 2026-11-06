@@ -46,10 +46,10 @@ pub(crate) fn list_dir(dir: &Path) -> Result<Vec<FileEntry>, String> {
     Ok(v)
 }
 
-/// Where the browser starts: `/mnt/us` on a Kindle, else the folder above the first
-/// library folder, else `/`.
+/// Where the browser starts: the user storage on the e-reader (`/mnt/us`,
+/// `/mnt/onboard`), else the folder above the first library folder, else `/`.
 pub(crate) fn start_dir(library_dirs: &[PathBuf]) -> PathBuf {
-    let us = Path::new("/mnt/us");
+    let us = Path::new(ink_store::platform::user_root());
     if us.is_dir() {
         return us.to_path_buf();
     }

@@ -47,6 +47,7 @@ pub mod input;
 pub mod journal;
 pub mod light;
 pub mod lipc;
+pub mod platform;
 pub mod screen;
 pub mod screensaver;
 pub mod script;
@@ -60,6 +61,8 @@ pub mod wifi;
 
 #[cfg(target_os = "linux")]
 pub mod kindle;
+#[cfg(target_os = "linux")]
+pub mod kobo;
 #[cfg(all(feature = "sim", not(target_arch = "arm")))]
 pub mod sim;
 
@@ -98,7 +101,7 @@ pub type Result<T, E = DeviceError> = std::result::Result<T, E>;
 /// Which backend a [`Device`] uses and what it runs on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {
-    /// `kindle`, `sim` or `headless`.
+    /// `kindle`, `kobo`, `sim` or `headless`.
     pub backend: &'static str,
     /// Model name (`Kindle Paperwhite 4 (10th gen)`).
     pub model: String,

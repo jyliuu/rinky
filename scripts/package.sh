@@ -17,6 +17,10 @@
 #   rinky-V-kindlehf.tar.gz          the install package (SSH install, in-app update)
 #   rinky-V-kindlehf.tar.gz.sha256   its SHA-256 (sha256sum format)
 #   rinky-V-kindle.zip               the same files as a zip, for copying over USB
+#   rinky-V-kobo.tar.gz (.sha256)    the Kobo package (same binary; Kobo launcher,
+#                                    NickelMenu entry nm/rinky)
+#   rinky-V-kobo.zip                 the Kobo files laid out as the drive (.adds/rinky,
+#                                    .adds/nm/rinky), for copying over USB
 #   SHA256SUMS                       both lines; upload it to the GitHub release next
 #                                    to the packages (the in-app update needs it)
 #
@@ -188,7 +192,51 @@ ZIP=$OUT/rinky-$VERSION-kindle.zip
 rm -f "$ZIP"
 (cd "$STAGE" && LC_ALL=C sort rinky/FILES | TZ=UTC zip -q -X -D "$ZIP" -@)
 
-(cd "$OUT" && sha256 "$NAME.tar.gz" >"$NAME.tar.gz.sha256" && { cat "$NAME.tar.gz.sha256"; sha256 "$(basename "$ZIP")"; } >SHA256SUMS)
+# The Kobo package: the same binary; the Kobo launcher instead of the Kindle's three
+# scripts, the NickelMenu entry (nm/rinky) instead of the KUAL menu, no dropbear.
+# rinky/ installs to /mnt/onboard/.adds/rinky, nm/rinky to /mnt/onboard/.adds/nm/rinky
+# (install.sh tells the two packages apart by nm/rinky).
+KNAME=rinky-$VERSION-kobo
+KSTAGE=$STAGE/kobo
+KP=$KSTAGE/rinky
+mkdir -p "$KP/fonts" "$KSTAGE/nm"
+install -m 755 "$BIN" "$KP/rinky"
+install -m 755 packaging/kobo/rinky.sh "$KP/rinky.sh"
+install -m 755 packaging/install.sh "$KP/install.sh"
+install -m 644 packaging/README.txt "$KP/README.txt"
+install -m 644 docs/user-guide.md "$KP/user-guide.md"
+install -m 644 LICENSE "$KP/LICENSE"
+install -m 644 fonts/LICENSE-Noto "$KP/LICENSE-Noto"
+install -m 644 fonts/ui/NotoSans-Regular.ttf "$KP/fonts/NotoSans-Regular.ttf"
+install -m 644 packaging/kobo/nm-rinky "$KSTAGE/nm/rinky"
+cp "$P/VERSION" "$KP/VERSION"
+(cd "$KSTAGE" && { find rinky nm -type f; echo rinky/FILES; echo rinky/SHA256SUMS; } | LC_ALL=C sort -u >rinky/FILES)
+(cd "$KSTAGE" && grep -vx 'rinky/SHA256SUMS' rinky/FILES | while IFS= read -r f; do sha256 "$f"; done >rinky/SHA256SUMS)
+KPKG=$OUT/$KNAME.tar.gz
+rm -f "$KPKG" "$KPKG.sha256"
+KLIST=$(cd "$KSTAGE" && { find rinky nm -type d; cat rinky/FILES; } | LC_ALL=C sort -u)
+if tar --version 2>/dev/null | grep -q bsdtar; then
+  (cd "$KSTAGE" && echo "$KLIST" | COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
+      --no-xattrs --no-mac-metadata --no-recursion -czf "$KPKG" -T -)
+else
+  (cd "$KSTAGE" && echo "$KLIST" | tar --format=ustar --owner=0 --group=0 --numeric-owner --no-recursion \
+      -czf "$KPKG" -T -)
+fi
+listed=$(tar -tzf "$KPKG" | grep -v '/$' | LC_ALL=C sort)
+[ "$listed" = "$(LC_ALL=C sort "$KSTAGE/rinky/FILES")" ] || die "Kobo archive contents differ from FILES"
+# Zip for USB installs, laid out as the Kobo drive: .adds/rinky and .adds/nm/rinky.
+KZ=$STAGE/kobo-zip
+mkdir -p "$KZ/.adds/nm"
+cp -R "$KP" "$KZ/.adds/rinky"
+cp "$KSTAGE/nm/rinky" "$KZ/.adds/nm/rinky"
+KZIP=$OUT/$KNAME.zip
+rm -f "$KZIP"
+(cd "$KZ" && { find .adds -type f | LC_ALL=C sort; } | TZ=UTC zip -q -X -D "$KZIP" -@)
+
+(cd "$OUT" && sha256 "$NAME.tar.gz" >"$NAME.tar.gz.sha256" && sha256 "$KNAME.tar.gz" >"$KNAME.tar.gz.sha256" &&
+  { cat "$NAME.tar.gz.sha256"; sha256 "$(basename "$ZIP")"; cat "$KNAME.tar.gz.sha256"; sha256 "$KNAME.zip"; } >SHA256SUMS)
 log "$(wc -l <"$STAGE/rinky/FILES" | tr -d ' ') files, $(du -k "$PKG" | cut -f1) KiB"
 log "sha256 $(head -1 "$OUT/SHA256SUMS" | cut -d' ' -f1)"
+log "kobo: $(wc -l <"$KSTAGE/rinky/FILES" | tr -d ' ') files, $(du -k "$KPKG" | cut -f1) KiB"
 echo "$PKG"
+echo "$KPKG"

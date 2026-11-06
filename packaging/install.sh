@@ -5,6 +5,8 @@
 #
 # Copies the package's rinky/ folder to /mnt/us/rinky and its
 # extensions/rinky/ folder (the KUAL menu) to /mnt/us/extensions/rinky.
+# A Kobo package (it has nm/rinky, the NickelMenu entry) goes to
+# /mnt/onboard/.adds/rinky and /mnt/onboard/.adds/nm/rinky instead.
 # Only the files listed in rinky/FILES are written. Settings, the library index,
 # logs, plugins and caches already in /mnt/us/rinky are kept.
 #
@@ -36,10 +38,23 @@ set -u
 
 PKG=$(cd "$(dirname "$0")/.." && pwd)
 PREFIX=${RINKY_PREFIX:-}
-US=$PREFIX/mnt/us
-DEST=$US/rinky
-EXTROOT=$US/extensions
-EXT=$EXTROOT/rinky
+# A Kobo package (nm/rinky, the NickelMenu entry, instead of the KUAL menu) installs
+# rinky/ to /mnt/onboard/.adds/rinky and nm/rinky to /mnt/onboard/.adds/nm/rinky.
+KOBO=0
+[ -f "$PKG/nm/rinky" ] && KOBO=1
+if [ "$KOBO" = 1 ]; then
+    US=$PREFIX/mnt/onboard
+    DEST=$US/.adds/rinky
+    EXTROOT=$US/.adds/nm
+    EXT=$EXTROOT
+    EXTNAME=.adds/nm
+else
+    US=$PREFIX/mnt/us
+    DEST=$US/rinky
+    EXTROOT=$US/extensions
+    EXT=$EXTROOT/rinky
+    EXTNAME=extensions
+fi
 RUN=${RINKY_RUN:-/tmp/rinky}
 STATE=$DEST/.install-state
 SDRLIST=$DEST/.install-sdr
@@ -65,7 +80,7 @@ for arg in "$@"; do
     esac
 done
 
-[ -d "$US" ] || die "$US does not exist (is this a Kindle?)"
+[ -d "$US" ] || die "$US does not exist (is this a $([ "$KOBO" = 1 ] && echo Kobo || echo Kindle)?)"
 [ -f "$PKG/rinky/FILES" ] || die "not an rinky package: $PKG/rinky/FILES is missing"
 [ -f "$PKG/rinky/rinky" ] || die "not an rinky package: $PKG/rinky/rinky is missing"
 [ -f "$PKG/rinky/SHA256SUMS" ] || die "not an rinky package: $PKG/rinky/SHA256SUMS is missing"
@@ -94,7 +109,8 @@ target_of() {
     case "$1" in
         /* | *..*) return 1 ;;
         rinky/*) echo "$DEST/${1#rinky/}" ;;
-        extensions/rinky/*) echo "$EXT/${1#extensions/rinky/}" ;;
+        extensions/rinky/*) [ "$KOBO" = 0 ] && echo "$EXT/${1#extensions/rinky/}" ;;
+        nm/rinky) [ "$KOBO" = 1 ] && echo "$EXT/rinky" ;;
         *) return 1 ;;
     esac
 }
@@ -150,7 +166,7 @@ EOF
         rm -f "$STATE.$TMP" "$SDRLIST.$TMP" "$SCRIPTLET.$TMP"
     fi
     if [ "$LOCKED" = 1 ] && [ "$DONE" != 1 ]; then
-        [ "$NEW_EXT" = 1 ] && rmdir "$EXT/bin" "$EXT" 2>/dev/null
+        [ "$NEW_EXT" = 1 ] && [ "$KOBO" = 0 ] && rmdir "$EXT/bin" "$EXT" 2>/dev/null
         [ "$NEW_EXTROOT" = 1 ] && rmdir "$EXTROOT" 2>/dev/null
     fi
     [ "$LOCKED" = 1 ] && rm -rf "$LOCK"
@@ -207,7 +223,7 @@ CREATED=
 if [ ! -d "$EXTROOT" ]; then
     mkdir -p "$EXTROOT" || die "cannot create $EXTROOT"
     CREATED="${CREATED:+$CREATED
-}created=extensions"
+}created=$EXTNAME"
 fi
 
 # Old file list, for removing files that the new version no longer ships.
@@ -237,7 +253,9 @@ scriptlet_text() {
 }
 SCRIPTLET_STATE=
 rm -f "$SCRIPTLET".new[0-9]*
-if [ ! -d "$US/documents" ]; then
+if [ "$KOBO" = 1 ]; then
+    : # Kobo: NickelMenu starts rinky.
+elif [ ! -d "$US/documents" ]; then
     say "no $US/documents folder; library entry not created"
 elif [ ! -e "$SCRIPTLET" ] || [ "$(cat "$SCRIPTLET" 2>/dev/null)" = "$(scriptlet_text)" ]; then
     scriptlet_text >"$SCRIPTLET.$TMP" || die "cannot write $SCRIPTLET.$TMP (no space left?); nothing was changed"
@@ -257,7 +275,7 @@ fi
 # Written once; later installs keep the list of the first one. A folder that already
 # holds an rinky file is left out (an upgrade from a version without this list:
 # rinky may have created that folder).
-if [ ! -f "$SDRLIST" ]; then
+if [ ! -f "$SDRLIST" ] && [ "$KOBO" = 0 ]; then
     (cd "$US" && find . \( -path ./koreader -o -path ./system -o -path ./rinky -o -path ./extensions \) -prune -o \
         -type d -name '*.sdr' -print -prune 2>/dev/null) | sed 's|^\./||' | while IFS= read -r d; do
         ls -d "$US/$d"/rinky* >/dev/null 2>&1 || echo "$d"
@@ -301,6 +319,11 @@ chmod 755 "$DEST/rinky" "$DEST/rinky.sh" "$DEST/rinky-watchdog.sh" "$DEST/rinky-
 sync
 
 say "rinky $VERSION installed in $DEST ($count files)"
+if [ "$KOBO" = 1 ]; then
+    say "NickelMenu entry: $EXT/rinky"
+    say "start: NickelMenu > rinky, or: sh $DEST/rinky.sh"
+    exit 0
+fi
 say "KUAL menu: $EXT"
 [ -n "$SCRIPTLET_STATE" ] && say "library entry: $SCRIPTLET"
 say "start: KUAL > rinky > Start rinky, or: sh $DEST/rinky-ctl.sh start"

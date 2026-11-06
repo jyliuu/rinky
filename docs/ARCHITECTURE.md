@@ -107,6 +107,25 @@ Dev-dependencies only: ink-html -> ink-formats, ink-store; ink-formats -> ink-st
   `rotate` journaled. The UI is laid out in 300 ppi pixels and adapts to the panel
   size, so the 212 and 167 ppi models are marked unsupported. `rinky sim --panel WxH`
   renders other sizes.
+- Kobo (`kobo::open`, chosen when `platform::Platform::detect()` finds
+  `/mnt/onboard/.kobo`; `RINKY_PLATFORM` overrides): the same binary and the same
+  screen, input and sleep code as the Kindle backend. Kobo models are in the same
+  table (`kindle::model::KOBO_MODELS`, by the number at the end of
+  `/mnt/onboard/.kobo/version`), with what a Kobo adds: the `rotate` value that is
+  upright (FBInk's rotation map), touch transforms (KOReader's `touch_switch_xy`,
+  `touch_mirrored_*`), the cover key (`KEY_F1`) and whether the driver's wait ioctl
+  can be trusted. Refresh: `Epdc::KoboMxcfb` (72-byte v2 struct; REAGL FULL; night
+  mode is the per-update inversion flag with the eclipse waveforms GLKW16/GCK16; no
+  waits on the Libra 2 and the others KOReader flags) and `Epdc::KoboMtk` (36-byte
+  `hwtcon_update_data`). The framebuffer boots at 16 or 32 bpp and is switched to 8 bpp
+  gray (on MTK after `Y8` to the hwtcon `mdp_src_format`), and back on exit. Touch:
+  "snow" panels never send `TRACKING_ID -1`; `BTN_TOUCH 0` ends the contact. There is
+  no lipc: `kobo::services` drives light (`mxc_msp430.0` brightness, the mixer's
+  `color`), battery (`power_supply`), Wi-Fi (`kobo::wifi`: modules, `wpa_supplicant`
+  on Nickel's config, `wpa_cli`, `dhcpcd`/`udhcpc`, as KOReader's scripts) and suspend
+  (`state-extended`, no `wakeup_count`, Wi-Fi off first). USB storage stays Nickel's.
+  `packaging/kobo/rinky.sh` stops Nickel and starts it again (KOReader's `koreader.sh`
+  and `nickel.sh`). Investigation notes: `docs/kobo-port.md`.
 - `script`: the scripted-input language used by headless and sim runs.
 - `eink::EinkPanel`: 16-level quantization, DU to 2 levels, optional ghosting.
 - Wave A (`device`): the Kindle backend implements

@@ -58,6 +58,8 @@ pub enum CoverSource {
     /// powerd `goingToScreenSaver 4` (HALL_SUSPEND) / `outOfScreenSaver 6`
     /// (HALL_WAKEUP), the events KOReader uses.
     Powerd(u32),
+    /// A cover key on the key device (Kobo `KEY_F1`: pressed = closed).
+    Key,
 }
 
 impl std::fmt::Display for CoverSource {
@@ -66,6 +68,7 @@ impl std::fmt::Display for CoverSource {
             CoverSource::Uevent => write!(f, "uevent"),
             CoverSource::LipcHal => write!(f, "lipc-hal"),
             CoverSource::Powerd(n) => write!(f, "powerd({n})"),
+            CoverSource::Key => write!(f, "key"),
         }
     }
 }
