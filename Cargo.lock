@@ -840,7 +840,6 @@ dependencies = [
  "fontdue",
  "hyphenation",
  "ink-device",
- "ink-platform",
  "libc",
  "log",
  "rustybuzz",

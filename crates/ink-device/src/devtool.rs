@@ -1,5 +1,5 @@
 //! `rinky device ...`: test and diagnostic commands for the device layer, run on
-//! the Kindle (or the emulator) and used for the phase 5 evidence. They draw with the
+//! the e-reader (or the emulator) and used for the phase 5 evidence. They draw with the
 //! built-in bitmap font, so they need nothing above `ink-device`.
 
 /// Usage text.
@@ -33,7 +33,7 @@ environment: RINKY_TOUCH, RINKY_SLEEP, RINKY_AUTOSLEEP, RINKY_SUSPEND,
 pub fn main(args: &[String]) -> i32 {
     #[cfg(target_os = "linux")]
     {
-        match kindle::run(args) {
+        match device::run(args) {
             Ok(code) => code,
             Err(e) => {
                 say!("rinky device: {e}");
@@ -44,7 +44,7 @@ pub fn main(args: &[String]) -> i32 {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = args;
-        say!("rinky device: needs the Kindle (Linux framebuffer and evdev)\n{USAGE}");
+        say!("rinky device: needs the e-reader (Linux framebuffer and evdev)\n{USAGE}");
         2
     }
 }
@@ -60,7 +60,7 @@ pub fn flag(args: &[String], name: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-mod kindle {
+mod device {
     use super::{flag, opt, USAGE};
     use crate::canvas::Canvas;
     use crate::clock::{stamp, TimeZone};
@@ -102,7 +102,7 @@ mod kindle {
     }
 
     fn open_full() -> Result<Device> {
-        ereader::open(ReaderOptions { power_events: true, ..Default::default() })
+        ereader::open(ReaderOptions::default())
     }
 
     fn kobo() -> bool {
@@ -490,7 +490,7 @@ mod kindle {
                     } else {
                         dev.usb.set_charge_only(true)?;
                         out!("{} usb: charge only chosen (state {:?})", stamp(), dev.usb.state());
-                        page(&mut c, "USB test", &["charge only".into(), "the files stay on the Kindle".into()]);
+                        page(&mut c, "USB test", &["charge only".into(), "the files stay on the e-reader".into()]);
                         dev.screen.update_all(&c, RefreshClass::Gc16)?;
                     }
                 }

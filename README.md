@@ -83,7 +83,6 @@ each step; in short:
 
 | | Kindle | Kobo |
 |---|---|---|
-| Tested | Paperwhite 12th gen on the device; Paperwhite 3 and 4, Oasis 3, Kindle 12th gen in an emulator | Libra 2 and Tolino Shine 5 (Clara BW inside) in an emulator |
 | Prepare | jailbreak and KUAL ([kindlemodding.org](https://kindlemodding.org/)) | [NickelMenu](https://pgaskin.net/NickelMenu/) (no jailbreak) |
 | Download | `rinky-<version>-kindle.zip` | `rinky-<version>-kobo.zip` |
 | Copy over USB | `rinky` and `extensions` to the top of the Kindle drive | `.adds` to the top of the Kobo drive (hidden folder) |

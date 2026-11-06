@@ -1,4 +1,4 @@
-//! Kindle models: which one this is and what differs between them.
+//! E-reader models (Kindle and Kobo): which one this is and what differs between them.
 //!
 //! The model comes from the serial number in `/proc/usid`, decoded as KOReader does
 //! (`frontend/device/kindle/device.lua`): serials starting with `B` or `9` carry a
@@ -75,6 +75,12 @@ impl Epdc {
         }
     }
 
+    /// The MTK Kobo's MDP source pixel formats for 8 and 32 bpp (`Y8`, `ABGR32`): its
+    /// driver keeps the bit depth of the format, so it is switched first.
+    pub fn mdp_formats(self) -> Option<(&'static str, &'static str)> {
+        (self == Epdc::KoboMtk).then_some(("Y8", "ABGR32"))
+    }
+
     /// Short name for logs.
     pub fn name(self) -> &'static str {
         match self {
@@ -111,7 +117,7 @@ pub enum Tier {
     Unsupported(&'static str),
 }
 
-/// What rinky needs to know about one Kindle model.
+/// What rinky needs to know about one e-reader model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Model {
     /// Short name (`PW4`), as KOReader's class without the `Kindle` prefix.
@@ -154,6 +160,8 @@ pub struct Model {
     /// Clara 2E and Nia's time out after 5 s now and then (KOReader
     /// `hasReliableMxcWaitFor`): rinky never waits for completion on them.
     pub reliable_wait: bool,
+    /// Suspends while charging. A MediaTek Kobo's kernel hangs then (KOReader).
+    pub suspend_on_charger: bool,
 }
 
 const WARIO_HALL: Option<&str> = Some("/sys/devices/system/wario_hall/wario_hall0");
@@ -183,6 +191,7 @@ const fn m(id: &'static str, name: &'static str, codes: &'static [&'static str],
         upright: None,
         cover_key: None,
         reliable_wait: true,
+        suspend_on_charger: true,
     }
 }
 
@@ -336,6 +345,7 @@ const fn kobo(id: &'static str, name: &'static str, codes: &'static [&'static st
         warmth: true,
         cover_key: KOBO_COVER,
         touch: SWAP_MIRROR_X,
+        suspend_on_charger: !matches!(epdc, Epdc::KoboMtk),
         ..m(id, name, codes, epdc)
     }
 }

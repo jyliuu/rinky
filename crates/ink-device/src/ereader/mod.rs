@@ -44,9 +44,6 @@ use std::time::Duration;
 pub struct ReaderOptions {
     /// Grab the touchscreen (`EVIOCGRAB`) so the framework does not see taps.
     pub grab_touch: bool,
-    /// Subscribe to powerd, wifid, cmd, volumd, hal and time events
-    /// (`InputEvent::Power`, `InputEvent::Usb`).
-    pub power_events: bool,
     /// lipc runner for services and events.
     pub lipc: Lipc,
     /// rinky handles the power key, the cover, inactivity and suspend
@@ -92,7 +89,6 @@ impl Default for ReaderOptions {
         };
         ReaderOptions {
             grab_touch: true,
-            power_events: false,
             lipc: Lipc::new(),
             sleep: (env("RINKY_SLEEP").as_deref() != Some("0")).then(SleepConfig::from_env),
             screensaver: env("RINKY_SCREENSAVER").map(|s| Screensaver::from_setting(&s)).unwrap_or_default(),
@@ -197,14 +193,23 @@ impl SharedHandle {
     }
 }
 
-/// Runs a suspend routine and logs its progress lines.
-pub(crate) fn logged_suspend(suspend: system::SuspendFn, sys: &SysRoot, wake_after: Option<Duration>) -> Result<()> {
+/// Runs a suspend routine (refused on a charger where the model must not) and logs its
+/// progress lines.
+pub(crate) fn logged_suspend(
+    suspend: system::SuspendFn,
+    sys: &SysRoot,
+    model: &model::Model,
+    wake_after: Option<Duration>,
+) -> Result<crate::sleep::Resume> {
+    if !model.suspend_on_charger && crate::battery::charging(sys) {
+        return Err(crate::DeviceError::Backend(format!("charging: the {} does not suspend while charging", model.name)));
+    }
     let mut lines = Vec::new();
     let r = suspend(sys, wake_after, &mut |s| lines.push(s));
     for l in lines {
         log::info!("suspend: {l}");
     }
-    r.map(|_| ())
+    r
 }
 
 /// The screen as the app sees it: while the screensaver or the USB lock screen is up,
@@ -290,8 +295,7 @@ pub fn open(opts: ReaderOptions) -> Result<Device> {
     let platform = screen.model.platform;
     // Amazon's services: lipc events, volumd's USB drive mode, powerd's warmth schedule.
     let lipc = (platform == Platform::Kindle).then(|| opts.lipc.clone());
-    let lipc_events = lipc.is_some() && opts.power_events;
-    let usb = opts.usb.filter(|_| lipc_events);
+    let usb = opts.usb.filter(|_| lipc.is_some());
     let shared = Rc::new(RefCell::new(Shared {
         screen,
         shadow: None,
@@ -309,13 +313,11 @@ pub fn open(opts: ReaderOptions) -> Result<Device> {
     }));
     let loop_opts = input::LoopOptions {
         grab_touch: opts.grab_touch,
-        lipc_events,
         sleep: opts.sleep.clone(),
         usb,
         low_battery: opts.low_battery,
-        // On a Kobo the Wi-Fi service syncs the clock itself when it connects.
-        ntp_server: opts.ntp_server.clone().filter(|_| lipc_events),
-        amber: lipc.is_some() && opts.amber,
+        ntp_server: opts.ntp_server.clone(),
+        amber: opts.amber,
         heartbeat: opts.heartbeat.clone(),
         suspend: match platform {
             Platform::Kindle => system::kernel_suspend,

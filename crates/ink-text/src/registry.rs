@@ -6,7 +6,6 @@ use crate::face::{collection_faces, map_file, FaceInfo};
 use rustybuzz::ttf_parser;
 use std::path::{Path, PathBuf};
 
-
 /// A font file found on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FontFile {

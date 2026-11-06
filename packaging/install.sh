@@ -38,8 +38,6 @@ set -u
 
 PKG=$(cd "$(dirname "$0")/.." && pwd)
 PREFIX=${RINKY_PREFIX:-}
-# A Kobo package (nm/rinky, the NickelMenu entry, instead of the KUAL menu) installs
-# rinky/ to /mnt/onboard/.adds/rinky and nm/rinky to /mnt/onboard/.adds/nm/rinky.
 KOBO=0
 [ -f "$PKG/nm/rinky" ] && KOBO=1
 if [ "$KOBO" = 1 ]; then

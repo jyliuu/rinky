@@ -26,9 +26,10 @@
 //!   instead (what KOReader's `ui` updates do), `=gl16` the old GL16 PARTIAL;
 //! - "fast mode" (`MXCFB_SET_UPDATE_FLAGS_MTK`) stops the driver from silently
 //!   turning partial updates into REAGL; KOReader turns it off again on exit;
-//! - rotation is done in software (as KOReader does on Kindle): pixels are rotated by
-//!   [`copy_to_panel`] and refresh rectangles are in panel coordinates, `vinfo.rotate`
-//!   is never touched, so the framework comes back as it was.
+//! - rotation is done in software (as KOReader does): pixels are rotated by
+//!   [`copy_to_panel`] and refresh rectangles are in panel coordinates. `vinfo.rotate`
+//!   is set only to make the panel upright (Kobo; a Kindle left in landscape) and is put
+//!   back on exit.
 //!
 //! Update markers: FULL updates (REAGL, GC16, night waveforms) are not waited for
 //! when they are sent; before pixels are written into a panel rectangle, earlier FULL
@@ -47,7 +48,6 @@
 //! launcher can undo it after a crash (`rinky device restore`).
 
 use super::model::{Epdc, Model, NightMethod};
-use crate::platform::Platform;
 use crate::canvas::Canvas;
 use crate::geom::{Rect, Rotation, Size};
 use crate::journal::{Entry, Journal};
@@ -150,6 +150,7 @@ fn ioctl(fd: i32, req: u32, arg: *mut libc::c_void) -> std::io::Result<()> {
 /// Night: REAGL and GL16 become the night REAGL waveform GLKW16, which must be FULL
 /// (KOReader `night_is_reagl`); it does not flash. GC16 becomes the night flash GCK16.
 /// DU stays DU PARTIAL (the driver picks DUNM while the flag is set).
+#[cfg(test)]
 pub fn waveform_for(class: RefreshClass, night: bool) -> (u32, u32) {
     waveform_with(class, night, NightUi::Glkw16)
 }
@@ -258,7 +259,8 @@ pub fn update_data_epdc(epdc: Epdc, r: Rect, waveform: u32, mode: u32, marker: u
     let flags = if waveform == WAVEFORM_DU { EPDC_FLAG_FORCE_MONOCHROME } else { 0 };
     match epdc {
         // Kobo hwtcon: {...; flags; dither_mode}, all zero.
-        Epdc::KoboMtk | Epdc::Mtk => {}
+        Epdc::KoboMtk => {}
+        Epdc::Mtk => unreachable!("built by update_data"),
         // Kobo v2: {...; temp; flags; dither_mode; quant_bit; alt_buffer_data}, no
         // dithering (EPDC_FLAG_USE_DITHERING_PASSTHROUGH).
         Epdc::KoboMxcfb => d[7] = TEMP_USE_AMBIENT,
@@ -378,7 +380,8 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
-    /// Opens and maps `/dev/fb0`. Fails unless it is an 8 bpp framebuffer.
+    /// Opens and maps `/dev/fb0` (a Kobo's is switched to 8 bpp first). Fails unless it
+    /// is an 8 bpp framebuffer then.
     pub fn open() -> Result<Self> {
         Self::open_with(Some(Journal::default()))
     }
@@ -430,16 +433,16 @@ impl Framebuffer {
         }
         // Kobos boot at 16 (i.MX) or 32 bpp (MTK): 8 bpp gray, as KOReader (`fbdepth -d 8`).
         let mut original_depth = None;
-        if model.platform == Platform::Kobo && var[VAR_BPP] != 8 && !passive {
+        if var[VAR_BPP] != 8 && !passive {
             let bpp = var[VAR_BPP];
             if let Some(j) = &journal {
                 let _ = j.record(Entry::Fb { key: "bpp".into(), value: bpp as i64 });
             }
             // The MTK driver resets bits_per_pixel to its MDP source format unless that
             // is switched first (FBInk `set_fbinfo`).
-            let mtk = model.epdc == Epdc::KoboMtk;
-            let mdp = mtk.then(mdp_src_format).flatten();
-            set_depth(fd, 8, mtk.then_some("Y8"))?;
+            let formats = model.epdc.mdp_formats();
+            let mdp = formats.and_then(|_| mdp_src_format());
+            set_depth(fd, 8, formats.map(|(gray, _)| gray))?;
             ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
             log::info!("fb0: switched from {bpp} to {} bpp", var[VAR_BPP]);
             original_depth = Some((bpp, mdp));
@@ -466,7 +469,7 @@ impl Framebuffer {
             return Err(std::io::Error::last_os_error().into());
         }
         let original = var[VAR_GRAYSCALE];
-        let probe = model.is_unknown() && model.platform == Platform::Kindle && !passive;
+        let probe = model.is_unknown() && Epdc::PROBE_ORDER.contains(&model.epdc) && !passive;
         let epdc = if probe { probe_epdc(fd).unwrap_or(Epdc::Mtk) } else { model.epdc };
         log::info!("model: {}; refresh interface {}", model.describe(), epdc.name());
         let fb = Framebuffer {
@@ -503,11 +506,9 @@ impl Framebuffer {
         if passive {
             return Ok(fb);
         }
-        if fb.hw_night {
-            log::warn!("fb0: grayscale flag was left inverted; resetting to day");
-        }
         let mut fb = fb;
         if fb.hw_night {
+            log::warn!("fb0: grayscale flag was left inverted; resetting to day");
             let _ = fb.set_grayscale(fb.original_grayscale);
             fb.hw_night = false;
         }
@@ -524,9 +525,7 @@ impl Framebuffer {
     }
 
     fn var(&self) -> Result<[u32; 40]> {
-        let mut var = [0u32; 40];
-        ioctl(self.file.as_raw_fd(), FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
-        Ok(var)
+        Ok(get_var(self.file.as_raw_fd())?)
     }
 
     /// The page-turn sweep is used (MTK models that take it, [`Model::swipe`]).
@@ -539,17 +538,14 @@ impl Framebuffer {
         Ok(self.var()?[VAR_GRAYSCALE])
     }
 
-    /// The driver's `rotate` field now (never changed by rinky).
+    /// The driver's `rotate` field now.
     pub fn hw_rotate(&self) -> Result<u32> {
         Ok(self.var()?[VAR_ROTATE])
     }
 
     /// Sets `grayscale` with a read-modify-write of `fb_var_screeninfo`.
     pub fn set_grayscale(&mut self, value: u32) -> Result<()> {
-        let mut var = self.var()?;
-        var[VAR_GRAYSCALE] = value;
-        var[VAR_ACTIVATE] = 0; // FB_ACTIVATE_NOW
-        ioctl(self.file.as_raw_fd(), FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())
+        update_var(self.file.as_raw_fd(), |v| v[VAR_GRAYSCALE] = value)
             .map_err(|e| DeviceError::Backend(format!("FBIOPUT_VSCREENINFO grayscale {value}: {e}")))?;
         let back = self.grayscale()?;
         if back != value {
@@ -727,17 +723,7 @@ impl Framebuffer {
         for y in 0..c.height {
             dst[y * stride..y * stride + w].copy_from_slice(&c.pixels[y * w..(y + 1) * w]);
         }
-        let r = Rect::from_size(Size::new(self.width as u32, self.height as u32));
-        self.refresh_panel(r, class)
-    }
-
-    /// The value to store so the panel shows `v` (software night inversion applied).
-    pub fn panel_value(&self, v: u8) -> u8 {
-        if self.night && !self.hw_night {
-            255 - v
-        } else {
-            v
-        }
+        self.refresh_panel(all, class)
     }
 
     /// Software inversion in effect (night mode without the hardware flag).
@@ -806,21 +792,31 @@ fn set_mdp_src_format(format: &str) {
     }
 }
 
-fn set_rotate(fd: i32, rotate: u32) -> std::io::Result<()> {
+/// `fb_var_screeninfo` now (`FBIOGET_VSCREENINFO`), as 40 u32 words.
+fn get_var(fd: i32) -> std::io::Result<[u32; 40]> {
     let mut var = [0u32; 40];
     ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
-    var[VAR_ROTATE] = rotate;
+    Ok(var)
+}
+
+/// Changes `fb_var_screeninfo` with `f` and applies it at once (`FBIOPUT_VSCREENINFO`,
+/// `FB_ACTIVATE_NOW`).
+fn update_var(fd: i32, f: impl FnOnce(&mut [u32; 40])) -> std::io::Result<()> {
+    let mut var = get_var(fd)?;
+    f(&mut var);
     var[VAR_ACTIVATE] = 0;
     ioctl(fd, FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())
+}
+
+fn set_rotate(fd: i32, rotate: u32) -> std::io::Result<()> {
+    update_var(fd, |v| v[VAR_ROTATE] = rotate)
 }
 
 /// The `rotate` value that makes the panel portrait, tried in turn; `None` (and `was`
 /// set again) when none does.
 fn upright_rotate(fd: i32, was: u32) -> Option<u32> {
-    let mut var = [0u32; 40];
     for r in [0, 2, 1, 3].into_iter().filter(|r| *r != was) {
-        if set_rotate(fd, r).is_ok() && ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast()).is_ok() && var[VAR_XRES] < var[VAR_YRES]
-        {
+        if set_rotate(fd, r).is_ok() && get_var(fd).is_ok_and(|v| v[VAR_XRES] < v[VAR_YRES]) {
             return Some(r);
         }
     }
@@ -834,18 +830,16 @@ fn set_depth(fd: i32, bpp: u32, mdp: Option<&str>) -> std::io::Result<()> {
     if let Some(f) = mdp {
         set_mdp_src_format(f);
     }
-    let mut var = [0u32; 40];
-    ioctl(fd, FBIOGET_VSCREENINFO, var.as_mut_ptr().cast())?;
-    var[VAR_BPP] = bpp;
-    if bpp == 8 {
-        var[VAR_GRAYSCALE] = GRAYSCALE_8BIT;
-        // red, green, blue {offset 0, length 8, msb_right 0}; no transparency.
-        var[8..20].copy_from_slice(&[0, 8, 0, 0, 8, 0, 0, 8, 0, 0, 0, 0]);
-    } else {
-        var[VAR_GRAYSCALE] = 0;
-    }
-    var[VAR_ACTIVATE] = 0;
-    ioctl(fd, FBIOPUT_VSCREENINFO, var.as_mut_ptr().cast())
+    update_var(fd, |var| {
+        var[VAR_BPP] = bpp;
+        if bpp == 8 {
+            var[VAR_GRAYSCALE] = GRAYSCALE_8BIT;
+            // red, green, blue {offset 0, length 8, msb_right 0}; no transparency.
+            var[8..20].copy_from_slice(&[0, 8, 0, 0, 8, 0, 0, 8, 0, 0, 0, 0]);
+        } else {
+            var[VAR_GRAYSCALE] = 0;
+        }
+    })
 }
 
 /// Finds an unknown Kindle's refresh interface: the first one whose ioctl takes a
@@ -867,9 +861,9 @@ fn probe_epdc(fd: i32) -> Option<Epdc> {
     None
 }
 
-/// Puts the framebuffer flags back after a crash (`rinky device restore`):
-/// grayscale to day (or the journaled value), the framework's rotation, fast mode off
-/// (MTK). Returns what it did.
+/// Puts back what a crashed rinky journaled (`rinky device restore`): the rotation, a
+/// Kobo's bit depth (else the grayscale flag, to day or the journaled value), the MTK
+/// fast mode. Returns what it did.
 pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
     let file = OpenOptions::new().read(true).write(true).open("/dev/fb0")?;
     let fd = file.as_raw_fd();
@@ -888,7 +882,7 @@ pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
     if let Some(bpp) = journaled("bpp") {
         // Kobo: the bit depth Nickel expects (on MTK with its pixel format); the
         // grayscale flag goes with it.
-        let mdp = (bpp == 32 && model.epdc == Epdc::KoboMtk).then_some("ABGR32");
+        let mdp = model.epdc.mdp_formats().map(|(_, colour)| colour).filter(|_| bpp == 32);
         set_depth(fd, bpp, mdp)?;
         done.push(format!("bpp -> {bpp}"));
     } else {
@@ -903,7 +897,7 @@ pub fn restore_after_crash(entries: &[Entry]) -> Result<Vec<String>> {
             done.push(format!("grayscale -> {want}"));
         }
     }
-    if model.epdc == Epdc::Mtk {
+    if journaled("fastmode").is_some() {
         set_fast_mode(fd, false)?;
         done.push("fast mode off".into());
     }
@@ -996,9 +990,7 @@ impl Screen for Framebuffer {
     fn screenshot(&self) -> Result<Canvas> {
         let mut c = self.snapshot();
         if self.hw_night {
-            for p in &mut c.pixels {
-                *p = 255 - *p;
-            }
+            c.invert();
         }
         Ok(c)
     }

@@ -82,12 +82,17 @@ pub fn print(checks: &[Check]) -> u32 {
 /// Runs the checks.
 pub fn run(opts: &Options) -> Vec<Check> {
     let mut r = Runner { checks: Vec::new() };
+    // These checks are about the Kindle's lipc services and daemons.
     #[cfg(target_os = "linux")]
-    kindle::all(&mut r, opts);
+    if crate::platform::current() == crate::platform::Platform::Kindle {
+        kindle::all(&mut r, opts);
+    } else {
+        r.skip("device", "Kindle checks; on a Kobo use `rinky device info`, `wifi`, `light`, `battery`");
+    }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = opts;
-        r.skip("device", "not a Kindle");
+        r.skip("device", "not an e-reader");
     }
     r.checks
 }

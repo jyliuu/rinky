@@ -13,7 +13,7 @@
 pub mod wifi;
 
 use super::input::Request;
-use super::model::{Epdc, Model};
+use super::model::Model;
 use super::system::{self, DeviceClock};
 use super::{Shared, SharedHandle};
 use crate::battery;
@@ -26,7 +26,7 @@ use crate::wifi::WifiProfile;
 use crate::{DeviceError, Result};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const WHITE: &str = "/sys/class/backlight/mxc_msp430.0/brightness";
 const MIXERS: [&str; 3] =
@@ -34,24 +34,46 @@ const MIXERS: [&str; 3] =
 /// `ioctl(/dev/ntx_io, 241, level)`: brightness on models without the sysfs file.
 const NTX_FRONTLIGHT: libc::c_ulong = 241;
 const WARMTH_MAX: u32 = 10;
-/// How long a Wi-Fi state read is reused (each one runs `wpa_cli`; the control center
-/// and the settings pages read it on every build).
-const WIFI_STATE_FOR: Duration = Duration::from_millis(1500);
+
+const NICKEL_CONF: &str = "/mnt/onboard/.kobo/Kobo/Kobo eReader.conf";
+
+/// A value from Nickel's settings file (`Key=value` lines).
+pub(crate) fn nickel_setting(key: &str) -> Option<String> {
+    let conf = std::fs::read_to_string(NICKEL_CONF).ok()?;
+    let prefix = format!("{key}=");
+    conf.lines().find_map(|l| l.strip_prefix(&prefix)).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// `ioctl(/dev/ntx_io, cmd, arg)`, the argument passed by value (KOReader `ntx_io.lua`).
+pub fn ntx_io(cmd: libc::c_ulong, arg: libc::c_int) -> Result<()> {
+    let path = c"/dev/ntx_io";
+    // SAFETY: plain open/ioctl/close on a NUL-terminated path; the ioctl takes an int.
+    unsafe {
+        let fd = libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let r = libc::ioctl(fd, cmd as _, arg);
+        let e = std::io::Error::last_os_error();
+        libc::close(fd);
+        if r < 0 {
+            return Err(DeviceError::Backend(format!("ntx_io {cmd} {arg}: {e}")));
+        }
+    }
+    Ok(())
+}
 
 /// Suspends a Kobo as KOReader does (`Kobo:suspend`): Wi-Fi off, `1` to
 /// `/sys/power/state-extended` (the NTX drivers prepare for sleep), 2 s, then the
 /// kernel suspend without the `wakeup_count` handshake (KOReader leaves it out on
 /// Kobo; on the Tolino emulator its write failed with EINVAL every time), then `0` back.
-/// A MediaTek Kobo's kernel hangs when it suspends while charging: refused then.
+/// (A MediaTek Kobo must not suspend while charging: [`Model::suspend_on_charger`].)
 pub fn suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(String)) -> Result<Resume> {
     if wifi::is_up() {
         log("wifi: turning off before suspend".into());
         if let Err(e) = wifi::stop() {
             log(format!("wifi: {e}"));
         }
-    }
-    if Model::detect(sys).epdc == Epdc::KoboMtk && battery::charging(sys) {
-        return Err(DeviceError::Backend("charging: a MediaTek Kobo does not suspend while charging".into()));
     }
     if let Err(e) = sys.write("/sys/power/state-extended", "1") {
         log(format!("state-extended 1: {e}"));
@@ -78,8 +100,6 @@ pub struct KoboServices {
     mixer: Option<&'static str>,
     /// Last brightness set through the ioctl (it cannot be read back); at first Nickel's.
     ioctl_level: Rc<Cell<Option<u32>>>,
-    /// The last Wi-Fi state read and when.
-    wifi_state: Rc<RefCell<Option<(Instant, WifiState)>>>,
     /// Sets the clock after Wi-Fi connects.
     clock: DeviceClock,
 }
@@ -97,52 +117,34 @@ impl KoboServices {
         let mixer = MIXERS.into_iter().find(|p| warmth && sys.path(p).exists());
         let white = sys.path(WHITE).exists();
         log::info!("light: white {}, warmth mixer {mixer:?}", if white { WHITE } else { "ntx_io 241" });
-        let nickel_level = wifi::nickel_setting("FrontLightLevel").and_then(|v| v.parse().ok());
+        let nickel_level = nickel_setting("FrontLightLevel").and_then(|v| v.parse().ok());
         KoboServices {
             shared,
             sys,
             white,
             mixer,
             ioctl_level: Rc::new(Cell::new(nickel_level)),
-            wifi_state: Rc::default(),
             clock: DeviceClock { lipc: None, ntp_server },
         }
     }
 
-    /// Turns the radio on and joins the saved network wpa_supplicant picks, gets an
-    /// address and syncs the clock, on a thread: the radio takes seconds to come up.
-    fn start_wifi_in_background(&self) {
-        let mut clock = self.clock.clone();
-        let spawned = std::thread::Builder::new().name("wifi-on".into()).spawn(move || {
-            let joined = wifi::start()
-                .and_then(|()| wifi::wait_associated(Duration::from_secs(15)))
-                .and_then(|()| wifi::obtain_ip());
-            match joined {
-                Ok(()) => {
-                    log::info!("wifi: connected");
-                    sync_clock(&mut clock);
-                }
-                Err(e) => log::info!("wifi: no saved network joined: {e}"),
-            }
-        });
-        if let Err(e) = spawned {
-            log::warn!("wifi: no thread: {e}");
-        }
-    }
-
-    fn forget_wifi_state(&self) {
-        self.wifi_state.borrow_mut().take();
-    }
 }
 
 /// Sets the clock from NTP (when it is off by a second or more), logging the outcome.
-fn sync_clock(clock: &mut DeviceClock) {
+fn sync_clock(mut clock: DeviceClock) {
     if clock.ntp_server.is_none() {
         return;
     }
     match clock.sync_ntp(None) {
         Ok(s) => log::info!("ntp: {} offset {} ms", s.server, s.offset_ms),
         Err(e) => log::info!("ntp: {e}"),
+    }
+}
+
+/// [`sync_clock`] on a thread (the NTP query takes up to 10 s).
+fn sync_clock_in_background(clock: DeviceClock) {
+    if let Err(e) = std::thread::Builder::new().name("ntp".into()).spawn(move || sync_clock(clock)) {
+        log::warn!("ntp: no thread: {e}");
     }
 }
 
@@ -163,7 +165,7 @@ impl Light for KoboServices {
         if self.white {
             return Ok(self.sys.write(WHITE, &level.to_string())?);
         }
-        wifi::ntx_io(NTX_FRONTLIGHT, level as libc::c_int)?;
+        ntx_io(NTX_FRONTLIGHT, level as libc::c_int)?;
         self.ioctl_level.set(Some(level));
         Ok(())
     }
@@ -208,7 +210,8 @@ impl Power for KoboServices {
     }
 
     fn suspend(&mut self, wake_after: Option<Duration>) -> Result<()> {
-        super::logged_suspend(suspend, &self.sys, wake_after)
+        let model = self.shared.model().unwrap_or_else(|| Model::detect(&self.sys));
+        super::logged_suspend(suspend, &self.sys, &model, wake_after).map(|_| ())
     }
 
     fn set_screensaver(&mut self, s: Screensaver) -> Result<()> {
@@ -237,20 +240,15 @@ impl Power for KoboServices {
 
 impl Wifi for KoboServices {
     fn state(&self) -> Result<WifiState> {
-        let mut cached = self.wifi_state.borrow_mut();
-        if let Some((_, s)) = cached.as_ref().filter(|(at, _)| at.elapsed() < WIFI_STATE_FOR) {
-            return Ok(s.clone());
-        }
-        let s = wifi::state();
-        *cached = Some((Instant::now(), s.clone()));
-        Ok(s)
+        Ok(wifi::state())
     }
 
-    /// On: returns at once; the radio comes up and joins a saved network on a thread.
+    /// On: returns at once; the radio comes up, joins a saved network and syncs the
+    /// clock on a thread.
     fn set_enabled(&mut self, on: bool) -> Result<()> {
-        self.forget_wifi_state();
         if on {
-            self.start_wifi_in_background();
+            let clock = self.clock.clone();
+            wifi::start_in_background(move || sync_clock(clock));
             Ok(())
         } else {
             wifi::stop()
@@ -266,18 +264,16 @@ impl Wifi for KoboServices {
     }
 
     fn connect(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
-        self.forget_wifi_state();
         let id = match (password, wifi::network_id(essid)?) {
             (None, Some(id)) => id,
             _ => wifi::save_network(essid, password)?,
         };
         wifi::connect(id)?;
-        sync_clock(&mut self.clock);
+        sync_clock_in_background(self.clock.clone());
         Ok(())
     }
 
     fn disconnect(&mut self) -> Result<()> {
-        self.forget_wifi_state();
         wifi::disconnect()
     }
 

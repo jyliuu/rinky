@@ -237,19 +237,15 @@ pub enum UiFallback {
     Builtin,
 }
 
-/// Kindle system fonts used as UI fallbacks for symbols (`Kindle_Symbol`: arrows, ▪,
-/// suits; `code2000`: ∫ ≠ ◇ ✗ and the rest). Missing on a Kobo, then skipped.
-const SYMBOL_FALLBACKS: [&str; 2] = ["/usr/java/lib/fonts/Kindle_Symbol.ttf", "/usr/java/lib/fonts/code2000.ttf"];
-
 /// Fallback faces of the UI fonts, in order, for characters the UI font lacks (IPA in
 /// dictionary pronunciations, combining double macrons and breves, math and dingbats):
 /// Noto Sans Regular shipped in rinky's `fonts` folder (all IPA of the Oxford
-/// dictionaries, a sans face like most UI fonts), the embedded Noto Serif, then
-/// [`SYMBOL_FALLBACKS`].
+/// dictionaries, a sans face like most UI fonts), the embedded Noto Serif, then the
+/// system's symbol fonts ([`ink_platform::Platform::symbol_fonts`]).
 pub fn default_ui_fallbacks() -> Vec<UiFallback> {
-    let noto = ink_platform::current().install_root().join("fonts/NotoSans-Regular.ttf");
-    let mut v = vec![UiFallback::File(noto), UiFallback::Builtin];
-    v.extend(SYMBOL_FALLBACKS.iter().map(|f| UiFallback::File(PathBuf::from(f))));
+    let p = ink_platform::current();
+    let mut v = vec![UiFallback::File(p.install_root().join("fonts/NotoSans-Regular.ttf")), UiFallback::Builtin];
+    v.extend(p.symbol_fonts().iter().map(|f| UiFallback::File(PathBuf::from(f))));
     v
 }
 

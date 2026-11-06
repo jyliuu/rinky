@@ -557,10 +557,12 @@ too. If it is wrong, start rinky over SSH with the model named, for example:
 RINKY_MODEL=PaperWhite4 sh /mnt/us/rinky/rinky-ctl.sh start
 ```
 
-The names are those in the table under [Before you start](#1-before-you-start) as
-KOReader spells them: `PaperWhite3`, `PaperWhite4`, `PaperWhite5`, `PaperWhite6`,
-`Voyage`, `Oasis`, `Oasis2`, `Oasis3`, `Basic4`, `Basic5`, `Scribe`, `ColorSoft`.
-Please open an issue with the log either way.
+The names are the models of the [install guide](install.md#1-which-device-which-package)
+as KOReader spells them: `PaperWhite3`, `PaperWhite4`, `PaperWhite5`, `PaperWhite6`,
+`Voyage`, `Oasis`, `Oasis2`, `Oasis3`, `Basic4`, `Basic5`, `Scribe`, `ColorSoft`; on a
+Kobo `Libra2`, `ClaraHD`, `Clara2E`, `Forma`, `LibraH2O`, `ClaraBW`, `ClaraColour`,
+`LibraColour` (put `export RINKY_MODEL=...` in `.adds/rinky/rinky.env`). Please open an
+issue with the log either way.
 
 ### Taps land in the wrong place
 

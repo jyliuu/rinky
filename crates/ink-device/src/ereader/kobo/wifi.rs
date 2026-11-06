@@ -17,11 +17,11 @@ use crate::ereader::system::processes_named;
 use crate::services::{WifiNetwork, WifiState};
 use crate::{DeviceError, Result};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const WPA_CONF: &str = "/mnt/onboard/.kobo/wpa_supplicant.conf";
-const NICKEL_CONF: &str = "/mnt/onboard/.kobo/Kobo/Kobo eReader.conf";
 /// Limit for a tool that should answer at once (`wpa_cli`, `insmod`, `ifconfig`).
 const TOOL_TIMEOUT: Duration = Duration::from_secs(15);
 /// `CM_WIFI_CTRL` on `/dev/ntx_io`.
@@ -29,6 +29,17 @@ const NTX_WIFI_CTRL: libc::c_ulong = 208;
 
 /// One Wi-Fi operation at a time (the UI thread, the connect thread, suspend).
 static BUSY: Mutex<()> = Mutex::new(());
+/// The last [`state`] read and when; cleared by every change rinky makes.
+static STATE: Mutex<Option<(Instant, WifiState)>> = Mutex::new(None);
+/// How long a state read is reused (each one runs `wpa_cli`; the control center and the
+/// settings pages read it on every build).
+const STATE_FOR: Duration = Duration::from_secs(10);
+/// The radio is being turned on ([`start_in_background`]).
+static STARTING: AtomicBool = AtomicBool::new(false);
+
+fn changed() {
+    *STATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
 
 fn lock() -> std::sync::MutexGuard<'static, ()> {
     BUSY.lock().unwrap_or_else(|e| e.into_inner())
@@ -47,8 +58,13 @@ pub struct WifiEnv {
 
 /// Where the launcher saves Nickel's environment (`$RINKY_RUN/nickel.env`), for rinky
 /// commands run after Nickel stopped.
-fn saved_env_path() -> String {
-    format!("{}/nickel.env", std::env::var("RINKY_RUN").unwrap_or_else(|_| "/tmp/rinky".into()))
+fn saved_env_path() -> std::path::PathBuf {
+    ink_platform::run_dir().join("nickel.env")
+}
+
+/// The value in `NAME=value` when it is not empty.
+fn value_of<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    line.strip_prefix(name)?.strip_prefix('=').filter(|v| !v.is_empty())
 }
 
 /// A variable from rinky's environment (the launcher copies Nickel's), else from the
@@ -59,17 +75,14 @@ pub fn firmware_env(name: &str) -> Option<String> {
         return Some(v);
     }
     let saved = std::fs::read_to_string(saved_env_path()).unwrap_or_default();
-    if let Some(v) = saved.lines().find_map(|l| l.strip_prefix(name).and_then(|r| r.strip_prefix('='))).filter(|v| !v.is_empty()) {
+    if let Some(v) = saved.lines().find_map(|l| value_of(l, name)) {
         return Some(v.to_string());
     }
     for dir in processes_named(&["udevd", "nickel", "systemd-udevd"]) {
         let env = std::fs::read(dir.join("environ")).unwrap_or_default();
         for kv in env.split(|b| *b == 0) {
-            let kv = String::from_utf8_lossy(kv);
-            if let Some(v) = kv.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
+            if let Some(v) = value_of(&String::from_utf8_lossy(kv), name) {
+                return Some(v.to_string());
             }
         }
     }
@@ -130,38 +143,12 @@ fn run_daemon(prog: &str, args: &[&str], limit: Duration) -> Result<()> {
     }
 }
 
-/// A value from Nickel's settings file (`Key=value` lines).
-pub(crate) fn nickel_setting(key: &str) -> Option<String> {
-    let conf = std::fs::read_to_string(NICKEL_CONF).ok()?;
-    let prefix = format!("{key}=");
-    conf.lines().find_map(|l| l.strip_prefix(&prefix)).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
-}
-
 fn module_loaded(name: &str) -> bool {
     std::fs::read_to_string("/proc/modules").unwrap_or_default().lines().any(|l| l.split(' ').next() == Some(name))
 }
 
 fn pause(ms: u64) {
     std::thread::sleep(Duration::from_millis(ms));
-}
-
-/// `ioctl(/dev/ntx_io, cmd, arg)`, the argument passed by value (KOReader `ntx_io.lua`).
-pub fn ntx_io(cmd: libc::c_ulong, arg: libc::c_int) -> Result<()> {
-    let path = c"/dev/ntx_io";
-    // SAFETY: plain open/ioctl/close on a NUL-terminated path; the ioctl takes an int.
-    unsafe {
-        let fd = libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC);
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let r = libc::ioctl(fd, cmd as _, arg);
-        let e = std::io::Error::last_os_error();
-        libc::close(fd);
-        if r < 0 {
-            return Err(DeviceError::Backend(format!("ntx_io {cmd} {arg}: {e}")));
-        }
-    }
-    Ok(())
 }
 
 impl WifiEnv {
@@ -213,8 +200,11 @@ impl WifiEnv {
     }
 }
 
-/// The interface exists and is up.
+/// The interface exists and is up (or is being brought up).
 pub fn is_up() -> bool {
+    if STARTING.load(Ordering::Relaxed) {
+        return true;
+    }
     std::fs::read_to_string(format!("/sys/class/net/{}/flags", env().interface))
         .ok()
         .and_then(|f| u32::from_str_radix(f.trim().trim_start_matches("0x"), 16).ok())
@@ -229,10 +219,11 @@ fn wpa_running() -> bool {
 /// `wpa_supplicant` (which joins a known network by itself).
 pub fn start() -> Result<()> {
     let _g = lock();
+    changed();
     let e = env();
     log::info!("wifi: on ({} on {}, {})", e.module, e.interface, e.platform);
     match e.module.as_str() {
-        "moal" => ntx_io(NTX_WIFI_CTRL, 1)?,
+        "moal" => super::ntx_io(NTX_WIFI_CTRL, 1)?,
         "wlan_drv_gen4m" => {
             for m in ["wmt_drv", "wmt_chrdev_wifi", "wmt_cdev_bt", e.module.as_str()] {
                 e.insmod(m, &[])?;
@@ -249,14 +240,14 @@ pub fn start() -> Result<()> {
             if std::path::Path::new(&format!("{}/sdio_wifi_pwr.ko", e.kmod_dir())).exists() {
                 e.insmod("sdio_wifi_pwr", &[])?;
             } else {
-                ntx_io(NTX_WIFI_CTRL, 1)?;
+                super::ntx_io(NTX_WIFI_CTRL, 1)?;
             }
         }
     }
     pause(250);
     if !e.mtk() {
         let mut params = Vec::new();
-        if let Some(cc) = nickel_setting("WifiRegulatoryDomain") {
+        if let Some(cc) = super::nickel_setting("WifiRegulatoryDomain") {
             match e.module.as_str() {
                 "8821cs" => params.push(format!("rtw_country_code={cc}")),
                 "moal" => params.push(format!("reg_alpha2={cc}")),
@@ -283,10 +274,35 @@ pub fn start() -> Result<()> {
     Ok(())
 }
 
+/// [`start`], then joins the saved network wpa_supplicant picks and gets an address, on
+/// a thread (the radio takes seconds to come up); `then` runs once there is an address.
+/// While it runs, [`state`] says `PENDING` and a second call does nothing.
+pub fn start_in_background(then: impl FnOnce() + Send + 'static) {
+    if STARTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("wifi-on".into()).spawn(move || {
+        let joined = start().and_then(|()| wait_associated(Duration::from_secs(15))).and_then(|()| obtain_ip());
+        STARTING.store(false, Ordering::SeqCst);
+        match joined {
+            Ok(()) => {
+                log::info!("wifi: connected");
+                then();
+            }
+            Err(e) => log::info!("wifi: no saved network joined: {e}"),
+        }
+    });
+    if let Err(e) = spawned {
+        STARTING.store(false, Ordering::SeqCst);
+        log::warn!("wifi: no thread: {e}");
+    }
+}
+
 /// Releases the lease, stops `wpa_supplicant`, takes the interface down, unloads the
 /// driver (not on MediaTek, as KOReader) and powers the radio off.
 pub fn stop() -> Result<()> {
     let _g = lock();
+    changed();
     if !is_up() && !wpa_running() {
         return Ok(());
     }
@@ -300,7 +316,7 @@ pub fn stop() -> Result<()> {
             e.rmmod("moal");
             e.rmmod("mlan");
             pause(250);
-            ntx_io(NTX_WIFI_CTRL, 0)?;
+            super::ntx_io(NTX_WIFI_CTRL, 0)?;
         }
         "wlan_drv_gen4m" => std::fs::write("/dev/wmtWifi", "0")?,
         m => {
@@ -309,7 +325,7 @@ pub fn stop() -> Result<()> {
                 e.rmmod("sdio_wifi_pwr");
             } else {
                 pause(250);
-                let _ = ntx_io(NTX_WIFI_CTRL, 0);
+                let _ = super::ntx_io(NTX_WIFI_CTRL, 0);
             }
         }
     }
@@ -332,6 +348,7 @@ fn release_ip(e: &WifiEnv) {
 
 /// Gets an address (blocks up to 30 s).
 pub fn obtain_ip() -> Result<()> {
+    changed();
     let e = env();
     release_ip(e);
     if std::path::Path::new("/sbin/dhcpcd").exists() {
@@ -374,6 +391,20 @@ pub fn bars(rssi: i32) -> u8 {
 /// The state in wifid's words: `CONNECTED` (associated and an address), `PENDING`
 /// (associating or waiting for DHCP), `NA` (radio on, not connected).
 pub fn state() -> WifiState {
+    if STARTING.load(Ordering::Relaxed) {
+        return WifiState { enabled: true, state: "PENDING".into(), essid: None, signal: None };
+    }
+    let mut cached = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, s)) = cached.as_ref().filter(|(at, _)| at.elapsed() < STATE_FOR) {
+        return s.clone();
+    }
+    let s = read_state();
+    *cached = Some((Instant::now(), s.clone()));
+    s
+}
+
+/// [`state`] read from the interface and `wpa_cli`.
+fn read_state() -> WifiState {
     if !is_up() {
         return WifiState { enabled: false, state: "NA".into(), essid: None, signal: None };
     }
@@ -510,6 +541,7 @@ pub fn network_id(essid: &str) -> Result<Option<i64>> {
 
 /// Joins saved network `id`, waits for the association (20 s) and gets an address.
 pub fn connect(id: i64) -> Result<()> {
+    changed();
     let e = env();
     e.wpa(&["select_network", &id.to_string()])?;
     let r = wait_associated(Duration::from_secs(20));
@@ -537,6 +569,7 @@ pub fn wait_associated(limit: Duration) -> Result<()> {
 
 /// Disconnects (the radio stays on).
 pub fn disconnect() -> Result<()> {
+    changed();
     let e = env();
     release_ip(e);
     e.wpa(&["disconnect"]).map(|_| ())

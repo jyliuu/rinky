@@ -102,15 +102,16 @@ pub fn run(opts: &SelftestOptions) -> u32 {
             r.skip("device.screen", "pass --screen to draw the test pattern");
         }
         r.check("device.input", || {
+            use ink_device::evdev::{choose_touch_device, TouchOverride};
             let devs = ink_device::ereader::input::list_devices();
-            let touch = devs.iter().find(|d| d.has_abs).map(|d| d.name.clone());
-            let power = devs.iter().find(|d| d.name.contains("pwrkey")).map(|d| d.name.clone());
+            let touch = choose_touch_device(&devs, &TouchOverride::default()).map(|d| d.name.clone());
+            let power = ink_device::ereader::input::power_key_device(&devs).map(|d| d.name.clone());
             anyhow::ensure!(touch.is_some(), "no touch device in {devs:?}");
             Ok(format!("touch {:?}, power key {:?}", touch.unwrap_or_default(), power))
         });
     }
     #[cfg(not(target_os = "linux"))]
-    r.skip("device", "not a Kindle");
+    r.skip("device", "not an e-reader");
 
     // lipc through child processes.
     if opts.lipc {

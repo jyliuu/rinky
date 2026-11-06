@@ -89,6 +89,15 @@ impl Platform {
         vec![PathBuf::from(system), PathBuf::from(user), self.install_root().join("fonts")]
     }
 
+    /// System fonts used as UI fallbacks for symbols the UI font lacks (Kindle:
+    /// `Kindle_Symbol` for arrows, ▪, suits; `code2000` for ∫ ≠ ◇ ✗ and the rest).
+    pub fn symbol_fonts(self) -> &'static [&'static str] {
+        match self {
+            Platform::Kindle => &["/usr/java/lib/fonts/Kindle_Symbol.ttf", "/usr/java/lib/fonts/code2000.ttf"],
+            Platform::Kobo => &[],
+        }
+    }
+
     /// The release asset this platform installs and updates from:
     /// `rinky-<version><suffix>`.
     pub fn package_suffix(self) -> &'static str {
@@ -97,6 +106,12 @@ impl Platform {
             Platform::Kobo => "-kobo.tar.gz",
         }
     }
+}
+
+/// rinky's runtime folder on the tmpfs (`RINKY_RUN`, default `/tmp/rinky`): the
+/// launcher's lock and restart files, the restore journal, the heartbeat.
+pub fn run_dir() -> PathBuf {
+    std::env::var_os("RINKY_RUN").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp/rinky"))
 }
 
 /// The platform this process runs on: [`Platform::detect`], once.

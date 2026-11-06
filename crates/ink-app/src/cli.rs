@@ -195,7 +195,7 @@ fn open_device() -> anyhow::Result<ink_device::Device> {
 fn open_device_with(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
     #[cfg(target_os = "linux")]
     {
-        let mut opts = ink_device::ereader::ReaderOptions { power_events: true, ..Default::default() };
+        let mut opts = ink_device::ereader::ReaderOptions::default();
         if !device_sleep {
             opts.sleep = None;
         }
@@ -574,7 +574,10 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
         Some("inject") if rest.first().map(String::as_str) == Some("power") => {
             #[cfg(target_os = "linux")]
             {
-                let dev = ink_device::ereader::input::inject_key("pwrkey", ink_device::evdev::KEY_POWER)?;
+                use ink_device::ereader::input::{inject_key, list_devices, power_key_device};
+                let devs = list_devices();
+                let key = power_key_device(&devs).ok_or_else(|| anyhow::anyhow!("no power key device"))?;
+                let dev = inject_key(key, ink_device::evdev::KEY_POWER)?;
                 println!("injected KEY_POWER press+release into {dev}");
                 Ok(0)
             }

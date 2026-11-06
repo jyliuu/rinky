@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds the rinky install package for the Kindle (one .tar.gz).
+# Builds the rinky install packages for the Kindle and the Kobo (one binary, two
+# layouts).
 #
 #   scripts/package.sh [--allow-dirty] [--no-build] [--version V] [--out DIR] [--profile P]
 #
@@ -21,17 +22,17 @@
 #                                    NickelMenu entry nm/rinky)
 #   rinky-V-kobo.zip                 the Kobo files laid out as the drive (.adds/rinky,
 #                                    .adds/nm/rinky), for copying over USB
-#   SHA256SUMS                       both lines; upload it to the GitHub release next
-#                                    to the packages (the in-app update needs it)
+#   SHA256SUMS                       one line per package; upload it to the GitHub
+#                                    release next to them (the in-app update needs it)
 #
-# Package layout (mirrors /mnt/us on the Kindle):
+# Kindle package layout (mirrors /mnt/us on the Kindle):
 #   rinky/              -> /mnt/us/rinky
 #     rinky             static ARMv7 musl binary
 #     rinky.sh, rinky-watchdog.sh   framework-stop launcher and watchdog
 #     rinky-ctl.sh      start / stop (Exit to Kindle) / status
 #     install.sh, uninstall.sh
 #     VERSION, FILES (every file of the package), SHA256SUMS (of every other file)
-#     README.txt, user-guide.md, LICENSE, LICENSE-Noto, LICENSE-dropbear
+#     README.txt, install.md, user-guide.md, LICENSE, LICENSE-Noto, LICENSE-dropbear
 #     bin/dropbearmulti     static ARMv7 musl dropbear (SSH server, dropbearkey, scp) for
 #                           the ssh plugin; built by scripts/build-dropbear.sh
 #     bin/scp               wrapper running dropbearmulti scp (dropbear's session PATH
@@ -40,6 +41,11 @@
 #                                  LICENSE-Noto); also listed as the family "Noto Sans"
 #   extensions/rinky/   -> /mnt/us/extensions/rinky (KUAL menu)
 #     config.xml, menu.json, bin/kual.sh
+#
+# Kobo package layout:
+#   rinky/              -> /mnt/onboard/.adds/rinky: the same files without the Kindle
+#                          launcher scripts and dropbear; rinky.sh is the Kobo launcher
+#   nm/rinky            -> /mnt/onboard/.adds/nm/rinky (NickelMenu entry)
 #
 # Build: cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p ink-app
 # (CARGO_BUILD_JOBS defaults to all cores; CARGO_TARGET_DIR is honoured), then
@@ -63,7 +69,7 @@ while [ $# -gt 0 ]; do
     --version) VERSION=${2:?--version needs a value}; shift ;;
     --out) OUT=${2:?--out needs a value}; shift ;;
     --profile) PROFILE=${2:?--profile needs a value}; shift ;;
-    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
     *) die "unknown option $1" ;;
   esac
   shift

@@ -6,7 +6,7 @@
 #      exit, or an update, cannot hit a running file);
 #   2. take Nickel's environment (PLATFORM, PRODUCT, WIFI_MODULE, INTERFACE, ...),
 #      turn Bluetooth off, stop Nickel and its helpers;
-#   3. run rinky; `rinky-ctl.sh restart` or an in-app update writes $RUN/restart and
+#   3. run rinky; when it exits after writing $RUN/restart (an in-app update does),
 #      the launcher runs the installed binary again without starting Nickel;
 #   4. on every exit path: put back what rinky journaled (framebuffer bit depth and
 #      rotation), turn Wi-Fi off, and start Nickel again (reboot if Nickel was not

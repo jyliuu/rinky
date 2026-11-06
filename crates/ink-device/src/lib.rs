@@ -2,12 +2,12 @@
 //!
 //! A [`Device`] bundles one implementation of each service trait:
 //!
-//! | Trait | Kindle (`kindle`) | Host window (`sim`) | Tests (`headless`) |
+//! | Trait | Kindle and Kobo (`ereader`) | Host window (`sim`) | Tests (`headless`) |
 //! | --- | --- | --- | --- |
-//! | [`Screen`] | `/dev/fb0` + MTK refresh ioctls | minifb window, e-ink look | PNG frames |
-//! | [`Input`] | evdev touch + power key + powerd events | mouse + keys | script |
-//! | [`Light`], [`Battery`], [`Power`], [`Wifi`], [`Usb`] | `lipc` properties | unsupported | unsupported |
-//! | [`Clock`] | system clock | system clock | system clock |
+//! | [`Screen`] | `/dev/fb0` + the model's refresh ioctls | minifb window, e-ink look | PNG frames |
+//! | [`Input`] | evdev touch and keys; powerd events on a Kindle | mouse + keys | script |
+//! | [`Light`], [`Battery`], [`Power`], [`Wifi`], [`Usb`] | Kindle: `lipc` properties; Kobo: sysfs, `wpa_supplicant` | unsupported | unsupported |
+//! | [`Clock`] | system clock and RTC | system clock | system clock |
 //!
 //! Fields are public so the app can borrow the screen and the input at the same time.
 //! Shared building blocks live here too: [`Canvas`] (8-bit gray pixels), [`geom`]
@@ -101,9 +101,10 @@ pub type Result<T, E = DeviceError> = std::result::Result<T, E>;
 pub struct DeviceInfo {
     /// `kindle`, `kobo`, `sim` or `headless`.
     pub backend: &'static str,
-    /// Model name (`Kindle Paperwhite 4 (10th gen)`).
+    /// Model name (`Kindle Paperwhite 4 (10th gen)`, `Kobo Libra 2`).
     pub model: String,
-    /// Firmware (first line of `/etc/version.txt`); empty off the device.
+    /// Firmware version (Kindle `/etc/version.txt`, Kobo `.kobo/version`); empty off the
+    /// device.
     pub firmware: String,
     /// The panel sweeps a page turn in ([`Screen::update_wave`]); without it the
     /// "Page turn wave" setting is hidden.

@@ -7,7 +7,6 @@
 //! (`/tmp/rinky/heartbeat`, a counter) moves while the app waits for input; a
 //! stuck app stops calling `next_event` and the heartbeat stops.
 
-use super::fb::Framebuffer;
 use super::system;
 use super::Shared;
 use crate::battery::{self, LowBatteryMonitor};
@@ -60,11 +59,6 @@ pub fn list_devices() -> Vec<DevInfo> {
     crate::evdev::parse_devices(&text)
 }
 
-/// Parses the text of `/proc/bus/input/devices` (kept for callers of phase 0).
-pub fn parse_devices(text: &str) -> Vec<DevInfo> {
-    crate::evdev::parse_devices(text)
-}
-
 fn abs_info(f: &File, code: u16) -> Option<[i32; 6]> {
     let mut info = [0i32; 6];
     // SAFETY: EVIOCGABS writes one struct input_absinfo (6 x i32).
@@ -101,14 +95,10 @@ pub fn page_key_device(devs: &[DevInfo], codes: (u16, u16)) -> Option<&DevInfo> 
     devs.iter().find(|d| d.has_key(codes.0) && d.has_key(codes.1))
 }
 
-/// Writes key press + release records into the evdev node of the device whose name
-/// contains `device_name` (for example `pwrkey`). Every reader of that node receives
-/// them as if the key was pressed (powerd ignores injected events).
-pub fn inject_key(device_name: &str, code: u16) -> Result<String> {
-    let dev = list_devices()
-        .into_iter()
-        .find(|d| d.name.contains(device_name))
-        .ok_or_else(|| DeviceError::Backend(format!("no input device named *{device_name}*")))?;
+/// Writes key press + release records into the evdev node of `dev` (for example
+/// [`power_key_device`]). Every reader of that node receives them as if the key was
+/// pressed (powerd ignores injected events).
+pub fn inject_key(dev: &DevInfo, code: u16) -> Result<String> {
     let path = format!("/dev/input/{}", dev.event);
     let mut f = OpenOptions::new().write(true).open(&path)?;
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
@@ -355,8 +345,6 @@ pub enum Request {
 pub struct LoopOptions {
     /// Grab the touchscreen.
     pub grab_touch: bool,
-    /// Subscribe to lipc publishers.
-    pub lipc_events: bool,
     /// Sleep policy (`None` = deliver the power key to the app).
     pub sleep: Option<crate::sleep::SleepConfig>,
     /// USB policy (`None` = leave volumd alone).
@@ -416,12 +404,6 @@ struct Plat<'a> {
     light_saved: &'a mut Vec<(String, i64)>,
 }
 
-fn invert(c: &mut Canvas) {
-    for p in &mut c.pixels {
-        *p = 255 - *p;
-    }
-}
-
 /// Shows a panel-orientation picture over whatever is there, keeping the old content
 /// as the shadow (app updates go to the shadow until [`hide_overlay`]).
 fn show_overlay(sh: &mut Shared, mut picture: Canvas) -> Result<()> {
@@ -430,7 +412,7 @@ fn show_overlay(sh: &mut Shared, mut picture: Canvas) -> Result<()> {
     }
     if sh.screen.hw_night() {
         // The driver inverts; store the negative so the picture shows as drawn.
-        invert(&mut picture);
+        picture.invert();
     }
     sh.screen.write_panel(&picture, RefreshClass::Gc16)
 }
@@ -454,7 +436,7 @@ impl SleepPlatform for Plat<'_> {
             Some(shadow) => {
                 let mut c = shadow.clone();
                 if sh.screen.hw_night() {
-                    invert(&mut c);
+                    c.invert();
                 }
                 c
             }
@@ -505,12 +487,8 @@ impl SleepPlatform for Plat<'_> {
     }
 
     fn suspend(&mut self, rtc_wake: Option<Duration>) -> Result<Resume> {
-        let mut lines = Vec::new();
-        let r = (self.suspend)(self.sys, rtc_wake, &mut |s| lines.push(s));
-        for l in lines {
-            log::info!("suspend: {l}");
-        }
-        r
+        let model = self.shared.borrow().screen.model;
+        super::logged_suspend(self.suspend, self.sys, &model, rtc_wake)
     }
 
     fn after_resume(&mut self) -> Result<()> {
@@ -590,7 +568,7 @@ impl ReaderInput {
             app_touch: AppContacts::default(),
             opts,
         };
-        if let Some(lipc) = lipc.filter(|_| me.opts.lipc_events) {
+        if let Some(lipc) = lipc {
             if let Some((rd, wr)) = make_pipe() {
                 let mut hub = EventHub::new(lipc, move || {
                     let _ = (&wr).write_all(&[1]);
@@ -1317,13 +1295,5 @@ impl Drop for ReaderInput {
                 let _ = hide_overlay(&mut sh);
             }
         }
-    }
-}
-
-impl Framebuffer {
-    /// The panel orientation size (for callers without the trait in scope).
-    pub fn size_px(&self) -> (u32, u32) {
-        let s = crate::Screen::panel_size(self);
-        (s.w, s.h)
     }
 }
