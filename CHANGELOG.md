@@ -4,7 +4,7 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-11-06
 
 ### Added
 - rinky runs on more Kindles: the Paperwhite 3, 4 and 5, Voyage, Oasis 1 to 3, Kindle
@@ -185,6 +185,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.5.0]: https://github.com/jyliuu/rinky/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/jyliuu/rinky/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jyliuu/rinky/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jyliuu/rinky/compare/v0.4.0...v0.4.1
