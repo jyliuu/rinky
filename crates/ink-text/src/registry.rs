@@ -6,9 +6,6 @@ use crate::face::{collection_faces, map_file, FaceInfo};
 use rustybuzz::ttf_parser;
 use std::path::{Path, PathBuf};
 
-/// Directories searched on the Kindle, in order (user fonts first).
-pub const KINDLE_FONT_DIRS: &[&str] = &["/mnt/us/fonts", "/usr/java/lib/fonts"];
-
 /// A font file found on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FontFile {
@@ -137,11 +134,6 @@ pub fn summary<P: AsRef<Path>>(dirs: &[P], entries: &[FontEntry]) -> Vec<String>
         })
         .collect()
 }
-
-/// Directories the reader loads text fonts from at runtime, in order: the Kindle's
-/// system fonts (Bookerly, Amazon Ember, Caecilia, ...; never copied or packaged, only
-/// read on the device), the user's fonts and rinky's own font folder.
-pub const READER_FONT_DIRS: &[&str] = &["/usr/java/lib/fonts", "/mnt/us/fonts", "/mnt/us/rinky/fonts"];
 
 /// One face of an installed family: file, face index and weight.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -286,10 +286,8 @@ pub const INDENTS: [(f32, &str); 5] = [(-1.0, "Book's own"), (0.0, "None"), (1.0
 /// Text weights on the default layout page, `(level, name)`.
 pub const WEIGHTS: [(u8, &str); 3] = [(0, "Normal"), (1, "Darker"), (2, "Darkest")];
 
-/// Folders under `/mnt/us` offered on the library folders page besides the chosen ones.
-pub const FOLDER_ROOT: &str = "/mnt/us";
-
-/// The library folders offered: the chosen ones, then the folders in [`FOLDER_ROOT`]
+/// The library folders offered: the chosen ones, then the folders in `root` (the
+/// user storage)
 /// (hidden ones and rinky's own skipped), at most 40.
 pub fn folder_choices(chosen: &[std::path::PathBuf], root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out: Vec<std::path::PathBuf> = chosen.to_vec();
@@ -518,6 +516,8 @@ pub struct MainValues {
     pub night: bool,
     /// Page turn wave on.
     pub wave: bool,
+    /// The panel cannot sweep a page turn: no "Page turn wave" toggle.
+    pub wave_hidden: bool,
     /// Default layout (text size, spacing).
     pub layout: String,
     /// Navigation bar items.
@@ -569,7 +569,9 @@ pub fn main_rows(v: &MainValues) -> Vec<Row> {
     let m = |s: &str| section_modules(v, s);
     let mut rows = vec![Row::header("Reading")];
     rows.extend(m("Reading").into_iter().take(1));
-    rows.push(Row::toggle("Page turn wave", v.wave, "anim").icon(Icon::Book).subtitle("The screen sweeps the new page in"));
+    if !v.wave_hidden {
+        rows.push(Row::toggle("Page turn wave", v.wave, "anim").icon(Icon::Book).subtitle("The screen sweeps the new page in"));
+    }
     rows.extend(m("Reading").into_iter().skip(1));
     rows.push(Row::nav(Icon::Font, "Default layout", "page:layout").value(&v.layout));
     rows.push(Row::nav(Icon::Sync, "Full refresh", "page:refresh").value(&v.refresh));
@@ -607,7 +609,10 @@ pub fn main_rows(v: &MainValues) -> Vec<Row> {
     rows.push(Row::nav(Icon::Download, "Update", "page:update").value(&v.version));
     rows.extend(m("About"));
     rows.push(Row::toggle("Ask before exit", v.confirm_exit, "confirm-exit").icon(Icon::Info));
-    rows.push(Row::item("Exit to Kindle", "exit").icon(Icon::Home).subtitle("Close rinky, start the Kindle home screen"));
+    let device = ink_platform::current().device_name();
+    rows.push(
+        Row::item(format!("Exit to {device}"), "exit").icon(Icon::Home).subtitle(format!("Close rinky, start the {device} home screen")),
+    );
     rows
 }
 
@@ -1015,7 +1020,7 @@ impl SettingsScreen {
             _ => None,
         };
         if page == Page::Folders {
-            self.folders = folder_choices(&current_settings(cx).library_dirs, std::path::Path::new(FOLDER_ROOT));
+            self.folders = folder_choices(&current_settings(cx).library_dirs, std::path::Path::new(ink_platform::current().user_root()));
         }
         self.page = page;
         self.list = None;
@@ -1164,6 +1169,7 @@ impl SettingsScreen {
             rotation: rotation_name(crate::app::settings_rotation(st)).into(),
             night: st.device.night_mode,
             wave: page_wave(st),
+            wave_hidden: !cx.services.info.page_wave,
             layout: format!("{} px · {:.1}", r.font_px.round(), r.line_spacing),
             nav: crate::plugin_entries::nav_chosen(st, cx.plugins).iter().map(|n| crate::plugin_entries::nav_label(cx.plugins, n)).collect::<Vec<_>>().join(", "),
             folders: match st.library_dirs.len() {
@@ -1212,7 +1218,7 @@ impl SettingsScreen {
             pngs.sort();
             values.extend(pngs.into_iter().take(50));
         }
-        let mut rows = vec![Row::header("Shown while the Kindle sleeps")];
+        let mut rows = vec![Row::header(format!("Shown while the {} sleeps", ink_platform::current().device_name()))];
         rows.extend(values.iter().map(|v| Row::choice(screensaver_name(v), *v == now, format!("saver:{v}"))));
         rows.push(Row::note(format!("PNG pictures in {} are listed too.", dir.display())));
         self.add_rows(rows, content);
@@ -1374,7 +1380,7 @@ impl SettingsScreen {
     fn build_device(&mut self, cx: &mut AppCtx, content: Rect) {
         let s = &cx.services;
         let device = Card::new(s.info.model.clone(), "")
-            .subtitle(format!("Backend: {}", s.info.backend))
+            .subtitle(if s.info.firmware.is_empty() { format!("Backend: {}", s.info.backend) } else { s.info.firmware.clone() })
             .body(format!("rinky {}", update::current_version()));
         let mut cards = vec![(device, DEVICE_CARD_H)];
         let battery = match s.battery.info() {
@@ -1582,8 +1588,13 @@ impl SettingsScreen {
 
     fn confirm(&mut self, what: Confirm) {
         let (title, body, ok) = match &what {
-            Confirm::Exit => ("Exit to Kindle?".to_string(), "rinky closes and the Kindle home screen starts.".to_string(), "Exit"),
-            Confirm::Forget(e) => (format!("Forget {e}?"), "The saved password is removed from the Kindle.".to_string(), "Forget"),
+            Confirm::Exit => {
+                let device = ink_platform::current().device_name();
+                (format!("Exit to {device}?"), format!("rinky closes and the {device} home screen starts."), "Exit")
+            }
+            Confirm::Forget(e) => {
+                (format!("Forget {e}?"), format!("The saved password is removed from the {}.", ink_platform::current().device_name()), "Forget")
+            }
         };
         let scrim = self.tree.add(None, Box::new(Scrim::new("")), Rect::from_size(self.size));
         let dialog = Dialog { title, body, buttons: vec![("Cancel".into(), "dlg-cancel".into()), (ok.into(), "dlg-ok".into())] };

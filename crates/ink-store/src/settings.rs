@@ -245,7 +245,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            library_dirs: vec![PathBuf::from("/mnt/us/Books"), PathBuf::from("/mnt/us/documents")],
+            library_dirs: ink_platform::current().default_library_dirs(),
             language: "en".into(),
             reader: ReaderSettings::default(),
             device: DeviceSettings::default(),

@@ -118,6 +118,15 @@ pub struct DevInfo {
     pub has_abs: bool,
     /// Reports `ABS_MT_POSITION_X` (a multi-touch screen).
     pub has_mt: bool,
+    /// The `B: KEY=` bitmap as printed (see [`DevInfo::has_key`]).
+    pub key_bits: String,
+}
+
+impl DevInfo {
+    /// The device can send this key code.
+    pub fn has_key(&self, code: u16) -> bool {
+        bitmap_has(&self.key_bits, code as usize)
+    }
 }
 
 /// Parses the text of `/proc/bus/input/devices` (bitmap words as an ARM32 kernel
@@ -136,6 +145,8 @@ pub fn parse_devices(text: &str) -> Vec<DevInfo> {
             } else if let Some(a) = line.strip_prefix("B: ABS=") {
                 d.has_abs = a.trim() != "0";
                 d.has_mt = bitmap_has(a, ABS_MT_POSITION_X as usize);
+            } else if let Some(k) = line.strip_prefix("B: KEY=") {
+                d.key_bits = k.trim().to_string();
             }
         }
         if !d.event.is_empty() {
@@ -232,11 +243,23 @@ impl TouchProfile {
     }
 }
 
+/// How raw touch coordinates map onto the upright screen: swap the axes first, then
+/// mirror (KOReader's `touch_switch_xy`, `touch_mirrored_x`, `touch_mirrored_y`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TouchTransform {
+    /// Raw x is the screen's y and the other way round.
+    pub swap: bool,
+    /// Flip x (after the swap).
+    pub mirror_x: bool,
+    /// Flip y (after the swap).
+    pub mirror_y: bool,
+}
+
 /// Parsed `RINKY_TOUCH` value: comma-separated tokens.
 ///
 /// | Token | Meaning |
 /// | --- | --- |
-/// | `swap`, `mirror_x`, `mirror_y` | axis transforms; any of these (or `none`) replaces the profile's transforms |
+/// | `swap`, `mirror_x`, `mirror_y` | axis transforms ([`TouchTransform`]); any of these (or `none`) replaces the profile's transforms |
 /// | `none` | no swap or mirror |
 /// | `pixels` / `scale` | raw units are pixels / scale by the reported range |
 /// | `profile=NAME` | use profile `pt_mt`, `fts_ts`, `cyttsp` or `generic` |
@@ -244,8 +267,8 @@ impl TouchProfile {
 /// | `range=X0:X1,Y0:Y1` is not supported; use `scale` with the driver's own range |
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TouchOverride {
-    /// Replacement transforms `(swap, mirror_x, mirror_y)`, when any transform token is given.
-    pub transforms: Option<(bool, bool, bool)>,
+    /// Replacement transforms, when any transform token is given.
+    pub transforms: Option<TouchTransform>,
     /// Forced coordinate mode.
     pub pixels: Option<bool>,
     /// Forced profile.
@@ -281,7 +304,7 @@ impl TouchOverride {
             }
         }
         if any {
-            o.transforms = Some((swap, mx, my));
+            o.transforms = Some(TouchTransform { swap, mirror_x: mx, mirror_y: my });
         }
         o
     }
@@ -351,10 +374,10 @@ impl TouchMapping {
 
     /// Applies an `RINKY_TOUCH` override.
     pub fn with_override(mut self, ov: &TouchOverride) -> Self {
-        if let Some((s, mx, my)) = ov.transforms {
-            self.swap_xy = s;
-            self.mirror_x = mx;
-            self.mirror_y = my;
+        if let Some(t) = ov.transforms {
+            self.swap_xy = t.swap;
+            self.mirror_x = t.mirror_x;
+            self.mirror_y = t.mirror_y;
         }
         if let Some(p) = ov.pixels {
             self.pixels = p;
@@ -452,6 +475,10 @@ pub struct TouchDecoder {
     has_tracking: bool,
     /// The device sent `ABS_MT_POSITION_*`: its `ABS_X`/`ABS_Y` emulation is ignored.
     has_mt_pos: bool,
+    /// A `TRACKING_ID -1` was seen. Until then a `BTN_TOUCH 0` ends every contact:
+    /// Kobo's "snow" panels (Clara HD and BW, Forma, Libra H2O) never send the -1
+    /// (KOReader `handleTouchEvSnow`).
+    saw_release: bool,
     /// Between `SYN_DROPPED` and the next `SYN_REPORT`: everything is discarded.
     dropping: bool,
     /// A `SYN_DROPPED` was handled; the backend should re-seed from the kernel.
@@ -467,6 +494,7 @@ impl TouchDecoder {
             slots: [SlotState::default(); SLOTS],
             has_tracking: false,
             has_mt_pos: false,
+            saw_release: false,
             dropping: false,
             resync: false,
         }
@@ -533,9 +561,22 @@ impl TouchDecoder {
             return None;
         }
         match (ev.ty, ev.code) {
-            (EV_ABS, ABS_MT_TRACKING_ID) => self.has_tracking = true,
+            (EV_ABS, ABS_MT_TRACKING_ID) => {
+                self.has_tracking = true;
+                if ev.value < 0 {
+                    self.saw_release = true;
+                }
+            }
             (EV_ABS, ABS_MT_POSITION_X) | (EV_ABS, ABS_MT_POSITION_Y) => self.has_mt_pos = true,
-            (EV_KEY, BTN_TOUCH) if self.has_tracking => return None,
+            (EV_KEY, BTN_TOUCH) if self.has_tracking => {
+                if ev.value == 0 && !self.saw_release {
+                    for s in self.slots.iter_mut().filter(|s| s.down || s.began) {
+                        s.ended = true;
+                        s.end_pos = s.pos;
+                    }
+                }
+                return None;
+            }
             (EV_ABS, ABS_X) | (EV_ABS, ABS_Y) if self.has_mt_pos => return None,
             _ => {}
         }
@@ -681,6 +722,28 @@ mod tests {
     fn run(events: &[RawEvent]) -> Vec<TouchFrame> {
         let mut d = TouchDecoder::new(TouchMapping::identity(1272, 1696));
         events.iter().filter_map(|e| d.feed(*e)).collect()
+    }
+
+    #[test]
+    fn snow_lift_is_btn_touch() {
+        // Kobo Clara BW: tracking id 0 at every touch, never -1; BTN_TOUCH 0 lifts.
+        let tap = |t: u64, x: i32| {
+            [
+                ev(t, EV_KEY, BTN_TOUCH, 1),
+                ev(t, EV_ABS, ABS_MT_TRACKING_ID, 0),
+                ev(t, EV_ABS, ABS_MT_POSITION_X, x),
+                ev(t, EV_ABS, ABS_MT_POSITION_Y, 200),
+                ev(t, EV_SYN, 2, 0), // SYN_MT_REPORT
+                ev(t, EV_SYN, SYN_REPORT, 0),
+                ev(t + 90, EV_ABS, ABS_MT_POSITION_X, x),
+                ev(t + 90, EV_KEY, BTN_TOUCH, 0),
+                ev(t + 90, EV_SYN, SYN_REPORT, 0),
+            ]
+        };
+        let events: Vec<RawEvent> = tap(0, 100).into_iter().chain(tap(1000, 300)).collect();
+        let phases: Vec<(TouchPhase, i32)> =
+            run(&events).iter().flat_map(|f| f.contacts.iter().map(|c| (c.phase, c.x))).collect();
+        assert_eq!(phases, [(TouchPhase::Down, 100), (TouchPhase::Up, 100), (TouchPhase::Down, 300), (TouchPhase::Up, 300)]);
     }
 
     #[test]
@@ -977,6 +1040,16 @@ fts_ts: 1792868250693 ms type 0 code 0 value 0";
     const EMU_DEVICES: &str = "I: Bus=0019\nN: Name=\"bd71828-pwrkey\"\nH: Handlers=event0 ktch \nB: EV=3\n\n\
         I: Bus=0018\nN: Name=\"fts_ts\"\nH: Handlers=event1 ktch \nB: ABS=2618000 0\n\n\
         I: Bus=0018 Vendor=1949 Product=0417\nN: Name=\"gesture_tap\"\nH: Handlers=event2 ktch \nB: EV=3\n";
+
+    #[test]
+    fn key_bitmaps() {
+        // An Oasis-like key device: KEY_PAGEUP (104), KEY_PAGEDOWN (109), KEY_POWER (116)
+        // are bits 8, 13 and 20 of the fourth word.
+        let devs = parse_devices("N: Name=\"gpio-keys\"\nH: Handlers=kbd event2\nB: EV=3\nB: KEY=102100 0 0 0\n");
+        assert!(devs[0].has_key(104) && devs[0].has_key(109) && devs[0].has_key(116));
+        assert!(!devs[0].has_key(105) && !devs[0].has_key(65) && !devs[0].has_key(300));
+        assert!(!parse_devices(PT_MT_DEVICES)[0].has_key(116), "no KEY= line");
+    }
 
     #[test]
     fn device_list_parsing_and_choice() {

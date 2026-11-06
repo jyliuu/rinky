@@ -3,14 +3,13 @@
 //! input loop for sleep and USB drive mode.
 
 use super::input::Request;
-use super::Shared;
+use super::{Shared, SharedHandle};
 use crate::battery;
-use crate::clock::NtpSample;
 use crate::journal::Entry;
 use crate::light::{AmberMode, AmberSchedule, DayTime};
 use crate::lipc::Lipc;
 use crate::screensaver::Screensaver;
-use crate::services::{Battery, BatteryState, Clock, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
+use crate::services::{Battery, BatteryState, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
 use crate::sleep::SleepState;
 use crate::sysfs::SysRoot;
 use crate::usb::{DriveModeState, UsbCable};
@@ -20,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 const POWERD: &str = "com.lab126.powerd";
 const WIFID: &str = "com.lab126.wifid";
@@ -95,11 +94,26 @@ const LIVE_WRITE_EVERY: Duration = Duration::from_millis(50);
 pub struct LipcServices {
     /// The runner.
     pub lipc: Lipc,
-    shared: Option<Rc<RefCell<Shared>>>,
+    shared: SharedHandle,
     sys: SysRoot,
     fl_max: Cell<Option<u32>>,
     cache: Arc<StateCache>,
     live: Arc<LiveWriter>,
+}
+
+impl LipcServices {
+    /// The model has a warmth light (true without the input loop: `rinky device`).
+    fn has_warmth(&self) -> bool {
+        self.shared.model().is_none_or(|m| m.warmth)
+    }
+
+    fn check_warmth(&self) -> Result<()> {
+        if self.has_warmth() {
+            Ok(())
+        } else {
+            Err(DeviceError::Unsupported("warmth (no natural light on this model)"))
+        }
+    }
 }
 
 impl std::fmt::Debug for LipcServices {
@@ -117,7 +131,7 @@ impl Default for LipcServices {
 impl LipcServices {
     /// Services over `lipc`; `shared` connects them to a running input loop.
     pub(crate) fn new(lipc: Lipc, shared: Option<Rc<RefCell<Shared>>>, sys: SysRoot) -> Self {
-        LipcServices { lipc, shared, sys, fl_max: Cell::new(None), cache: Arc::default(), live: Arc::default() }
+        LipcServices { lipc, shared: SharedHandle(shared), sys, fl_max: Cell::new(None), cache: Arc::default(), live: Arc::default() }
     }
 
     /// A cached value when cached reads are on.
@@ -213,19 +227,11 @@ impl LipcServices {
     }
 
     fn request(&self, r: Request) -> Result<()> {
-        match &self.shared {
-            Some(s) => {
-                s.borrow_mut().requests.push_back(r);
-                Ok(())
-            }
-            None => Err(DeviceError::Unsupported("needs the running input loop")),
-        }
+        self.shared.request(r)
     }
 
     fn journal(&self, e: Entry) {
-        if let Some(s) = &self.shared {
-            let _ = s.borrow().journal.record(e);
-        }
+        self.shared.journal(e)
     }
 
     fn wait_for(&self, what: &str, limit: Duration, mut done: impl FnMut() -> Result<Option<bool>>) -> Result<()> {
@@ -276,6 +282,7 @@ impl Light for LipcServices {
     }
 
     fn warmth(&self) -> Result<u32> {
+        self.check_warmth()?;
         if let Some(v) = self.known(|k| k.warmth) {
             return Ok(v);
         }
@@ -285,6 +292,7 @@ impl Light for LipcServices {
     }
 
     fn set_warmth(&mut self, level: u32) -> Result<()> {
+        self.check_warmth()?;
         let (lo, hi) = self.warmth_range();
         let level = level.clamp(lo, hi);
         self.remember(|k| k.warmth = Some(level));
@@ -297,6 +305,7 @@ impl Light for LipcServices {
     }
 
     fn set_warmth_live(&mut self, level: u32) -> Result<()> {
+        self.check_warmth()?;
         let (lo, hi) = self.warmth_range();
         let level = level.clamp(lo, hi);
         self.remember(|k| k.warmth = Some(level));
@@ -304,6 +313,7 @@ impl Light for LipcServices {
     }
 
     fn amber_schedule(&self) -> Result<AmberSchedule> {
+        self.check_warmth()?;
         if let Some(s) = self.known(|k| k.schedule.clone()) {
             return Ok(s);
         }
@@ -325,6 +335,7 @@ impl Light for LipcServices {
     }
 
     fn set_amber_schedule(&mut self, s: &AmberSchedule) -> Result<()> {
+        self.check_warmth()?;
         self.remember(|k| k.schedule = Some(s.clone()));
         self.lipc.set_str(POWERD, "amberSchedMode", s.mode.as_powerd())?;
         self.lipc.set_str(POWERD, "amberSchedStartTime", &s.start.to_powerd())?;
@@ -354,7 +365,7 @@ impl Battery for LipcServices {
 
 impl Power for LipcServices {
     fn defer_suspend(&mut self, duration: Duration) -> Result<()> {
-        if self.shared.as_ref().is_some_and(|s| s.borrow().sleep_enabled) {
+        if self.shared.sleep_enabled() {
             // rinky's own sleep controller suspends while the framework is stopped;
             // it also tells powerd, best effort: with lab126_gui stopped powerd refuses
             // deferSuspend (lipcPropErrInvalidState, seen on 5.19.5), which is no error.
@@ -371,20 +382,17 @@ impl Power for LipcServices {
     }
 
     fn request_screensaver(&mut self) -> Result<()> {
-        if self.shared.as_ref().is_some_and(|s| s.borrow().sleep_enabled) {
+        if self.shared.sleep_enabled() {
             return self.request(Request::Sleep);
         }
         self.lipc.set_int(POWERD, "powerButton", 1)
     }
 
     fn state(&self) -> Result<String> {
-        match &self.shared {
-            Some(s) if s.borrow().sleep_enabled => Ok(match s.borrow().sleep_state {
-                SleepState::Awake => "active".into(),
-                SleepState::Asleep => "screenSaver".into(),
-            }),
-            _ => self.lipc.get_str(POWERD, "state"),
+        if self.shared.sleep_enabled() {
+            return Ok(self.shared.sleep_state().name().into());
         }
+        self.lipc.get_str(POWERD, "state")
     }
 
     fn rtc_wakeup(&mut self, after: Duration) -> Result<()> {
@@ -392,23 +400,11 @@ impl Power for LipcServices {
     }
 
     fn suspend(&mut self, wake_after: Option<Duration>) -> Result<()> {
-        let mut lines = Vec::new();
-        let r = super::system::kernel_suspend(&self.sys, wake_after, &mut |s| lines.push(s));
-        for l in lines {
-            log::info!("suspend: {l}");
-        }
-        r.map(|_| ())
+        self.shared.suspend(super::system::kernel_suspend, &self.sys, wake_after)
     }
 
     fn set_screensaver(&mut self, s: Screensaver) -> Result<()> {
-        match &self.shared {
-            Some(sh) => {
-                log::info!("screensaver: {}", s.describe());
-                sh.borrow_mut().screensaver = s;
-                Ok(())
-            }
-            None => Err(DeviceError::Unsupported("screensaver needs the running input loop")),
-        }
+        self.shared.set_screensaver(s)
     }
 
     fn set_auto_sleep(&mut self, after: Option<Duration>) -> Result<()> {
@@ -416,7 +412,7 @@ impl Power for LipcServices {
     }
 
     fn auto_sleep(&self) -> Option<Duration> {
-        self.shared.as_ref().and_then(|s| s.borrow().auto_sleep)
+        self.shared.auto_sleep()
     }
 
     fn sleep_now(&mut self) -> Result<()> {
@@ -424,7 +420,7 @@ impl Power for LipcServices {
     }
 
     fn sleep_state(&self) -> SleepState {
-        self.shared.as_ref().map(|s| s.borrow().sleep_state).unwrap_or_default()
+        self.shared.sleep_state()
     }
 }
 
@@ -535,16 +531,7 @@ impl Wifi for LipcServices {
 
 impl Usb for LipcServices {
     fn state(&self) -> Result<UsbState> {
-        let (cable, drive) = match &self.shared {
-            Some(s) => {
-                let s = s.borrow();
-                (s.cable, s.drive_state)
-            }
-            None => {
-                let udc = crate::usb::read_udc(&self.sys).map(|(_, s)| s);
-                (crate::usb::cable_from(udc.as_deref(), battery::external_power(&self.sys), None), DriveModeState::Off)
-            }
-        };
+        let (cable, drive) = (self.shared.cable(&self.sys), self.shared.drive_state().unwrap_or(DriveModeState::Off));
         Ok(if drive.active() {
             UsbState::Exported
         } else if cable.present() {
@@ -555,20 +542,14 @@ impl Usb for LipcServices {
     }
 
     fn set_drive_mode(&mut self, on: bool) -> Result<()> {
-        match &self.shared {
-            Some(s) if s.borrow().usb_enabled => self.request(Request::DriveMode(on)),
-            _ => Err(DeviceError::Unsupported("usb drive mode needs the input loop with RINKY_USB != off")),
+        if !self.shared.usb_enabled() {
+            return Err(DeviceError::Unsupported("usb drive mode needs the input loop with RINKY_USB != off"));
         }
+        self.request(Request::DriveMode(on))
     }
 
     fn cable(&self) -> Result<UsbCable> {
-        match &self.shared {
-            Some(s) => Ok(s.borrow().cable),
-            None => {
-                let udc = crate::usb::read_udc(&self.sys).map(|(_, s)| s);
-                Ok(crate::usb::cable_from(udc.as_deref(), battery::external_power(&self.sys), None))
-            }
-        }
+        Ok(self.shared.cable(&self.sys))
     }
 
     fn set_charge_only(&mut self, on: bool) -> Result<()> {
@@ -576,44 +557,10 @@ impl Usb for LipcServices {
     }
 
     fn drive_mode(&self) -> Result<DriveModeState> {
-        match &self.shared {
-            Some(s) => Ok(s.borrow().drive_state),
+        match self.shared.drive_state() {
+            Some(d) => Ok(d),
             None => Ok(DriveModeState::from_volumd(self.lipc.get_int("com.lab126.volumd", "driveModeState")?)),
         }
     }
 }
 
-/// The system clock, settable, with NTP.
-#[derive(Clone, Debug, Default)]
-pub struct KindleClock {
-    /// lipc runner (for the `timeChanged` event).
-    pub lipc: Lipc,
-    /// Default NTP server.
-    pub ntp_server: Option<String>,
-}
-
-impl Clock for KindleClock {
-    fn set_time(&mut self, t: SystemTime) -> Result<()> {
-        let before = SystemTime::now();
-        let rtc = super::system::set_system_time(t)?;
-        log::info!("clock set; {rtc}");
-        let delta = match t.duration_since(before) {
-            Ok(d) => d.as_secs() as i64,
-            Err(e) => -(e.duration().as_secs() as i64),
-        };
-        let _ = self.lipc.send_event("com.lab126.time", "timeChanged", &[crate::lipc::LipcValue::Int(delta)]);
-        Ok(())
-    }
-
-    fn sync_ntp(&mut self, server: Option<&str>) -> Result<NtpSample> {
-        let server = server
-            .map(str::to_string)
-            .or_else(|| self.ntp_server.clone())
-            .ok_or(DeviceError::Unsupported("no NTP server configured"))?;
-        let s = crate::clock::sntp_query(&server, Duration::from_secs(10))?;
-        if s.offset_ms.abs() >= 1000 {
-            self.set_time(s.time)?;
-        }
-        Ok(s)
-    }
-}

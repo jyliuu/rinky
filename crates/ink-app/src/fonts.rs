@@ -17,7 +17,7 @@
 //!   in the family's regular face, so titles are light. Parsing a face
 //!   for the UI costs about 0.5 s, so [`request_ui_font`] loads it on a thread and the
 //!   app loop swaps it in ([`take_ui_fonts`]). Every UI font gets the fallback faces of
-//!   [`UI_FALLBACKS`] for characters it lacks (IPA in dictionary pronunciations).
+//!   [`default_ui_fallbacks`] for characters it lacks (IPA in dictionary pronunciations).
 //! - [`preview_face`] / [`draw_family_text`]: a family's regular face drawn on the shaped
 //!   path (mapped file, glyphs outlined on first use), for pickers and previews.
 
@@ -54,12 +54,13 @@ const CACHE_VERSION: u64 = 1;
 
 /// The folders scanned for text fonts, in order (earlier folders win a family name).
 pub fn font_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = registry::READER_FONT_DIRS.iter().map(PathBuf::from).collect();
+    let mut dirs = ink_platform::current().font_dirs();
     if let Ok(v) = std::env::var(ENV_DIRS) {
         dirs.extend(v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
     // Never KOReader's folders.
-    dirs.retain(|d| !d.starts_with("/mnt/us/koreader"));
+    let koreader = ink_platform::current().koreader_dir();
+    dirs.retain(|d| !d.starts_with(&koreader));
     dirs.dedup();
     dirs
 }
@@ -238,22 +239,26 @@ pub enum UiFallback {
 
 /// Fallback faces of the UI fonts, in order, for characters the UI font lacks (IPA in
 /// dictionary pronunciations, combining double macrons and breves, math and dingbats):
-/// Noto Sans Regular shipped with rinky (all IPA of the Oxford dictionaries, a sans
-/// face like most UI fonts), the embedded Noto Serif, then two Kindle system fonts for
-/// symbols (`Kindle_Symbol`: arrows, ▪, suits; `code2000`: ∫ ≠ ◇ ✗ and the rest).
-pub const UI_FALLBACKS: &[&str] =
-    &["/mnt/us/rinky/fonts/NotoSans-Regular.ttf", "builtin", "/usr/java/lib/fonts/Kindle_Symbol.ttf", "/usr/java/lib/fonts/code2000.ttf"];
+/// Noto Sans Regular shipped in rinky's `fonts` folder (all IPA of the Oxford
+/// dictionaries, a sans face like most UI fonts), the embedded Noto Serif, then the
+/// system's symbol fonts ([`ink_platform::Platform::symbol_fonts`]).
+pub fn default_ui_fallbacks() -> Vec<UiFallback> {
+    let p = ink_platform::current();
+    let mut v = vec![UiFallback::File(p.install_root().join("fonts/NotoSans-Regular.ttf")), UiFallback::Builtin];
+    v.extend(p.symbol_fonts().iter().map(|f| UiFallback::File(PathBuf::from(f))));
+    v
+}
 
-/// Environment variable replacing [`UI_FALLBACKS`]: colon-separated font files, the word
+/// Environment variable replacing [`default_ui_fallbacks`]: colon-separated font files, the word
 /// `builtin` for the embedded Noto Serif (tests and the host).
 pub const ENV_UI_FALLBACKS: &str = "RINKY_UI_FALLBACKS";
 
-/// The UI fallback chain: [`ENV_UI_FALLBACKS`] when set, else [`UI_FALLBACKS`].
+/// The UI fallback chain: [`ENV_UI_FALLBACKS`] when set, else [`default_ui_fallbacks`].
 pub fn ui_fallback_chain() -> Vec<UiFallback> {
     let parse = |s: &str| if s == "builtin" { UiFallback::Builtin } else { UiFallback::File(PathBuf::from(s)) };
     match std::env::var(ENV_UI_FALLBACKS) {
         Ok(v) => v.split(':').filter(|s| !s.is_empty()).map(parse).collect(),
-        Err(_) => UI_FALLBACKS.iter().map(|s| parse(s)).collect(),
+        Err(_) => default_ui_fallbacks(),
     }
 }
 
@@ -522,7 +527,7 @@ mod tests {
         let mut b = Fonts::load();
         assert_eq!(add_fallback_chain(&mut b, &chain, true), 1);
         assert!(render(&mut b, &lines).1.is_empty());
-        assert_eq!(ui_fallback_chain().len(), std::env::var(ENV_UI_FALLBACKS).map_or(UI_FALLBACKS.len(), |v| v.split(':').filter(|s| !s.is_empty()).count()));
+        assert_eq!(ui_fallback_chain().len(), std::env::var(ENV_UI_FALLBACKS).map_or(default_ui_fallbacks().len(), |v| v.split(':').filter(|s| !s.is_empty()).count()));
     }
 
     /// Renders the samples with a real UI font into a PNG. Run by hand:

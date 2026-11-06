@@ -122,6 +122,14 @@ pub fn clear_rtc(sys: &SysRoot) {
 
 /// Suspends now (see the module comment). `log` receives progress lines.
 pub fn kernel_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(String)) -> Result<Resume> {
+    suspend_with(sys, rtc_wake, true, log)
+}
+
+/// How a platform suspends: the RTC alarm, then progress lines to `log`.
+pub type SuspendFn = fn(&SysRoot, Option<Duration>, &mut dyn FnMut(String)) -> Result<Resume>;
+
+/// [`kernel_suspend`], with or without the `wakeup_count` handshake.
+pub(crate) fn suspend_with(sys: &SysRoot, rtc_wake: Option<Duration>, wakeup_count: bool, log: &mut dyn FnMut(String)) -> Result<Resume> {
     let alarm = match rtc_wake {
         Some(d) => match arm_rtc(sys, d) {
             Ok(t) => Some(t),
@@ -132,24 +140,30 @@ pub fn kernel_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn F
         },
         None => None,
     };
-    match read_wakeup_count_ex(sys, Duration::from_secs(2)) {
-        WakeupCount::Value(count) => {
-            if let Err(e) = sys.write("/sys/power/wakeup_count", &count) {
-                clear_rtc(sys);
-                return Err(DeviceError::Backend(format!("wakeup event pending (wakeup_count {count}): {e}")));
+    if wakeup_count {
+        match read_wakeup_count_ex(sys, Duration::from_secs(2)) {
+            WakeupCount::Value(count) => {
+                if let Err(e) = sys.write("/sys/power/wakeup_count", &count) {
+                    clear_rtc(sys);
+                    return Err(DeviceError::Backend(format!("wakeup event pending (wakeup_count {count}): {e}")));
+                }
             }
+            WakeupCount::Blocked => log("wakeup_count blocked for 2 s (a wakeup source is active); suspending anyway".into()),
+            WakeupCount::StillBlocked => {
+                log("wakeup_count blocked since an earlier attempt (a wakeup source is active); suspending anyway".into())
+            }
+            WakeupCount::Failed(e) => log(format!("wakeup_count unreadable ({e}); suspending anyway")),
         }
-        WakeupCount::Blocked => log("wakeup_count blocked for 2 s (a wakeup source is active); suspending anyway".into()),
-        WakeupCount::StillBlocked => {
-            log("wakeup_count blocked since an earlier attempt (a wakeup source is active); suspending anyway".into())
-        }
-        WakeupCount::Failed(e) => log(format!("wakeup_count unreadable ({e}); suspending anyway")),
     }
     // SAFETY: sync(2) has no arguments and cannot fail.
     unsafe { libc::sync() };
     let wall0 = SystemTime::now();
     let mono0 = Instant::now();
-    let r = sys.write("/sys/power/state", "mem");
+    let state = suspend_state(&sys.read("/sys/power/state").unwrap_or_default());
+    if state != "mem" {
+        log(format!("the kernel offers no mem; using {state}"));
+    }
+    let r = sys.write("/sys/power/state", state);
     let slept = SystemTime::now().duration_since(wall0).unwrap_or_else(|_| mono0.elapsed());
     clear_rtc(sys);
     match r {
@@ -162,6 +176,28 @@ pub fn kernel_suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn F
         }
         Err(e) => Err(DeviceError::Io(e)),
     }
+}
+
+/// The deepest sleep `/sys/power/state` offers: `mem`, else `standby`, else `freeze`
+/// (the emulated MT8113 Tolino lists only `freeze`). An empty or unreadable list: `mem`.
+pub fn suspend_state(offered: &str) -> &'static str {
+    let has = |s: &str| offered.split_whitespace().any(|o| o == s);
+    ["mem", "standby", "freeze"].into_iter().find(|s| has(s)).unwrap_or("mem")
+}
+
+
+/// The `/proc/<pid>` folders of the running processes with one of these names (names
+/// longer than the kernel's 15-character `comm` match on their first 15).
+pub fn processes_named(names: &[&str]) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
+    rd.flatten()
+        .filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
+        .filter(|e| {
+            let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+            names.iter().any(|n| comm.trim() == &n[..n.len().min(15)])
+        })
+        .map(|e| e.path())
+        .collect()
 }
 
 /// Frontlight LED class devices (`/sys/class/backlight/*`), e.g. `fp9967-bl1`
@@ -235,4 +271,76 @@ pub fn set_system_time(t: SystemTime) -> Result<String> {
     }
     log::warn!("rtc: not written: {}", tried.join("; "));
     Ok(format!("RTC not written ({})", tried.join("; ")))
+}
+
+/// The system clock, settable, with NTP. On a Kindle a change is announced to the
+/// framework with lipc `com.lab126.time timeChanged`.
+#[derive(Clone, Debug, Default)]
+pub struct DeviceClock {
+    /// lipc runner (Kindle only).
+    pub lipc: Option<crate::lipc::Lipc>,
+    /// Default NTP server.
+    pub ntp_server: Option<String>,
+}
+
+impl DeviceClock {
+    /// Sets the clock from NTP on a thread (the query takes up to 10 s), when a server is
+    /// configured: after Wi-Fi connects.
+    pub fn sync_in_background(&self) {
+        if self.ntp_server.is_none() {
+            return;
+        }
+        let mut clock = self.clone();
+        let spawned = std::thread::Builder::new().name("ntp".into()).spawn(move || {
+            use crate::services::Clock;
+            match clock.sync_ntp(None) {
+                Ok(s) => log::info!("ntp: {} offset {} ms, delay {} ms", s.server, s.offset_ms, s.delay_ms),
+                Err(e) => log::info!("ntp: {e}"),
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("ntp: no thread: {e}");
+        }
+    }
+}
+
+impl crate::services::Clock for DeviceClock {
+    fn set_time(&mut self, t: SystemTime) -> Result<()> {
+        let before = SystemTime::now();
+        let rtc = set_system_time(t)?;
+        log::info!("clock set; {rtc}");
+        if let Some(lipc) = &self.lipc {
+            let delta = match t.duration_since(before) {
+                Ok(d) => d.as_secs() as i64,
+                Err(e) => -(e.duration().as_secs() as i64),
+            };
+            let _ = lipc.send_event("com.lab126.time", "timeChanged", &[crate::lipc::LipcValue::Int(delta)]);
+        }
+        Ok(())
+    }
+
+    fn sync_ntp(&mut self, server: Option<&str>) -> Result<crate::clock::NtpSample> {
+        let server = server
+            .map(str::to_string)
+            .or_else(|| self.ntp_server.clone())
+            .ok_or(DeviceError::Unsupported("no NTP server configured"))?;
+        let s = crate::clock::sntp_query(&server, Duration::from_secs(10))?;
+        if s.offset_ms.abs() >= 1000 {
+            self.set_time(s.time)?;
+        }
+        Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deepest_offered_suspend_state() {
+        assert_eq!(suspend_state("freeze mem\n"), "mem");
+        assert_eq!(suspend_state("freeze standby"), "standby");
+        assert_eq!(suspend_state("freeze\n"), "freeze");
+        assert_eq!(suspend_state(""), "mem");
+    }
 }

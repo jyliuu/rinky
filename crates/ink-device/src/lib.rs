@@ -2,12 +2,12 @@
 //!
 //! A [`Device`] bundles one implementation of each service trait:
 //!
-//! | Trait | Kindle (`kindle_mtk`) | Host window (`sim`) | Tests (`headless`) |
+//! | Trait | Kindle and Kobo (`ereader`) | Host window (`sim`) | Tests (`headless`) |
 //! | --- | --- | --- | --- |
-//! | [`Screen`] | `/dev/fb0` + MTK refresh ioctls | minifb window, e-ink look | PNG frames |
-//! | [`Input`] | evdev touch + power key + powerd events | mouse + keys | script |
-//! | [`Light`], [`Battery`], [`Power`], [`Wifi`], [`Usb`] | `lipc` properties | unsupported | unsupported |
-//! | [`Clock`] | system clock | system clock | system clock |
+//! | [`Screen`] | `/dev/fb0` + the model's refresh ioctls | minifb window, e-ink look | PNG frames |
+//! | [`Input`] | evdev touch and keys; powerd events on a Kindle | mouse + keys | script |
+//! | [`Light`], [`Battery`], [`Power`], [`Wifi`], [`Usb`] | Kindle: `lipc` properties; Kobo: sysfs, `wpa_supplicant` | unsupported | unsupported |
+//! | [`Clock`] | system clock and RTC | system clock | system clock |
 //!
 //! Fields are public so the app can borrow the screen and the input at the same time.
 //! Shared building blocks live here too: [`Canvas`] (8-bit gray pixels), [`geom`]
@@ -47,6 +47,7 @@ pub mod input;
 pub mod journal;
 pub mod light;
 pub mod lipc;
+pub use ink_platform as platform;
 pub mod screen;
 pub mod screensaver;
 pub mod script;
@@ -59,7 +60,7 @@ pub mod usb;
 pub mod wifi;
 
 #[cfg(target_os = "linux")]
-pub mod kindle_mtk;
+pub mod ereader;
 #[cfg(all(feature = "sim", not(target_arch = "arm")))]
 pub mod sim;
 
@@ -98,10 +99,16 @@ pub type Result<T, E = DeviceError> = std::result::Result<T, E>;
 /// Which backend a [`Device`] uses and what it runs on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {
-    /// `kindle_mtk`, `sim` or `headless`.
+    /// `kindle`, `kobo`, `sim` or `headless`.
     pub backend: &'static str,
-    /// Model or firmware description.
+    /// Model name (`Kindle Paperwhite 4 (10th gen)`, `Kobo Libra 2`).
     pub model: String,
+    /// Firmware version (Kindle `/etc/version.txt`, Kobo `.kobo/version`); empty off the
+    /// device.
+    pub firmware: String,
+    /// The panel sweeps a page turn in ([`Screen::update_wave`]); without it the
+    /// "Page turn wave" setting is hidden.
+    pub page_wave: bool,
 }
 
 /// One implementation of every device service.

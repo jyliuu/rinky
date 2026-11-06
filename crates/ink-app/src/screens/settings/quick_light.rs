@@ -22,7 +22,7 @@
 //!
 //! Auto warmth is stored as powerd's `Manual` schedule (sunset mode writes the computed
 //! sunset and sunrise times), which the Kindle backend's own amber timer
-//! (`ink_device::kindle_mtk` input loop, every 60 s) applies on every screen; the panel
+//! (`ink_device::kindle` input loop, every 60 s) applies on every screen; the panel
 //! applies a change at once. Backends without such a timer can call
 //! [`tick_auto_warmth`] from their loop.
 //!

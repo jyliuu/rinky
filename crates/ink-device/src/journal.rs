@@ -15,8 +15,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Default journal path.
-pub const DEFAULT_PATH: &str = "/tmp/rinky/restore";
 
 /// One saved original value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,7 +85,8 @@ pub struct Journal {
 
 impl Default for Journal {
     fn default() -> Self {
-        Journal::at(DEFAULT_PATH)
+        // In rinky's runtime folder, where the launcher and `rinky device restore` look.
+        Journal::at(ink_platform::run_dir().join("restore"))
     }
 }
 

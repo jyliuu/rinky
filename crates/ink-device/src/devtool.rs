@@ -1,5 +1,5 @@
 //! `rinky device ...`: test and diagnostic commands for the device layer, run on
-//! the Kindle (or the emulator) and used for the phase 5 evidence. They draw with the
+//! the e-reader (or the emulator) and used for the phase 5 evidence. They draw with the
 //! built-in bitmap font, so they need nothing above `ink-device`.
 
 /// Usage text.
@@ -33,7 +33,7 @@ environment: RINKY_TOUCH, RINKY_SLEEP, RINKY_AUTOSLEEP, RINKY_SUSPEND,
 pub fn main(args: &[String]) -> i32 {
     #[cfg(target_os = "linux")]
     {
-        match kindle::run(args) {
+        match device::run(args) {
             Ok(code) => code,
             Err(e) => {
                 say!("rinky device: {e}");
@@ -44,7 +44,7 @@ pub fn main(args: &[String]) -> i32 {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = args;
-        say!("rinky device: needs the Kindle (Linux framebuffer and evdev)\n{USAGE}");
+        say!("rinky device: needs the e-reader (Linux framebuffer and evdev)\n{USAGE}");
         2
     }
 }
@@ -60,7 +60,7 @@ pub fn flag(args: &[String], name: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-mod kindle {
+mod device {
     use super::{flag, opt, USAGE};
     use crate::canvas::Canvas;
     use crate::clock::{stamp, TimeZone};
@@ -68,7 +68,7 @@ mod kindle {
     use crate::geom::{Point, Rect, Rotation};
     use crate::input::{InputEvent, PowerEvent, TouchPhase};
     use crate::journal::{Entry, Journal};
-    use crate::kindle_mtk::{self, fb, input, services::LipcServices, system, KindleOptions};
+    use crate::ereader::{self, fb, input, kindle::LipcServices, system, ReaderOptions};
     use crate::lipc::Lipc;
     use crate::screen::{RefreshClass, Screen};
     use crate::services::{Battery, Clock, Light, Wifi};
@@ -102,7 +102,23 @@ mod kindle {
     }
 
     fn open_full() -> Result<Device> {
-        kindle_mtk::open(KindleOptions { power_events: true, ..Default::default() })
+        ereader::open(ReaderOptions::default())
+    }
+
+    fn kobo() -> bool {
+        crate::platform::current() == crate::platform::Platform::Kobo
+    }
+
+    /// Light, battery and Wi-Fi of this e-reader without the input loop.
+    trait Services: Light + Battery + Wifi {}
+    impl<T: Light + Battery + Wifi> Services for T {}
+
+    fn services(lipc: Lipc) -> Box<dyn Services> {
+        if kobo() {
+            Box::new(crate::ereader::kobo::KoboServices::new(None, SysRoot::system(), system::DeviceClock::default()))
+        } else {
+            Box::new(LipcServices::standalone(lipc))
+        }
     }
 
     fn mark(canvas: &mut Canvas, p: Point, n: u32) -> Rect {
@@ -144,12 +160,28 @@ mod kindle {
     }
 
     fn info() -> Result<()> {
+        let sys = SysRoot::system();
+        let model = crate::ereader::model::Model::detect(&sys);
+        if kobo() {
+            out!("model: {} (Kobo {:?}, firmware {})", model.describe(), model.codes.first(), ereader::firmware(crate::platform::Platform::Kobo));
+            let w = crate::ereader::kobo::wifi::env();
+            out!("wifi: module {} interface {} platform {}", w.module, w.interface, w.platform);
+        } else {
+            let serial = sys.read("/proc/usid").unwrap_or_default();
+            out!("model: {} (code {:?})", model.describe(), crate::ereader::model::device_code(&serial));
+        }
         let devs = input::list_devices();
         for d in &devs {
-            out!("input: {:<16} {:<7} abs {} mt {}", d.name, d.event, d.has_abs, d.has_mt);
+            out!("input: {:<16} {:<7} abs {} mt {} keys {}", d.name, d.event, d.has_abs, d.has_mt, d.key_bits);
+        }
+        if let Some(d) = input::power_key_device(&devs) {
+            out!("power key: {} ({})", d.name, d.event);
+        }
+        if let Some(d) = model.page_keys.and_then(|c| input::page_key_device(&devs, c)) {
+            out!("page keys: {} ({})", d.name, d.event);
         }
         let ov = crate::evdev::TouchOverride::parse(&std::env::var("RINKY_TOUCH").unwrap_or_default());
-        let fbs = fb::MtkScreen::open_passive()?;
+        let fbs = fb::Framebuffer::open_passive()?;
         let size = fbs.panel_size();
         match input::TouchDev::open(size.w, size.h, false, &ov) {
             Ok(mut t) => {
@@ -159,7 +191,6 @@ mod kindle {
             Err(e) => out!("touch: {e}"),
         }
         out!("fb: {}x{} grayscale {} rotate {}", size.w, size.h, fbs.grayscale()?, fbs.hw_rotate()?);
-        let sys = SysRoot::system();
         out!("udc: {:?}", crate::usb::read_udc(&sys));
         out!("transport: {:?}", input::detect_transport(&Lipc::new()));
         out!("battery: {:?}", crate::battery::read_sysfs(&sys));
@@ -285,7 +316,7 @@ mod kindle {
             Some("test") => {
                 let out = opt(args, "--out").unwrap_or("/tmp/rinky/night");
                 std::fs::create_dir_all(out)?;
-                let mut s = fb::MtkScreen::open()?;
+                let mut s = fb::Framebuffer::open()?;
                 let size = s.size();
                 let mut c = Canvas::new(size.w as usize, size.h as usize);
                 page(&mut c, "night mode test", &["day: black on white".into()]);
@@ -310,7 +341,7 @@ mod kindle {
                 Ok(0)
             }
             Some(v @ ("on" | "off")) => {
-                let mut s = fb::MtkScreen::open()?;
+                let mut s = fb::Framebuffer::open()?;
                 s.set_night_mode(v == "on")?;
                 s.refresh_all()?;
                 out!("night {v}: grayscale {} (exits now; the flag is restored on exit)", s.grayscale()?);
@@ -325,7 +356,7 @@ mod kindle {
 
     fn screenshot(args: &[String]) -> Result<()> {
         let file = args.first().ok_or_else(|| DeviceError::Backend("screenshot needs FILE.png".into()))?;
-        let s = fb::MtkScreen::open_passive()?;
+        let s = fb::Framebuffer::open_passive()?;
         s.screenshot()?.save_png(std::path::Path::new(file))?;
         out!("{file}: {}x{}", s.size().w, s.size().h);
         Ok(())
@@ -459,7 +490,7 @@ mod kindle {
                     } else {
                         dev.usb.set_charge_only(true)?;
                         out!("{} usb: charge only chosen (state {:?})", stamp(), dev.usb.state());
-                        page(&mut c, "USB test", &["charge only".into(), "the files stay on the Kindle".into()]);
+                        page(&mut c, "USB test", &["charge only".into(), "the files stay on the e-reader".into()]);
                         dev.screen.update_all(&c, RefreshClass::Gc16)?;
                     }
                 }
@@ -476,7 +507,7 @@ mod kindle {
     }
 
     fn wifi(args: &[String]) -> Result<i32> {
-        let mut w = LipcServices::standalone(Lipc::new().with_timeout(Duration::from_secs(10)));
+        let mut w = services(Lipc::new().with_timeout(Duration::from_secs(10)));
         let password = || -> Result<Option<String>> {
             if flag(args, "--password-stdin") {
                 let mut s = String::new();
@@ -487,7 +518,7 @@ mod kindle {
             }
         };
         match args.first().map(String::as_str) {
-            Some("status") | None => out!("{:?}", Wifi::state(&w)?),
+            Some("status") | None => out!("{:?}", Wifi::state(w.as_ref())?),
             Some("scan") => {
                 for n in w.scan()? {
                     out!("{n:?}");
@@ -503,7 +534,17 @@ mod kindle {
                     out!("{p:?}");
                 }
             }
-            Some("enable") => w.set_enabled(args.get(1).map(String::as_str) == Some("1"))?,
+            Some("enable") => {
+                let on = args.get(1).map(String::as_str) == Some("1");
+                w.set_enabled(on)?;
+                // Turning on may finish in the background (Kobo): wait for it here, as
+                // this process ends after the command.
+                let end = Instant::now() + Duration::from_secs(25);
+                while on && Instant::now() < end && Wifi::state(w.as_ref()).is_ok_and(|s| s.state != "CONNECTED") {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                out!("{:?}", Wifi::state(w.as_ref())?);
+            }
             Some("airplane") => {
                 if let Some(v) = args.get(1) {
                     w.set_airplane_mode(v == "1")?;
@@ -514,7 +555,7 @@ mod kindle {
                 let essid = args.get(1).ok_or_else(|| DeviceError::Backend("connect needs ESSID".into()))?;
                 let t = Instant::now();
                 w.connect(essid, password()?.as_deref())?;
-                out!("connected to {essid} in {} ms: {:?}", t.elapsed().as_millis(), Wifi::state(&w)?);
+                out!("connected to {essid} in {} ms: {:?}", t.elapsed().as_millis(), Wifi::state(w.as_ref())?);
             }
             Some("create") => {
                 let essid = args.get(1).ok_or_else(|| DeviceError::Backend("create needs ESSID".into()))?;
@@ -535,7 +576,7 @@ mod kindle {
     }
 
     fn light(args: &[String]) -> Result<()> {
-        let mut l = LipcServices::standalone(Lipc::new());
+        let mut l = services(Lipc::new());
         if let Some(b) = args.first().and_then(|v| v.parse().ok()) {
             l.set_brightness(b)?;
         }
@@ -570,15 +611,18 @@ mod kindle {
     }
 
     fn battery() -> Result<()> {
-        let b = LipcServices::standalone(Lipc::new());
+        let b = services(Lipc::new());
         out!("{:?}", b.info()?);
+        if kobo() {
+            return Ok(());
+        }
         let lipc = Lipc::new();
         out!("powerd battLevel {:?} isCharging {:?}", lipc.get_int("com.lab126.powerd", "battLevel"), lipc.get_int("com.lab126.powerd", "isCharging"));
         Ok(())
     }
 
     fn clock(args: &[String]) -> Result<i32> {
-        let mut c = kindle_mtk::services::KindleClock { lipc: Lipc::new(), ntp_server: KindleOptions::default().ntp_server };
+        let mut c = system::DeviceClock { lipc: (!kobo()).then(Lipc::new), ntp_server: ReaderOptions::default().ntp_server };
         match args.first().map(String::as_str) {
             Some("now") | None => out!("local {} (utc {})", c.local_now().format(), crate::clock::DateTime::from_unix(crate::clock::unix_secs(c.now()), 0).format()),
             Some("ntp") => {
@@ -599,12 +643,13 @@ mod kindle {
     }
 
     fn restore() -> Result<()> {
-        let path = std::env::var("RINKY_RUN").map(|r| format!("{r}/restore")).unwrap_or_else(|_| crate::journal::DEFAULT_PATH.into());
-        let j = Journal::at(&path);
+        let j = Journal::default();
+        let path = j.path().to_path_buf();
         let entries = j.entries();
         let lipc = Lipc::new();
         for e in &entries {
             let r = match e {
+                Entry::LipcInt { .. } | Entry::LipcStr { .. } if kobo() => continue,
                 Entry::LipcInt { publisher, prop, value } => lipc.set_int(publisher, prop, *value),
                 Entry::LipcStr { publisher, prop, value } => lipc.set_str(publisher, prop, value),
                 Entry::Fb { .. } => continue,

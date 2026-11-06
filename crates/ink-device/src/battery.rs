@@ -46,6 +46,11 @@ pub fn external_power(root: &SysRoot) -> bool {
         .any(|(n, _)| root.read_int(&format!("{PSY}/{n}/online")).unwrap_or(0) == 1)
 }
 
+/// The battery reports charging.
+pub fn charging(root: &SysRoot) -> bool {
+    read_sysfs(root).is_some_and(|b| b.charging)
+}
+
 /// Reads the first `Battery` supply.
 pub fn read_sysfs(root: &SysRoot) -> Option<BatteryInfo> {
     let (name, _) = supplies(root).into_iter().find(|(_, t)| t == "Battery")?;

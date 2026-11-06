@@ -1,0 +1,11 @@
+[package]
+name = "ink-platform"
+description = "Which e-reader rinky runs on (Kindle or Kobo) and the paths and names that follow from it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false

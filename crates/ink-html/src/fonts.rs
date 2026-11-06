@@ -745,9 +745,9 @@ impl FontBook {
     }
 }
 
-/// The Kindle font directories plus `extra`.
+/// The e-reader's font directories plus `extra` (searched first).
 pub fn font_dirs(extra: Option<&Path>) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = ink_text::registry::KINDLE_FONT_DIRS.iter().map(PathBuf::from).collect();
+    let mut v = ink_platform::current().font_dirs();
     if let Some(e) = extra {
         v.insert(0, e.to_path_buf());
     }

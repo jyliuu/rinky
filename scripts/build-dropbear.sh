@@ -38,7 +38,8 @@ OUT=$OUTDIR/dropbearmulti
 STAMP=$OUT.stamp
 WORK=$OUTDIR/$DROPBEAR_VERSION
 TARBALL=$OUTDIR/dropbear-$DROPBEAR_VERSION.tar.bz2
-ZIGTARGET="-target arm-linux-musleabihf -mcpu=cortex_a7"
+# Cortex-A9: the oldest CPU of the supported Kindles (no hardware divide, VFPv3).
+ZIGTARGET="-target arm-linux-musleabihf -mcpu=cortex_a9"
 FORCE=0
 
 die() { echo "build-dropbear: error: $*" >&2; exit 1; }

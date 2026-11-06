@@ -12,6 +12,7 @@ publish.workspace = true
 doctest = false
 
 [dependencies]
+ink-platform.workspace = true
 ink-device.workspace = true
 ink-text.workspace = true
 ink-doc.workspace = true

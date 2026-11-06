@@ -1,0 +1,3 @@
+# NickelMenu entry for rinky (installed as /mnt/onboard/.adds/nm/rinky).
+menu_item:main:rinky:cmd_spawn:quiet:exec /bin/sh /mnt/onboard/.adds/rinky/rinky.sh --library
+menu_item:library:rinky:cmd_spawn:quiet:exec /bin/sh /mnt/onboard/.adds/rinky/rinky.sh --library

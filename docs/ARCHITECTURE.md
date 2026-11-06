@@ -10,7 +10,7 @@ device, ui, store, net, html, formats, mupdf, plugin, packaging).
 ```text
 crates/
   ink-device   Canvas, geometry, Screen/Input/Light/Battery/Power/Wifi/Usb/Clock traits,
-               evdev decoder, lipc runner; backends kindle_mtk, sim (minifb), headless
+               evdev decoder, lipc runner; backends kindle, sim (minifb), headless
   ink-text     Fonts (fontdue), glyph cache, draw_text, Shaper, line breaking, Hyphenator
   ink-ui       WidgetTree, Damage, RefreshScheduler, GestureRecognizer, keyboard,
                Dialog/Toast/Menu/BottomSheet, Theme, message screen
@@ -91,8 +91,41 @@ Dev-dependencies only: ink-html -> ink-formats, ink-store; ink-formats -> ink-st
   watchers from long-lived threads).
 - `Power::suspend(wake_after)`: kernel suspend with an RTC alarm, bypassing powerd (see
   "Sleep and the Kindle framework").
-- Backends: `kindle_mtk::open(KindleOptions)` (Linux), `sim::open(SimOptions)` (feature
+- Backends: `kindle::open(KindleOptions)` (Linux), `sim::open(SimOptions)` (feature
   `sim`, host only), `headless::open(HeadlessOptions)` (always; returns a probe).
+- Kindle models (`kindle::model`): the model comes from the device code in the serial
+  (`/proc/usid`, KOReader's rule; `RINKY_MODEL` overrides). The table holds what differs:
+  the refresh interface (`Epdc`: MTK for the PW5 and newer, the i.MX Rex, Zelda and
+  original `mxcfb_update_data` for the PW4, Oasis 2/3 and Voyage/PW3/Oasis 1), warmth,
+  page keys and their direction, the Voyage's pressure keys, the hall sensor folder.
+  `KindleFb` builds each refresh struct (`update_data_epdc`); on i.MX night mode is
+  software inversion with day waveforms and there is no page-turn sweep or fast mode;
+  the sweep is on only for the PW5 and PW12 (`Model::swipe`, KOReader's
+  `canDoSwipeAnimation`: the Kindle 2024 driver voids swept updates).
+  An unknown model's interface is probed with a GC16 PARTIAL of an unchanged corner. A
+  framebuffer left in landscape (accelerometer models) is turned upright and the old
+  `rotate` journaled. The UI is laid out in 300 ppi pixels and adapts to the panel
+  size, so the 212 and 167 ppi models are marked unsupported. `rinky sim --panel WxH`
+  renders other sizes.
+- Kobo (`kobo::open`, chosen when `platform::Platform::detect()` finds
+  `/mnt/onboard/.kobo`; `RINKY_PLATFORM` overrides): the same binary and the same
+  screen, input and sleep code as the Kindle backend. Kobo models are in the same
+  table (`kindle::model::KOBO_MODELS`, by the number at the end of
+  `/mnt/onboard/.kobo/version`), with what a Kobo adds: the `rotate` value that is
+  upright (FBInk's rotation map), touch transforms (KOReader's `touch_switch_xy`,
+  `touch_mirrored_*`), the cover key (`KEY_F1`) and whether the driver's wait ioctl
+  can be trusted. Refresh: `Epdc::KoboMxcfb` (72-byte v2 struct; REAGL FULL; night
+  mode is the per-update inversion flag with the eclipse waveforms GLKW16/GCK16; no
+  waits on the Libra 2 and the others KOReader flags) and `Epdc::KoboMtk` (36-byte
+  `hwtcon_update_data`). The framebuffer boots at 16 or 32 bpp and is switched to 8 bpp
+  gray (on MTK after `Y8` to the hwtcon `mdp_src_format`), and back on exit. Touch:
+  "snow" panels never send `TRACKING_ID -1`; `BTN_TOUCH 0` ends the contact. There is
+  no lipc: `kobo::services` drives light (`mxc_msp430.0` brightness, the mixer's
+  `color`), battery (`power_supply`), Wi-Fi (`kobo::wifi`: modules, `wpa_supplicant`
+  on Nickel's config, `wpa_cli`, `dhcpcd`/`udhcpc`, as KOReader's scripts) and suspend
+  (`state-extended`, no `wakeup_count`, Wi-Fi off first). USB storage stays Nickel's.
+  `packaging/kobo/rinky.sh` stops Nickel and starts it again (KOReader's `koreader.sh`
+  and `nickel.sh`). Investigation notes: `docs/kobo-port.md`.
 - `script`: the scripted-input language used by headless and sim runs.
 - `eink::EinkPanel`: 16-level quantization, DU to 2 levels, optional ghosting.
 - Wave A (`device`): the Kindle backend implements
@@ -598,7 +631,7 @@ Firmware 5.19.5 behaves as follows while rinky runs with `lab126_gui` stopped.
   `goingToScreenSaver` or `readyToSuspend` and never suspends. So rinky reads
   `KEY_POWER` from the `bd71828-pwrkey` evdev node itself, draws its own screensaver and
   suspends the kernel directly (`crates/ink-device/src/sleep.rs`,
-  `kindle_mtk/system.rs`).
+  `kindle/system.rs`).
 - **powerd events.** With the framework running, powerd publishes the events KOReader
   handles (`goingToScreenSaver`, `outOfScreenSaver`, `exitingScreenSaver`,
   `readyToSuspend`, `wakeupFromSuspend`, `charging`, `notCharging`) plus

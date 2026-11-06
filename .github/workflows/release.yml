@@ -4,8 +4,9 @@
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
-# Release assets: rinky-V-kindlehf.tar.gz (SSH install and the in-app update),
-# rinky-V-kindle.zip (USB install) and SHA256SUMS (both; the in-app update checks it).
+# Release assets: rinky-V-kindlehf.tar.gz and rinky-V-kobo.tar.gz (SSH install and the in-app
+# update), rinky-V-kindle.zip and rinky-V-kobo.zip (USB install) and SHA256SUMS (all four;
+# the in-app update checks it).
 name: Package
 
 on:

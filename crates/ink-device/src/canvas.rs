@@ -176,6 +176,13 @@ impl Canvas {
         out
     }
 
+    /// Inverts every pixel (night mode in software).
+    pub fn invert(&mut self) {
+        for p in &mut self.pixels {
+            *p = 255 - *p;
+        }
+    }
+
     /// Inverts the pixels inside `r` (night mode, selection highlight).
     pub fn invert_rect(&mut self, r: Rect) {
         let r = self.drawable().intersect(&r);

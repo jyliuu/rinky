@@ -578,6 +578,10 @@ fn wifi_rows_show_signal_lock_and_the_connection() {
     // Every section of the main page is there, in order.
     let heads: Vec<String> = main_rows(&MainValues::default()).into_iter().filter(|r| r.kind == rows::Kind::Header).map(|r| r.title).collect();
     assert_eq!(heads, SECTIONS);
+    // A panel without the page-turn sweep (i.MX Kindles, the Kindle 2024) has no toggle.
+    let has_wave = |v: &MainValues| main_rows(v).iter().any(|r| r.action == "anim");
+    assert!(has_wave(&MainValues::default()));
+    assert!(!has_wave(&MainValues { wave_hidden: true, ..MainValues::default() }));
 }
 
 #[test]

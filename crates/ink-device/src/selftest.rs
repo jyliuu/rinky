@@ -82,12 +82,17 @@ pub fn print(checks: &[Check]) -> u32 {
 /// Runs the checks.
 pub fn run(opts: &Options) -> Vec<Check> {
     let mut r = Runner { checks: Vec::new() };
+    // These checks are about the Kindle's lipc services and daemons.
     #[cfg(target_os = "linux")]
-    kindle::all(&mut r, opts);
+    if crate::platform::current() == crate::platform::Platform::Kindle {
+        kindle::all(&mut r, opts);
+    } else {
+        r.skip("device", "Kindle checks; on a Kobo use `rinky device info`, `wifi`, `light`, `battery`");
+    }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = opts;
-        r.skip("device", "not a Kindle");
+        r.skip("device", "not an e-reader");
     }
     r.checks
 }
@@ -95,24 +100,14 @@ pub fn run(opts: &Options) -> Vec<Check> {
 #[cfg(target_os = "linux")]
 mod kindle {
     use super::{Options, Runner};
-    use crate::kindle_mtk::{fb, input, services::LipcServices, system};
+    use crate::ereader::{fb, input, kindle::LipcServices, system};
     use crate::lipc::{EventHub, Lipc, LipcValue};
     use crate::services::{Battery, Light, Wifi};
     use crate::sysfs::SysRoot;
     use std::time::{Duration, Instant};
 
     fn running(names: &[&str]) -> Vec<(String, bool)> {
-        let mut comms = Vec::new();
-        if let Ok(rd) = std::fs::read_dir("/proc") {
-            for e in rd.flatten() {
-                if e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(c) = std::fs::read_to_string(e.path().join("comm")) {
-                        comms.push(c.trim().to_string());
-                    }
-                }
-            }
-        }
-        names.iter().map(|n| (n.to_string(), comms.iter().any(|c| c == &n[..n.len().min(15)]))).collect()
+        names.iter().map(|n| (n.to_string(), !system::processes_named(&[n]).is_empty())).collect()
     }
 
     pub(super) fn all(r: &mut Runner, opts: &Options) {
@@ -236,7 +231,7 @@ mod kindle {
         r.check("input.touch", || {
             let devs = input::list_devices();
             let ov = crate::evdev::TouchOverride::parse(&std::env::var("RINKY_TOUCH").unwrap_or_default());
-            let s = fb::MtkScreen::open_passive().map_err(|e| e.to_string())?;
+            let s = fb::Framebuffer::open_passive().map_err(|e| e.to_string())?;
             let size = crate::Screen::panel_size(&s);
             let mut t = input::TouchDev::open(size.w, size.h, false, &ov).map_err(|e| format!("{e}; devices {devs:?}"))?;
             let seed = t.seed();
@@ -249,13 +244,13 @@ mod kindle {
 
         // Framebuffer.
         r.check("fb.flags", || {
-            let s = fb::MtkScreen::open_passive().map_err(|e| e.to_string())?;
+            let s = fb::Framebuffer::open_passive().map_err(|e| e.to_string())?;
             let size = crate::Screen::panel_size(&s);
             Ok(format!("{}x{} grayscale {} rotate {}", size.w, size.h, s.grayscale().map_err(|e| e.to_string())?, s.hw_rotate().map_err(|e| e.to_string())?))
         });
         if opts.write {
             r.check("fb.night_flag", || {
-                let mut s = fb::MtkScreen::open().map_err(|e| e.to_string())?;
+                let mut s = fb::Framebuffer::open().map_err(|e| e.to_string())?;
                 crate::Screen::set_night_mode(&mut s, true).map_err(|e| e.to_string())?;
                 let on = s.grayscale().map_err(|e| e.to_string())?;
                 let hw = s.hw_night();

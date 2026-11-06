@@ -4,6 +4,44 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-06
+
+### Added
+- rinky runs on more Kindles: the Paperwhite 3, 4 and 5, Voyage, Oasis 1 to 3, Kindle
+  11th and 12th gen, Scribe and Colorsoft, besides the Paperwhite 12th gen. The
+  Paperwhite 3 and 4, Oasis 3 and Kindle 12th gen were tried in an emulator with
+  Amazon's firmware; the others are untested. The user guide lists them. rinky reads
+  the model from the serial number and uses that model's display interface, page keys
+  (Voyage, Oasis) and lights. On a Kindle it does not know, it tries each display
+  interface in turn.
+- Settings › Device shows the Kindle model, with the firmware under it.
+- The user guide explains how to get each Kindle ready (jailbreak, KUAL, USB drive or
+  MTP) and what differs between models.
+- `rinky sim --panel WxH` renders the simulator at another screen size.
+- rinky runs on Kobo e-readers with a 300 ppi screen: Libra 2, Clara HD, Clara 2E,
+  Forma, Libra H2O, Clara BW and Colour, Libra Colour, and the Tolinos made by Kobo.
+  It is the same binary; a Kobo package (`rinky-<version>-kobo.zip`, `.tar.gz`)
+  installs it in `.adds/rinky` with a NickelMenu entry. The launcher stops Kobo's own
+  software while rinky runs and starts it again afterwards. Light, warmth, battery,
+  sleep and Wi-Fi (with the Kobo's saved networks) work without it; the in-app update
+  fetches the Kobo package. Tried in an emulator on the Libra 2 (Kobo firmware 4.38)
+  and the Tolino Shine 5 (the Clara BW inside); untested on real Kobos. See
+  `docs/kobo.md`.
+
+### Changed
+- The "Page turn wave" switch is shown only on Kindles whose screen can sweep a page
+  in (Paperwhite 5 and 12th gen).
+- rinky and its SSH server are built for the Cortex-A9, the oldest processor of the
+  supported Kindles. The build for the Paperwhite 12th gen's Cortex-A53 stopped with
+  "Illegal instruction" on older models.
+
+### Fixed
+- Restarting rinky (after an in-app update, or `rinky-ctl.sh restart`) went back to the
+  Kindle's Home screen on Kindles with a small temporary folder (32 MB on the
+  Paperwhite 3 and 4 and the Oasis): there was no room for the new copy of rinky next
+  to the old one. The launcher now removes the old copy first, or runs rinky from its
+  install folder.
+
 ## [0.4.3] - 2026-11-04
 
 ### Added
@@ -147,6 +185,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.5.0]: https://github.com/jyliuu/rinky/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/jyliuu/rinky/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jyliuu/rinky/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jyliuu/rinky/compare/v0.4.0...v0.4.1

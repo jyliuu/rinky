@@ -124,6 +124,16 @@ pub enum SleepState {
     Asleep,
 }
 
+impl SleepState {
+    /// powerd's word for it (`active`, `screenSaver`), as `Power::state` reports.
+    pub fn name(self) -> &'static str {
+        match self {
+            SleepState::Awake => "active",
+            SleepState::Asleep => "screenSaver",
+        }
+    }
+}
+
 /// Why the device goes to sleep or wakes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trigger {

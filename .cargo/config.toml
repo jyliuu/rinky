@@ -14,9 +14,11 @@
 # Never resolve a dependency that needs a newer rustc than workspace.package.rust-version.
 incompatible-rust-versions = "fallback"
 
-# The PW12 (MT8110/MT8113) has four Cortex-A53 cores running this ARMv7 hard-float
-# userland in AArch32: schedule for the A53 and use NEON (the default armv7 target has
-# NEON off). The emulator machine (mt8113-bellatrix4) is the same CPU. Checked with
-# cargo zigbuild on 2026-11-01. RUSTFLAGS in the environment replaces this.
+# One binary for every supported Kindle: the oldest CPU among them is the i.MX6
+# SoloLite's Cortex-A9 (Voyage, PW3, Oasis 1, PW4: VFPv3, NEON, no hardware divide);
+# the Oasis 2/3 have Cortex-A7, the PW5 and newer Cortex-A53 in AArch32. So: A9 with
+# NEON (the default armv7 target has NEON off). `cortex-a53` (used until 0.4.3) let
+# LLVM emit ARMv8 AArch32 instructions: "Illegal instruction" on the i.MX emulators
+# (2026-11-05). RUSTFLAGS in the environment replaces this.
 [target.armv7-unknown-linux-musleabihf]
-rustflags = ["-C", "target-cpu=cortex-a53", "-C", "target-feature=+neon"]
+rustflags = ["-C", "target-cpu=cortex-a9", "-C", "target-feature=+neon"]
