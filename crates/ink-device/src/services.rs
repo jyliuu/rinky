@@ -160,6 +160,17 @@ pub struct WifiState {
     pub signal: Option<u8>,
 }
 
+impl WifiState {
+    /// The radio is on but neither connected nor joining: worth a scan.
+    pub fn searching(&self) -> bool {
+        self.enabled && !matches!(self.state.as_str(), "CONNECTED" | "PENDING")
+    }
+}
+
+/// How long [`Wifi::after_wake`] waits before it looks: the radio rejoins the network it
+/// had by itself when that one is still in range.
+pub const WIFI_WAKE_SETTLE: Duration = Duration::from_secs(5);
+
 /// A network found by a scan.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WifiNetwork {
@@ -219,6 +230,10 @@ pub trait Wifi {
     fn set_airplane_mode(&mut self, _on: bool) -> Result<()> {
         unsupported("airplane mode")
     }
+    /// The device woke from sleep: when the radio is on but not connected (carried away
+    /// from the network it had), starts a scan in the background, so a saved network in
+    /// range is joined and the Wi-Fi page lists what is around. Returns at once.
+    fn after_wake(&mut self) {}
 }
 
 /// USB state.
@@ -298,6 +313,17 @@ impl Clock for SystemClock {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wake scans only with the radio on and no network joined or being joined.
+    #[test]
+    fn searching_is_radio_on_without_a_network() {
+        let s = |enabled, state: &str| WifiState { enabled, state: state.into(), essid: None, signal: None }.searching();
+        assert!(s(true, "NA"));
+        assert!(s(true, "READY"));
+        assert!(!s(true, "CONNECTED"));
+        assert!(!s(true, "PENDING"));
+        assert!(!s(false, "NA"));
+    }
 
     #[test]
     fn unsupported_services_report_errors() {

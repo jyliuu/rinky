@@ -235,6 +235,26 @@ impl Wifi for KoboServices {
         }
     }
 
+    fn after_wake(&mut self) {
+        // Suspend turns the radio off ([`suspend`]); this matters only when it stayed on.
+        if !wifi::is_up() {
+            return;
+        }
+        let r = std::thread::Builder::new().name("wifi-wake".into()).spawn(|| {
+            std::thread::sleep(crate::services::WIFI_WAKE_SETTLE);
+            let s = wifi::state();
+            if s.searching() {
+                log::info!("wifi: not connected after wake ({}): scanning", s.state);
+                if let Err(e) = wifi::request_scan() {
+                    log::warn!("wifi: scan after wake: {e}");
+                }
+            }
+        });
+        if let Err(e) = r {
+            log::warn!("wifi: cannot start the wake scan: {e}");
+        }
+    }
+
     fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
         wifi::scan()
     }

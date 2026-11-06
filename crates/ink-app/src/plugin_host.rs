@@ -2951,6 +2951,17 @@ impl PluginUi {
                     return;
                 }
             }
+            // The same viewer still waiting to open (a chat shown, then shown again as its
+            // request starts, before a paint): the waiting one takes the new text. A second
+            // copy would open under the first, and closing the chat would need two taps.
+            let waiting = self.pending.iter_mut().find_map(|(p, r)| match r {
+                UiRequest::TextViewer { id: i, title, markdown } if p == plugin && i == id => Some((title, markdown)),
+                _ => None,
+            });
+            if let Some((t, m)) = waiting {
+                (*t, *m) = (title.clone(), markdown.clone());
+                return;
+            }
         }
         if let UiRequest::Dialog { id, title, body, buttons } = &req {
             // The same dialog again (repeated taps on what opens it): one copy only. Each
@@ -3588,6 +3599,21 @@ mod tests {
             let mut cx = PaintCx { canvas: &mut self.canvas, fonts: &mut self.fonts, theme: &self.theme };
             ui.paint(&mut cx, below)
         }
+    }
+
+    /// A viewer shown twice before a paint (Insightful's Explain: the chat is shown, then
+    /// shown again as its request starts) opens once, with the newer text.
+    #[test]
+    fn a_viewer_shown_twice_before_a_paint_opens_once() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        ui.push("ai", UiRequest::TextViewer { id: 3, title: "Chat".into(), markdown: "Thinking".into() });
+        ui.push("ai", UiRequest::TextViewer { id: 3, title: "Chat 2".into(), markdown: "Thinking…".into() });
+        assert_eq!(ui.pending(), 1);
+        s.ui(&mut ui, false);
+        assert_eq!(ui.layer_names(), ["viewer"]);
+        assert!(matches!(&ui.layers[0].kind, Kind::Viewer(v) if v.title == "Chat 2"));
+        assert_eq!(ui.pending(), 0);
     }
 
     /// Streamed text replacing a viewer's content (an AI answer arriving in batches)
