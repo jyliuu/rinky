@@ -310,9 +310,8 @@ impl SyncQueue {
         let day = now / 86400;
         self.items.retain(|q| now.saturating_sub(q.queued_at) < QUEUE_MAX_AGE_S && !(q.progress.document == progress.document && q.queued_at / 86400 == day));
         self.items.push(QueuedProgress { progress, queued_at: now });
-        while self.items.len() > QUEUE_MAX {
-            self.items.remove(0);
-        }
+        let excess = self.items.len().saturating_sub(QUEUE_MAX);
+        self.items.drain(..excess);
     }
 
     /// Sends queued pushes in order until one fails; returns how many were sent. A 401
@@ -467,12 +466,8 @@ mod tests {
         assert!(matches!(bad.push(&p), Err(NetError::Unauthorized(_))));
         assert!(matches!(bad.pull(doc), Err(NetError::Unauthorized(_))));
         // The server root works too (no prefix).
-        let root = KoSyncClient::new(&http, account_at(&s.base(), "reader", "s3cret"));
+        let root = KoSyncClient::new(&http, KoSyncAccount::new(&s.base(), "reader", "s3cret"));
         root.authorize().unwrap();
-    }
-
-    fn account_at(server: &str, user: &str, pass: &str) -> KoSyncAccount {
-        KoSyncAccount::new(server, user, pass)
     }
 
     /// Answers every request with a captive-portal login page.
