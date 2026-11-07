@@ -71,7 +71,7 @@ pub fn book_state(b: &BookEntry) -> Result<f32, Badge> {
     }
 }
 
-/// `42%`.
+/// `42%` (clamped; NaN reads `0%`).
 pub fn percent_text(v: f32) -> String {
     format!("{}%", (v.clamp(0.0, 1.0) * 100.0).round() as u32)
 }
@@ -551,5 +551,17 @@ impl LibraryScreen {
             p.text_left(Rect::new(MARGIN + 10, y, tw - 20, 60), &n, t.caption.px, Style::Italic, t.muted);
         }
         self.draw_scroll_bar(p, w, h, total, per, page);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_labels_clamp() {
+        assert_eq!(percent_text(0.424), "42%");
+        assert_eq!(percent_text(f32::NAN), "0%");
+        assert_eq!(percent_text(3.0), "100%");
     }
 }

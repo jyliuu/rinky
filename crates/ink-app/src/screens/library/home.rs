@@ -12,6 +12,7 @@
 //! card needs beyond the library index (chapter, time left) is read once per book and
 //! position and kept in [`HomeCache`], never on every paint.
 
+use super::browse::{authors_text, percent_text};
 use super::view::{MARGIN, TAB_H};
 use super::{Hit, LibraryScreen};
 use ink_device::Rect;
@@ -103,21 +104,6 @@ pub(crate) fn left_text(secs: u64) -> String {
         1 if secs < 60 => "Less than a minute left".into(),
         m if m < 60 => format!("{m} min left in book"),
         m => format!("{} h {:02} min left in book", m / 60, m % 60),
-    }
-}
-
-/// Percentage label, `42%`.
-fn pct_label(v: f32) -> String {
-    let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-    format!("{}%", (v * 100.0).round() as u32)
-}
-
-/// Authors joined, or "Unknown author".
-fn authors(b: &BookEntry) -> String {
-    if b.authors.is_empty() {
-        "Unknown author".into()
-    } else {
-        b.authors.join(", ")
     }
 }
 
@@ -250,7 +236,7 @@ impl LibraryScreen {
             y += lh;
         }
         y += space(1);
-        p.text_left(Rect::new(x, y, tw, 48), &authors(b), t.label.px, Style::Regular, t.muted);
+        p.text_left(Rect::new(x, y, tw, 48), &authors_text(b), t.label.px, Style::Regular, t.muted);
         y += 56;
         if !reading && !b.unsupported {
             // The card is the target; the button says what a tap does.
@@ -283,7 +269,7 @@ impl LibraryScreen {
         };
         // No bar for a book marked unread or at 0 % (the line below says "Unread").
         if super::browse::shows_progress(b) {
-            let mut bar = ProgressBar::new(pc).with_label(pct_label(pc));
+            let mut bar = ProgressBar::new(pc).with_label(percent_text(pc));
             bar.paint(p, Rect::new(x - 4, bar_y, tw + 4, bar_h as u32));
         }
         p.text_left(Rect::new(x, r.bottom() - pad - line_h, tw, line_h as u32), &below, t.caption.px, Style::Regular, t.muted);
@@ -307,7 +293,7 @@ impl LibraryScreen {
                 // The row keeps its height; a book marked unread or at 0 % has no bar.
                 if super::browse::shows_progress(b) {
                     let pc = if b.status == ReadingStatus::Complete { 1.0 } else { b.percent.unwrap_or(0.0) };
-                    let mut bar = ProgressBar::thin(pc).with_label(pct_label(pc));
+                    let mut bar = ProgressBar::thin(pc).with_label(percent_text(pc));
                     bar.paint(p, Rect::new(cell.x, y, cell.w, 28));
                 }
                 y += 32;
@@ -316,7 +302,7 @@ impl LibraryScreen {
             p.text_centered(Rect::new(cell.x, y, cell.w, 40), &b.title, t.caption.px, Style::Bold, title_c);
             y += 40;
             if !progress {
-                p.text_centered(Rect::new(cell.x, y, cell.w, 36), &authors(b), t.caption.px, Style::Regular, t.muted);
+                p.text_centered(Rect::new(cell.x, y, cell.w, 36), &authors_text(b), t.caption.px, Style::Regular, t.muted);
             }
             self.hits.push((cell, Hit::Book(b.path.clone())));
         }
@@ -415,12 +401,5 @@ mod tests {
         assert_eq!(left_text(61), "2 min left in book");
         assert_eq!(left_text(59 * 60), "59 min left in book");
         assert_eq!(left_text(3 * 3600 + 5 * 60), "3 h 05 min left in book");
-    }
-
-    #[test]
-    fn percent_labels_clamp() {
-        assert_eq!(pct_label(0.424), "42%");
-        assert_eq!(pct_label(f32::NAN), "0%");
-        assert_eq!(pct_label(3.0), "100%");
     }
 }
