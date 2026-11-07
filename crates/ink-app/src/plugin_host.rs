@@ -2839,6 +2839,16 @@ impl Kind {
         }
     }
 
+    /// Where a scrolling layer is (a viewer's page and scroll, a menu's scroll): a
+    /// change after an event means it is drawn again.
+    fn position(&self) -> (usize, i32) {
+        match self {
+            Kind::Viewer(v) => v.position(),
+            Kind::Menu(m) => (m.scroll() as usize, 0),
+            _ => (0, 0),
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Kind::Toast(_) => "toast",
@@ -2866,6 +2876,32 @@ struct Layer {
     stream: bool,
     kind: Kind,
     expires: Option<Instant>,
+}
+
+impl Layer {
+    /// True when the whole layer is drawn and refreshed at the next paint already.
+    fn whole_pending(&self) -> bool {
+        self.dirty.is_some() && self.partial.is_none()
+    }
+
+    /// `class`, or the stronger class already pending.
+    fn at_least(&self, class: RefreshClass) -> RefreshClass {
+        self.dirty.map_or(class, |c| c.max(class))
+    }
+
+    /// Draws the whole layer again at the next paint and refreshes all of it with `class`.
+    fn redraw(&mut self, class: RefreshClass) {
+        self.dirty = Some(class);
+        self.partial = None;
+    }
+
+    /// Adds layer-local `rects` to what the next paint refreshes, unless all of the
+    /// layer is refreshed then anyway. The caller sets the class.
+    fn refresh_parts(&mut self, rects: impl IntoIterator<Item = Rect>) {
+        if !self.whole_pending() {
+            self.partial.get_or_insert_with(Vec::new).extend(rects);
+        }
+    }
 }
 
 /// Pixels of a closed layer waiting to be put back: rect, pixels, refresh class.
@@ -2920,6 +2956,12 @@ impl Default for PluginUi {
             keyboard_layouts: vec!["en".into()],
         }
     }
+}
+
+/// True for a request that opens a modal layer (not a toast, a notification or a
+/// status text).
+fn opens_modal(req: &UiRequest) -> bool {
+    !matches!(req, UiRequest::Toast { .. } | UiRequest::Notification { .. } | UiRequest::Status { .. })
 }
 
 /// `ev` with positions relative to `r`'s origin.
@@ -2981,9 +3023,8 @@ impl PluginUi {
                     // Only the changed lines are refreshed (paint: `stream`), so streamed
                     // text never flashes. A pending REAGL (the view docking or undocking
                     // the keyboard) stays.
-                    l.dirty = Some(l.dirty.map_or(RefreshClass::Gl16, |c| c.max(RefreshClass::Gl16)));
+                    l.redraw(l.at_least(RefreshClass::Gl16));
                     l.stream = true;
-                    l.partial = None;
                     return;
                 }
             }
@@ -3036,10 +3077,7 @@ impl PluginUi {
             let Kind::Menu(m) = &mut l.kind else { return };
             let local = Rect::new(0, 0, l.rect.w, l.rect.h);
             let Some(Some(rect)) = m.set_label(local, action, label) else { return };
-            let whole_pending = l.dirty.is_some() && l.partial.is_none();
-            if !whole_pending {
-                l.partial.get_or_insert_with(Vec::new).push(rect);
-            }
+            l.refresh_parts([rect]);
             l.dirty = l.dirty.or(Some(RefreshClass::Gl16));
             return;
         }
@@ -3070,8 +3108,7 @@ impl PluginUi {
     /// or the keyboard or a dialog over the plugin's own chat view (a viewer with an
     /// input bar, [`MarkdownView::stacks`]) when that viewer is the only modal layer.
     fn can_start(&self, plugin: &str, req: &UiRequest) -> bool {
-        let modal = !matches!(req, UiRequest::Toast { .. } | UiRequest::Notification { .. } | UiRequest::Status { .. });
-        if !modal || !self.modal_open() {
+        if !opens_modal(req) || !self.modal_open() {
             return true;
         }
         let mut modals = self.layers.iter().filter(|l| l.kind.modal());
@@ -3097,9 +3134,22 @@ impl PluginUi {
         // modal layer is open; it must not make the loop spin) or pixels wait to go back.
         let startable = self.pending.front().is_some_and(|(p, r)| self.can_start(p, r));
         let soon = (startable || !self.restore.is_empty()).then_some(Duration::ZERO);
-        match (next.map(|t| t.saturating_duration_since(now)), soon) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        next.map(|t| t.saturating_duration_since(now)).into_iter().chain(soon).min()
+    }
+
+    /// Closes the toasts whose time is up.
+    fn close_expired(&mut self) {
+        let now = Instant::now();
+        while let Some(i) = self.layers.iter().position(|l| l.expires.is_some_and(|t| t <= now)) {
+            self.close(i);
+        }
+    }
+
+    /// Puts the pixels of closed layers back on the canvas and adds their damage.
+    fn put_back(&mut self, canvas: &mut Canvas, damage: &mut Vec<Damage>) {
+        for (r, pixels, class) in self.restore.drain(..) {
+            canvas.blit(&pixels, r.x, r.y);
+            damage.push(Damage { rect: r, class });
         }
     }
 
@@ -3112,8 +3162,7 @@ impl PluginUi {
                 if let Kind::Viewer(view) = &mut v.kind {
                     view.set_dock(0);
                 }
-                v.dirty = Some(v.dirty.map_or(RefreshClass::Reagl, |c| c.max(RefreshClass::Reagl)));
-                v.partial = None;
+                v.redraw(v.at_least(RefreshClass::Reagl));
                 return l;
             }
         }
@@ -3128,8 +3177,7 @@ impl PluginUi {
         // Layers above it covered part of its pixels: they are drawn again.
         for above in self.layers.iter_mut().skip(i) {
             above.backing = None;
-            above.dirty = Some(RefreshClass::Gl16);
-            above.partial = None;
+            above.redraw(RefreshClass::Gl16);
         }
         l
     }
@@ -3143,11 +3191,7 @@ impl PluginUi {
     /// Handles `ev` for the overlay: `(used, answers)` where an answer is
     /// `(plugin, request id, result)`.
     pub fn handle(&mut self, ev: &UiEvent, screen: Size) -> (bool, Vec<(String, u32, String)>) {
-        let now = Instant::now();
-        // Expired toasts.
-        while let Some(i) = self.layers.iter().position(|l| l.expires.is_some_and(|t| t <= now)) {
-            self.close(i);
-        }
+        self.close_expired();
         // Per-contact touches go only to an open keyboard (it types on them); other
         // layers work on gestures.
         let keyboard_open = self.layers.last().is_some_and(|l| matches!(l.kind, Kind::Input(_)));
@@ -3180,11 +3224,9 @@ impl PluginUi {
                     view.event(&lev, vr);
                     if view.position() != before {
                         // Only the pages above the panel: the keyboard stays.
-                        let whole_pending = v.dirty.is_some() && v.partial.is_none();
-                        if !whole_pending {
-                            v.partial.get_or_insert_with(Vec::new).push(view.pages_rect(vr));
-                        }
-                        v.dirty = Some(v.dirty.map_or(RefreshClass::Reagl, |c| c.max(RefreshClass::Reagl)));
+                        let pages = view.pages_rect(vr);
+                        v.refresh_parts([pages]);
+                        v.dirty = Some(v.at_least(RefreshClass::Reagl));
                     }
                 }
             }
@@ -3210,11 +3252,7 @@ impl PluginUi {
         } else {
             let lev = local(ev, l.rect);
             let lr = Rect::new(0, 0, l.rect.w, l.rect.h);
-            let before = match &l.kind {
-                Kind::Viewer(v) => v.position(),
-                Kind::Menu(m) => (m.scroll() as usize, 0),
-                _ => (0, 0),
-            };
+            let before = l.kind.position();
             match l.kind.widget().event(&lev, lr) {
                 EventResult::Action(a) => match a.as_str() {
                     "input:submit" => match &l.kind {
@@ -3234,10 +3272,9 @@ impl PluginUi {
                                 r.push(i.parts(lr).0);
                             }
                         }
-                        let whole_pending = l.dirty.is_some() && l.partial.is_none();
                         match rects {
-                            Some(r) if !whole_pending => l.partial.get_or_insert_with(Vec::new).extend(r),
-                            _ => l.partial = None,
+                            Some(r) => l.refresh_parts(r),
+                            None => l.partial = None,
                         }
                         l.dirty = Some(RefreshClass::Gl16);
                         None
@@ -3245,38 +3282,25 @@ impl PluginUi {
                     _ => Some(a),
                 },
                 _ => {
-                    let after = match &l.kind {
-                        Kind::Viewer(v) => v.position(),
-                        Kind::Menu(m) => (m.scroll() as usize, 0),
-                        _ => (0, 0),
-                    };
-                    if after != before {
+                    if l.kind.position() != before {
                         match &l.kind {
                             // A chat view scrolled: only the text below the app bar
                             // moves, REAGL like a page turn (no flash).
                             Kind::Viewer(v) if v.scrolls() => {
-                                let whole_pending = l.dirty.is_some() && l.partial.is_none();
-                                if !whole_pending {
-                                    l.partial.get_or_insert_with(Vec::new).push(v.pages_rect(lr));
-                                }
-                                l.dirty = Some(l.dirty.map_or(RefreshClass::Reagl, |c| c.max(RefreshClass::Reagl)));
+                                let pages = v.pages_rect(lr);
+                                l.refresh_parts([pages]);
+                                l.dirty = Some(l.at_least(RefreshClass::Reagl));
                             }
                             // A full-screen viewer page is text like a book page: REAGL,
                             // no flash (its GL16 would be promoted to a full-screen GC16).
-                            Kind::Viewer(v) if !v.sheet => {
-                                l.dirty = Some(RefreshClass::Reagl);
-                                l.partial = None;
-                            }
+                            Kind::Viewer(v) if !v.sheet => l.redraw(RefreshClass::Reagl),
                             // A menu's list jump is one DU of the layer (its rows are
                             // black and white, as on a settings page).
                             Kind::Menu(m) => {
-                                l.dirty = Some(m.refresh_class());
-                                l.partial = None;
+                                let class = m.refresh_class();
+                                l.redraw(class);
                             }
-                            _ => {
-                                l.dirty = Some(RefreshClass::Gl16);
-                                l.partial = None;
-                            }
+                            _ => l.redraw(RefreshClass::Gl16),
                         }
                     }
                     None
@@ -3344,13 +3368,10 @@ impl PluginUi {
                         let Kind::Viewer(view) = &mut v.kind else { unreachable!() };
                         let initial = if initial.is_empty() { view.draft.take().unwrap_or_default() } else { initial };
                         view.set_dock(ih);
-                        let vr = Rect::new(0, 0, v.rect.w, v.rect.h);
-                        match v.dirty {
-                            Some(_) if v.partial.is_none() => {}
-                            _ => {
-                                v.dirty = Some(v.dirty.map_or(RefreshClass::Reagl, |c| c.max(RefreshClass::Reagl)));
-                                v.partial = Some(vec![view.pages_rect(vr)]);
-                            }
+                        let pages = view.pages_rect(Rect::new(0, 0, v.rect.w, v.rect.h));
+                        if !v.whole_pending() {
+                            v.partial = Some(vec![pages]);
+                            v.dirty = Some(v.at_least(RefreshClass::Reagl));
                         }
                         (Some(id), Kind::Input(InputBox::docked(prompt, initial, &layouts)), Rect::new(0, (h - ih) as i32, w, ih), None)
                     }
@@ -3377,27 +3398,20 @@ impl PluginUi {
     pub fn paint(&mut self, cx: &mut PaintCx, below_redrawn: bool) -> Vec<Damage> {
         let screen = cx.canvas.size();
         let mut damage = Vec::new();
-        let now = Instant::now();
-        while let Some(i) = self.layers.iter().position(|l| l.expires.is_some_and(|t| t <= now)) {
-            self.close(i);
-        }
+        self.close_expired();
         if below_redrawn {
             // The pixels under every layer are new: drop the copies and the restores.
             self.restore.clear();
             for l in &mut self.layers {
                 l.backing = None;
-                l.dirty = l.dirty.or(Some(RefreshClass::Gl16));
-                l.partial = None;
+                l.redraw(l.dirty.unwrap_or(RefreshClass::Gl16));
                 l.stream = false;
             }
         }
-        for (r, pixels, class) in self.restore.drain(..) {
-            cx.canvas.blit(&pixels, r.x, r.y);
-            damage.push(Damage { rect: r, class });
-        }
+        self.put_back(cx.canvas, &mut damage);
         // Start waiting requests.
         while let Some((plugin, req)) = self.pending.front().cloned() {
-            let modal = !matches!(req, UiRequest::Toast { .. } | UiRequest::Notification { .. } | UiRequest::Status { .. });
+            let modal = opens_modal(&req);
             if !self.can_start(&plugin, &req) {
                 break;
             }
@@ -3423,13 +3437,9 @@ impl PluginUi {
             };
             // One toast at a time; a modal layer replaces a toast.
             while let Some(i) = self.layers.iter().rposition(|l| !l.kind.modal()) {
-                let l = self.close(i);
-                drop(l);
+                self.close(i);
             }
-            for (r, pixels, class) in self.restore.drain(..) {
-                cx.canvas.blit(&pixels, r.x, r.y);
-                damage.push(Damage { rect: r, class });
-            }
+            self.put_back(cx.canvas, &mut damage);
             self.open(plugin, req, screen, cx);
         }
         // Paint dirty layers bottom to top; a repainted layer forces the ones above that
@@ -3437,8 +3447,7 @@ impl PluginUi {
         let mut drawn: Vec<Rect> = Vec::new();
         for l in &mut self.layers {
             if l.dirty.is_none() && drawn.iter().any(|d| !d.intersect(&l.rect).is_empty()) {
-                l.dirty = Some(RefreshClass::Gl16);
-                l.partial = None;
+                l.redraw(RefreshClass::Gl16);
                 l.backing = None;
             }
             let Some(class) = l.dirty.take() else { continue };
@@ -3522,8 +3531,7 @@ impl PluginUi {
         for (i, l) in self.layers.iter_mut().enumerate() {
             let Some(b) = l.backing.as_mut() else { continue };
             if patch_backing(cx.canvas, l.rect, b, changed) {
-                l.dirty = l.dirty.or(Some(RefreshClass::Gl16));
-                l.partial = None;
+                l.redraw(l.dirty.unwrap_or(RefreshClass::Gl16));
                 l.stream = false;
                 first_dirty.get_or_insert(i);
             }
@@ -3537,8 +3545,7 @@ impl PluginUi {
                     let r = l.rect.intersect(&bounds);
                     cx.canvas.blit(&b, r.x, r.y);
                 }
-                l.dirty = l.dirty.or(Some(RefreshClass::Gl16));
-                l.partial = None;
+                l.redraw(l.dirty.unwrap_or(RefreshClass::Gl16));
             }
         }
         for (r, b, _) in &mut self.restore {
