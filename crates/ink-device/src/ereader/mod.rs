@@ -176,10 +176,7 @@ impl SharedHandle {
     pub(crate) fn cable(&self, sys: &SysRoot) -> UsbCable {
         match &self.0 {
             Some(s) => s.borrow().cable,
-            None => {
-                let udc = crate::usb::read_udc(sys).map(|(_, s)| s);
-                crate::usb::cable_from(udc.as_deref(), crate::battery::external_power(sys), None)
-            }
+            None => crate::usb::read_cable(sys, None),
         }
     }
 

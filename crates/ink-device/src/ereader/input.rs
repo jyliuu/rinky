@@ -635,8 +635,7 @@ impl ReaderInput {
     }
 
     fn read_cable(&self) -> UsbCable {
-        let udc = usb::read_udc(&self.sys).map(|(_, s)| s);
-        usb::cable_from(udc.as_deref(), battery::external_power(&self.sys), self.hal_plugged)
+        usb::read_cable(&self.sys, self.hal_plugged)
     }
 
     /// Runs `f` on the sleep controller (when rinky owns sleep) with this platform's
@@ -697,8 +696,8 @@ impl ReaderInput {
                     self.queue.push_back(InputEvent::Power(e));
                 }
                 UsbAction::Cable(b) => self.queue.push_back(InputEvent::Usb(b)),
-                UsbAction::Journal(p, k, v) => {
-                    let _ = self.shared.borrow().journal.record(Entry::LipcInt { publisher: p, prop: k, value: v });
+                UsbAction::Journal(e) => {
+                    let _ = self.shared.borrow().journal.record(e);
                 }
                 UsbAction::Log(s) => say!("{s}"),
             }
