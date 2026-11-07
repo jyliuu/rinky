@@ -71,7 +71,8 @@ rinky never changes the e-reader's own library or KOReader's files.
 
 rinky is written in Rust from the touch input to the pixels on the screen; only PDFs
 and comics are drawn by MuPDF. It is native code with no interpreter or framework
-underneath, which keeps it quick on an e-reader's small processor. Long books are
+underneath (Lua runs only for plugins you add), which keeps it quick on an e-reader's
+small processor. Long books are
 paginated in the background, so you can start reading before the page count is
 known.
 
