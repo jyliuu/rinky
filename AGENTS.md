@@ -138,7 +138,8 @@ scripts/release.sh check X.Y.Z                           # Cargo.toml and CHANGE
   `scripts/release.sh X.Y.Z` does (version, `Cargo.lock`, dated changelog heading).
 - PR body: one bold heading per commit with its short hash and a few lines or bullets,
   then `**Checks:**` (what ran) and `**Not tested on a device:**` (what only real
-  hardware can show). PR #19 is a good example.
+  hardware can show). `.github/pull_request_template.md` has the shape; PR #19 is a
+  good example.
 
 ## Done means
 
