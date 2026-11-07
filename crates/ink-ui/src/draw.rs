@@ -241,23 +241,30 @@ pub fn blit_fit(canvas: &mut Canvas, src: &Canvas, r: Rect) -> Rect {
     let scale = (r.w as f32 / src.width as f32).min(r.h as f32 / src.height as f32);
     let (w, h) = (((src.width as f32 * scale).round() as u32).clamp(1, r.w), ((src.height as f32 * scale).round() as u32).clamp(1, r.h));
     let dst = Rect::new(r.x + (r.w - w) as i32 / 2, r.y + (r.h - h) as i32 / 2, w, h);
+    // Source span `(start, end, sample step)` of target column or row `i`: at most 4
+    // samples per axis, enough for thumbnails and cheap for big images.
+    let span = |i: u32, scale: f32, len: usize| {
+        let end = (((i + 1) as f32 * scale) as usize).clamp(1, len);
+        let start = ((i as f32 * scale) as usize).min(end - 1);
+        (start, end, (end - start).div_ceil(4).max(1))
+    };
     let (sx, sy) = (src.width as f32 / w as f32, src.height as f32 / h as f32);
-    for y in 0..h {
-        let (y0, y1) = ((y as f32 * sy) as usize, (((y + 1) as f32 * sy) as usize).clamp(1, src.height));
-        let y0 = y0.min(y1 - 1);
-        for x in 0..w {
-            let (x0, x1) = ((x as f32 * sx) as usize, (((x + 1) as f32 * sx) as usize).clamp(1, src.width));
-            let x0 = x0.min(x1 - 1);
-            // At most 4 x 4 samples per pixel: enough for thumbnails, cheap for big images.
-            let (stx, sty) = ((x1 - x0).div_ceil(4), (y1 - y0).div_ceil(4));
+    // Only the part that drawing may change; the column spans are the same on every row.
+    let vis = drawable(canvas, dst);
+    let (vx, vy) = ((vis.x - dst.x) as u32, (vis.y - dst.y) as u32);
+    let cols: Vec<(usize, usize, usize)> = (vx..vx + vis.w).map(|x| span(x, sx, src.width)).collect();
+    for y in vy..vy + vis.h {
+        let (y0, y1, sty) = span(y, sy, src.height);
+        let row = (dst.y + y as i32) as usize * canvas.width + vis.x as usize;
+        for (p, &(x0, x1, stx)) in canvas.pixels[row..row + cols.len()].iter_mut().zip(&cols) {
             let (mut sum, mut n) = (0u32, 0u32);
-            for yy in (y0..y1).step_by(sty.max(1)) {
-                for xx in (x0..x1).step_by(stx.max(1)) {
+            for yy in (y0..y1).step_by(sty) {
+                for xx in (x0..x1).step_by(stx) {
                     sum += src.pixels[yy * src.width + xx] as u32;
                     n += 1;
                 }
             }
-            canvas.set(dst.x + x as i32, dst.y + y as i32, (sum / n.max(1)) as u8);
+            *p = (sum / n.max(1)) as u8;
         }
     }
     dst
@@ -391,6 +398,22 @@ mod tests {
         assert_eq!(c.get(50, 90), Some(255));
         assert_eq!(c.get(10, 10), Some(255), "outside the picture");
         assert_eq!(blit_fit(&mut c, &Canvas::new(0, 0), Rect::new(0, 0, 10, 10)).w, 0);
+        // A gradient scaled down, also partly off the canvas and under a clip: the same
+        // pixels where they land, nothing elsewhere.
+        let grad = Canvas::from_pixels(300, 200, (0..300 * 200).map(|i| ((i % 300) * 255 / 300 + i / 300 % 7) as u8).collect());
+        let mut full = Canvas::new(100, 100);
+        blit_fit(&mut full, &grad, Rect::new(5, 5, 90, 90));
+        let mut cut = Canvas::new(100, 100);
+        cut.set_clip(Some(Rect::new(20, 30, 50, 10)));
+        blit_fit(&mut cut, &grad, Rect::new(5, 5, 90, 90));
+        for (i, (a, b)) in full.pixels.iter().zip(&cut.pixels).enumerate() {
+            let inside = Rect::new(20, 30, 50, 10).contains(ink_device::Point::new((i % 100) as i32, (i / 100) as i32));
+            assert_eq!(*b, if inside { *a } else { 255 }, "pixel {i}");
+        }
+        let mut edge = Canvas::new(100, 100);
+        let r = blit_fit(&mut edge, &grad, Rect::new(-40, 60, 90, 90));
+        assert_eq!(r, Rect::new(-40, 75, 90, 60));
+        assert_eq!(edge.get(0, 80), full.get(45, 25));
         let mut g = Canvas::new(4, 1);
         for (x, v) in [0x22, 0x77, 0x99, 0xDD].iter().enumerate() {
             g.set(x as i32, 0, *v);
