@@ -102,14 +102,12 @@ fn unmatched_end_tags_feed(n: usize, in_content: bool) -> String {
 }
 
 #[test]
-#[ignore = "verifier: OPDS parse_feed is quadratic in unmatched end tags (path rposition per end tag)"]
 fn opds_unmatched_end_tags_parse_in_linear_time() {
     // 50 000 unclosed elements and 50 000 end tags that close none of them: 350 KB, far
-    // below OpdsClient's 16 MB limit. Each end tag scans the whole stack of open names
-    // (`path.iter().rposition`) and the stack never shrinks, so the parse is quadratic.
-    // Measured on the host (release): 10k pairs 0.3 s, 20k 1.2 s, 40k 5.1 s; balanced
-    // tags of the same size take 1-4 ms. A 1 MB feed of this kind takes minutes on the
-    // Kindle's ARM cores, a 16 MB one hours.
+    // below OpdsClient's 16 MB limit. Each end tag used to scan the whole stack of open
+    // names (`path.iter().rposition`) and the stack never shrinks, so the parse was
+    // quadratic: 9 s for this feed on the host (release), minutes for 1 MB on the
+    // Kindle. The parser now keeps the open depths of each name.
     let mut slow = Vec::new();
     for in_content in [false, true] {
         let xml = unmatched_end_tags_feed(50_000, in_content);

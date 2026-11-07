@@ -13,6 +13,8 @@ use crate::url::{encode_component, resolve};
 use crate::{NetError, Result};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Prefix of every acquisition relation.
@@ -374,7 +376,8 @@ fn named_entity(name: &str) -> Option<&'static str> {
 }
 
 fn is_block(tag: &str) -> bool {
-    matches!(tag.to_ascii_lowercase().as_str(), "p" | "div" | "br" | "li" | "ul" | "ol" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "tr" | "blockquote" | "pre" | "dt" | "dd" | "hr" | "table")
+    const BLOCKS: &[&str] = &["p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "blockquote", "pre", "dt", "dd", "hr", "table"];
+    BLOCKS.iter().any(|b| b.eq_ignore_ascii_case(tag))
 }
 
 /// Normalizes whitespace per line and drops empty lines.
@@ -416,29 +419,64 @@ fn one_line(s: &str) -> String {
 // ---------------------------------------------------------------------------------------
 // Atom parser.
 
-fn local(name: &[u8]) -> String {
+fn local(name: &[u8]) -> Cow<'_, str> {
     let n = match name.iter().position(|&b| b == b':') {
         Some(i) => &name[i + 1..],
         None => name,
     };
-    String::from_utf8_lossy(n).into_owned()
+    String::from_utf8_lossy(n)
 }
 
-fn attrs(e: &BytesStart<'_>) -> Vec<(String, String, String)> {
-    // (full name, local name, value)
-    e.attributes()
-        .with_checks(false)
-        .flatten()
-        .map(|a| {
-            let full = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-            let value = decode_entities(&String::from_utf8_lossy(&a.value));
-            (full.clone(), local(full.as_bytes()), value)
-        })
-        .collect()
+/// The open elements of the lenient parse. End tags need the innermost open element of
+/// their name; scanning the stack for it made a feed of unmatched end tags quadratic, so
+/// each name keeps the depths where it is open.
+#[derive(Default)]
+struct OpenElements {
+    /// Name ids, outermost first.
+    stack: Vec<usize>,
+    ids: HashMap<String, usize>,
+    /// Per name id: the stack indices where it is open, innermost last.
+    open_at: Vec<Vec<usize>>,
 }
 
-fn attr<'a>(list: &'a [(String, String, String)], local_name: &str) -> Option<&'a str> {
-    list.iter().find(|(_, l, _)| l == local_name).map(|(_, _, v)| v.as_str())
+impl OpenElements {
+    fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn push(&mut self, name: &str) {
+        let id = match self.ids.get(name) {
+            Some(&id) => id,
+            None => {
+                self.ids.insert(name.to_string(), self.open_at.len());
+                self.open_at.push(Vec::new());
+                self.open_at.len() - 1
+            }
+        };
+        self.open_at[id].push(self.stack.len());
+        self.stack.push(id);
+    }
+
+    /// Stack index of the innermost open element named `name`.
+    fn innermost(&self, name: &str) -> Option<usize> {
+        self.ids.get(name).and_then(|&id| self.open_at[id].last().copied())
+    }
+
+    /// Closes the element at stack index `p` and everything inside it.
+    fn truncate(&mut self, p: usize) {
+        for id in self.stack.drain(p.min(self.stack.len())..) {
+            self.open_at[id].pop();
+        }
+    }
+}
+
+/// `(local name, value)` of every attribute.
+fn attrs(e: &BytesStart<'_>) -> Vec<(String, String)> {
+    e.attributes().with_checks(false).flatten().map(|a| (local(a.key.as_ref()).into_owned(), decode_entities(&String::from_utf8_lossy(&a.value)))).collect()
+}
+
+fn attr<'a>(list: &'a [(String, String)], local_name: &str) -> Option<&'a str> {
+    list.iter().find(|(l, _)| l == local_name).map(|(_, v)| v.as_str())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -466,7 +504,7 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
         c.expand_empty_elements = true;
     }
     let mut feed = OpdsFeed { version: OpdsVersion::Atom1, ..Default::default() };
-    let mut path: Vec<String> = Vec::new();
+    let mut path = OpenElements::default();
     let mut entry: Option<OpdsEntry> = None;
     let mut entry_depth = 0usize;
     let mut cap: Option<Capture> = None;
@@ -478,8 +516,9 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
         let ev = reader.read_event().map_err(|e| NetError::Format(format!("xml at byte {}: {e}", reader.buffer_position())))?;
         match ev {
             Event::Start(e) => {
-                let name = local(e.name().as_ref());
-                path.push(name.clone());
+                let qname = e.name();
+                let name = local(qname.as_ref());
+                path.push(&name);
                 let depth = path.len();
                 if let Some(c) = cap.as_mut() {
                     if c.mode == Mode::Xhtml && is_block(&name) {
@@ -488,13 +527,13 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                     continue;
                 }
                 if root.is_none() {
-                    root = Some(name.clone());
+                    root = Some(name.to_string());
                     if name != "feed" && name != "entry" {
                         return Err(NetError::Format(format!("not an Atom feed (root <{name}>)")));
                     }
                 }
                 let a = attrs(&e);
-                match name.as_str() {
+                match &*name {
                     "entry" if entry.is_none() => {
                         entry = Some(OpdsEntry::default());
                         entry_depth = depth;
@@ -551,10 +590,10 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                         } else {
                             Mode::Text
                         };
-                        cap = Some(Capture { depth, name, mode, buf: String::new() });
+                        cap = Some(Capture { depth, name: name.into_owned(), mode, buf: String::new() });
                     }
                     "title" | "id" | "updated" | "published" | "issued" | "language" | "publisher" | "subtitle" | "icon" | "name" | "totalResults" | "itemsPerPage" | "startIndex" => {
-                        cap = Some(Capture { depth, name, mode: Mode::Text, buf: String::new() });
+                        cap = Some(Capture { depth, name: name.into_owned(), mode: Mode::Text, buf: String::new() });
                     }
                     _ => {}
                 }
@@ -576,9 +615,10 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                 }
             }
             Event::End(e) => {
-                let name = local(e.name().as_ref());
+                let qname = e.name();
+                let name = local(qname.as_ref());
                 // Pop to the matching open element (tolerates unclosed children).
-                let pos = path.iter().rposition(|p| *p == name);
+                let pos = path.innermost(&name);
                 if let Some(c) = cap.as_mut() {
                     match pos {
                         // An end tag that matches no open element: ignored.
@@ -883,7 +923,8 @@ pub fn parse_opensearch(xml: &str, base_url: &str) -> Result<Vec<OpenSearchUrl>>
     loop {
         match reader.read_event().map_err(|e| NetError::Format(format!("opensearch xml: {e}")))? {
             Event::Start(e) | Event::Empty(e) => {
-                let name = local(e.name().as_ref());
+                let qname = e.name();
+                let name = local(qname.as_ref());
                 if name == "OpenSearchDescription" {
                     root_ok = true;
                 }
