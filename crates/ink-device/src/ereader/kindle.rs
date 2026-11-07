@@ -456,13 +456,17 @@ impl Light for LipcServices {
     fn set_amber_schedule(&mut self, s: &AmberSchedule) -> Result<()> {
         self.check_warmth()?;
         self.remember(|k| k.schedule = Some(s.clone()));
-        self.lipc.set_str(POWERD, "amberSchedMode", s.mode.as_powerd())?;
-        self.lipc.set_str(POWERD, "amberSchedStartTime", &s.start.to_powerd())?;
-        self.lipc.set_str(POWERD, "amberSchedEndTime", &s.end.to_powerd())?;
-        self.lipc.set_int(POWERD, "schedAmberLevel", s.level.min(24) as i64)?;
-        self.lipc.set_int(POWERD, "amberSchedEnable", s.enabled as i64)?;
+        let written = (|| {
+            self.lipc.set_str(POWERD, "amberSchedMode", s.mode.as_powerd())?;
+            self.lipc.set_str(POWERD, "amberSchedStartTime", &s.start.to_powerd())?;
+            self.lipc.set_str(POWERD, "amberSchedEndTime", &s.end.to_powerd())?;
+            self.lipc.set_int(POWERD, "schedAmberLevel", s.level.min(24) as i64)?;
+            self.lipc.set_int(POWERD, "amberSchedEnable", s.enabled as i64)
+        })();
+        // Also after a failed write: some properties may have changed, and the input
+        // loop keeps the schedule it read until this request.
         let _ = self.request(Request::AmberChanged);
-        Ok(())
+        written
     }
 }
 
