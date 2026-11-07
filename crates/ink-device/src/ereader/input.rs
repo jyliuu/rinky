@@ -384,6 +384,9 @@ pub struct ReaderInput {
     amber: AmberScheduler,
     amber_next: Instant,
     amber_base: Option<u32>,
+    /// powerd's warmth schedule as last read. Only rinky changes it while the framework
+    /// is stopped, and it then sends [`Request::AmberChanged`], which clears this.
+    amber_schedule: Option<crate::light::AmberSchedule>,
     wifi_state: String,
     heartbeat: u64,
     heartbeat_at: Option<Instant>,
@@ -549,6 +552,7 @@ impl ReaderInput {
             amber: AmberScheduler::default(),
             amber_next: now + AMBER_EVERY,
             amber_base: None,
+            amber_schedule: None,
             wifi_state: String::new(),
             heartbeat: 0,
             heartbeat_at: None,
@@ -741,10 +745,11 @@ impl ReaderInput {
             return;
         }
         let Some(lipc) = &self.lipc else { return };
-        let sched = match super::kindle::read_amber_schedule(lipc) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        // Five lipc processes: read once, not every minute.
+        if self.amber_schedule.is_none() {
+            self.amber_schedule = super::kindle::read_amber_schedule(lipc).ok();
+        }
+        let Some(sched) = &self.amber_schedule else { return };
         if !sched.enabled || sched.mode != crate::light::AmberMode::Manual {
             self.amber.reset();
             return;
@@ -760,7 +765,7 @@ impl ReaderInput {
                 b
             }
         };
-        if let Some(w) = self.amber.tick(&sched, t, base) {
+        if let Some(w) = self.amber.tick(sched, t, base) {
             say!("amber: schedule {}..{} level {} at {t}: warmth {w}", sched.start, sched.end, sched.level);
             let _ = lipc.set_int(POWERD, "currentAmberLevel", w as i64);
         }
@@ -801,6 +806,7 @@ impl ReaderInput {
                     }
                 }
                 Request::AmberChanged => {
+                    self.amber_schedule = None;
                     self.amber.reset();
                     self.amber_next = now;
                 }
