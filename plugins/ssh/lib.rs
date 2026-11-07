@@ -497,29 +497,11 @@ impl SshPlugin {
             let tried: Vec<String> = self.paths.key_dirs.iter().map(|d| d.display().to_string()).collect();
             return self.fail(cx, "No safe folder for keys", format!("No safe folder for keys: none of {} is root-only", tried.join(", ")));
         };
-        let keys = match install_keys(&self.paths, &key_dir) {
-            Ok(n) => n,
-            Err(e) => {
+        let (keys, child) = match self.launch(&key_dir, port, no_password) {
+            Ok(started) => started,
+            Err(m) => {
                 remove_key_dir(&key_dir);
-                return self.fail(cx, "Start failed", format!("Cannot prepare the SSH keys: {e}"));
-            }
-        };
-        let log_path = self.paths.log();
-        trim_log(&log_path);
-        let log = match OpenOptions::new().create(true).append(true).open(&log_path) {
-            Ok(f) => f,
-            Err(e) => {
-                remove_key_dir(&key_dir);
-                return self.fail(cx, "Start failed", format!("Cannot open {}: {e}", log_path.display()));
-            }
-        };
-        let args = dropbear_args(&self.paths, &key_dir, port, no_password);
-        log::info!("ssh: starting {} {}", self.paths.dropbear.display(), args.join(" "));
-        let child = match self.sys.spawn(&self.paths.dropbear, &args, log) {
-            Ok(c) => c,
-            Err(e) => {
-                remove_key_dir(&key_dir);
-                return self.fail(cx, "Start failed", format!("Cannot start the SSH server: {e}"));
+                return self.fail(cx, "Start failed", m);
             }
         };
         let firewall = self.open_firewall(port);
@@ -533,6 +515,19 @@ impl SshPlugin {
         }
         log::info!("ssh: {msg} (pid {:?}, {keys} keys)", self.pid());
         toast(cx, &msg);
+    }
+
+    /// Puts the keys into `key_dir` and starts dropbear with its log; returns the number
+    /// of keys and the process, or the message of the step that failed.
+    fn launch(&mut self, key_dir: &Path, port: u16, no_password: bool) -> std::result::Result<(usize, Child), String> {
+        let keys = install_keys(&self.paths, key_dir).map_err(|e| format!("Cannot prepare the SSH keys: {e}"))?;
+        let log_path = self.paths.log();
+        trim_log(&log_path);
+        let log = OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| format!("Cannot open {}: {e}", log_path.display()))?;
+        let args = dropbear_args(&self.paths, key_dir, port, no_password);
+        log::info!("ssh: starting {} {}", self.paths.dropbear.display(), args.join(" "));
+        let child = self.sys.spawn(&self.paths.dropbear, &args, log).map_err(|e| format!("Cannot start the SSH server: {e}"))?;
+        Ok((keys, child))
     }
 
     /// Makes each missing host key with `dropbearkey` (the first start takes a few
@@ -593,17 +588,17 @@ impl SshPlugin {
     /// keep running until they log out. No UI.
     fn halt(&mut self) {
         let Some(mut s) = self.server.take() else { return };
-        if s.child.try_wait().ok().flatten().is_none() {
+        if alive(&mut s.child) {
             log::info!("ssh: stopping the server (pid {})", s.child.id());
             if let Ok(pid) = libc::pid_t::try_from(s.child.id()) {
                 // SAFETY: plain kill(2) on our own child, which has not been reaped yet.
                 unsafe { libc::kill(pid, libc::SIGTERM) };
             }
             let deadline = Instant::now() + STOP_WAIT;
-            while s.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+            while alive(&mut s.child) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            if s.child.try_wait().ok().flatten().is_none() {
+            if alive(&mut s.child) {
                 log::warn!("ssh: the server did not stop; killing it");
                 let _ = s.child.kill();
                 let _ = s.child.wait();
@@ -709,8 +704,9 @@ impl SshPlugin {
     }
 
     fn help_markdown(&self, port: u16) -> String {
-        let addr = usable_addrs(&self.addrs).first().map_or_else(|| format!("{USB_ADDRESS} (USB) or the Wi-Fi address"), |(_, ip)| ip.to_string());
-        let host = usable_addrs(&self.addrs).first().map_or_else(|| "ADDRESS".to_string(), |(_, ip)| ip.to_string());
+        let best = usable_addrs(&self.addrs).first().map(|(_, ip)| ip.to_string());
+        let addr = best.clone().unwrap_or_else(|| format!("{USB_ADDRESS} (USB) or the Wi-Fi address"));
+        let host = best.unwrap_or_else(|| "ADDRESS".into());
         let keys = self.paths.user_keys();
         let hostkey = self.paths.host_key();
         let p = format!("-p {port} ");
@@ -758,6 +754,11 @@ impl SshPlugin {
             _ => Ok(()),
         }
     }
+}
+
+/// The process has not exited (as far as `try_wait` can tell).
+fn alive(child: &mut Child) -> bool {
+    child.try_wait().ok().flatten().is_none()
 }
 
 fn toast(cx: &mut HostCtx, text: &str) {
