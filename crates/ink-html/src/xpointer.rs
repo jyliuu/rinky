@@ -57,29 +57,13 @@ pub fn order_key(dom: &Dom, pos: DomPos) -> (u32, u32) {
     }
 }
 
+/// The step of node `id` from its parent (sibling indexes from `Dom::finish`).
 fn step_of(dom: &Dom, id: NodeId) -> Step {
-    let node = dom.node(id);
-    if let Some(&(i, total)) = dom.steps.get(id as usize).filter(|_| dom.steps.len() == dom.nodes.len()) {
-        // Precomputed by `Dom::finish`.
-        let index = (total > 1).then_some(i);
-        return match &node.kind {
-            NodeKind::Element(e) => Step { name: e.name.clone(), index },
-            NodeKind::Text(_) => Step { name: "text()".into(), index },
-        };
-    }
-    let parent = node.parent;
-    let siblings: &[NodeId] = if parent == NONE { &[] } else { &dom.node(parent).children };
-    match &node.kind {
-        NodeKind::Element(e) => {
-            let same: Vec<NodeId> = siblings.iter().copied().filter(|&s| dom.element(s).is_some_and(|x| x.name == e.name)).collect();
-            let index = (same.len() > 1).then(|| same.iter().position(|&s| s == id).unwrap_or(0) as u32 + 1);
-            Step { name: e.name.clone(), index }
-        }
-        NodeKind::Text(_) => {
-            let texts: Vec<NodeId> = siblings.iter().copied().filter(|&s| dom.text(s).is_some()).collect();
-            let index = (texts.len() > 1).then(|| texts.iter().position(|&s| s == id).unwrap_or(0) as u32 + 1);
-            Step { name: "text()".into(), index }
-        }
+    let (i, total) = dom.steps.get(id as usize).copied().unwrap_or((1, 1));
+    let index = (total > 1).then_some(i);
+    match &dom.node(id).kind {
+        NodeKind::Element(e) => Step { name: e.name.clone(), index },
+        NodeKind::Text(_) => Step { name: "text()".into(), index },
     }
 }
 
@@ -123,11 +107,7 @@ pub fn to_xpointer(dom: &Dom, fragment: u32, fragments: u32, pos: DomPos) -> XPo
 /// Resolves the steps after `DocFragment[N]` (`body/...`) in `dom`. Strict: `None` when
 /// a step does not exist.
 pub fn resolve(dom: &Dom, xp: &XPointer) -> Option<DomPos> {
-    let frag_at = xp.steps.iter().position(|s| s.name == "DocFragment");
-    let rest: &[Step] = match frag_at {
-        Some(i) => &xp.steps[i + 1..],
-        None => &xp.steps[..],
-    };
+    let rest = in_fragment(xp);
     if rest.is_empty() {
         // `/body/DocFragment[N]` or `.../DocFragment[N].K`: the chapter start.
         return Some(DomPos::Element { node: dom.body, point: Some(0) });
@@ -159,6 +139,14 @@ pub fn resolve(dom: &Dom, xp: &XPointer) -> Option<DomPos> {
     Some(DomPos::Element { node: cur, point: xp.point })
 }
 
+/// The steps after `DocFragment[N]` (all of them when there is none).
+fn in_fragment(xp: &XPointer) -> &[Step] {
+    match xp.steps.iter().position(|s| s.name == "DocFragment") {
+        Some(i) => &xp.steps[i + 1..],
+        None => &xp.steps,
+    }
+}
+
 fn child_by_step(dom: &Dom, parent: NodeId, st: &Step) -> Option<NodeId> {
     let kids = &dom.node(parent).children;
     let idx = st.index.unwrap_or(1) as usize;
@@ -181,11 +169,7 @@ pub fn resolve_lenient(dom: &Dom, xp: &XPointer) -> Option<DomPos> {
     if let Some(p) = resolve(dom, xp) {
         return Some(p);
     }
-    let frag_at = xp.steps.iter().position(|s| s.name == "DocFragment");
-    let rest: &[Step] = match frag_at {
-        Some(i) => &xp.steps[i + 1..],
-        None => &xp.steps[..],
-    };
+    let rest = in_fragment(xp);
     if rest.is_empty() || !rest[0].name.eq_ignore_ascii_case("body") {
         return Some(DomPos::Element { node: dom.body, point: Some(0) });
     }

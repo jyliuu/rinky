@@ -267,10 +267,7 @@ impl Dom {
 
     /// The element with `id="..."` (or `<a name="...">`), the first in document order.
     pub fn find_id(&self, anchor: &str) -> Option<NodeId> {
-        if !self.preorder.is_empty() && self.steps.len() == self.nodes.len() {
-            return self.ids.get(anchor).copied();
-        }
-        self.preorder.iter().copied().find(|&n| self.element(n).is_some_and(|e| e.attr("id") == Some(anchor) || (e.name == "a" && e.attr("name") == Some(anchor))))
+        self.ids.get(anchor).copied()
     }
 
     /// Lang of the chapter (`<html lang>`/`xml:lang`, or `<body>`'s).
