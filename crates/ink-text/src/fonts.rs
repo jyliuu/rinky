@@ -18,6 +18,7 @@ use fontdue::{Font, FontSettings, Metrics};
 use ink_device::{Canvas, Rect};
 use rustybuzz::ttf_parser::GlyphId;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -101,6 +102,27 @@ pub struct ShapeOptions {
 impl Default for ShapeOptions {
     fn default() -> Self {
         ShapeOptions { kerning: true, ligatures: true, language: None }
+    }
+}
+
+/// [`ShapeOptions`] as `rustybuzz` takes them.
+#[derive(Default)]
+struct Shaping {
+    features: Vec<rustybuzz::Feature>,
+    language: Option<rustybuzz::Language>,
+}
+
+impl Shaping {
+    fn new(opts: &ShapeOptions) -> Self {
+        let off = |t: &[u8; 4]| rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(t), 0, ..);
+        let mut features = Vec::new();
+        if !opts.kerning {
+            features.push(off(b"kern"));
+        }
+        if !opts.ligatures {
+            features.extend([off(b"liga"), off(b"clig")]);
+        }
+        Shaping { features, language: opts.language.as_deref().and_then(|l| l.parse().ok()) }
     }
 }
 
@@ -404,28 +426,9 @@ impl Fonts {
     /// lacks draw its `.notdef`). An unknown face gives an empty run.
     pub fn shape_in(&mut self, face: FaceId, px: f32, text: &str) -> TextRun {
         let mut run = TextRun { px, ..TextRun::default() };
-        let Some(data) = self.faces.get(face as usize) else { return run };
-        let Some(shaper) = data.shaper() else { return run };
-        let scale = px / shaper.units_per_em().max(1) as f32;
-        let mut buf = rustybuzz::UnicodeBuffer::new();
-        buf.push_str(text);
-        buf.guess_segment_properties();
-        let out = rustybuzz::shape(shaper, &[], buf);
-        let mut pen = 0.0f32;
-        for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
-            let advance = pos.x_advance as f32 * scale;
-            run.glyphs.push(Glyph {
-                face,
-                id: info.glyph_id as u16,
-                cluster: info.cluster as usize,
-                x: pen + pos.x_offset as f32 * scale,
-                y: pos.y_offset as f32 * scale,
-                advance,
-                synth: Synth::NONE,
-            });
-            pen += advance;
+        if (face as usize) < self.faces.len() {
+            self.push_shaped(&mut run, face, text, 0..text.len(), Synth::NONE, &Shaping::default());
         }
-        run.width = pen;
         run
     }
 
@@ -547,46 +550,42 @@ impl Fonts {
                 _ => items.push((i, i + g.len(), face)),
             }
         }
-        let mut features = Vec::new();
-        let tag = |t: &[u8; 4]| rustybuzz::ttf_parser::Tag::from_bytes(t);
-        if !opts.kerning {
-            features.push(rustybuzz::Feature::new(tag(b"kern"), 0, ..));
-        }
-        if !opts.ligatures {
-            features.push(rustybuzz::Feature::new(tag(b"liga"), 0, ..));
-            features.push(rustybuzz::Feature::new(tag(b"clig"), 0, ..));
-        }
-        let language = opts.language.as_deref().and_then(|l| l.parse::<rustybuzz::Language>().ok());
-        let mut pen = 0.0f32;
+        let shaping = Shaping::new(opts);
         for (start, end, fid) in items {
             let synth = self.synth_for(fid, style);
-            let extra = if synth.bold { embolden_px(px) as f32 } else { 0.0 };
-            let Some(face) = self.faces[fid as usize].shaper() else { continue };
-            let scale = px / face.units_per_em().max(1) as f32;
-            let mut buf = rustybuzz::UnicodeBuffer::new();
-            buf.push_str(&text[start..end]);
-            if let Some(l) = &language {
-                buf.set_language(l.clone());
-            }
-            buf.guess_segment_properties();
-            let out = rustybuzz::shape(face, &features, buf);
-            for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
-                let advance = pos.x_advance as f32 * scale;
-                let advance = if advance > 0.0 { advance + extra } else { advance };
-                run.glyphs.push(Glyph {
-                    face: fid,
-                    id: info.glyph_id as u16,
-                    cluster: start + info.cluster as usize,
-                    x: pen + pos.x_offset as f32 * scale,
-                    y: pos.y_offset as f32 * scale,
-                    advance,
-                    synth,
-                });
-                pen += advance;
-            }
+            self.push_shaped(&mut run, fid, text, start..end, synth, &shaping);
         }
-        run.width = pen;
         run
+    }
+
+    /// Shapes `text[range]` with face `fid` and appends the glyphs to `run` at its end
+    /// (clusters as byte offsets into `text`). Synthetic bold widens every advancing
+    /// glyph. A face `rustybuzz` cannot parse adds nothing.
+    fn push_shaped(&self, run: &mut TextRun, fid: FaceId, text: &str, range: Range<usize>, synth: Synth, shaping: &Shaping) {
+        let Some(face) = self.faces[fid as usize].shaper() else { return };
+        let scale = run.px / face.units_per_em().max(1) as f32;
+        let extra = if synth.bold { embolden_px(run.px) as f32 } else { 0.0 };
+        let mut buf = rustybuzz::UnicodeBuffer::new();
+        buf.push_str(&text[range.clone()]);
+        if let Some(l) = &shaping.language {
+            buf.set_language(l.clone());
+        }
+        buf.guess_segment_properties();
+        let out = rustybuzz::shape(face, &shaping.features, buf);
+        for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
+            let advance = pos.x_advance as f32 * scale;
+            let advance = if advance > 0.0 { advance + extra } else { advance };
+            run.glyphs.push(Glyph {
+                face: fid,
+                id: info.glyph_id as u16,
+                cluster: range.start + info.cluster as usize,
+                x: run.width + pos.x_offset as f32 * scale,
+                y: pos.y_offset as f32 * scale,
+                advance,
+                synth,
+            });
+            run.width += advance;
+        }
     }
 
     /// Width of shaped `text`.
@@ -875,6 +874,12 @@ mod tests {
         assert!((cjk[0].advance - 40.0).abs() < 0.01);
         assert!(f.cached_bytes() > 0);
         assert_eq!(f.face_info(3).unwrap().family, "InkTest Fallback");
+        // One face on request: no fallback, plain advances, clusters into the text.
+        let own = f.shape_in(3, 40.0, "日本");
+        assert_eq!(own.glyphs.iter().map(|g| (g.face, g.cluster)).collect::<Vec<_>>(), vec![(3, 0), (3, 3)]);
+        assert!((own.width - 80.0).abs() < 0.01 && (own.glyphs[1].x - 40.0).abs() < 0.01, "{own:?}");
+        assert!(f.shape_in(0, 40.0, "日").glyphs.iter().all(|g| g.face == 0 && g.id == 0), "the main face draws .notdef");
+        assert_eq!(f.shape_in(99, 40.0, "x"), TextRun { px: 40.0, ..TextRun::default() });
     }
 
     #[test]
