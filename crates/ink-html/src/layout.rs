@@ -1554,23 +1554,18 @@ impl<'a, 'e> Flow<'a, 'e> {
             }
             }
         }
-        // Box boundaries in `placed` for justification.
-        let mut box_end_bytes: Vec<usize> = line.boxes.iter().map(|b| b.end).collect();
-        box_end_bytes.pop();
+        // Box ends (all but the last box's) for justification: a box with a space after
+        // it widens that space. Each box counts its own space (an empty box, such as the
+        // space after an inline image, ends where the box before it ends).
+        let mut gaps = line.boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
         let mut add = 0.0f32;
         let mut key: Option<(u32, u32)> = None;
         for (pl, off) in placed {
             let pc = &pl.piece;
             // Extra space accumulated before this piece.
-            while let Some(&e) = box_end_bytes.first() {
-                if pc.start >= e {
-                    let bx = line.boxes.iter().find(|b| b.end == e).unwrap();
-                    if bx.space > 0.0 {
-                        add += per_space;
-                    }
-                    box_end_bytes.remove(0);
-                } else {
-                    break;
+            while let Some((_, spaced)) = gaps.next_if(|&(e, _)| pc.start >= e) {
+                if spaced {
+                    add += per_space;
                 }
             }
             let px_x = x0 + off + add;
