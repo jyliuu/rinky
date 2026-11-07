@@ -677,7 +677,10 @@ mod tests {
         });
         let r = load_recovering(&f, parse_json).unwrap();
         t.join().unwrap();
-        assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Primary, Some(3)));
+        // Usually the renamed file; on a busy machine the wait can end between the
+        // writer's write and its rename, and then the complete copy is just as new.
+        assert!(matches!(r.source, LoadSource::Primary | LoadSource::Temp), "{:?}", r.source);
+        assert_eq!(r.value.unwrap()["v"].as_i64(), Some(3));
         assert!(load_waits() > before);
         // A file that never existed (no backup, no temporary file) is not waited for.
         let t = std::time::Instant::now();
