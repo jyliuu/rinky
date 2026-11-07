@@ -440,7 +440,7 @@ impl Widget for Preview {
 impl SettingsScreen {
     /// Builds the status bars page `view` in `content`.
     pub(super) fn build_status_bars(&mut self, cx: &mut AppCtx, content: Rect, view: &View) {
-        let s = cx.settings_update.as_ref().unwrap_or(cx.settings);
+        let s = super::current_settings(cx);
         let bars = s.status_bars.clone();
         let x = content.x + space(4);
         let w = content.w.saturating_sub(2 * space(4) as u32);
@@ -473,7 +473,7 @@ impl SettingsScreen {
             Page::StatusBars(v) => v.clone(),
             _ => View::default(),
         };
-        let mut s = cx.settings_update.as_ref().unwrap_or(cx.settings).clone();
+        let mut s = super::current_settings(cx).clone();
         let (next, text) = match action(a, &mut s.status_bars, &view) {
             None => {
                 log::info!("settings status bars: '{a}' ignored");

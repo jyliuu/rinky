@@ -1061,10 +1061,6 @@ impl SettingsScreen {
         Ok(())
     }
 
-    fn edit(cx: &mut AppCtx, f: impl FnOnce(&mut Settings)) {
-        edit_settings(cx, f);
-    }
-
     /// Adds a list of `rows` in the content area, at the scroll offset the previous
     /// list of this page had (kept across a rebuild, reset by [`SettingsScreen::go`]).
     fn add_rows(&mut self, rows: Vec<Row>, area: Rect) {
@@ -1122,7 +1118,7 @@ impl SettingsScreen {
             Page::StatusBars(v) => self.build_status_bars(cx, content, &v),
             Page::Gestures(p) => {
                 let plugins = crate::plugin_entries::gesture_choices(cx.plugins);
-                self.add_rows(gestures::rows(&cx.settings_update.as_ref().unwrap_or(cx.settings).gestures, p.as_deref(), &plugins), content)
+                self.add_rows(gestures::rows(&current_settings(cx).gestures, p.as_deref(), &plugins), content)
             }
             Page::Plugin(..) => {
                 let rows = self.plugin_page.as_ref().map_or_else(|| vec![Row::note("Not available")], PluginPage::rows);
@@ -1720,7 +1716,7 @@ impl SettingsScreen {
             }
             "confirm-exit" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.ui.confirm_exit = on);
+                edit_settings(cx, |s| s.ui.confirm_exit = on);
                 self.set_status(if on { "Exit asks first" } else { "Exit does not ask" });
             }
             "dlg-cancel" => self.close_dialog(),
@@ -1731,7 +1727,7 @@ impl SettingsScreen {
             }
             "sleep" => {
                 let Ok(m) = arg.parse::<u32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.device.sleep_minutes = m);
+                edit_settings(cx, |s| s.device.sleep_minutes = m);
                 let r = cx.services.power.set_auto_sleep(auto_sleep(m));
                 self.rebuild = Some(RefreshClass::Gl16);
                 self.status_text = match r {
@@ -1740,7 +1736,7 @@ impl SettingsScreen {
                 };
             }
             "saver" => {
-                Self::edit(cx, |s| set_screensaver_setting(s, arg));
+                edit_settings(cx, |s| set_screensaver_setting(s, arg));
                 let r = cx.services.power.set_screensaver(crate::sleep_cover::screensaver(arg, cx.paths));
                 self.rebuild = Some(RefreshClass::Gl16);
                 self.status_text = match r {
@@ -1795,7 +1791,7 @@ impl SettingsScreen {
             "forget" => self.confirm(Confirm::Forget(arg.to_string())),
             "rot" => {
                 let Ok(r) = arg.parse::<u8>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.device.rotation = r % 4);
+                edit_settings(cx, |s| s.device.rotation = r % 4);
                 // The app applies the rotation after this event; the canvas size change
                 // lays the page out again (on_resize). Same size: rebuild for the check.
                 self.status_text = format!("Orientation: {}", rotation_name(Rotation::ALL[(r % 4) as usize]).to_lowercase());
@@ -1803,7 +1799,7 @@ impl SettingsScreen {
             }
             "night" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.device.night_mode = on);
+                edit_settings(cx, |s| s.device.night_mode = on);
                 if let Err(e) = cx.screen.set_night_mode(on) {
                     self.status_text = format!("Night mode: {e}");
                 }
@@ -1811,12 +1807,12 @@ impl SettingsScreen {
             }
             "anim" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| set_page_wave(s, on));
+                edit_settings(cx, |s| set_page_wave(s, on));
                 self.set_status(if on { "Page turn wave on" } else { "Page turn wave off" });
             }
             "font-px" | "spacing" | "margin" => {
                 let Ok(v) = arg.parse::<f32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| match verb {
+                edit_settings(cx, |s| match verb {
                     "font-px" => s.reader.font_px = v,
                     "spacing" => s.reader.line_spacing = v,
                     _ => s.reader.margin_x = v,
@@ -1830,7 +1826,7 @@ impl SettingsScreen {
             }
             "pspace" | "indent" | "weight" => {
                 let Ok(v) = arg.parse::<f32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| match verb {
+                edit_settings(cx, |s| match verb {
                     "pspace" => s.reader.paragraph_spacing = v.clamp(0.0, 3.0),
                     "indent" => s.reader.paragraph_indent = if v < 0.0 { INDENT_BOOK } else { v.min(6.0) },
                     _ => s.reader.font_weight = (v.max(0.0) as u8).min(WEIGHT_MAX),
@@ -1845,7 +1841,7 @@ impl SettingsScreen {
             }
             "hyph" | "publisher" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| if verb == "hyph" { s.reader.hyphenate = on } else { s.reader.publisher_styles = on });
+                edit_settings(cx, |s| if verb == "hyph" { s.reader.hyphenate = on } else { s.reader.publisher_styles = on });
                 self.set_status(match (verb, on) {
                     ("hyph", true) => "Hyphenation on",
                     ("hyph", false) => "Hyphenation off",
@@ -1855,7 +1851,7 @@ impl SettingsScreen {
             }
             "justify" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.reader.justify = on);
+                edit_settings(cx, |s| s.reader.justify = on);
                 self.set_status(if on { "Justified text" } else { "Ragged right text" });
             }
             "nav" => {
@@ -1866,7 +1862,7 @@ impl SettingsScreen {
                 match order::apply(&mut items, &list, name, op, NAV_MIN, NAV_MAX) {
                     Ok(text) => {
                         log::info!("settings: navigation bar {items:?}");
-                        Self::edit(cx, |s| s.ui.nav_items = items);
+                        edit_settings(cx, |s| s.ui.nav_items = items);
                         self.status_text = text;
                     }
                     Err(text) => self.status_text = text,
@@ -1891,7 +1887,7 @@ impl SettingsScreen {
                     dirs.retain(|d| *d != dir);
                 }
                 log::info!("settings: library folders {dirs:?}");
-                Self::edit(cx, |s| s.library_dirs = dirs);
+                edit_settings(cx, |s| s.library_dirs = dirs);
                 self.set_status(format!("{} {}", dir.display(), if on == "on" { "added" } else { "removed" }));
             }
             "export-all" => {
@@ -1918,13 +1914,13 @@ impl SettingsScreen {
                 if !LANGUAGES.iter().any(|(c, _)| *c == arg) {
                     return Ok(Transition::None);
                 }
-                Self::edit(cx, |s| s.language = arg.to_string());
+                edit_settings(cx, |s| s.language = arg.to_string());
                 self.rebuild = Some(RefreshClass::Gl16);
                 self.status_text = format!("Language: {}", language_name(arg));
             }
             "refresh" => {
                 let Ok(n) = arg.parse::<u32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.reader.flash_every = n);
+                edit_settings(cx, |s| s.reader.flash_every = n);
                 self.rebuild = Some(RefreshClass::Gl16);
                 self.status_text = format!("Full refresh: {}; used from the next start", refresh_name(n).to_lowercase());
             }
