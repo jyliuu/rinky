@@ -483,12 +483,7 @@ impl LibraryScreen {
                 return self.open_nav(&name, size);
             }
             Hit::More => {
-                let items = vec![
-                    ("Settings".to_string(), "settings".to_string()),
-                    ("Reading statistics".to_string(), "stats".to_string()),
-                    ("KOReader import".to_string(), "import".to_string()),
-                ];
-                let mut items = items;
+                let mut items = menu_items(&[("Settings", "settings"), ("Reading statistics", "stats"), ("KOReader import", "import")]);
                 items.extend(self.plugin_entries.iter().map(|e| (e.label.clone(), format!("{LIB_ENTRY}{}", ink_plugin::registry::saved_id(&e.plugin, &e.id)))));
                 self.open_menu(items, MenuKind::More, Hit::More, size);
             }
@@ -552,13 +547,8 @@ impl LibraryScreen {
             }
             Hit::Delete(p) => {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let dialog = Dialog {
-                    title: "Delete this book?".into(),
-                    body: format!("{name} and rinky's notes for it are removed from the device. This cannot be undone."),
-                    buttons: vec![("Cancel".into(), "cancel".into()), ("Delete".into(), "ok".into())],
-                };
-                self.overlay = Some(Overlay::Confirm { dialog, kind: Confirm::DeleteBook(p) });
-                self.redraw();
+                let body = format!("{name} and rinky's notes for it are removed from the device. This cannot be undone.");
+                self.confirm_delete("Delete this book?", body, Confirm::DeleteBook(p));
             }
             Hit::PluginMenu(p) => {
                 let items = self.plugin_actions.iter().enumerate().map(|(i, a)| (a.label.clone(), format!("{i}"))).collect();
@@ -566,7 +556,7 @@ impl LibraryScreen {
             }
             Hit::NewCollection => self.open_input(InputFor::NewCollection(None), "New collection", ""),
             Hit::Collection(name) if long => {
-                let items = vec![("Rename".to_string(), "rename".to_string()), ("Delete".to_string(), "delete".to_string())];
+                let items = menu_items(&[("Rename", "rename"), ("Delete", "delete")]);
                 self.open_menu(items, MenuKind::CollectionActions(name.clone()), Hit::Collection(name), size);
             }
             Hit::Collection(name) => {
@@ -961,17 +951,20 @@ impl LibraryScreen {
                 if a == "rename" {
                     self.open_input(InputFor::Rename(name.clone()), "Rename collection", &name);
                 } else if a == "delete" {
-                    let dialog = Dialog {
-                        title: "Delete this collection?".into(),
-                        body: format!("“{name}” is removed. Its books stay in the library."),
-                        buttons: vec![("Cancel".into(), "cancel".into()), ("Delete".into(), "ok".into())],
-                    };
-                    self.overlay = Some(Overlay::Confirm { dialog, kind: Confirm::DeleteCollection(name) });
+                    let body = format!("“{name}” is removed. Its books stay in the library.");
+                    self.confirm_delete("Delete this collection?", body, Confirm::DeleteCollection(name));
                 }
             }
         }
         self.redraw();
         Transition::None
+    }
+
+    /// Asks before a delete: Cancel or Delete, then [`Self::confirmed`].
+    fn confirm_delete(&mut self, title: &str, body: String, kind: Confirm) {
+        let dialog = Dialog { title: title.into(), body, buttons: menu_items(&[("Cancel", "cancel"), ("Delete", "ok")]) };
+        self.overlay = Some(Overlay::Confirm { dialog, kind });
+        self.redraw();
     }
 
     fn confirmed(&mut self, kind: Confirm) {
@@ -1028,6 +1021,11 @@ impl LibraryScreen {
 
 /// Status choices on the details page, in menu order.
 const STATUSES: [ReadingStatus; 4] = [ReadingStatus::New, ReadingStatus::Reading, ReadingStatus::Complete, ReadingStatus::Abandoned];
+
+/// Owned `(label, action)` rows for a menu or dialog.
+fn menu_items(items: &[(&str, &str)]) -> Vec<(String, String)> {
+    items.iter().map(|(l, a)| (l.to_string(), a.to_string())).collect()
+}
 
 /// A menu label with a leading "\u{2713} " when `on` (`ink_ui::Menu` draws it as an icon).
 fn mark(on: bool, label: &str) -> String {
