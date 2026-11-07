@@ -1,8 +1,8 @@
 # Installing rinky
 
-rinky runs on Kindle and Kobo e-readers. It is one program, but each kind of e-reader
-gets its own package, and you prepare the e-reader differently. This page covers
-every device. Once rinky runs, the [user guide](user-guide.md) explains how to use it.
+rinky runs on Kindle and Kobo e-readers. Each kind gets its own package and needs a
+different preparation: a jailbreak and KUAL on a Kindle, NickelMenu on a Kobo. Once
+rinky runs, the [user guide](user-guide.md) explains how to use it.
 
 1. [Which device, which package](#1-which-device-which-package)
 2. [Kindle](#2-kindle)
@@ -30,8 +30,8 @@ on a Kindle and *More > Settings > Device information* on a Kobo.
 | Tolino Shine Color, Vision Color | untested | SSH only | `rinky-<version>-kobo.tar.gz` |
 | Kindle Paperwhite 1 and 2, Kindle 7th, 8th and 10th gen; Kobo Glo HD, Aura ONE, Aura H2O², older Kobos; Kobo Elipsa, Sage | not supported | | |
 
-Not supported means: the screen has too few pixels for rinky's layout (it is made for
-300 ppi), or the device drives its display in a way rinky does not know yet.
+A model is not supported when its screen has too few pixels for rinky's layout, which
+is made for 300 ppi, or when it drives its display in a way rinky does not know yet.
 
 What differs between models once rinky runs:
 
@@ -193,10 +193,10 @@ check the package themselves.
 
 ## 6. Update
 
-In rinky, *Settings > Update* checks the releases page and installs a newer version
-over Wi-Fi: on a Kindle the Kindle package, on a Kobo the Kobo package. Settings,
-notes and reading positions are kept, and rinky restarts into the new version. It needs
-about 30 MB of free space. Installing a newer package by hand as above works too.
+In rinky, *Settings > Update* installs a newer version over Wi-Fi and restarts into
+it, keeping your settings, notes and reading positions. It needs about 30 MB of free
+space. Installing a newer package by hand as above works too; the
+[user guide](user-guide.md#9-update) has the other ways.
 
 ## 7. Uninstall
 
