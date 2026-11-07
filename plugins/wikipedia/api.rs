@@ -257,11 +257,15 @@ pub fn article_html(lang: &str, title: &str, description: Option<&str>, text: &s
     h
 }
 
-/// A file name for a saved article: the title without path and shell characters.
+/// A file name for a saved article: the title without path and shell characters, at
+/// most 80 characters of it, without dots or spaces at its ends.
 pub fn file_name(title: &str, lang: &str) -> String {
     let clean: String = title.chars().map(|c| if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
-    let clean: String = clean.trim().trim_matches('.').chars().take(80).collect();
-    let clean = if clean.is_empty() { "Article".to_string() } else { clean };
+    let clean: String = clean.trim_matches(|c: char| c.is_whitespace() || c == '.').chars().take(80).collect();
+    let clean = match clean.trim_end() {
+        "" => "Article",
+        c => c,
+    };
     format!("{clean} (Wikipedia {lang}).html")
 }
 

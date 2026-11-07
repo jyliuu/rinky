@@ -240,6 +240,10 @@ fn parses_the_article_and_builds_text() {
     assert!(html.contains("<h2>Background</h2>") && html.contains("<h3>Voyage</h3>") && html.contains("<p><i>desc</i></p>"), "{html}");
     assert!(html.contains("CC BY-SA"), "{html}");
     assert_eq!(api::file_name("AC/DC: live?", "de"), "AC_DC_ live_ (Wikipedia de).html");
+    // No space where the title is cut or after a leading dot.
+    assert_eq!(api::file_name(&format!("{} yyy", "x".repeat(79)), "en"), format!("{} (Wikipedia en).html", "x".repeat(79)));
+    assert_eq!(api::file_name(" . Hidden", "en"), "Hidden (Wikipedia en).html");
+    assert_eq!(api::file_name(" .. ", "en"), "Article (Wikipedia en).html");
 }
 
 #[test]
