@@ -85,7 +85,9 @@ ink-app      <- everything
 
 Dev-dependencies only: ink-html uses ink-formats and ink-store in its tests (the golden
 pages open real books), ink-formats uses ink-store. ink-net knows nothing of the
-device: the app wires Wi-Fi and power into its `Connectivity` and `KeepAwake` hooks.
+device: Wi-Fi state and keeping the device awake reach it through its `Connectivity`
+and `KeepAwake` hooks. So far only `rinky selftest --net` wires them (with `--lipc`);
+the app's sleep path does not consult them yet (`PLAN.md`).
 
 ## A page turn, end to end
 
@@ -124,10 +126,10 @@ What happens between a tap on the right side of a page and the next page on the 
    update. The screen is wrapped by `shown::ShownScreen`, which keeps a copy of what
    the panel shows.
 9. **To the panel.** `ereader/fb.rs` rotates the canvas into the framebuffer
-   (`copy_to_panel`, which also applies software night inversion on i.MX panels),
-   builds the refresh struct for this model's controller (`update_data_epdc`) and sends
-   the ioctl. It does not wait for a FULL update to finish; it waits only before it
-   next writes into the same rectangle.
+   (`copy_to_panel`, which also inverts for night mode where the controller does
+   not), builds the refresh struct for this model's controller (`update_data_epdc`)
+   and sends the ioctl. It does not wait for a FULL update to finish; it waits only
+   before it next writes into the same rectangle.
 10. **Saving the position.** The page shown is noted at once, and written to the
     sidecar (`<book>.sdr/rinky.<ext>.json`, through `ink_store::write_atomic`) after
     two idle seconds or at most ten seconds later (`POSITION_SAVE_IDLE`,
@@ -192,9 +194,11 @@ laid out in 300 ppi pixels, so lower-density models are not supported; `rinky si
 --panel WxH` renders other sizes.
 
 **Night mode and rotation.** Rotation is done in software (`copy_to_panel`); refresh
-rectangles are in panel coordinates. On MediaTek panels night mode is the driver's
-hardware inversion with night waveforms. On i.MX Kindles it is software inversion with
-the day waveforms, and there is no page-turn sweep.
+rectangles are in panel coordinates. Night mode depends on the controller
+(`Epdc::night`): on MediaTek Kindles (PW5 and newer) the driver inverts in hardware
+and uses night waveforms; i.MX Kobos set an inversion flag on each update; on i.MX
+Kindles and MediaTek Kobos it is software inversion with the day waveforms. i.MX
+Kindles have no page-turn sweep.
 
 **The journal.** Every system setting rinky changes (lipc properties, framebuffer
 flags such as night mode, rotation and bit depth) is written to `/tmp/rinky/restore`
@@ -229,8 +233,14 @@ by `scripts/deploy.sh`) and the in-app update (`update::request_restart`) write
 and starts the installed binary again without bringing the framework back. A launcher
 announces that it can do this with `/tmp/rinky/restart-capable`.
 
-Runtime files are in `/tmp/rinky` (`lock`, `launcher.pid`, `rinky.pid`, `done`,
-`restore`, `quieted`). Logs are `/mnt/us/rinky/rinky.log` and `watchdog.log`.
+Runtime files are in `/tmp/rinky` (`lock/`, `launcher.pid`, `rinky.pid`, `done`,
+`heartbeat`, `restore`, `quieted`, `restart-capable`). Logs are
+`/mnt/us/rinky/rinky.log` and `watchdog.log`.
+
+The PW12 on 5.19.5, for scale: two ARMv7 cores, 980 MB RAM (about 618 MB available
+with the framework running; with it stopped about 410 MB free plus 300 MB cache),
+`/dev/fb0` 1272 x 1696 at 8 bpp. The device's touch controller is `pt_mt`, the
+emulator's `fts_ts`; the power key is `bd71828-pwrkey` on both.
 
 ### Sleep and the Kindle framework
 
@@ -298,8 +308,8 @@ timeout. On Linux every child gets `PR_SET_PDEATHSIG(SIGKILL)` and dies with the
 that spawned it, so start watchers from long-lived threads.
 
 After `stop lab126_gui`, only `KPPMainApp`, `pillowd` and the `kb` keyboard stop.
-`powerd`, `wifid`, `cmd`, `volumd`, `blanket`, `deviced` and X keep running and keep
-answering lipc. The properties rinky uses:
+`powerd`, `wifid`, `cmd`, `volumd`, `blanket`, `deviced`, X and `awesome` keep running,
+and the lipc services among them keep answering. The properties rinky uses:
 
 | Service | Properties |
 | --- | --- |
@@ -307,6 +317,7 @@ answering lipc. The properties rinky uses:
 | `com.lab126.wifid` | `enable`, `scan`, `scanList`, `cmConnect`, `cmDisconnect`, `createProfile`, `profileData`, `cmState`, `signalStrength`, `currentEssid` |
 | `com.lab126.cmd` | `wirelessEnable`, `activeInterface` |
 | `com.lab126.volumd` | USB and MTP state |
+| `com.lab126.blanket` | screensaver and USB modules |
 | `com.lab126.deviced` | `enable_touch` |
 
 ## Running on the Kobo
