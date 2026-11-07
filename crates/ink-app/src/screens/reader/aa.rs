@@ -45,7 +45,7 @@ use ink_device::{Point, Rect, RefreshClass, Size};
 use ink_doc::LayoutSettings;
 use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::sidecar::BookSettings;
-use ink_store::{BookState, Settings};
+use ink_store::Settings;
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
 use ink_ui::{BottomSheet, Button, EventResult, Gesture, Icon, Label, PaintCx, Segmented, Tabs, Toggle, TouchKind, UiEvent, Widget};
@@ -655,11 +655,7 @@ impl ReaderScreen {
     }
 
     fn save_book_settings(&self) {
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        state.settings = self.book_settings.clone();
-        if let Err(e) = state.save(&self.path) {
-            log::warn!("aa: cannot save book settings: {e}");
-        }
+        self.update_sidecar("book settings", |state| state.settings = self.book_settings.clone());
     }
 }
 

@@ -332,6 +332,18 @@ fn saved_ranges(hl: &[Highlight]) -> Vec<(Position, Position)> {
     hl.iter().filter_map(|h| Some((h.start.parse::<Position>().ok()?, h.end.parse::<Position>().ok()?))).collect()
 }
 
+/// Now as `YYYY-MM-DD HH:MM:SS` local time: when a bookmark or highlight was made.
+fn timestamp() -> String {
+    let t = ink_device::clock::TimeZone::local().at(std::time::SystemTime::now()).format();
+    t.get(..19).map_or_else(|| t.clone(), str::to_string)
+}
+
+/// `page` for a fixed-layout book (its marks keep the page: positions there are pages),
+/// `None` for a reflowable one.
+fn fixed_page(doc: &dyn Document, page: usize) -> Option<u32> {
+    (doc.kind() == ink_doc::DocKind::Fixed).then_some(page as u32)
+}
+
 /// True when `p` is within `slop` pixels of `r` (targets widened for fingers).
 fn near(r: &Rect, p: Point, slop: i32) -> bool {
     Rect::new(r.x - slop, r.y - slop, r.w + 2 * slop as u32, r.h + 2 * slop as u32).contains(p)
@@ -784,24 +796,36 @@ impl ReaderScreen {
     fn save_position(&self) {
         let Some(doc) = self.doc.as_ref() else { return };
         let Ok(pos) = doc.position_of_page(self.page) else { return };
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        state.position = Some(pos.to_string());
         let percent = saved_percent(doc.as_ref(), self.page);
-        state.percent = Some(percent);
         // The chapter title for the Home tab's hero card (library/home.rs). Only when the
         // TOC is already loaded (the footer loads it); saving never reads the TOC itself.
-        if let Some(toc) = self.toc.as_deref() {
-            match current_chapter(doc.as_ref(), toc, self.page).map(|i| toc[i].title.trim().to_string()).filter(|t| !t.is_empty()) {
-                Some(t) => {
+        let chapter = self.toc.as_deref().map(|toc| current_chapter(doc.as_ref(), toc, self.page).map(|i| toc[i].title.trim().to_string()).filter(|t| !t.is_empty()));
+        self.update_sidecar("position", |state| {
+            state.position = Some(pos.to_string());
+            state.percent = Some(percent);
+            match chapter {
+                Some(Some(t)) => {
                     state.extra.insert("chapter".into(), t.into());
                 }
-                None => {
+                Some(None) => {
                     state.extra.remove("chapter");
                 }
+                None => {}
             }
-        }
-        if let Err(e) = state.save(&self.path) {
-            log::warn!("cannot save position: {e}");
+        });
+    }
+
+    /// Loads the book's sidecar, changes it with `change` and writes it back. A failed
+    /// write is logged ("cannot save `what`"); returns true when the write succeeded.
+    fn update_sidecar(&self, what: &str, change: impl FnOnce(&mut BookState)) -> bool {
+        let mut state = BookState::load(&self.path).unwrap_or_default();
+        change(&mut state);
+        match state.save(&self.path) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("cannot save {what}: {e}");
+                false
+            }
         }
     }
 
@@ -854,7 +878,7 @@ impl ReaderScreen {
             page,
             pages: count.pages,
             complete: count.complete,
-            estimate: if count.complete { None } else { doc.page_estimate().filter(|&e| e > count.pages) },
+            estimate: footer::estimate(doc),
             // The footer's fraction, so the menu and the status bar show the same percent.
             percent: footer::bar_progress(doc, page),
             chapter,
@@ -897,25 +921,19 @@ impl ReaderScreen {
         let marked = if self.marks.len() == n {
             let Ok(pos) = doc.position_of_page(page) else { return false };
             let chapter = current_chapter(doc, toc, page).map(|i| toc[i].title.clone());
-            let created = ink_device::clock::TimeZone::local().at(std::time::SystemTime::now()).format();
-            let fixed = doc.kind() == ink_doc::DocKind::Fixed;
             self.marks.push(Bookmark {
                 position: pos.to_string(),
                 label: format!("Page {}", page + 1),
-                created: created.get(..19).unwrap_or(&created).to_string(),
+                created: timestamp(),
                 chapter,
-                page: fixed.then_some(page as u32),
+                page: fixed_page(doc, page),
                 note: None,
             });
             true
         } else {
             false
         };
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        state.bookmarks = self.marks.clone();
-        if let Err(e) = state.save(&self.path) {
-            log::warn!("cannot save bookmarks: {e}");
-        }
+        self.update_sidecar("bookmarks", |state| state.bookmarks = self.marks.clone());
         log::info!("reader bookmark page {}: {}", page + 1, if marked { "added" } else { "removed" });
         marked
     }
@@ -1071,16 +1089,14 @@ impl ReaderScreen {
         self.load_toc();
         let toc = self.toc.as_deref().unwrap_or_default();
         let (Some(doc), Some(sel)) = (self.doc.as_deref(), self.sel.as_ref()) else { return };
-        let created = ink_device::clock::TimeZone::local().at(std::time::SystemTime::now()).format();
-        let fixed = doc.kind() == ink_doc::DocKind::Fixed;
         let h = Highlight {
             start: sel.start.to_string(),
             end: sel.end.to_string(),
             text: sel.text.clone(),
             style: "lighten".into(),
             chapter: current_chapter(doc, toc, page).map(|i| toc[i].title.clone()),
-            created: created.get(..19).unwrap_or(&created).to_string(),
-            page: fixed.then_some(page as u32),
+            created: timestamp(),
+            page: fixed_page(doc, page),
             note: note.filter(|n| !n.trim().is_empty()),
             ..Highlight::default()
         };
@@ -1088,11 +1104,8 @@ impl ReaderScreen {
         let key = doc.layout().cache_key();
         self.session_hl.extend(pages.iter().map(|(p, rects)| (key.clone(), *p, rects.clone(), h.start.clone())));
         self.saved_hl.push((sel.start.clone(), sel.end.clone()));
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        state.add_highlight(h);
-        match state.save(&self.path) {
-            Ok(()) => log::info!("reader highlight on page {} ({} pages): {} chars, note {}", page + 1, pages.len(), sel.text.chars().count(), h_note),
-            Err(e) => log::warn!("cannot save highlight: {e}"),
+        if self.update_sidecar("highlight", |state| state.add_highlight(h)) {
+            log::info!("reader highlight on page {} ({} pages): {} chars, note {}", page + 1, pages.len(), sel.text.chars().count(), h_note);
         }
     }
 
@@ -1142,11 +1155,9 @@ impl ReaderScreen {
         self.saved_hl.retain(|(s, e)| !(s == start && e == end));
         let key = start.to_string();
         self.session_hl.retain(|(.., st)| *st != key);
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        let removed = state.remove_highlight(&key, &end.to_string());
-        match state.save(&self.path) {
-            Ok(()) => log::info!("reader: highlight removed ({})", if removed { "from the sidecar" } else { "not in the sidecar" }),
-            Err(e) => log::warn!("cannot save after removing a highlight: {e}"),
+        let mut removed = false;
+        if self.update_sidecar("the removed highlight", |state| removed = state.remove_highlight(&key, &end.to_string())) {
+            log::info!("reader: highlight removed ({})", if removed { "from the sidecar" } else { "not in the sidecar" });
         }
     }
 

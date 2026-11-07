@@ -356,6 +356,17 @@ pub fn bar_progress(doc: &dyn Document, page: usize) -> f32 {
     }
 }
 
+/// The estimated page count while pagination runs, when it is above the pages counted
+/// so far; `None` once the count is complete.
+pub fn estimate(doc: &dyn Document) -> Option<usize> {
+    let c = doc.page_count();
+    if c.complete {
+        None
+    } else {
+        doc.page_estimate().filter(|&e| e > c.pages)
+    }
+}
+
 /// Minutes to read `pages` pages at `seconds_per_page`, rounded up, at least 1.
 pub fn minutes_for(pages: usize, seconds_per_page: f32) -> u32 {
     ((pages as f32 * seconds_per_page.max(0.0)) / 60.0).ceil().max(1.0) as u32
@@ -373,7 +384,7 @@ pub fn info(doc: &dyn Document, toc: &[TocEntry], map: &ChapterMap, page: usize,
     FooterInfo {
         page,
         total: count.pages,
-        total_estimate: if count.complete { None } else { doc.page_estimate().filter(|&e| e > count.pages) },
+        total_estimate: estimate(doc),
         progress: bar_progress(doc, page),
         marks: map.marks.clone(),
         pages_left_chapter: pages_left,

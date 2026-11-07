@@ -249,14 +249,7 @@ impl super::ReaderScreen {
     pub(super) fn goto_overlay(&mut self, tab: usize, size: Size) -> Overlay {
         let info = self.goto_info(tab);
         let highlights = self.highlight_rows().into_iter().map(|(r, _)| r).collect();
-        let (title, pages, estimate) = self
-            .doc
-            .as_deref()
-            .map(|d| {
-                let c = d.page_count();
-                (d.metadata().title.clone(), c.pages, if c.complete { None } else { d.page_estimate().filter(|&e| e > c.pages) })
-            })
-            .unwrap_or_default();
+        let (title, pages, estimate) = self.doc.as_deref().map(|d| (d.metadata().title.clone(), d.page_count().pages, super::footer::estimate(d))).unwrap_or_default();
         build_with(&info, &GotoExtra { title, page: self.page, pages, estimate, highlights }, size)
     }
 }
