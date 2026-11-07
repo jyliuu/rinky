@@ -720,12 +720,6 @@ impl InsightfulPlugin {
         Ok(())
     }
 
-    fn ask_input(&mut self, cx: &mut HostCtx) -> Result<()> {
-        let prompt = chat::ASK_PLACEHOLDER;
-        cx.ui()?.input(INPUT_ASK, prompt, "");
-        Ok(())
-    }
-
     /// A sheet of `(label, action, icon)` rows.
     fn sheet(cx: &mut HostCtx, id: u32, title: &str, rows: &[(&str, &str, &str)]) -> Result<()> {
         let mut md = String::from(":::sheet\n");
@@ -976,10 +970,9 @@ impl Plugin for InsightfulPlugin {
                         self.ask_followup(cx, &q)?;
                     }
                 } else if result == LINK_ASK {
-                    if self.fresh {
-                        self.ask_input(cx)?;
-                    } else if self.run.is_none() {
-                        cx.ui()?.input(INPUT_FOLLOWUP, chat::ASK_PLACEHOLDER, "");
+                    // A fresh chat's first question starts it; later ones follow up.
+                    if self.fresh || self.run.is_none() {
+                        cx.ui()?.input(if self.fresh { INPUT_ASK } else { INPUT_FOLLOWUP }, chat::ASK_PLACEHOLDER, "");
                     }
                 } else if result == LINK_NEW {
                     self.pending_sel = None;
