@@ -443,7 +443,8 @@ fails, the old version stays installed.
 Other ways to update:
 
 - KUAL: *rinky > Update rinky*. The new version runs the next time you start rinky.
-- SSH: `/mnt/us/rinky/rinky update check`, then `/mnt/us/rinky/rinky update install`.
+- SSH: `/mnt/us/rinky/rinky update check`, then `/mnt/us/rinky/rinky update install`
+  (add `--force` to reinstall the same version).
 - Without Wi-Fi: install the new package over the old one as in the
   [install guide](install.md). Your data is kept.
 
@@ -455,6 +456,9 @@ url = "https://api.github.com/repos/OWNER/REPO/releases/latest"
 # allow_http = true     # only for a mirror on your own network
 ```
 
+Over SSH, `--url URL` or the environment variable `RINKY_UPDATE_URL` does the same for
+one run, and `--allow-http` allows a plain `http://` address.
+
 ## 10. Uninstall
 
 On a Kindle, in KUAL choose *rinky > Uninstall rinky*, then:
@@ -464,7 +468,10 @@ On a Kindle, in KUAL choose *rinky > Uninstall rinky*, then:
 - *Uninstall completely* removes everything rinky added.
 
 Close and reopen KUAL afterwards so the entry disappears. Over SSH the same is
-`sh /mnt/us/rinky/uninstall.sh`, with `--keep-data` to keep your data.
+`sh /mnt/us/rinky/uninstall.sh`, with `--keep-data` to keep your data. The uninstaller
+changes nothing while an install or update runs; it stops with *"an install or update
+is running"* or *"an update is running"* (KUAL shows *"Uninstall failed"*). Uninstall
+again once the update has shown its result.
 
 A complete uninstall stops rinky, deletes the `rinky*` files in each book's `.sdr`
 folder (and the folder itself if it is then empty and rinky created it), the KUAL
@@ -482,6 +489,11 @@ On a Kobo, see the [install guide](install.md#7-uninstall).
 When you report a problem, please include `/mnt/us/rinky/rinky.log` and
 `/mnt/us/rinky/VERSION`. *Settings > Diagnostics > Write debug report* gathers the logs,
 your settings without passwords, and any crash logs in one folder.
+
+Over SSH, `sh /mnt/us/rinky/rinky-ctl.sh status` shows whether rinky and the Kindle's
+screens are running and which version is installed, `/mnt/us/rinky/rinky device info` prints the model rinky found,
+and `/mnt/us/rinky/rinky selftest --lipc` checks the connections to the Kindle's
+services, one PASS or FAIL line per check.
 
 ### The Kindle's Home screen does not come back
 
@@ -580,17 +592,19 @@ If the Kindle does not wake, hold the power button for about 10 seconds to resta
 
 ## 12. Files rinky writes
 
-Everything rinky writes is inside `/mnt/us/rinky` or the books' `.sdr` folders, plus
-the two menu entries, so uninstall can remove it all.
+On the Kindle drive, everything rinky writes is inside `/mnt/us/rinky` or the books'
+`.sdr` folders, plus the KUAL entry and the library item, so uninstall can remove it
+all. Outside the drive it keeps only runtime files, which it removes itself.
 
 | Path | What | Complete uninstall | `--keep-data` |
 | --- | --- | --- | --- |
-| `/mnt/us/rinky/` | program, settings (`settings.toml`), library index, logs, plugins and their data, statistics, vocabulary, `exports/`, `screenshots/`, `ssh/`, dictionaries and fonts you added | removed | only the program files removed |
+| `/mnt/us/rinky/` | program, settings (`settings.toml`), library index, logs, plugins and their data, statistics, vocabulary, `battery.csv`, `exports/`, `screenshots/`, `ssh/`, dictionaries, and fonts you put in `rinky/fonts` | removed | only the program files removed |
 | `/mnt/us/extensions/rinky/` | KUAL entry | removed | removed |
 | `/mnt/us/extensions/` | only if the installer created it | removed if empty | removed if empty |
 | `/mnt/us/documents/rinky.sh` | library item (SSH install only) | removed | removed |
 | `<book>.sdr/rinky.<ext>.json` | position, highlights, notes, bookmarks | removed | kept |
 | `/tmp/rinky/` | lock and process ids while running (in memory) | removed | removed |
+| `/var/run/rinky-ssh/`, `/var/local/rinky-ssh/` or `/dev/rinky-ssh/` (the first that only root can write) | a root-only copy of `authorized_keys` and the pid file while the SSH server runs | removed when the server stops | removed when the server stops |
 
 ## 13. License
 
