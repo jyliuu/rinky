@@ -1950,9 +1950,7 @@ impl MarkdownView {
 
     /// Where a tap closes the view: the Close button with `space(2)` of slack.
     fn close_rect(&self, b: Rect) -> Rect {
-        let r = self.bar().action_rects(Rect::new(b.x, b.y, b.w, APP_BAR_H)).first().copied().unwrap_or_default();
-        let s = ink_ui::theme::space(2);
-        Rect::new(r.x - s, r.y - s, r.w + 2 * s as u32, r.h + 2 * s as u32)
+        with_slack(self.bar().action_rects(Rect::new(b.x, b.y, b.w, APP_BAR_H)).first().copied().unwrap_or_default())
     }
 
     fn input_rect(b: Rect) -> Rect {
@@ -2059,6 +2057,12 @@ impl MarkdownView {
         }
     }
 
+    /// [`Self::turn`] for an event that is used up by it.
+    fn turn_handled(&mut self, step: i32) -> EventResult {
+        self.turn(step);
+        EventResult::Handled
+    }
+
     /// A thin scroll bar at the right edge of `win` (in the margin) when the content
     /// does not fit.
     fn paint_scroll_bar(&self, cx: &mut PaintCx, win: Rect) {
@@ -2105,12 +2109,7 @@ impl MarkdownView {
                     trim_gaps(&mut body);
                     if !seg.b.is_empty() {
                         body.push(gap_line(base * 0.3));
-                        let mut foot = Vec::new();
-                        wrap_spans(cx, &[Span::plain(&seg.b)], cap, Some(Style::Regular), 0.0, inner, None, &mut foot);
-                        for l in &mut foot {
-                            l.runs.iter_mut().for_each(|r| r.muted = true);
-                        }
-                        body.extend(foot);
+                        body.extend(caption_lines(cx, &seg.b, cap, inner));
                     }
                     let w = extent(cx, &body).min(inner) + 2.0 * PAD;
                     let x = width - w;
@@ -2135,11 +2134,7 @@ impl MarkdownView {
                     body.extend(text);
                     if !seg.b.is_empty() {
                         body.push(gap_line(base * 0.3));
-                        let mut foot = Vec::new();
-                        wrap_spans(cx, &[Span::plain(&seg.b)], cap, Some(Style::Regular), 0.0, inner, None, &mut foot);
-                        for l in &mut foot {
-                            l.runs.iter_mut().for_each(|r| r.muted = true);
-                        }
+                        let mut foot = caption_lines(cx, &seg.b, cap, inner);
                         shift(&mut foot, PAD);
                         body.extend(foot);
                     }
@@ -2185,13 +2180,7 @@ impl MarkdownView {
                 }
                 BoxKind::Card => {
                     let inner = width - 2.0 * PAD;
-                    let mut body = Vec::new();
-                    if !seg.b.is_empty() {
-                        wrap_spans(cx, &[Span::plain(&seg.b)], cap, Some(Style::Regular), 0.0, inner, None, &mut body);
-                        for l in &mut body {
-                            l.runs.iter_mut().for_each(|r| r.muted = true);
-                        }
-                    }
+                    let mut body = if seg.b.is_empty() { Vec::new() } else { caption_lines(cx, &seg.b, cap, inner) };
                     body.extend(layout_blocks(cx, &seg.blocks, base, inner));
                     trim_gaps(&mut body);
                     shift(&mut body, PAD);
@@ -2289,6 +2278,22 @@ impl MarkdownView {
         self.page = self.page.min(self.pages.len() - 1);
         self.laid_for = Some((b.w, b.h));
     }
+}
+
+/// `text` as muted caption lines (`px`) wrapped to `width`.
+fn caption_lines(cx: &mut PaintCx, text: &str, px: f32, width: f32) -> Vec<Line> {
+    let mut lines = Vec::new();
+    wrap_spans(cx, &[Span::plain(text)], px, Some(Style::Regular), 0.0, width, None, &mut lines);
+    for r in lines.iter_mut().flat_map(|l| &mut l.runs) {
+        r.muted = true;
+    }
+    lines
+}
+
+/// `r` grown by `space(2)` on every side: where a tap still hits an app bar button.
+fn with_slack(r: Rect) -> Rect {
+    let s = ink_ui::theme::space(2);
+    Rect::new(r.x - s, r.y - s, r.w + 2 * s as u32, r.h + 2 * s as u32)
 }
 
 /// The face for a span (`force` overrides it: headings, table headers, quotes).
@@ -2536,7 +2541,6 @@ impl Widget for MarkdownView {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        let turn = |v: &mut Self, step: i32| v.turn(step);
         // A held link reports `hold:LINK` (a chat list deletes a chat that way).
         if let UiEvent::Gesture(Gesture::LongPress { pos, .. }) = ev {
             return match self.links.iter().find(|(r, _)| r.contains(*pos)) {
@@ -2560,9 +2564,7 @@ impl Widget for MarkdownView {
                     return EventResult::Action("closed".into());
                 }
                 if let Some(link) = &self.back {
-                    let r = AppBar::back_rect(Rect::new(b.x, b.y, b.w, APP_BAR_H));
-                    let s = ink_ui::theme::space(2);
-                    if Rect::new(r.x - s, r.y - s, r.w + 2 * s as u32, r.h + 2 * s as u32).contains(*pos) {
+                    if with_slack(AppBar::back_rect(Rect::new(b.x, b.y, b.w, APP_BAR_H))).contains(*pos) {
                         return EventResult::Action(link.clone());
                     }
                 }
@@ -2575,33 +2577,14 @@ impl Widget for MarkdownView {
                     return EventResult::Action(url.clone());
                 }
                 if pos.y > b.y + APP_BAR_H as i32 {
-                    turn(self, if pos.x < b.x + b.w as i32 / 3 { -1 } else { 1 });
+                    self.turn(if pos.x < b.x + b.w as i32 / 3 { -1 } else { 1 });
                 }
                 EventResult::Handled
             }
-            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Left | Direction::Up, .. }) => {
-                turn(self, 1);
-                EventResult::Handled
-            }
-            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Down, .. }) => {
-                turn(self, -1);
-                EventResult::Handled
-            }
-            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Right, .. }) => {
-                turn(self, -1);
-                EventResult::Handled
-            }
-            UiEvent::Key(k) if k.pressed => match k.key {
-                ink_device::Key::PageNext => {
-                    turn(self, 1);
-                    EventResult::Handled
-                }
-                ink_device::Key::PagePrev => {
-                    turn(self, -1);
-                    EventResult::Handled
-                }
-                _ => EventResult::Handled,
-            },
+            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Left | Direction::Up, .. }) => self.turn_handled(1),
+            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Down | Direction::Right, .. }) => self.turn_handled(-1),
+            UiEvent::Key(k) if k.pressed && k.key == ink_device::Key::PageNext => self.turn_handled(1),
+            UiEvent::Key(k) if k.pressed && k.key == ink_device::Key::PagePrev => self.turn_handled(-1),
             _ => EventResult::Handled,
         }
     }
