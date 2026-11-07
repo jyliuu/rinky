@@ -26,7 +26,7 @@
 //! Chapters ([`ChapterMap`]): the chapter a page is in is the deepest TOC entry that
 //! starts at or before it (the TOC is flat with levels, sorted by page). When the TOC is
 //! flat or missing, spine items also count as chapter starts for "pages left in chapter"
-//! ([`spine_starts`]). Chapter ticks use every TOC entry, or only the top level when the
+//! ([`Document::spine_starts`]). Chapter ticks use every TOC entry, or only the top level when the
 //! TOC has more than 60 entries.
 //!
 //! Time left: pages left times the seconds per page. Seconds per page come from ink-stats
@@ -141,12 +141,6 @@ pub fn speed_from_stats(db: &std::path::Path, md5: &str) -> Option<Speed> {
     speed_from_totals(t.read_time, t.pages_read)
 }
 
-/// First page of every spine item (DocFragment) of `doc`, for books whose TOC is flat or
-/// missing ([`Document::spine_starts`]: from the page map, empty until pagination ends).
-pub fn spine_starts(doc: &dyn Document) -> Vec<usize> {
-    doc.spine_starts()
-}
-
 /// One TOC entry for [`ChapterMap::from_entries`]: (first page, level, TOC index).
 pub type TocStart = (usize, u8, usize);
 
@@ -197,7 +191,9 @@ impl ChapterMap {
         let page_of = |e: &TocEntry| if count.complete { e.page.or_else(|| doc.page_of(&e.position).ok()) } else { e.page };
         let entries: Vec<TocStart> = toc.iter().enumerate().filter_map(|(i, e)| Some((page_of(e)?, e.level, i))).collect();
         let flat = toc.iter().all(|e| e.level == toc[0].level);
-        let spine = if flat && count.complete { spine_starts(doc) } else { Vec::new() };
+        // Spine items (DocFragments) as chapter starts: from the page map, empty until
+        // pagination ends.
+        let spine = if flat && count.complete { doc.spine_starts() } else { Vec::new() };
         let mut map = if count.complete {
             Self::from_entries(&entries, toc.len(), &spine, count.pages)
         } else {
@@ -509,13 +505,17 @@ fn battery_gap(px: f32) -> f32 {
     (px * 0.25).round()
 }
 
+/// Width of a slot's pieces with a separator of `sep_w` between each two.
+fn slot_width(pieces: &[(Piece, f32)], sep_w: f32) -> f32 {
+    pieces.iter().map(|p| p.1).sum::<f32>() + sep_w * pieces.len().saturating_sub(1) as f32
+}
+
 /// The pieces of a slot, with their widths, cut to `max` pixels: the widest text is
 /// ellipsized first; pieces are dropped from the end when even that is not enough.
 /// Returns the pieces and the total width (separators included).
 fn fit_slot(cx: &mut PaintCx, mut pieces: Vec<(Piece, f32)>, sep_w: f32, px: f32, max: f32) -> (Vec<(Piece, f32)>, f32) {
-    let total = |p: &[(Piece, f32)]| p.iter().map(|x| x.1).sum::<f32>() + sep_w * p.len().saturating_sub(1) as f32;
     loop {
-        let w = total(&pieces);
+        let w = slot_width(&pieces, sep_w);
         if w <= max || pieces.is_empty() {
             return (pieces, w);
         }
@@ -659,13 +659,21 @@ pub fn bar_rows(layout: &LayoutSettings, edge: Edge, bar: &StatusBar, text: bool
     rows
 }
 
+/// `edge`'s bar of `bars` and the plugin texts it shows in its left, centre and right
+/// slots: the top bar the centre text, the bottom bar the left and right texts.
+fn edge_bar<'a>(bars: &'a StatusBars, edge: Edge, info: &'a FooterInfo) -> (&'a StatusBar, [&'a str; 3]) {
+    let s = &info.status;
+    match edge {
+        Edge::Top => (&bars.top, ["", &s[1], ""]),
+        Edge::Bottom => (&bars.bottom, [&s[0], "", &s[2]]),
+    }
+}
+
 /// The rows `edge`'s bar of `bars` takes for `info` (nothing when the bar is off and has
 /// no plugin text).
 pub fn rows_for(layout: &LayoutSettings, bars: &StatusBars, edge: Edge, info: &FooterInfo) -> BarRows {
-    let (bar, plugin) = match edge {
-        Edge::Top => (&bars.top, !info.status[1].is_empty()),
-        Edge::Bottom => (&bars.bottom, !info.status[0].is_empty() || !info.status[2].is_empty()),
-    };
+    let (bar, plugin) = edge_bar(bars, edge, info);
+    let plugin = plugin.iter().any(|t| !t.is_empty());
     let widgets = bar.enabled && [&bar.left, &bar.center, &bar.right].iter().any(|s| !s.is_empty());
     bar_rows(layout, edge, bar, widgets || plugin, bar.enabled && has_progress(bar), info.bar_left)
 }
@@ -700,10 +708,9 @@ fn plan_row(cx: &mut PaintCx, row: Rect, px: f32, centre: f32, bar: &StatusBar, 
     let l = slot(cx, &bar.left, plugin[0]);
     let c = slot(cx, &bar.center, plugin[1]);
     let r = slot(cx, &bar.right, plugin[2]);
-    let total = |p: &[(Piece, f32)]| p.iter().map(|x| x.1).sum::<f32>() + sep_w * p.len().saturating_sub(1) as f32;
     let width = row.w as f32;
     let gap = px;
-    let (wl, wr, wc) = (total(&l), total(&r), total(&c));
+    let (wl, wr, wc) = (slot_width(&l, sep_w), slot_width(&r, sep_w), slot_width(&c, sep_w));
     // Side caps: with a centre slot, each side gets half of what the centre leaves (the
     // centre keeps at least a third); without, the sides share the row.
     let (cap_l, cap_r) = if c.is_empty() {
@@ -757,12 +764,9 @@ pub fn slot_spans(canvas: &mut Canvas, fonts: &mut Fonts, layout: &LayoutSetting
     let row = rows.text?;
     let theme = Theme::day();
     let mut cx = PaintCx::new(canvas, fonts, &theme);
-    let (bar, plugin) = match edge {
-        Edge::Top => (&bars.top, ["", info.status[1].as_str(), ""]),
-        Edge::Bottom => (&bars.bottom, [info.status[0].as_str(), "", info.status[2].as_str()]),
-    };
+    let (bar, plugin) = edge_bar(bars, edge, info);
     let (slots, sep_w) = plan_row(&mut cx, row, rows.px, rows.centre, bar, info, plugin);
-    Some(slots.map(|(p, x)| (x, p.iter().map(|q| q.1).sum::<f32>() + sep_w * p.len().saturating_sub(1) as f32)))
+    Some(slots.map(|(p, x)| (x, slot_width(&p, sep_w))))
 }
 
 /// Draws the progress bar of `bar` in `b`.
@@ -806,10 +810,7 @@ pub fn draw_bars_at(canvas: &mut Canvas, fonts: &mut Fonts, layout: &LayoutSetti
         rows.text = rows.text.map(shift);
         rows.progress = rows.progress.map(shift);
         rows.centre += origin.0 as f32;
-        let (bar, plugin) = match edge {
-            Edge::Top => (&bars.top, ["", info.status[1].as_str(), ""]),
-            Edge::Bottom => (&bars.bottom, [info.status[0].as_str(), "", info.status[2].as_str()]),
-        };
+        let (bar, plugin) = edge_bar(bars, edge, info);
         if let Some(r) = rows.text {
             draw_text_row(&mut cx, r, rows.px, rows.centre, bar, info, plugin);
             drawn.push(r);
@@ -942,18 +943,18 @@ impl ReaderScreen {
         let old_status = self.status_shown.clone();
         let info = self.bar_info(cx, bar_left, status)?;
         let doc = self.doc.as_deref()?;
-        let layout = doc.layout().clone();
+        let layout = doc.layout();
         let bars = &cx.settings.status_bars;
         let old = FooterInfo { status: old_status, ..info.clone() };
         let edges = [Edge::Top, Edge::Bottom];
-        if edges.iter().any(|&e| rows_for(&layout, bars, e, &info) != rows_for(&layout, bars, e, &old)) {
+        if edges.iter().any(|&e| rows_for(layout, bars, e, &info) != rows_for(layout, bars, e, &old)) {
             return None;
         }
         let bounds = cx.canvas.bounds();
         let rows: Vec<Rect> = edges
             .iter()
             .flat_map(|&e| {
-                let r = rows_for(&layout, bars, e, &info);
+                let r = rows_for(layout, bars, e, &info);
                 [r.text, r.progress.filter(|_| part == Part::All)]
             })
             .flatten()
@@ -963,7 +964,7 @@ impl ReaderScreen {
         for r in &rows {
             cx.canvas.fill_rect(r.x, r.y, r.w as i32, r.h as i32, 0xFF);
         }
-        draw_bars(cx.canvas, cx.fonts, &layout, bars, &info, part);
+        draw_bars(cx.canvas, cx.fonts, layout, bars, &info, part);
         if let Some(buf) = self.page_buf.as_mut() {
             for r in &rows {
                 super::copy_rect(buf, cx.canvas, *r);
