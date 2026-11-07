@@ -2345,7 +2345,9 @@ fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, i
     let mut x = indent;
     let mut first = true;
     for word in words {
-        let ww: f32 = word.iter().map(|(t, st, _)| cx.fonts.shaped_width(*st, px, t)).sum();
+        // Each part is shaped once here; its width is reused below.
+        let widths: Vec<f32> = word.iter().map(|(t, st, _)| cx.fonts.shaped_width(*st, px, t)).collect();
+        let ww: f32 = widths.iter().sum();
         if !first && x + space + ww > width {
             lines.push(std::mem::replace(&mut line, Line { height, ..Line::default() }));
             x = indent;
@@ -2354,27 +2356,19 @@ fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, i
         if !first {
             x += space;
         }
-        for (t, st, link) in word {
-            // Hard-break words wider than the line.
-            let mut t = t;
-            while cx.fonts.shaped_width(st, px, &t) > width - indent && t.chars().count() > 1 {
-                let mut head = String::new();
-                for c in t.chars() {
-                    if cx.fonts.shaped_width(st, px, &format!("{head}{c}")) > width - x {
-                        break;
-                    }
-                    head.push(c);
-                }
-                if head.is_empty() {
-                    head = t.chars().next().map(String::from).unwrap_or_default();
-                }
-                let rest: String = t.chars().skip(head.chars().count()).collect();
-                line.runs.push(Run { x, text: head, style: st, px, link: link.clone(), muted: false });
+        for ((mut t, st, link), mut w) in word.into_iter().zip(widths) {
+            // Hard-break words wider than the line: the longest head that fits the rest
+            // of the line (at least one character) goes on it.
+            while w > width - indent && t.chars().count() > 1 {
+                let ends: Vec<usize> = t.char_indices().map(|(i, _)| i).chain([t.len()]).collect();
+                let k = last_fitting(ends.len() - 1, |k| cx.fonts.shaped_width(st, px, &t[..ends[k]]) <= width - x).max(1);
+                let rest = t.split_off(ends[k]);
+                line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false });
                 lines.push(std::mem::replace(&mut line, Line { height, ..Line::default() }));
                 x = indent;
                 t = rest;
+                w = cx.fonts.shaped_width(st, px, &t);
             }
-            let w = cx.fonts.shaped_width(st, px, &t);
             line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false });
             x += w;
         }
@@ -4500,6 +4494,28 @@ mod tests {
                 assert_eq!(fit_end(&mut cx, text, px, max), slow_end(&mut cx, text, max), "fit_end {text:?} {max}");
             }
         }
+    }
+
+    /// A word wider than the line starts a line of its own and is cut into pieces that
+    /// each fit their line.
+    #[test]
+    fn long_words_break_into_pieces_that_fit() {
+        let mut canvas = Canvas::new(8, 8);
+        let mut fonts = Fonts::load();
+        let theme = Theme::day();
+        let mut cx = PaintCx { canvas: &mut canvas, fonts: &mut fonts, theme: &theme };
+        let (px, width) = (40.0, 600.0);
+        let word = "https://example.org/a/very/long/link/that/does/not/fit/on/one/line/at/all";
+        let mut lines = Vec::new();
+        wrap_spans(&mut cx, &[Span::plain(&format!("See {word} now"))], px, None, 0.0, width, None, &mut lines);
+        let runs: Vec<&Run> = lines.iter().flat_map(|l| &l.runs).collect();
+        let pieces: String = runs.iter().filter(|r| r.text != "See" && r.text != "now").map(|r| r.text.as_str()).collect();
+        assert_eq!(pieces, word);
+        assert!(lines.len() >= 3, "{lines:?}");
+        for r in &runs {
+            assert!(r.x + cx.fonts.shaped_width(r.style, px, &r.text) <= width, "{r:?}");
+        }
+        assert_eq!((lines[0].runs.len(), runs[1].x), (1, 0.0), "the word starts a new line");
     }
 
     #[test]
