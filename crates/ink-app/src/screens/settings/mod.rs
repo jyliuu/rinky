@@ -38,6 +38,7 @@ pub mod advanced;
 pub mod battery;
 pub mod control_buttons;
 pub mod diagnostics;
+#[cfg(test)]
 pub mod fakes;
 pub mod keyboard_layouts;
 pub mod order;
