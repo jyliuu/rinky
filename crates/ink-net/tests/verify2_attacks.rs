@@ -2,9 +2,10 @@
 //! them.
 //!
 //! Raw `TcpListener` servers in this file play misbehaving peers; `ink_net::testserver`
-//! plays the well-behaved ones. Tests that failed on the branch head they were written
-//! against (ac340c7) carry `#[ignore = "verifier: ..."]`; run them with
-//! `cargo test -p ink-net --test verify2_attacks -- --ignored`.
+//! plays the well-behaved ones. Three tests failed on the branch head they were written
+//! against (ac340c7) and were marked `#[ignore = "verifier: ..."]`: quadratic OPDS end
+//! tags, a 206 to a request without Range, a 401 portal page dropping the KOSync queue.
+//! They are fixed and run normally now; none is ignored.
 //!
 //! The two memory attacks count allocations with a global allocator, so each one is a test
 //! binary of its own: `tests/verify2_memory_sse.rs` and `tests/verify2_memory_opds.rs`.
