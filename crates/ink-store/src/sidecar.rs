@@ -771,7 +771,7 @@ mod tests {
             quads: vec![Quad { x0: 1.0, y0: 2.0, x1: 3.0, y1: 4.0 }, Quad { x0: f32::NAN, y0: 0.0, x1: f32::INFINITY, y1: 1.0 }],
             ..Default::default()
         });
-        s.settings.crop = Some([0.1, f32::NEG_INFINITY, 0.1, 0.1]);
+        s.settings.crop = Some([f32::NAN, f32::NEG_INFINITY, 0.1, 0.1]);
         s.settings.font_px = Some(f32::INFINITY);
         s.settings.line_spacing = Some(1.2);
         s.settings.extra.insert("font_px".into(), serde_json::json!("big"));

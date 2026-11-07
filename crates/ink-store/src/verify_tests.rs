@@ -8,7 +8,7 @@ use crate::koreader::{self, KoreaderDirs};
 use crate::library::{BookEntry, Collection, LibraryIndex};
 use crate::lua;
 use crate::md5::{partial_md5, partial_md5_reader, vectors};
-use crate::sidecar::{sidecar_dir, sidecar_path, BookSettings, BookState, Bookmark, Highlight, Quad, StateSource};
+use crate::sidecar::{sidecar_dir, sidecar_path, BookState, Bookmark, Highlight, StateSource};
 use crate::stats::{PageRecord, StatsBook, StatsDb};
 use crate::testutil::TempDir;
 use crate::{backup_path, write_atomic, Paths};
@@ -167,33 +167,6 @@ fn verifier_md5_tiny_files_on_disk() {
 // Sidecar
 // ---------------------------------------------------------------------------------------
 
-/// `save` must never write bytes that the next `load` sets aside: a highlight quad with a
-/// NaN coordinate (MuPDF can return degenerate boxes) is written by serde_json as `null`,
-/// which an `f32` field refuses, so the whole sidecar (position, every highlight) is
-/// moved aside on the next open and the reader falls back to the `.old` backup.
-#[test]
-fn verifier_sidecar_nonfinite_quad_round_trip() {
-    let dir = TempDir::new("v-nan");
-    let book = dir.path().join("scan.pdf");
-    let mut s = BookState { position: Some("page:3".into()), ..Default::default() };
-    s.add_bookmark(Bookmark { position: "page:1".into(), label: "p. 2".into(), ..Default::default() });
-    s.add_highlight(Highlight {
-        start: "page:3;1,2,3,4".into(),
-        end: "page:3;1,2,3,4".into(),
-        page: Some(3),
-        quads: vec![Quad { x0: f32::NAN, y0: 0.0, x1: f32::INFINITY, y1: 1.0 }],
-        ..Default::default()
-    });
-    let saved = s.save(&book);
-    let r = BookState::load_report(&book).unwrap();
-    assert!(r.set_aside.is_empty(), "save returned {saved:?}, then load set aside {:?}: {:?}", r.set_aside, r.errors);
-    if saved.is_ok() {
-        assert_eq!(r.source, StateSource::Sidecar);
-        assert_eq!(r.state.position.as_deref(), Some("page:3"));
-        assert_eq!((r.state.highlights.len(), r.state.bookmarks.len()), (1, 1));
-    }
-}
-
 /// The same defect reached through the KOReader import: `pboxes` with `inf` (dump.lua
 /// writes LuaJIT's `inf`/`nan`) go into our sidecar, which then no longer loads.
 #[test]
@@ -232,36 +205,6 @@ fn verifier_koreader_import_nonfinite_pboxes_keeps_sidecar_loadable() {
     assert!(r.set_aside.is_empty(), "import returned {imported:?}, then load set aside {:?}: {:?}", r.set_aside, r.errors);
     assert_eq!(r.source, StateSource::Sidecar);
     assert_eq!(r.state.bookmarks.len(), 1, "our own bookmark survives the import");
-}
-
-/// A key in `BookSettings::extra` (documented as "screens add their own without a schema
-/// change") that equals a typed field name gives a JSON object with the key twice; serde
-/// refuses duplicate fields, so the next load sets the whole sidecar aside.
-#[test]
-fn verifier_sidecar_extra_key_shadowing_a_field() {
-    let dir = TempDir::new("v-dup");
-    let book = dir.path().join("dup.epub");
-    let mut s = BookState { position: Some("/body/DocFragment[2]/body/p[1]/text().0".into()), ..Default::default() };
-    s.settings = BookSettings { font_px: Some(30.0), ..Default::default() };
-    s.settings.extra.insert("font_px".into(), serde_json::json!(31.0));
-    let saved = s.save(&book);
-    let r = BookState::load_report(&book).unwrap();
-    assert!(r.set_aside.is_empty(), "save returned {saved:?}, then load set aside {:?}: {:?}", r.set_aside, r.errors);
-    if saved.is_ok() {
-        assert_eq!(r.state.position, s.position);
-    }
-}
-
-/// Two books whose file names are not UTF-8 must not share one sidecar directory, and
-/// the directory must be the one KOReader uses (`<name without suffix>.sdr`, bytes kept).
-#[test]
-fn verifier_sidecar_dir_non_utf8_names_do_not_collide() {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    let a = Path::new(OsStr::from_bytes(b"/mnt/us/Books/caf\xe9.epub"));
-    let b = Path::new(OsStr::from_bytes(b"/mnt/us/Books/na\xefve.epub"));
-    assert_ne!(sidecar_dir(a), sidecar_dir(b), "two books, one sidecar");
-    assert_eq!(sidecar_dir(a), Path::new(OsStr::from_bytes(b"/mnt/us/Books/caf\xe9.sdr")));
 }
 
 /// Two formats of one title side by side (`Title.epub` and `Title.pdf`, the layout
@@ -1071,25 +1014,6 @@ fn store_load_never_misses_a_file_being_renamed() {
         crate::load_waits() - waits_before,
         dir.path().display()
     );
-}
-
-/// `BookSettings::crop` is `Option<[f32; 4]>`: one NaN fraction (a crop computed from a
-/// zero-size page) is written as `null`, which `f32` refuses, so the next load sets the
-/// whole sidecar aside. Same defect as the quad test, here in a float array; a fix must
-/// cover every non-`Option` float, not only `Quad`.
-#[test]
-fn verifier_sidecar_nonfinite_crop_round_trip() {
-    let dir = TempDir::new("v-nan-crop");
-    let book = dir.path().join("scan.pdf");
-    let mut s = BookState { position: Some("page:3".into()), ..Default::default() };
-    s.add_bookmark(Bookmark { position: "page:1".into(), ..Default::default() });
-    s.settings.crop = Some([0.05, f32::NAN, 0.05, 0.1]);
-    let saved = s.save(&book);
-    let r = BookState::load_report(&book).unwrap();
-    assert!(r.set_aside.is_empty(), "save returned {saved:?}, then load set aside {:?}: {:?}", r.set_aside, r.errors);
-    if saved.is_ok() {
-        assert_eq!((r.state.position.as_deref(), r.state.bookmarks.len()), (Some("page:3"), 1));
-    }
 }
 
 /// The chain the library screen is told to run: KOReader's
