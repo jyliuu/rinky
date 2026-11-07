@@ -83,7 +83,7 @@ pub struct GotoExtra {
     pub page: usize,
     /// Page count (0 = unknown: no progress per chapter).
     pub pages: usize,
-    /// Estimated page count while pagination runs (shown as "~N"); `None` when the count
+    /// Estimated page count while pagination runs (shown as [`super::footer::about`]); `None` when the count
     /// is exact.
     pub estimate: Option<usize>,
     /// Highlight rows.
@@ -116,10 +116,10 @@ pub fn build(info: &GotoInfo, size: Size) -> Overlay {
     build_with(info, &GotoExtra::default(), size)
 }
 
-/// The app bar's second line: book, page of total (`~N` while the total is an estimate), percent.
+/// The app bar's second line: book, page of total (`about N` while the total is an estimate), percent.
 fn subtitle(pct: f32, extra: &GotoExtra) -> String {
     let total = match extra.estimate {
-        Some(e) => format!("~{e}"),
+        Some(e) => super::footer::about(e),
         None => extra.pages.to_string(),
     };
     match (extra.title.is_empty(), extra.pages) {
@@ -329,9 +329,9 @@ mod tests {
         let mut e = GotoExtra { title: "Book".into(), page: 4, pages: 200, ..Default::default() };
         assert_eq!(subtitle(12.0, &e), "Book · page 5 of 200 · 12%");
         e.estimate = Some(8370);
-        assert_eq!(subtitle(12.0, &e), "Book · page 5 of ~8370 · 12%");
+        assert_eq!(subtitle(12.0, &e), "Book · page 5 of about 8370 · 12%");
         e.title.clear();
-        assert_eq!(subtitle(12.0, &e), "Page 5 of ~8370 · 12%");
+        assert_eq!(subtitle(12.0, &e), "Page 5 of about 8370 · 12%");
     }
 
     #[test]
