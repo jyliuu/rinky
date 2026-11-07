@@ -152,3 +152,16 @@ scripts/release.sh check X.Y.Z                           # Cargo.toml and CHANGE
 5. Changelog and user guide updated for user-visible changes.
 6. Your report names the commands you ran and their result, and what was not tested
    (device-only behaviour, the emulator if you did not run it).
+
+## Skills
+
+Step-by-step procedures live in `.claude/skills/<name>/SKILL.md` (Claude Code loads
+them as `/name`; other agents can read the files directly):
+
+| Skill | Use it to |
+|---|---|
+| `release` | cut `release/X.Y.Z`, run `scripts/release.sh`, open the PR, tag after the merge, check the published assets |
+| `new-feature` | put a feature or fix in the right crate with tests, goldens, changelog, user guide and the PR body |
+| `new-plugin` | add a compiled-in Rust plugin or a Lua plugin, register it, test it |
+| `testing` | choose between fast, full and slow runs, goldens, simulator shots, monkey and emulator scenarios |
+| `perf-measure` | measure before/after on the host (`scripts/perf-bench.sh`) or the emulator |
