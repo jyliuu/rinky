@@ -291,14 +291,11 @@ fn verifier2_sidecar_deep_plugin_value_does_not_block_position_saves() {
     assert_eq!(BookState::load(&book).unwrap().position.as_deref(), Some("flow:4.0.0"));
 }
 
-/// The same value through `PluginStore::set`: it writes `settings.json` without reading
-/// the bytes back (unlike `BookState::save` since cycle 1). If the deep value reaches the
-/// disk, the next `open` finds a file that does not parse, moves it aside and uses the
-/// `.old` backup: settings written after the backup are lost silently. Expected: `set`
-/// refuses the value (nothing written) or the value loads again; either way every other
-/// setting survives a reopen.
+/// The same value through `PluginStore::set`. If the deep value reached the disk, the
+/// next `open` would find a file that does not parse, move it aside and use the `.old`
+/// backup: settings written after the backup would be lost silently. `set` refuses the
+/// value (nothing written), so every other setting survives a reopen.
 #[test]
-#[ignore = "verifier: PluginStore::set writes a value serde_json cannot read back; on the next open the whole settings.json is set aside and later settings are lost"]
 fn verifier2_plugin_settings_deep_value_never_loses_other_settings() {
     use crate::plugin::PluginStore;
     use crate::Paths;
@@ -318,10 +315,9 @@ fn verifier2_plugin_settings_deep_value_never_loses_other_settings() {
     assert!(!names.iter().any(|n| n.contains(".corrupt-")), "a file was set aside: {names:?}");
 }
 
-/// A deep value as the very first plugin setting (no `.old` backup exists yet): if it is
-/// written, the reopened store is empty.
+/// A deep value as the very first plugin setting (no `.old` backup exists yet): if it
+/// were written, the reopened store would be empty.
 #[test]
-#[ignore = "verifier: PluginStore::set writes a value serde_json cannot read back; with no backup yet the reopened plugin settings are empty"]
 fn verifier2_plugin_settings_first_deep_value_keeps_the_file_loadable() {
     use crate::plugin::PluginStore;
     use crate::Paths;
