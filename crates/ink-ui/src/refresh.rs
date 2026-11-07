@@ -138,12 +138,10 @@ fn issue_order(list: &mut [Damage]) {
 /// 7. sorts into issue order DU, GL16, REAGL, GC16.
 pub fn coalesce(list: Vec<Damage>, screen: Rect) -> Vec<Damage> {
     let mut out = reduce(list, screen);
-    // After `reduce` the rectangles are disjoint, so the sum is the covered area.
-    let gl16: u64 = out.iter().filter(|d| d.class == RefreshClass::Gl16).map(|d| area(&d.rect)).sum();
-    if gl16 * 100 >= area(&screen) * FLASH_PERCENT {
+    if gl16_covers(&out, screen, FLASH_PERCENT) {
         return vec![Damage { rect: screen, class: RefreshClass::Gc16 }];
     }
-    if gl16 * 100 >= area(&screen) * FULL_SCREEN_PERCENT {
+    if gl16_covers(&out, screen, FULL_SCREEN_PERCENT) {
         // DU and GL16 are covered by the full-screen GL16; no merge, so REAGL and GC16
         // keep their own rectangles and the result stays within MAX_RECTS.
         out.retain(|d| matches!(d.class, RefreshClass::Reagl | RefreshClass::Gc16));
@@ -166,8 +164,15 @@ pub fn no_flash(damage: Vec<Damage>, screen: Rect, class: RefreshClass) -> Vec<D
 /// True when [`coalesce`] would turn `damage` into a full-screen GC16 (its GL16
 /// rectangles cover [`FLASH_PERCENT`] of `screen`).
 pub fn would_flash(damage: &[Damage], screen: Rect) -> bool {
-    let gl16: u64 = reduce(damage.to_vec(), screen).iter().filter(|d| d.class == RefreshClass::Gl16).map(|d| area(&d.rect)).sum();
-    gl16 * 100 >= area(&screen) * FLASH_PERCENT
+    gl16_covers(&reduce(damage.to_vec(), screen), screen, FLASH_PERCENT)
+}
+
+/// True when the GL16 rectangles of `reduced` cover at least `percent` of `screen`.
+/// After [`reduce`] the rectangles are disjoint, so their summed area is the covered
+/// area.
+fn gl16_covers(reduced: &[Damage], screen: Rect, percent: u64) -> bool {
+    let gl16: u64 = reduced.iter().filter(|d| d.class == RefreshClass::Gl16).map(|d| area(&d.rect)).sum();
+    gl16 * 100 >= area(&screen) * percent
 }
 
 /// Run before [`coalesce`] with `shown`, a copy of what the panel shows: when the
@@ -426,10 +431,7 @@ impl RefreshScheduler {
         let every = self.every();
         let debt_due = every > 0 && self.ghost_debt >= (every / 2).max(1);
         if self.force || self.image_flash || debt_due || (every > 0 && self.turns >= every) {
-            self.turns = 0;
-            self.force = false;
-            self.image_flash = false;
-            self.ghost_debt = 0;
+            self.reset_page_counts();
             RefreshClass::Gc16
         } else {
             RefreshClass::Reagl
@@ -486,13 +488,8 @@ impl RefreshScheduler {
             Change::KeyRelease { typing: false } | Change::TextEdit { typing: false } => Gl16,
             Change::OverlayOpen | Change::Release | Change::SliderLift | Change::SelectionLift => Gl16,
             Change::Mark | Change::Status => Gl16,
-            Change::ToastHide { over_page } => {
-                if over_page {
-                    Reagl
-                } else {
-                    Gl16
-                }
-            }
+            Change::ToastHide { over_page: true } => Reagl,
+            Change::ToastHide { over_page: false } => Gl16,
             Change::Pop { full_screen: true, .. } => {
                 self.reset_page_counts();
                 Gc16
