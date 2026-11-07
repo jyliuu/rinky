@@ -2453,13 +2453,21 @@ impl ReaderScreen {
             let c = cx.refresh.class_for(Change::FullOverlayClose);
             self.dirty = Some(self.dirty.map_or(c, |d| d.max(c)));
         }
-        if self.dirty.is_none() && self.overlay.is_none() && self.counting_done() {
-            // Pagination finished after the bars were drawn (a font size change): the
-            // page again with the counted total, refreshing only the pixels that change.
-            log::info!("reader: pagination done; status bars drawn again");
-            self.rerender = true;
-            self.mark_change = true;
-            self.dirty = Some(RefreshClass::Gl16);
+        if self.dirty.is_none() && self.overlay.is_none() && !self.rerender && self.error.is_none() && self.counting_done() {
+            // Pagination finished after the bars were drawn (a font size change): only
+            // the bars again, with the counted total and the chapter ticks (the page
+            // itself is not rendered again).
+            let t = Instant::now();
+            match self.redraw_bars(cx, &status, footer::Part::All) {
+                Some(rows) => {
+                    log::info!("reader: pagination done; status bars drawn again in {} ms", t.elapsed().as_millis());
+                    bar_damage.extend(rows.into_iter().map(|r| cx.refresh.damage(Change::Status, r)));
+                }
+                None => {
+                    self.rerender = true;
+                    self.dirty = Some(RefreshClass::Gl16);
+                }
+            }
         }
         let swap_before = std::mem::take(&mut self.swap_same).then(|| cx.canvas.clone());
         let reveal = self.reveal_damage(cx);

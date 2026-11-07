@@ -918,6 +918,12 @@ impl ReaderScreen {
     /// when that is not enough: no document or page buffer, or the new texts change
     /// which rows the bars take (the page must then be drawn again).
     pub(super) fn redraw_bar_text(&mut self, cx: &mut AppCtx, status: &[String; 3]) -> Option<Vec<Rect>> {
+        self.redraw_bars(cx, status, Part::Text)
+    }
+
+    /// [`Self::redraw_bar_text`], with the progress bars too when `part` is [`Part::All`]
+    /// (pagination finished: the chapter ticks and the fill change).
+    pub(super) fn redraw_bars(&mut self, cx: &mut AppCtx, status: &[String; 3], part: Part) -> Option<Vec<Rect>> {
         if self.page_buf.as_ref().is_none_or(|b| b.size() != cx.canvas.size()) {
             return None;
         }
@@ -933,11 +939,20 @@ impl ReaderScreen {
             return None;
         }
         let bounds = cx.canvas.bounds();
-        let rows: Vec<Rect> = edges.iter().filter_map(|&e| rows_for(&layout, bars, e, &info).text).map(|r| r.intersect(&bounds)).filter(|r| !r.is_empty()).collect();
+        let rows: Vec<Rect> = edges
+            .iter()
+            .flat_map(|&e| {
+                let r = rows_for(&layout, bars, e, &info);
+                [r.text, r.progress.filter(|_| part == Part::All)]
+            })
+            .flatten()
+            .map(|r| r.intersect(&bounds))
+            .filter(|r| !r.is_empty())
+            .collect();
         for r in &rows {
             cx.canvas.fill_rect(r.x, r.y, r.w as i32, r.h as i32, 0xFF);
         }
-        draw_bars(cx.canvas, cx.fonts, &layout, bars, &info, Part::Text);
+        draw_bars(cx.canvas, cx.fonts, &layout, bars, &info, part);
         let w = cx.canvas.width;
         if let Some(buf) = self.page_buf.as_mut() {
             for r in &rows {

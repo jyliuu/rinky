@@ -237,7 +237,7 @@ impl Wifi for KoboServices {
 
     /// wpa_supplicant joins a saved network it finds by itself (and scans now and then
     /// while it has none); a scan right after the wake makes that happen sooner.
-    fn after_wake(&mut self) {
+    fn look_for_networks(&mut self) {
         // Suspend turns the radio off ([`suspend`]); this matters only when it stayed on.
         if !wifi::is_up() {
             return;

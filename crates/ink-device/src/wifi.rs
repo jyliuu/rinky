@@ -131,8 +131,8 @@ pub fn profile_hash(essid: &str, password: Option<&str>) -> Result<LipcHash> {
 }
 
 /// When and what to join while the radio is on but not connected: the strongest saved
-/// network a scan finds. Scans start often and get rarer while none is found (a wake or
-/// the radio turned on starts over); a network that failed to join is skipped for a while
+/// network a scan finds. Scans start often and get rarer while none is found (a wake,
+/// the radio turned on or a lost connection starts over); a network that failed to join is skipped for a while
 /// (a changed password must not be retried every minute).
 #[derive(Debug)]
 pub struct AutoJoin {
@@ -151,8 +151,6 @@ impl AutoJoin {
     pub const FIRST: Duration = Duration::from_secs(15);
     /// The longest wait between scans.
     pub const MAX: Duration = Duration::from_secs(5 * 60);
-    /// How often a connected radio is checked (it may drop).
-    pub const CONNECTED: Duration = Duration::from_secs(60);
     /// How long a network that failed to join is skipped.
     pub const SKIP_FAILED: Duration = Duration::from_secs(10 * 60);
 

@@ -37,8 +37,8 @@ pub fn read_amber_schedule(lipc: &Lipc) -> Result<AmberSchedule> {
 }
 
 /// Scans and returns what was found: wifid reports "scanning" then "idle" (KOReader
-/// polls the same way, 20 s max).
-fn scan_now(lipc: &Lipc) -> Result<Vec<WifiNetwork>> {
+/// polls the same way, 20 s max), checked every `poll`.
+fn scan_now(lipc: &Lipc, poll: Duration) -> Result<Vec<WifiNetwork>> {
     lipc.set_str(WIFID, "scan", "")?;
     std::thread::sleep(Duration::from_millis(250));
     let end = Instant::now() + Duration::from_secs(20);
@@ -46,24 +46,36 @@ fn scan_now(lipc: &Lipc) -> Result<Vec<WifiNetwork>> {
         if Instant::now() >= end {
             return Err(DeviceError::Timeout("Wi-Fi scan".into()));
         }
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(poll);
     }
     Ok(wifi::networks_from_scan(&lipc.hash_get(WIFID, "scanList")?))
 }
 
+/// How often the auto-join thread checks a scan or a join in progress (each check is a
+/// `lipc-get-prop` process; nobody waits for these).
+const AUTO_JOIN_POLL: Duration = Duration::from_secs(1);
+
 /// Starts the thread that joins a saved network in range whenever the radio is on but
 /// not connected ([`AutoJoin`]). With Amazon's framework stopped, wifid does not do this
 /// by itself: a Kindle carried to another saved network stayed offline.
+///
+/// While connected (or with the radio off) the thread sleeps until it is woken: by a
+/// wake from sleep, Wi-Fi turned on, or wifid reporting a lost connection
+/// ([`Wifi::look_for_networks`]). It reads nothing meanwhile.
 fn start_auto_join(lipc: Lipc) -> Option<mpsc::Sender<()>> {
     let (tx, rx) = mpsc::channel::<()>();
     let r = std::thread::Builder::new().name("wifi-join".into()).spawn(move || {
         let mut policy = AutoJoin::default();
-        let mut wait = WIFI_WAKE_SETTLE;
+        let mut wait = Some(WIFI_WAKE_SETTLE);
         loop {
-            match rx.recv_timeout(wait) {
+            let woken = match wait {
+                Some(w) => rx.recv_timeout(w),
+                None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            };
+            match woken {
                 Ok(()) => {
-                    // Woken or the radio turned on: the old network rejoins by itself
-                    // when it is in range; look after that.
+                    // The old network rejoins by itself when it is in range; look after
+                    // that.
                     std::thread::sleep(WIFI_WAKE_SETTLE);
                     while rx.try_recv().is_ok() {}
                     policy.reset();
@@ -84,38 +96,39 @@ fn start_auto_join(lipc: Lipc) -> Option<mpsc::Sender<()>> {
 }
 
 /// One look: scans when the radio is on but not connected and joins the strongest saved
-/// network found. Returns the wait before the next look.
-fn auto_join_once(lipc: &Lipc, policy: &mut AutoJoin) -> Duration {
-    match read_wifi_state(lipc) {
-        Ok(s) if s.searching() => {}
-        Ok(s) => {
-            if s.enabled {
-                policy.reset();
-            }
-            return AutoJoin::CONNECTED;
-        }
-        Err(e) => {
+/// network found. Returns the wait before the next look; `None` waits to be woken.
+fn auto_join_once(lipc: &Lipc, policy: &mut AutoJoin) -> Option<Duration> {
+    // Two reads, not read_wifi_state's four: the network name and signal are not needed.
+    let enabled = lipc.get_int(WIFID, "enable").map(|v| v != 0);
+    let state = lipc.get_str(WIFID, "cmState");
+    let s = match (enabled, state) {
+        (Ok(enabled), Ok(state)) => WifiState { enabled, state, essid: None, signal: None },
+        (Err(e), _) | (_, Err(e)) => {
             log::warn!("wifi: auto-join state: {e}");
-            return policy.next_wait();
+            return Some(policy.next_wait());
         }
+    };
+    if !s.searching() {
+        policy.reset();
+        return None;
     }
-    let nets = match scan_now(lipc) {
+    let nets = match scan_now(lipc, AUTO_JOIN_POLL) {
         Ok(n) => n,
         Err(e) => {
             log::warn!("wifi: auto-join scan: {e}");
-            return policy.next_wait();
+            return Some(policy.next_wait());
         }
     };
     let Some(net) = policy.pick(&nets, Instant::now()) else {
         log::info!("wifi: auto-join: no saved network among {} found", nets.len());
-        return policy.next_wait();
+        return Some(policy.next_wait());
     };
     let essid = net.essid.clone();
     log::info!("wifi: auto-join: joining saved network {essid:?}");
     let joined = lipc.set_str(CMD, "ensureConnection", &format!("wifi:{essid}")).is_ok() && {
         let end = Instant::now() + Duration::from_secs(30);
         loop {
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(AUTO_JOIN_POLL);
             match lipc.get_str(WIFID, "cmState").as_deref() {
                 Ok("CONNECTED") => break true,
                 _ if Instant::now() >= end => break false,
@@ -126,11 +139,11 @@ fn auto_join_once(lipc: &Lipc, policy: &mut AutoJoin) -> Duration {
     if joined {
         log::info!("wifi: auto-join: connected to {essid:?}");
         policy.reset();
-        AutoJoin::CONNECTED
+        None
     } else {
         log::warn!("wifi: auto-join: {essid:?} did not connect; skipped for {} min", AutoJoin::SKIP_FAILED.as_secs() / 60);
         policy.failed(&essid, Instant::now());
-        policy.next_wait()
+        Some(policy.next_wait())
     }
 }
 
@@ -557,14 +570,14 @@ impl Wifi for LipcServices {
         }
     }
 
-    fn after_wake(&mut self) {
-        // The state read before sleep is stale now.
+    fn look_for_networks(&mut self) {
+        // The state read before is stale now.
         self.remember(|k| k.wifi = None);
         self.nudge_auto_join();
     }
 
     fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
-        scan_now(&self.lipc)
+        scan_now(&self.lipc, Duration::from_millis(250))
     }
 
     fn scan_list(&self) -> Result<Vec<WifiNetwork>> {

@@ -389,15 +389,19 @@ impl App {
                 if let UiEvent::Gesture(g) = &ev {
                     log::info!("gesture: {g:?}");
                 }
-                match ev {
+                match &ev {
                     UiEvent::Power(PowerEvent::GoingToScreenSaver) => self.note_battery(false),
                     UiEvent::Power(PowerEvent::OutOfScreenSaver) => self.note_battery(true),
+                    // wifid lost the connection: look for a saved network in range.
+                    UiEvent::Power(PowerEvent::WifiState(s)) if !matches!(s.as_str(), "CONNECTED" | "PENDING") => {
+                        self.device.wifi.look_for_networks();
+                    }
                     _ => {}
                 }
                 if matches!(ev, UiEvent::Power(PowerEvent::OutOfScreenSaver)) {
                     self.repaint_after_wake = true;
                     // Carried somewhere else while asleep: look for networks there.
-                    self.device.wifi.after_wake();
+                    self.device.wifi.look_for_networks();
                 }
                 if matches!(ev, UiEvent::Power(PowerEvent::GoingToScreenSaver | PowerEvent::OutOfScreenSaver | PowerEvent::Resuming)) {
                     // The screensaver (or a resume) changed the panel behind the app's back.

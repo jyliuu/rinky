@@ -63,6 +63,8 @@ pub fn load(path: &Path) -> Vec<Sample> {
 pub struct BatteryLog {
     path: PathBuf,
     last: Option<Instant>,
+    /// Lines in the file (read once, at the first sample).
+    lines: Option<usize>,
 }
 
 impl BatteryLog {
@@ -71,7 +73,7 @@ impl BatteryLog {
 
     /// A log written to `path`.
     pub fn new(path: PathBuf) -> Self {
-        BatteryLog { path, last: None }
+        BatteryLog { path, last: None, lines: None }
     }
 
     /// True when a periodic sample is due.
@@ -89,15 +91,19 @@ impl BatteryLog {
         }
     }
 
-    fn append(&self, s: Sample, now: u64) -> std::io::Result<()> {
-        let lines = std::fs::read_to_string(&self.path).map(|t| t.lines().count()).unwrap_or(0);
+    fn append(&mut self, s: Sample, now: u64) -> std::io::Result<()> {
+        let path = &self.path;
+        let lines = *self.lines.get_or_insert_with(|| std::fs::read_to_string(path).map(|t| t.lines().count()).unwrap_or(0));
         if lines >= MAX_LINES {
-            let keep: String = load(&self.path).iter().filter(|x| now.saturating_sub(x.t) < KEEP.as_secs()).map(Sample::line).collect();
+            let keep: Vec<Sample> = load(&self.path).into_iter().filter(|x| now.saturating_sub(x.t) < KEEP.as_secs()).collect();
             let tmp = self.path.with_extension("csv.tmp");
-            std::fs::write(&tmp, keep)?;
+            std::fs::write(&tmp, keep.iter().map(Sample::line).collect::<String>())?;
             std::fs::rename(&tmp, &self.path)?;
+            self.lines = Some(keep.len());
         }
-        std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?.write_all(s.line().as_bytes())
+        std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?.write_all(s.line().as_bytes())?;
+        self.lines = self.lines.map(|n| n + 1);
+        Ok(())
     }
 }
 
