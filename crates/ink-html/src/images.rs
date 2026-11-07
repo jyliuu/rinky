@@ -105,27 +105,28 @@ fn whole_decode(bytes: &[u8], w: u32, h: u32) -> Option<GrayImage> {
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|p| ((p[0] as u32 * p[1] as u32 + 255 * (255 - p[1] as u32)) / 255) as u8)
+            .map(|p| over_white(p[0] as u32, p[1] as u32))
             .collect();
         GrayImage::from_raw(iw, ih, raw)?
     } else {
         img.to_luma8()
     };
-    if gray.dimensions() == (w, h) {
-        return Some(gray);
-    }
-    Some(resize_gray(&gray, w, h))
+    Some(finish_size(gray, w, h))
 }
 
 /// 8-bit gray of one pixel with `channels` (1 gray, 2 gray+alpha, 3 RGB, 4 RGBA)
 /// samples; transparency is composited on white.
 fn gray_of(px: &[u8], channels: usize) -> u8 {
-    let (l, a) = match channels {
-        1 => return px[0],
-        2 => (px[0] as u32, px[1] as u32),
-        3 => return luma(px[0], px[1], px[2]) as u8,
-        _ => (luma(px[0], px[1], px[2]), px[3] as u32),
-    };
+    match channels {
+        1 => px[0],
+        2 => over_white(px[0] as u32, px[1] as u32),
+        3 => luma(px[0], px[1], px[2]) as u8,
+        _ => over_white(luma(px[0], px[1], px[2]), px[3] as u32),
+    }
+}
+
+/// Gray `l` with alpha `a` composited on white paper.
+fn over_white(l: u32, a: u32) -> u8 {
     ((l * a + 255 * (255 - a)) / 255) as u8
 }
 
@@ -194,8 +195,8 @@ impl RowShrink {
     }
 }
 
-/// Fits a shrunk image (at most `w` x `h`) to exactly `w` x `h` (upscaling the axes
-/// that the source was too small for).
+/// Scales an image to exactly `w` x `h` unless it has that size (the shrinking
+/// decoders give at most `w` x `h`: axes the source was too small for grow).
 fn finish_size(img: GrayImage, w: u32, h: u32) -> GrayImage {
     if img.dimensions() == (w, h) {
         img
@@ -381,9 +382,7 @@ fn render_svg_tree(tree: &usvg::Tree, w: u32, h: u32) -> GrayImage {
     for (i, px) in pix.pixels().iter().enumerate() {
         let c = px.demultiply();
         let (r, g, b, a) = (c.red() as u32, c.green() as u32, c.blue() as u32, c.alpha() as u32);
-        let l = (r * 299 + g * 587 + b * 114) / 1000;
-        let v = (l * a + 255 * (255 - a)) / 255;
-        out.as_mut()[i] = v as u8;
+        out.as_mut()[i] = over_white((r * 299 + g * 587 + b * 114) / 1000, a);
     }
     out
 }
