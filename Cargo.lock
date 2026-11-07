@@ -700,6 +700,7 @@ name = "ink-dict"
 version = "0.5.2"
 dependencies = [
  "flate2",
+ "ink-html",
  "thiserror",
 ]
 

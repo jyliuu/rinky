@@ -91,7 +91,7 @@ fn lookup_popup_full_view_and_record() {
     let reqs = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_ui_result(cx, id, "full").unwrap());
     let UiRequest::TextViewer { title, markdown, .. } = &reqs[0] else { panic!("{reqs:?}") };
     assert_eq!(title, "household");
-    assert!(markdown.starts_with("## Sample English Dictionary\n\n**household**\n\n"), "{markdown}");
+    assert!(markdown.starts_with("## Sample English Dictionary\n\n**household** *noun*\n\n"), "{markdown}");
     assert!(markdown.contains("a house and its occupants"));
     assert!(!markdown.contains("Looked up"), "same word: no note");
     // "close" shows nothing more.
@@ -133,7 +133,9 @@ fn inflected_list_entry_and_not_found() {
     run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_ui_result(cx, 1, "add").unwrap());
     let md = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_ui_result(cx, 1, "full").unwrap());
     let UiRequest::TextViewer { markdown, .. } = &md[0] else { panic!() };
-    assert!(markdown.contains("\n- the state or quality of being worthy"), "{markdown}");
+    // The dictionary's own formatting: its numbered senses, its head line once.
+    assert!(markdown.contains("**dignity** *noun*\n\n1. the state or quality of being worthy"), "{markdown}");
+    assert_eq!(markdown.matches("**dignity**").count(), 1, "{markdown}");
     let mut book = Book { selection: Some(sel("xyzzy")) };
     let reqs = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     let UiRequest::Dialog { body, buttons, .. } = &reqs[0] else { panic!("{reqs:?}") };
@@ -195,13 +197,13 @@ fn typed_word_action() {
 
 #[test]
 fn popup_cut_and_markdown_escape() {
-    let long = Hit { dict: "D".into(), headword: "w".into(), text: "word ".repeat(200), entry: None };
+    let long = Hit { dict: "D".into(), headword: "w".into(), text: "word ".repeat(200), entry: None, markdown: String::new() };
     let b = popup_body(&long, 2);
     assert!(b.contains('…') && b.ends_with("\n— D · +2 more"), "{b}");
     assert!(b.chars().count() < POPUP_CHARS + 20);
-    let rep = Hit { dict: "D".into(), headword: "cat".into(), text: "Cat\na small animal".into(), entry: None };
+    let rep = Hit { dict: "D".into(), headword: "cat".into(), text: "Cat\na small animal".into(), entry: None, markdown: String::new() };
     assert_eq!(popup_body(&rep, 0), "a small animal\n— D");
-    let noad = Hit { dict: "D".into(), headword: "mutiny".into(), text: "mutiny | ˈmjuːtɪni | noun (plural mutinies)\n1 an open rebellion".into(), entry: None };
+    let noad = Hit { dict: "D".into(), headword: "mutiny".into(), text: "mutiny | ˈmjuːtɪni | noun (plural mutinies)\n1 an open rebellion".into(), entry: None, markdown: String::new() };
     let e = parse_entry(&noad);
     assert_eq!((e.pron.as_deref(), e.pos.as_deref(), e.sense.as_str()), (Some("ˈmjuːtɪni"), Some("noun (plural mutinies)"), "an open rebellion"));
     assert_eq!(popup_body(&noad, 0), "_/ˈmjuːtɪni/ · noun (plural mutinies)_\nan open rebellion\n— D");
@@ -213,7 +215,7 @@ fn popup_cut_and_markdown_escape() {
 
 #[test]
 fn full_view_tabs_with_two_dictionaries() {
-    let hit = |d: &str, t: &str| Hit { dict: d.into(), headword: "w".into(), text: t.into(), entry: None };
+    let hit = |d: &str, t: &str| Hit { dict: d.into(), headword: "w".into(), text: t.into(), entry: None, markdown: t.into() };
     let r = LookupResult { query: "w".into(), form: "w".into(), hits: vec![hit("A", "first"), hit("B", "second")] };
     assert_eq!(dict_names(&r), vec!["A".to_string(), "B".to_string()]);
     let md = full_markdown_tab(&r, 1);
@@ -235,7 +237,7 @@ fn parsed_entry_card_and_full_view() {
         ],
         sections: vec![Section { label: "Origin".into(), lines: vec![(String::new(), "1990s: imitative.".into())] }],
     };
-    let hit = Hit { dict: "D".into(), headword: "blip".into(), text: String::new(), entry: Some(e.clone()) };
+    let hit = Hit { dict: "D".into(), headword: "blip".into(), text: String::new(), entry: Some(e.clone()), markdown: String::new() };
     assert_eq!(popup_body(&hit, 1), "_/blɪp/ · noun_\n1. a dot\n2. a sound\nverb: make a blip\n— D · +1 more");
     assert_eq!(vocab_definition(&hit), "noun · a dot");
     let md = entry_markdown("blip", &e);
@@ -334,7 +336,7 @@ fn swipes_page_the_card_through_the_dictionaries_with_a_hit() {
     let Some(UiRequest::TextViewer { markdown, .. }) = ui.last() else { panic!("{ui:?}") };
     assert!(markdown.contains("**Gamma**") && markdown.contains("from gamma") && !markdown.contains("from alpha"), "{markdown}");
     // One dictionary: no pages, a swipe sends nothing.
-    let hit = |d: &str, t: &str| Hit { dict: d.into(), headword: "w".into(), text: t.into(), entry: None };
+    let hit = |d: &str, t: &str| Hit { dict: d.into(), headword: "w".into(), text: t.into(), entry: None, markdown: String::new() };
     let one = LookupResult { query: "w".into(), form: "w".into(), hits: vec![hit("A", "first"), hit("A", "second")] };
     assert_eq!(popup_page(&one, 0).unwrap().1, "first\n— A · +1 more");
     let two = LookupResult { hits: vec![hit("A", "first"), hit("A", "again"), hit("B", "second")], ..one.clone() };

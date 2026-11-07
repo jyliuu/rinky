@@ -8,6 +8,8 @@
 //!   lowercase, possessive, simple English inflections).
 //! - [`text::html_to_text`]: plain text from the `h`/`x`/`g` definition types.
 //! - [`entry::parse`]: senses, examples and sections of known dictionary markups.
+//! - [`markdown::to_markdown`]: Markdown of any definition markup for the full view, with
+//!   the dictionary's style sheet.
 //! - [`writer`]: writes small dictionaries (tests, examples, the simulator).
 
 #![warn(missing_docs)]
@@ -15,6 +17,7 @@
 mod dictzip;
 pub mod entry;
 mod library;
+pub mod markdown;
 pub mod normalize;
 mod stardict;
 pub mod text;
