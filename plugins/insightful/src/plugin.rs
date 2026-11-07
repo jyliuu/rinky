@@ -252,6 +252,11 @@ impl InsightfulPlugin {
     }
 
     fn show(&mut self, cx: &mut HostCtx) -> Result<()> {
+        // The streamed text is copied for the view only here, not per event.
+        if let Some(r) = self.run.as_mut().filter(|r| r.live.text != r.acc.text()) {
+            r.live.text.clear();
+            r.live.text.push_str(r.acc.text());
+        }
         let Some(conv) = self.conv() else { return Ok(()) };
         // The live answer only in the chat it belongs to.
         let run = self.run.as_ref().filter(|r| self.chat.as_deref() == Some(r.chat.as_str()));
@@ -379,7 +384,6 @@ impl InsightfulPlugin {
         r.status = 0;
         r.err_body.clear();
         r.sse = SseParser::new();
-        r.live.text.clear();
         r.live.status = "Thinking…".into();
         match cx.start_request(http, mode) {
             Ok(id) => {
@@ -651,17 +655,16 @@ impl InsightfulPlugin {
                 return self.fail(cx, m);
             }
         }
-        r.live.text = r.acc.text().to_string();
-        r.live.status = if !r.live.text.is_empty() {
+        r.live.status = if !r.acc.text().is_empty() {
             String::new()
-        } else if !r.acc.tool_names().is_empty() {
+        } else if r.acc.has_tool_calls() {
             "Choosing book tools…".into()
         } else if r.acc.reasoning() {
             "Reasoning…".into()
         } else {
             "Thinking…".into()
         };
-        let grown = r.live.text.len().saturating_sub(r.flushed);
+        let grown = r.acc.text().len().saturating_sub(r.flushed);
         if grown >= self.batch_chars || (grown > 0 && r.last_flush.elapsed() >= self.batch_interval) {
             let chat = r.chat.clone();
             return self.refresh(cx, &chat);

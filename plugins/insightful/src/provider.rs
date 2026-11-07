@@ -467,6 +467,11 @@ impl StreamAccumulator {
         self.reasoning
     }
 
+    /// True once a tool call was seen.
+    pub fn has_tool_calls(&self) -> bool {
+        !self.calls.is_empty()
+    }
+
     /// Names of the tool calls seen so far.
     pub fn tool_names(&self) -> Vec<String> {
         self.calls.values().map(|c| c.name.clone()).collect()
