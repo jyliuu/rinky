@@ -378,6 +378,24 @@ fn push_text(el: &mut Element, s: String) {
     }
 }
 
+/// Index of the `>` that closes the tag opening at `start` (a `<`), skipping quoted
+/// attribute values; `None` when the tag is never closed.
+pub(crate) fn tag_end(b: &[u8], start: usize) -> Option<usize> {
+    let mut quote = 0u8;
+    for (j, &c) in b.iter().enumerate().skip(start + 1) {
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            quote = c;
+        } else if c == b'>' {
+            return Some(j);
+        }
+    }
+    None
+}
+
 /// True when the markup in `s` opens more than `limit` nested elements. A byte scan
 /// (start tags minus end tags; void HTML elements, self-closing tags, comments, CDATA,
 /// declarations and processing instructions do not count), fast enough for every
@@ -407,38 +425,11 @@ pub fn nesting_exceeds(s: &str, limit: usize) -> bool {
             i = p + 2;
             continue;
         }
-        // A start tag: find its end, honouring quotes.
-        let mut j = p + 1;
-        let mut quote = 0u8;
-        while j < b.len() {
-            let c = b[j];
-            if quote != 0 {
-                if c == quote {
-                    quote = 0;
-                }
-            } else if c == b'"' || c == b'\'' {
-                quote = c;
-            } else if c == b'>' {
-                break;
-            }
-            j += 1;
-        }
-        if j >= b.len() {
-            break;
-        }
-        // The name up to whitespace, `/` or `>`, without copying it; void names are short
-        // ASCII words, so the local name is lowercased in a small stack buffer.
+        let Some(j) = tag_end(b, p) else { break };
+        // The name up to whitespace, `/` or `>`, without copying it.
         let name_len = rest[1..].find(|c: char| c.is_whitespace() || matches!(c, '/' | '>')).unwrap_or(rest.len() - 1);
-        let name = &rest[1..1 + name_len];
-        let local = name.rsplit(':').next().unwrap_or("");
-        let mut buf = [0u8; 16];
-        let void = local.len() <= buf.len() && {
-            let l = &mut buf[..local.len()];
-            l.copy_from_slice(local.as_bytes());
-            l.make_ascii_lowercase();
-            std::str::from_utf8(l).is_ok_and(crate::xhtml::is_void)
-        };
-        if b[j - 1] != b'/' && !void {
+        let local = rest[1..1 + name_len].rsplit(':').next().unwrap_or("");
+        if b[j - 1] != b'/' && !crate::xhtml::is_void_ignore_case(local) {
             depth += 1;
             if depth > limit {
                 return true;

@@ -6,7 +6,7 @@
 //! A [`Rewrite`] sees every element before it is written and can rename it, change its
 //! attributes, drop it or unwrap it (keep the children only).
 
-use crate::xml::{escape_attr, escape_text, is_xml_name};
+use crate::xml::{escape_attr, escape_text, is_xml_name, tag_end};
 use html5ever::tendril::StrTendril;
 use html5ever::tokenizer::{BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts};
 use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, Tracer, TreeBuilder, TreeBuilderOpts, TreeSink};
@@ -45,6 +45,11 @@ const VOID: &[&str] =
 /// True for HTML void elements (written as `<x/>`).
 pub fn is_void(name: &str) -> bool {
     VOID.contains(&name)
+}
+
+/// [`is_void`] for a local name in any letter case (`BR`, `Img`).
+pub(crate) fn is_void_ignore_case(name: &str) -> bool {
+    VOID.iter().any(|v| v.eq_ignore_ascii_case(name))
 }
 
 /// Most handles the HTML tree builder may hold (open elements plus active formatting
@@ -438,35 +443,17 @@ pub fn expand_self_closing(xml: &str) -> String {
             i = start + 1;
             continue;
         }
-        // Find the end of the tag, honouring quotes.
-        let mut j = start + 1;
-        let mut quote = 0u8;
-        while j < bytes.len() {
-            let c = bytes[j];
-            if quote != 0 {
-                if c == quote {
-                    quote = 0;
-                }
-            } else if c == b'"' || c == b'\'' {
-                quote = c;
-            } else if c == b'>' {
-                break;
-            }
-            j += 1;
-        }
-        if j >= bytes.len() {
-            break;
-        }
+        let Some(j) = tag_end(bytes, start) else { break };
         if bytes[j - 1] == b'/' {
             let tag = &xml[start + 1..j - 1];
-            let name: String = tag.chars().take_while(|c| !c.is_whitespace() && *c != '/').collect();
-            let local = name.rsplit(':').next().unwrap_or(&name).to_ascii_lowercase();
-            if !name.is_empty() && !is_void(&local) {
+            let name = &tag[..tag.find(|c: char| c.is_whitespace() || c == '/').unwrap_or(tag.len())];
+            let local = name.rsplit(':').next().unwrap_or(name);
+            if !name.is_empty() && !is_void_ignore_case(local) {
                 out.push_str(&xml[last..start]);
                 out.push('<');
                 out.push_str(tag.trim_end());
                 out.push_str("></");
-                out.push_str(&name);
+                out.push_str(name);
                 out.push('>');
                 last = j + 1;
             }
