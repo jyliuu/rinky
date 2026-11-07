@@ -472,8 +472,9 @@ pub fn wrap(
         };
         let mut first = 0;
         for br in breaks {
-            let boxes: Vec<&Range<usize>> = spans[first..br.position.min(n)].iter().flatten().collect();
-            if let (Some(a), Some(z)) = (boxes.first(), boxes.last()) {
+            let mut boxes = spans[first..br.position.min(n)].iter().flatten();
+            if let Some(a) = boxes.next() {
+                let z = boxes.next_back().unwrap_or(a);
                 let w: f32 = items[first..br.position]
                     .iter()
                     .skip_while(|i| !matches!(i, Item::Box { .. }))
