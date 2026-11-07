@@ -50,18 +50,13 @@ impl EinkPanel {
             (true, RefreshClass::Gl16) => 2,
             (true, RefreshClass::Du) => 3,
         };
-        let w = self.pixels.width;
+        let levels: [u8; 256] = std::array::from_fn(|v| if class == RefreshClass::Du { quantize2(v as u8) } else { quantize16(v as u8) });
+        let (w, n) = (self.pixels.width, rect.w as usize);
         for y in rect.y as usize..rect.bottom() as usize {
-            for x in rect.x as usize..rect.right() as usize {
-                let i = y * w + x;
-                let new = src.pixels[i];
-                let q = if class == RefreshClass::Du { quantize2(new) } else { quantize16(new) };
-                let old = self.pixels.pixels[i] as u32;
-                self.pixels.pixels[i] = if ghost > 0 && old != q as u32 {
-                    ((q as u32 * (16 - ghost) + old * ghost) / 16) as u8
-                } else {
-                    q
-                };
+            let i = y * w + rect.x as usize;
+            for (old, &new) in self.pixels.pixels[i..i + n].iter_mut().zip(&src.pixels[i..i + n]) {
+                let q = levels[new as usize];
+                *old = if ghost > 0 && *old != q { ((q as u32 * (16 - ghost) + *old as u32 * ghost) / 16) as u8 } else { q };
             }
         }
         self.updates += 1;
