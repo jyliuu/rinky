@@ -313,25 +313,18 @@ fn split_fields(data: &[u8], seq: &str) -> Vec<Field> {
     let mut out = Vec::new();
     let mut p = 0usize;
     if !seq.is_empty() {
-        let kinds: Vec<char> = seq.chars().collect();
-        for (k, &kind) in kinds.iter().enumerate() {
-            if p > data.len() {
-                break;
-            }
-            let last = k + 1 == kinds.len();
-            if last {
+        let last = seq.chars().count() - 1;
+        for (k, kind) in seq.chars().enumerate() {
+            if k == last {
+                // The rest; a NUL or size prefix written anyway is dropped.
                 let d = &data[p..];
-                let d = if kind.is_ascii_lowercase() { d.strip_suffix(&[0]).unwrap_or(d) } else if d.len() >= 4 && !kind.is_ascii_lowercase() && u32::from_be_bytes(d[..4].try_into().unwrap()) as usize == d.len() - 4 { &d[4..] } else { d };
+                let d = if kind.is_ascii_lowercase() { d.strip_suffix(&[0]).unwrap_or(d) } else if d.len() >= 4 && be32(d) as usize == d.len() - 4 { &d[4..] } else { d };
                 out.push(Field { kind, data: d.to_vec() });
                 break;
             }
-            match take_field(data, p, kind) {
-                Some((f, next)) => {
-                    out.push(Field { kind, data: f.to_vec() });
-                    p = next;
-                }
-                None => break,
-            }
+            let Some((f, next)) = take_field(data, p, kind) else { break };
+            out.push(Field { kind, data: f.to_vec() });
+            p = next;
         }
         return out;
     }
