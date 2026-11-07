@@ -220,6 +220,17 @@ static SETTLE_WAITS: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     /// [`SETTLE_WAITS`] for loads on this thread only: tests in the same process wait too.
     static SETTLE_WAITS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Run once, on this thread, at the next settle wait: see [`on_settle_wait`].
+    static ON_SETTLE_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` when the next load on this thread finds its file missing and is about to
+/// wait for a save in progress. Tests finish their "save in progress" there: from
+/// another thread, the save had to land inside the 127 ms of waits, which a busy machine
+/// does not guarantee.
+#[cfg(test)]
+pub(crate) fn on_settle_wait(f: impl FnOnce() + 'static) {
+    ON_SETTLE_WAIT.with(|h| *h.borrow_mut() = Some(Box::new(f)));
 }
 
 /// How many times loads in this process found a file missing while a save of it might
@@ -244,7 +255,12 @@ fn read_settled(path: &Path, check_backup: bool) -> std::io::Result<Option<Vec<u
                     Some(&ms) if busy => {
                         SETTLE_WAITS.fetch_add(1, Ordering::Relaxed);
                         #[cfg(test)]
-                        SETTLE_WAITS_HERE.with(|w| w.set(w.get() + 1));
+                        {
+                            SETTLE_WAITS_HERE.with(|w| w.set(w.get() + 1));
+                            if let Some(f) = ON_SETTLE_WAIT.with(|h| h.borrow_mut().take()) {
+                                f();
+                            }
+                        }
                         std::thread::sleep(Duration::from_millis(ms));
                     }
                     _ => return Ok(None),
@@ -661,21 +677,15 @@ mod tests {
         std::fs::rename(&f, &tmp).unwrap();
         std::fs::write(&tmp, b"{\"v\":").unwrap(); // still being written: not usable
         let before = load_waits();
-        let t = std::thread::spawn({
+        // The save finishes while the load waits for it.
+        on_settle_wait({
             let (f, tmp) = (f.clone(), tmp.clone());
             move || {
-                // Finish the save once the load is waiting for it, not after a fixed
-                // sleep, which a busy machine can stretch past the load's 127 ms.
-                let start = std::time::Instant::now();
-                while load_waits() == before && start.elapsed() < Duration::from_secs(5) {
-                    std::thread::yield_now();
-                }
                 std::fs::write(&tmp, b"{\"v\":3}").unwrap();
                 std::fs::rename(&tmp, &f).unwrap();
             }
         });
         let r = load_recovering(&f, parse_json).unwrap();
-        t.join().unwrap();
         assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Primary, Some(3)));
         assert!(load_waits() > before);
         // A file that never existed (no backup, no temporary file) is not waited for.
