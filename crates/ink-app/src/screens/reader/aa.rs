@@ -1142,14 +1142,19 @@ impl FamilyGrid {
         }
     }
 
+    /// (cells in `b`, names per page, pages): with more names than cells the last cell
+    /// is the "More" cell.
+    fn paging(&self, b: Rect) -> (usize, usize, usize) {
+        let per = (Self::cols(b) * ((b.h + GAP) / (CONTROL_H + GAP)).max(1)) as usize;
+        let per_page = if self.names.len() > per { per - 1 } else { per };
+        (per, per_page, self.names.len().div_ceil(per_page.max(1)).max(1))
+    }
+
     /// The cells of the current page.
     fn cells(&self, b: Rect) -> Vec<(Rect, Cell2)> {
         let cols = Self::cols(b);
-        let rows = ((b.h + GAP) / (CONTROL_H + GAP)).max(1);
-        let per = (cols * rows) as usize;
-        let paged = self.names.len() > per;
-        let per_page = if paged { per - 1 } else { per };
-        let pages = self.names.len().div_ceil(per_page.max(1)).max(1);
+        let (per, per_page, pages) = self.paging(b);
+        let paged = per_page < per;
         let page = self.page % pages;
         let w = (b.w - (cols - 1) * GAP) / cols;
         let at = |n: usize| {
@@ -1165,12 +1170,7 @@ impl FamilyGrid {
     }
 
     fn pages(&self, b: Rect) -> usize {
-        let per = (Self::cols(b) * ((b.h + GAP) / (CONTROL_H + GAP)).max(1)) as usize;
-        if self.names.len() > per {
-            self.names.len().div_ceil(per - 1)
-        } else {
-            1
-        }
+        self.paging(b).2
     }
 
     fn selected(&self) -> String {
@@ -1265,6 +1265,12 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
     let s = shown.borrow().clone();
     let ctl = |f, inner, values: Vec<String>| -> Box<dyn Widget> { Box::new(Control::new(f, inner, values, shown)) };
     let toggle = |f, label: &str, on: bool, action: &str| ctl(f, Inner::Toggle(Toggle::new(label, on, action)), Vec::new());
+    // A segmented choice from a (value, caption) table; option I reports `action:value`.
+    fn choice<T: std::fmt::Display>(table: &[(T, &str)], action: &str) -> (Inner, Vec<String>) {
+        let captions: Vec<&str> = table.iter().map(|x| x.1).collect();
+        (seg(&captions), table.iter().map(|x| format!("{action}:{}", x.0)).collect())
+    }
+    let pick = |f, (inner, values): (Inner, Vec<String>)| ctl(f, inner, values);
     match tab {
         0 => {
             let preset_names: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
@@ -1291,25 +1297,20 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
                     stack_narrow: true,
                     widgets: vec![
                         (Some("publisher"), toggle(Field::Publisher, "Book's styles", s.publisher, "aa-publisher")),
-                        (Some("weight"), ctl(Field::Weight, seg(&WEIGHTS.map(|x| x.1)), WEIGHTS.iter().map(|x| format!("aa-weight:{}", x.0)).collect())),
+                        (Some("weight"), pick(Field::Weight, choice(&WEIGHTS, "aa-weight"))),
                     ],
                 },
             ]
         }
         1 => vec![
             Row::one("sliders", None, SliderPanel::height(4, PREVIEW_H), Box::new(SliderPanel::new(vec![1, 2, 3, 4], shown, screen_w))),
-            Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, ctl(Field::ParaSpace, Inner::Seg(Segmented::new(&PARA_SPACINGS.map(|x| x.1), "seg")), PARA_SPACINGS.iter().map(|x| format!("aa-pspace:{}", x.0)).collect())),
-            Row::one("indent", Some("First-line indent"), CONTROL_H, ctl(Field::Indent, seg(&INDENTS.map(|x| x.1)), INDENTS.iter().map(|x| format!("aa-indent:{}", x.0)).collect())),
+            Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, pick(Field::ParaSpace, choice(&PARA_SPACINGS, "aa-pspace"))),
+            Row::one("indent", Some("First-line indent"), CONTROL_H, pick(Field::Indent, choice(&INDENTS, "aa-indent"))),
         ],
         _ => [
             s.extras.wave_supported.then(|| Row::one("wave", None, CONTROL_H, toggle(Field::Wave, "Page turn wave", s.extras.wave, "aa-anim"))),
             Some(Row::one("statusbars", None, CONTROL_H, Box::new(Button::new("Status bars…", "aa-statusbars")))),
-            Some(Row::one(
-                "flash",
-                Some("Full refresh every"),
-                CONTROL_H,
-                ctl(Field::Flash, Inner::Seg(Segmented::new(&FLASHES.iter().map(|x| x.1).collect::<Vec<_>>(), "seg")), FLASHES.iter().map(|x| format!("aa-flash:{}", x.0)).collect()),
-            )),
+            Some(Row::one("flash", Some("Full refresh every"), CONTROL_H, pick(Field::Flash, choice(&FLASHES, "aa-flash")))),
             Some(Row::one("night", None, CONTROL_H, toggle(Field::Night, "Night mode", s.extras.night, "aa-night"))),
         ]
         .into_iter()
