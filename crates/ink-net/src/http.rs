@@ -143,7 +143,7 @@ impl Request {
 
     /// First header named `name` (case-insensitive).
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        find_header(&self.headers, name)
     }
 
     /// `Authorization: Basic ...` (OPDS servers such as Calibre-Web).
@@ -204,7 +204,7 @@ impl Response {
 
     /// First header named `name` (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        find_header(&self.headers, name)
     }
 
     /// `Content-Length`, when present and valid.
@@ -251,13 +251,28 @@ impl Response {
             return Ok(self);
         }
         let status = self.status;
-        let text = self.text(4096).unwrap_or_default();
-        let message = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v.get("message").or(v.get("error")).and_then(|m| m.as_str()).map(str::to_string))
-            .unwrap_or_else(|| text.trim().chars().take(200).collect());
-        Err(if status == 401 { NetError::Unauthorized(message) } else { NetError::Server { status, message } })
+        Err(status_error(status, &self.text(4096).unwrap_or_default()))
     }
+}
+
+/// The error for an answer with a failing `status` and body `text`: the message is the
+/// body's JSON `message` (or `error`) field, else the start of the body; 401 becomes
+/// [`NetError::Unauthorized`].
+pub fn status_error(status: u16, text: &str) -> NetError {
+    let message = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("message").or(v.get("error")).and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_else(|| text.trim().chars().take(200).collect());
+    if status == 401 {
+        NetError::Unauthorized(message)
+    } else {
+        NetError::Server { status, message }
+    }
+}
+
+/// First header named `name` (case-insensitive).
+fn find_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
 }
 
 /// Sends requests.
@@ -441,35 +456,23 @@ impl UreqClient {
 
 /// Maps a ureq error to [`NetError`].
 pub fn map_ureq(e: ureq::Error) -> NetError {
-    match e {
-        ureq::Error::Timeout(_) => NetError::Timeout,
-        ureq::Error::Tls(m) => NetError::Tls(m.to_string()),
-        ureq::Error::Pem(p) => NetError::Tls(format!("pem: {p}")),
-        ureq::Error::Rustls(r) => NetError::Tls(r.to_string()),
-        ureq::Error::Io(io) => {
-            let msg = io.to_string();
-            if io.kind() == std::io::ErrorKind::TimedOut || io.kind() == std::io::ErrorKind::WouldBlock {
-                NetError::Timeout
-            } else if is_tls_message(&msg) {
-                NetError::Tls(msg)
-            } else {
-                NetError::Http(format!("io: {msg}"))
-            }
-        }
-        other => {
-            let msg = other.to_string();
-            if is_tls_message(&msg) {
-                NetError::Tls(msg)
-            } else {
-                NetError::Http(msg)
-            }
-        }
-    }
-}
-
-fn is_tls_message(msg: &str) -> bool {
+    use std::io::ErrorKind::{TimedOut, WouldBlock};
+    // Other errors are TLS failures when their text says so (ureq wraps some of them).
+    let (msg, http_prefix) = match e {
+        ureq::Error::Timeout(_) => return NetError::Timeout,
+        ureq::Error::Tls(m) => return NetError::Tls(m.to_string()),
+        ureq::Error::Pem(p) => return NetError::Tls(format!("pem: {p}")),
+        ureq::Error::Rustls(r) => return NetError::Tls(r.to_string()),
+        ureq::Error::Io(io) if matches!(io.kind(), TimedOut | WouldBlock) => return NetError::Timeout,
+        ureq::Error::Io(io) => (io.to_string(), "io: "),
+        other => (other.to_string(), ""),
+    };
     let m = msg.to_ascii_lowercase();
-    m.contains("certificate") || m.contains("unknownissuer") || m.contains("handshake") || m.contains("tls")
+    if ["certificate", "unknownissuer", "handshake", "tls"].iter().any(|w| m.contains(w)) {
+        NetError::Tls(msg)
+    } else {
+        NetError::Http(format!("{http_prefix}{msg}"))
+    }
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -478,8 +481,9 @@ fn is_redirect(status: u16) -> bool {
 
 /// Header names that carry credentials; dropped when a redirect changes the origin.
 pub fn is_sensitive_header(name: &str) -> bool {
+    // `auth` covers Authorization and Proxy-Authorization.
     let n = name.to_ascii_lowercase();
-    n == "authorization" || n == "proxy-authorization" || n == "cookie" || n.contains("auth") || n.contains("key") || n.contains("token") || n.contains("secret")
+    n == "cookie" || ["auth", "key", "token", "secret"].iter().any(|w| n.contains(w))
 }
 
 /// Applies one redirect to `req` (RFC 9110 section 15.4 plus browser practice): resolves

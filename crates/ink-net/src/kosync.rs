@@ -225,17 +225,15 @@ impl<'a> KoSyncClient<'a> {
         let status = resp.status;
         let mime = resp.mime();
         let text = resp.text(1 << 20)?;
-        let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
         if ok.contains(&status) {
             // A hotel or train Wi-Fi login page answers 200 to everything. A sync server
             // never sends HTML; counting it as success would drop queued pushes.
             if mime == "text/html" || text.trim_start().starts_with('<') {
                 return Err(NetError::Format(format!("status {status} with an HTML page, not a sync server answer (captive portal?)")));
             }
-            return Ok(body);
+            return Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null));
         }
-        let message = body.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| text.trim().chars().take(200).collect());
-        Err(if status == 401 { NetError::Unauthorized(message) } else { NetError::Server { status, message } })
+        Err(crate::http::status_error(status, &text))
     }
 
     /// Creates the account (`POST /users/create`). A taken name is
