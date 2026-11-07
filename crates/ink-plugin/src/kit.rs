@@ -146,6 +146,19 @@ pub fn md_escape(s: &str) -> String {
     out
 }
 
+/// `text` with each run of white space (line breaks too) as one space, and none at
+/// either end.
+pub fn squeeze(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for w in text.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    out
+}
+
 /// `text` cut at `max` characters on a word boundary (when one is in the second half),
 /// without trailing separators, with an ellipsis; `text` itself when it is short enough.
 pub fn cut_at(text: &str, max: usize) -> String {
@@ -164,7 +177,7 @@ pub fn cut_at(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cut_at, md_escape, Requests};
+    use super::{cut_at, md_escape, squeeze, Requests};
     use crate::{HostCtx, HttpEvent, MemoryStorage, NetHost, Permission, PluginError, StreamMode, UiQueue, UiRequest};
     use ink_net::Request;
     use serde_json::json;
@@ -202,6 +215,8 @@ mod tests {
         assert_eq!(cut_at("one two three four", 12), "one two…");
         assert_eq!(cut_at("one two, • three", 10), "one two…");
         assert_eq!(cut_at("abcdefghijkl", 5), "abcde…");
+        assert_eq!(squeeze(" a\n\t b  c "), "a b c");
+        assert_eq!(squeeze(" \n "), "");
     }
 
     struct Jobs(u32);

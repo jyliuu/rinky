@@ -138,9 +138,9 @@ pub fn footer(lang: &str, page: usize, pages: usize) -> String {
 pub fn summary_card(s: &Summary, lang: &str, page: usize, pages: usize) -> (String, String) {
     let mut lines: Vec<String> = Vec::new();
     if let Some(d) = &s.description {
-        lines.push(format!("_{}_", d.split_whitespace().collect::<Vec<_>>().join(" ")));
+        lines.push(format!("_{}_", api::squeeze(d)));
     }
-    let extract = s.extract.split_whitespace().collect::<Vec<_>>().join(" ");
+    let extract = api::squeeze(&s.extract);
     lines.push(if extract.is_empty() { "No summary for this page. Open the full view.".to_string() } else { api::cut_at(&extract, CARD_CHARS) });
     lines.push(format!("— {}", footer(lang, page, pages)));
     (s.title.clone(), lines.join("\n"))

@@ -9,6 +9,7 @@
 
 use crate::prompts::SelectionInfo;
 use crate::provider::Usage;
+use ink_plugin::kit::squeeze;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -210,7 +211,7 @@ pub fn file_name(book_id: &str) -> String {
 }
 
 fn short(text: &str, n: usize) -> String {
-    let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = squeeze(text);
     if t.chars().count() <= n {
         t
     } else {
@@ -327,7 +328,7 @@ fn guard(text: &str) -> String {
 
 /// One line for a block argument (no `|` separator, no line breaks).
 fn arg(text: &str) -> String {
-    text.replace('|', "/").split_whitespace().collect::<Vec<_>>().join(" ")
+    squeeze(&text.replace('|', "/"))
 }
 
 /// Replaces `<question>q</question>` items with links; returns the new text and adds

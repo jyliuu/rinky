@@ -5,6 +5,7 @@
 //! strings and come back unchanged. Pages are 1-based in tool arguments and results.
 
 use ink_doc::{LinkTarget, Position, TocEntry};
+use ink_plugin::kit::squeeze;
 use ink_plugin::DocumentAccess;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -66,10 +67,6 @@ pub fn utf8_prefix(text: &str, limit: usize) -> String {
         cut -= 1;
     }
     format!("{}...", &text[..cut])
-}
-
-fn squeeze(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[derive(Clone, Debug)]

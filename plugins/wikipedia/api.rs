@@ -12,7 +12,7 @@
 //!   `== Heading ==`.
 
 use ink_net::url::encode_component;
-pub use ink_plugin::kit::{cut_at, md_escape};
+pub use ink_plugin::kit::{cut_at, md_escape, squeeze};
 use ink_plugin::serde_json::{json, Map, Value};
 use std::path::Path;
 
@@ -70,7 +70,7 @@ pub fn article_url(lang: &str, title: &str) -> String {
 /// The selected text as a search term: whitespace collapsed, quotes and sentence
 /// punctuation cut off both ends, at most 120 characters.
 pub fn clean_query(sel: &str) -> String {
-    let joined = sel.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = squeeze(sel);
     let t = joined.trim_matches(|c: char| {
         matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '«' | '»' | '(' | ')' | '[' | ']' | '{' | '}' | '.' | ',' | ';' | ':' | '!' | '?' | '…' | '*' | '—' | '–' | '-')
     });
@@ -187,7 +187,7 @@ pub fn strip_html(s: &str) -> String {
         }
     }
     res.push_str(rest);
-    res.split_whitespace().collect::<Vec<_>>().join(" ")
+    squeeze(&res)
 }
 
 /// `== Heading ==` as `(level, text)`; level 1 is `==`.
@@ -267,7 +267,7 @@ pub fn file_name(title: &str, lang: &str) -> String {
 
 /// Cache key: lowercase, whitespace collapsed.
 pub fn norm(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    squeeze(s).to_lowercase()
 }
 
 /// The last [`CACHE_SIZE`] summaries, newest first, in `cache.json` of the plugin's data

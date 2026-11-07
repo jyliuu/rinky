@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 
 use ink_dict::{Dictionary, Hit, Library, LookupResult};
-use ink_plugin::kit::{cut_at, md_escape};
+use ink_plugin::kit::{cut_at, md_escape, squeeze};
 use ink_plugin::{DocumentAccess, HostCtx, Permission, Plugin, PluginManifest, Registrar, Result};
 use ink_store::vocab::{Lookup, VocabDb};
 
@@ -157,7 +157,7 @@ fn take_pron(meta: &str) -> (Option<String>, String) {
                 let p = meta[a + 1..a + 1 + len].trim().to_string();
                 if !p.is_empty() {
                     let rest = format!("{} {}", &meta[..a], &meta[a + 2 + len..]);
-                    return (Some(p), rest.split_whitespace().collect::<Vec<_>>().join(" "));
+                    return (Some(p), squeeze(&rest));
                 }
             }
         }
@@ -680,7 +680,7 @@ impl Plugin for DictionaryPlugin {
                     cx.ui()?.toast("Select a word to look up");
                     return Ok(());
                 };
-                let context = doc.read_around(&sel.start, 200).ok().map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "));
+                let context = doc.read_around(&sel.start, 200).ok().map(|s| squeeze(&s));
                 let snap = BookRef::of(doc, context);
                 self.lookup(cx, &sel.text, Some(snap))
             }

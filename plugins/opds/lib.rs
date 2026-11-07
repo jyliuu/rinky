@@ -17,7 +17,7 @@
 use ink_net::opds::{self, OpdsEntry, OpdsFeed, SearchLink};
 use ink_net::Request;
 use ink_plugin::serde_json::{json, Value};
-use ink_plugin::kit::{Answer, Pending, Requests};
+use ink_plugin::kit::{squeeze, Answer, Pending, Requests};
 use ink_plugin::{HostCtx, HttpEvent, Permission, Plugin, PluginError, PluginManifest, Registrar, Result, StreamMode};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -78,7 +78,7 @@ pub fn extension(mime: &str, href: &str) -> String {
 /// replaced by `_`, at most 80 characters.
 pub fn safe_name(title: &str) -> String {
     let mut s: String = title.chars().map(|c| if c.is_alphanumeric() || " -_.,()'&".contains(c) { c } else { '_' }).collect();
-    s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    s = squeeze(&s);
     let s: String = s.trim_matches(|c: char| c == '.' || c == ' ').chars().take(80).collect();
     if s.is_empty() {
         "book".into()
