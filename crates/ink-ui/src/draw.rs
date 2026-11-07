@@ -40,40 +40,37 @@ fn circle_points(cx: f32, cy: f32, r: f32) -> Vec<(f32, f32)> {
     .collect()
 }
 
+/// Appends a quarter circle of radius `r` around `(cx, cy)`, clockwise on screen from
+/// angle `a0`: the corner of a rounded rectangle, in a few segments for its size.
+fn corner(pts: &mut Vec<(f32, f32)>, (cx, cy): (f32, f32), r: f32, a0: f32) {
+    let steps = ((r / 2.0) as usize).clamp(3, 16);
+    for i in 0..=steps {
+        let a = a0 + i as f32 / steps as f32 * PI / 2.0;
+        pts.push((cx + r * a.cos(), cy + r * a.sin()));
+    }
+}
+
 fn round_rect_points(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
     let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
     if r < 0.5 {
         return vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
     }
     let mut pts = Vec::new();
-    let steps = ((r / 2.0) as usize).clamp(3, 16);
-    let corners = [(x + w - r, y + r, -PI / 2.0), (x + w - r, y + h - r, 0.0), (x + r, y + h - r, PI / 2.0), (x + r, y + r, PI)];
-    for (cx, cy, a0) in corners {
-        for i in 0..=steps {
-            let a = a0 + i as f32 / steps as f32 * PI / 2.0;
-            pts.push((cx + r * a.cos(), cy + r * a.sin()));
-        }
-    }
+    corner(&mut pts, (x + w - r, y + r), r, -PI / 2.0);
+    corner(&mut pts, (x + w - r, y + h - r), r, 0.0);
+    corner(&mut pts, (x + r, y + h - r), r, PI / 2.0);
+    corner(&mut pts, (x + r, y + r), r, PI);
     pts
 }
 
 /// A rectangle with only its top corners rounded (sheets attached to the bottom edge).
 fn top_round_rect_points(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
     let r = r.min(w / 2.0).min(h).max(0.0);
-    let steps = ((r / 2.0) as usize).clamp(3, 16);
     let mut pts = Vec::new();
-    for (cx, cy, a0) in [(x + w - r, y + r, -PI / 2.0)] {
-        for i in 0..=steps {
-            let a = a0 + i as f32 / steps as f32 * PI / 2.0;
-            pts.push((cx + r * a.cos(), cy + r * a.sin()));
-        }
-    }
+    corner(&mut pts, (x + w - r, y + r), r, -PI / 2.0);
     pts.push((x + w, y + h));
     pts.push((x, y + h));
-    for i in 0..=steps {
-        let a = PI + i as f32 / steps as f32 * PI / 2.0;
-        pts.push((x + r + r * a.cos(), y + r + r * a.sin()));
-    }
+    corner(&mut pts, (x + r, y + r), r, PI);
     pts
 }
 
@@ -202,13 +199,10 @@ impl Path {
 
 /// Blends `value` into `r` of the canvas with per-pixel coverage `cov` (`r.w * r.h`).
 pub fn blend(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {
-    // Row slices of the part of `r` on the canvas and inside its clip (what
-    // `Canvas::set` would write), instead of a bounds-checked get/set per pixel: the
-    // sheets and panels blend their full-size outlines on every paint.
-    let area = match canvas.clip() {
-        Some(c) => r.intersect(&canvas.bounds()).intersect(&c),
-        None => r.intersect(&canvas.bounds()),
-    };
+    // Row slices of the part of `r` that drawing may change, instead of a bounds-checked
+    // get/set per pixel: the sheets and panels blend their full-size outlines on every
+    // paint.
+    let area = drawable(canvas, r);
     if area.is_empty() {
         return;
     }
@@ -272,13 +266,22 @@ pub fn blit_fit(canvas: &mut Canvas, src: &Canvas, r: Rect) -> Rect {
 /// Forces `r` of the canvas to two levels (black below `threshold`, else white): what a
 /// DU animation frame shows, so the simulator and screenshots match the panel.
 pub fn two_level(canvas: &mut Canvas, r: Rect, threshold: u8) {
-    let r = r.intersect(&canvas.bounds());
+    let r = drawable(canvas, r);
     for y in r.y..r.bottom() {
-        for x in r.x..r.right() {
-            if let Some(v) = canvas.get(x, y) {
-                canvas.set(x, y, if v < threshold { 0 } else { 255 });
-            }
+        let i = y as usize * canvas.width + r.x as usize;
+        for p in &mut canvas.pixels[i..i + r.w as usize] {
+            *p = if *p < threshold { 0 } else { 255 };
         }
+    }
+}
+
+/// The part of `r` that drawing may change: on the canvas and inside its clip (what
+/// `Canvas::set` writes).
+fn drawable(canvas: &Canvas, r: Rect) -> Rect {
+    let r = r.intersect(&canvas.bounds());
+    match canvas.clip() {
+        Some(c) => r.intersect(&c),
+        None => r,
     }
 }
 
@@ -394,5 +397,10 @@ mod tests {
         }
         two_level(&mut g, Rect::new(0, 0, 10, 10), 0x80);
         assert_eq!(g.pixels, vec![0, 0, 255, 255]);
+        // Only inside the canvas's clip.
+        let mut g = Canvas::from_pixels(4, 1, vec![0x22, 0x77, 0x99, 0xDD]);
+        g.set_clip(Some(Rect::new(1, 0, 2, 1)));
+        two_level(&mut g, Rect::new(-5, -5, 20, 20), 0x80);
+        assert_eq!(g.pixels, vec![0x22, 0, 255, 0xDD]);
     }
 }
