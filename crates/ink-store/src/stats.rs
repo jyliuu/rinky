@@ -234,9 +234,7 @@ fn u(v: i64) -> u64 {
 impl StatsDb {
     /// Opens (creating if needed) the database at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
-        }
+        crate::create_parent_dir(path)?;
         let conn = Connection::open(path)?;
         Self::init(conn, WriteQueue::for_path(path))
     }
@@ -246,15 +244,7 @@ impl StatsDb {
     /// `-journal`) and a new database is started; the new name is returned. Other errors
     /// (locked, read-only, a newer schema) are returned and nothing is moved.
     pub fn open_or_recover(path: &Path) -> Result<(Self, Option<PathBuf>)> {
-        let damaged = |e: &StoreError| matches!(e, StoreError::Sqlite(e) if crate::is_damaged_sqlite(e));
-        match Self::open(path) {
-            Ok(db) => Ok((db, None)),
-            Err(e) if damaged(&e) => {
-                let Some(moved) = crate::set_aside_database(path) else { return Err(e) };
-                Ok((Self::open(path)?, Some(moved)))
-            }
-            Err(e) => Err(e),
-        }
+        crate::open_db_or_recover(path, Self::open)
     }
 
     /// An in-memory database (tests).

@@ -288,39 +288,31 @@ pub struct Recovered<T> {
 /// backup is used ([`LoadSource::Temp`]) before the backup.
 pub fn load_recovering<T>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Result<T, String>) -> Result<Recovered<T>> {
     let mut out = Recovered { value: None, source: LoadSource::Missing, set_aside: Vec::new(), errors: Vec::new() };
+    // Takes the parsed bytes of `file`, or moves the file aside when they do not parse.
+    let take = |out: &mut Recovered<T>, file: &Path, bytes: &[u8], source: LoadSource| match parse(bytes) {
+        Ok(v) => {
+            out.value = Some(v);
+            out.source = source;
+        }
+        Err(e) => {
+            out.errors.push(format!("{}: {e}", file.display()));
+            out.set_aside.push(set_aside(file));
+        }
+    };
     let backup = backup_path(path);
     match read_settled(path, true)? {
-        Some(bytes) => match parse(&bytes) {
-            Ok(v) => {
-                out.value = Some(v);
-                out.source = LoadSource::Primary;
-                return Ok(out);
-            }
-            Err(e) => {
-                out.errors.push(format!("{}: {e}", path.display()));
-                out.set_aside.push(set_aside(path));
-            }
-        },
+        Some(bytes) => take(&mut out, path, &bytes, LoadSource::Primary),
         None => {
             let backup_time = std::fs::metadata(&backup).and_then(|m| m.modified()).ok();
-            if let Some(v) = newest_temp_copy(path, backup_time, &parse) {
-                out.value = Some(v);
+            out.value = newest_temp_copy(path, backup_time, &parse);
+            if out.value.is_some() {
                 out.source = LoadSource::Temp;
-                return Ok(out);
             }
         }
     }
-    if let Some(bytes) = read_settled(&backup, false)? {
-        match parse(&bytes) {
-            Ok(v) => {
-                out.value = Some(v);
-                out.source = LoadSource::Backup;
-                return Ok(out);
-            }
-            Err(e) => {
-                out.errors.push(format!("{}: {e}", backup.display()));
-                out.set_aside.push(set_aside(&backup));
-            }
+    if out.value.is_none() {
+        if let Some(bytes) = read_settled(&backup, false)? {
+            take(&mut out, &backup, &bytes, LoadSource::Backup);
         }
     }
     Ok(out)
@@ -344,6 +336,28 @@ pub fn is_damaged_sqlite(e: &rusqlite::Error) -> bool {
         if matches!(f.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt))
 }
 
+/// Opens the SQLite database at `path` with `open`. A file that is not a database or is
+/// damaged ([`is_damaged_sqlite`]) is moved aside with its `-journal` and a new database
+/// is opened in its place; the damaged file's new name is returned. Other errors
+/// (locked, read-only, a newer schema) are returned and nothing is moved.
+pub(crate) fn open_db_or_recover<T>(path: &Path, open: impl Fn(&Path) -> Result<T>) -> Result<(T, Option<PathBuf>)> {
+    match open(path) {
+        Err(StoreError::Sqlite(e)) if is_damaged_sqlite(&e) => {
+            let Some(moved) = set_aside_database(path) else { return Err(StoreError::Sqlite(e)) };
+            Ok((open(path)?, Some(moved)))
+        }
+        r => r.map(|db| (db, None)),
+    }
+}
+
+/// Creates the directory that holds `path`, if `path` has one.
+pub(crate) fn create_parent_dir(path: &Path) -> std::io::Result<()> {
+    match path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        Some(dir) => std::fs::create_dir_all(dir),
+        None => Ok(()),
+    }
+}
+
 /// Moves a damaged SQLite file (and its `-journal`) to `<name>.corrupt-<secs>-<n>`;
 /// returns the new name, or `None` when the rename failed (nothing moved).
 pub fn set_aside_database(path: &Path) -> Option<PathBuf> {
@@ -362,9 +376,7 @@ pub fn set_aside_database(path: &Path) -> Option<PathBuf> {
 /// file when the backup is missing or older than [`BACKUP_INTERVAL`] and the current
 /// file passes `valid` (a corrupt file never replaces a good backup).
 pub fn save_with_backup(path: &Path, bytes: &[u8], valid: impl Fn(&[u8]) -> bool) -> Result<()> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)?;
-    }
+    create_parent_dir(path)?;
     if path.exists() {
         let bak = backup_path(path);
         let stale = match std::fs::metadata(&bak).and_then(|m| m.modified()) {
