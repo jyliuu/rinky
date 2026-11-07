@@ -289,11 +289,17 @@ impl Inner {
         Ok((Gray { w, h, px }, k, b))
     }
 
-    fn geom(&mut self, page: usize, opts: &FixedOptions) -> PageGeom {
+    /// Crop box and column regions of `page` for `opts`, analysed on first use.
+    fn geom(&mut self, page: usize, opts: &FixedOptions) -> &PageGeom {
         let key = (page, opts.crop_margins, opts.columns.max(1));
-        if let Some(g) = self.geom.get(&key) {
-            return g.clone();
+        if !self.geom.contains_key(&key) {
+            let g = self.analyse(page, opts);
+            self.geom.insert(key, g);
         }
+        &self.geom[&key]
+    }
+
+    fn analyse(&mut self, page: usize, opts: &FixedOptions) -> PageGeom {
         let b = self.bound(page);
         let cols = opts.columns.max(1) as usize;
         let g = if !opts.crop_margins && cols == 1 {
@@ -307,7 +313,6 @@ impl Inner {
                 }
             }
         };
-        self.geom.insert(key, g.clone());
         g
     }
 
@@ -801,7 +806,7 @@ impl MupdfDocument {
             return Err(DocError::PageOutOfRange(page));
         }
         let opts = self.opts;
-        Ok(self.inner.borrow_mut().geom(page, &opts).regions)
+        Ok(self.inner.borrow_mut().geom(page, &opts).regions.clone())
     }
 
     /// The text of document page `page`.
