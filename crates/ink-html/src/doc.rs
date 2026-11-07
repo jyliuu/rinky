@@ -112,32 +112,7 @@ impl HtmlDocument {
         }
         let book = Book::new(meta, chapters.into_iter().map(|c| (c.path, c.html)).collect(), resources.as_ref());
         let mut font_sources = FontSources { fallback_dirs: crate::fonts::font_dirs(None), ..Default::default() };
-        let mut faces = Vec::new();
-        for (path, sheet) in &book.sheets {
-            let dir = path.rfind('/').map(|i| &path[..=i]).unwrap_or("");
-            for ff in &sheet.font_faces {
-                faces.push((dir.to_string(), ff.clone()));
-            }
-        }
-        // `<style>` blocks with @font-face.
-        for ch in &book.chapters {
-            if let Some(head_end) = ch.html.find("<body") {
-                let head = &ch.html[..head_end];
-                if head.contains("@font-face") {
-                    let mut from = 0;
-                    while let Some(p) = head[from..].find("<style") {
-                        let s = from + p;
-                        let Some(o) = head[s..].find('>').map(|e| s + e + 1) else { break };
-                        let e = head[o..].find("</style").map(|e| o + e).unwrap_or(head.len());
-                        for ff in crate::css::parse_stylesheet(&head[o..e]).font_faces {
-                            faces.push((ch.dir.clone(), ff));
-                        }
-                        from = e;
-                    }
-                }
-            }
-        }
-        font_sources.add_font_faces(&faces, &book.fonts);
+        font_sources.add_font_faces(&book.font_faces, &book.fonts);
         let fonts = RefCell::new(font_sources.build_foreground());
         let mut paths = HashMap::new();
         for (i, ch) in book.chapters.iter().enumerate() {

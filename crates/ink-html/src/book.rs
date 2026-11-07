@@ -4,7 +4,7 @@
 //! main thread when the book opens, because the resource loader of an EPUB is not
 //! `Send`), and caches of chapter DOMs and image sizes. Everything here is `Send + Sync`.
 
-use crate::css::{self, Stylesheet};
+use crate::css::{self, FontFaceRule, Stylesheet};
 use crate::dom::{Classifier, Dom, ElemRef, NodeId, SheetRef};
 use crate::style::{ua_rules, Cascade, Origin, RuleSet, StructStyle, StyleContext, WhiteSpace};
 use ink_doc::{resolve_href, Metadata, ResourceLoader};
@@ -46,6 +46,9 @@ pub struct Book {
     pub fragments: u32,
     /// Stylesheets by resolved path.
     pub sheets: HashMap<String, Arc<Stylesheet>>,
+    /// Every `@font-face` rule of the book's stylesheets and `<style>` blocks, with the
+    /// directory its URLs are relative to.
+    pub font_faces: Vec<(String, FontFaceRule)>,
     /// Font file bytes by resolved path.
     pub fonts: HashMap<String, Arc<Vec<u8>>>,
     /// A loader usable from any thread, when the format provides one.
@@ -327,8 +330,9 @@ impl Book {
                 }
             }
         }
-        let mut inline_imports = Vec::new();
-        // `<style>` blocks may @import or declare fonts too.
+        // `<style>` blocks may @import or declare fonts too: their @font-face rules with
+        // the chapter's directory.
+        let mut inline_faces = Vec::new();
         for ch in &chapters {
             let head_end = head_end(&ch.html);
             let lower = ch.html[..head_end].to_ascii_lowercase();
@@ -341,7 +345,7 @@ impl Book {
                 for imp in &sheet.imports {
                     todo.push(resolve_href(&ch.dir, imp));
                 }
-                inline_imports.push((ch.dir.clone(), sheet));
+                inline_faces.extend(sheet.font_faces.into_iter().map(|ff| (ch.dir.clone(), ff)));
                 from = close;
             }
         }
@@ -358,27 +362,22 @@ impl Book {
             }
             sheets.insert(path, Arc::new(sheet));
         }
-        let mut font_paths = Vec::new();
-        for (path, sheet) in &sheets {
-            for ff in &sheet.font_faces {
-                for src in &ff.sources {
-                    font_paths.push(resolve_href(&dir_of(path), src));
+        // The linked sheets' @font-face rules (by path, so the order does not depend on
+        // hashing), then the inline ones.
+        let mut linked: Vec<(&String, &Arc<Stylesheet>)> = sheets.iter().collect();
+        linked.sort_by_key(|(path, _)| *path);
+        let mut font_faces: Vec<(String, FontFaceRule)> =
+            linked.into_iter().flat_map(|(path, sheet)| sheet.font_faces.iter().map(|ff| (dir_of(path), ff.clone()))).collect();
+        font_faces.extend(inline_faces);
+        for (dir, ff) in &font_faces {
+            for src in &ff.sources {
+                let p = resolve_href(dir, src);
+                if fonts.contains_key(&p) {
+                    continue;
                 }
-            }
-        }
-        for (dir, sheet) in &inline_imports {
-            for ff in &sheet.font_faces {
-                for src in &ff.sources {
-                    font_paths.push(resolve_href(dir, src));
+                if let Ok(bytes) = loader.read(&p) {
+                    fonts.insert(p, Arc::new(bytes));
                 }
-            }
-        }
-        for p in font_paths {
-            if fonts.contains_key(&p) {
-                continue;
-            }
-            if let Ok(bytes) = loader.read(&p) {
-                fonts.insert(p, Arc::new(bytes));
             }
         }
         let fragments = fragment;
@@ -387,6 +386,7 @@ impl Book {
             chapters,
             fragments,
             sheets,
+            font_faces,
             fonts,
             loader: loader.shared(),
             images: Mutex::new(HashMap::new()),
@@ -536,6 +536,7 @@ mod tests {
         keys.sort();
         assert_eq!(keys, vec!["css/a.css", "css/d.css", "text/b.css", "text/c.css"]);
         assert_eq!(book.fonts.get("f.ttf").map(|b| b.as_slice()), Some(&b"FONT"[..]));
+        assert_eq!(book.font_faces.iter().map(|(dir, ff)| (dir.as_str(), ff.family.as_str())).collect::<Vec<_>>(), [("text/", "F")]);
         let ch = book.chapter(0);
         // a.css (+ d.css), b.css, the <style> (+ c.css): one rule each.
         assert_eq!(ch.author.len(), 4);
