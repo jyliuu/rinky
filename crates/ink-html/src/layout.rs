@@ -314,13 +314,13 @@ struct Seg {
     kind: SegKind,
     /// Baseline shift from `vertical-align` of the inline ancestors (up = positive).
     shift: f32,
-    /// Font size factor (small capitals of `font-variant: small-caps`).
-    scale: f32,
 }
 
 #[derive(Clone, Debug)]
 enum SegKind {
-    Text,
+    /// Text in face `face` at `px` (the style's size, smaller for the small capitals of
+    /// `font-variant: small-caps`), resolved once per segment.
+    Text { face: FaceKey, px: f32 },
     Image { src: String, w: f32, h: f32 },
     Break,
 }
@@ -956,8 +956,10 @@ impl<'a, 'e> Flow<'a, 'e> {
         if st.hidden {
             return;
         }
+        let face = self.face(st);
+        let text_seg = |scale: f32| Seg { node: n, style: parent, link, kind: SegKind::Text { face, px: st.font_size * scale }, shift };
         let mut seg = segs.len() as u32;
-        segs.push(Seg { node: n, style: parent, link, kind: SegKind::Text, shift, scale: 1.0 });
+        segs.push(text_seg(1.0));
         let small_caps = st.small_caps;
         let mut small = false;
         let ws = st.white_space;
@@ -992,7 +994,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 if want_small != small {
                     small = want_small;
                     seg = segs.len() as u32;
-                    segs.push(Seg { node: n, style: parent, link, kind: SegKind::Text, shift, scale: if small { 0.78 } else { 1.0 } });
+                    segs.push(text_seg(if small { 0.78 } else { 1.0 }));
                 }
                 if small {
                     out = out.to_uppercase().next().unwrap_or(out);
@@ -1020,7 +1022,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                     }
                     if name == "br" {
                         let seg = segs.len() as u32;
-                        segs.push(Seg { node: n, style: n, link, kind: SegKind::Break, shift, scale: 1.0 });
+                        segs.push(Seg { node: n, style: n, link, kind: SegKind::Break, shift });
                         // A trailing space before a forced break is dropped.
                         if text.ends_with(' ') && !self.st(owner).white_space.keeps_spaces() {
                             text.pop();
@@ -1035,7 +1037,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                             let l = if link == NO_LINK { self.link_of(n) } else { link };
                             let seg = segs.len() as u32;
                             let own = self.valign_shift(n);
-                            segs.push(Seg { node: n, style: n, link: l, kind: SegKind::Image { src: s, w: dw, h: dh }, shift: shift + own, scale: 1.0 });
+                            segs.push(Seg { node: n, style: n, link: l, kind: SegKind::Image { src: s, w: dw, h: dh }, shift: shift + own });
                             text.push(OBJ);
                             src.push(CharSrc { seg, dom: 0 });
                         }
@@ -1085,14 +1087,21 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.st(style_node).lang.as_deref().map(str::to_string).or_else(|| self.book_lang.clone())
     }
 
-    fn seg_face(&mut self, seg: &Seg) -> (FaceKey, f32, &'a ComputedStyle) {
-        let st = self.st(seg.style);
-        (self.face(st), st.font_size * seg.scale, st)
+    /// Face and size of a segment's text.
+    fn seg_face(&mut self, seg: &Seg) -> (FaceKey, f32) {
+        match seg.kind {
+            SegKind::Text { face, px } => (face, px),
+            _ => {
+                let st = self.st(seg.style);
+                (self.face(st), st.font_size)
+            }
+        }
     }
 
     /// Width of a text range of one segment.
     fn range_width(&mut self, text: &str, seg: &Seg) -> f32 {
-        let (face, px, st) = self.seg_face(seg);
+        let (face, px) = self.seg_face(seg);
+        let st = self.st(seg.style);
         // Most words have no soft hyphen (UTF-8 C2 AD) or newline: measure them in place.
         let dirty = text.as_bytes().iter().any(|&b| b == b'\n' || b == 0xAD);
         let owned: String;
@@ -1118,7 +1127,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         match &seg.kind {
             SegKind::Image { w, .. } => *w,
             SegKind::Break => 0.0,
-            SegKind::Text => self.range_width(&p.text[start..end], seg),
+            SegKind::Text { .. } => self.range_width(&p.text[start..end], seg),
         }
     }
 
@@ -1305,7 +1314,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         let word = &p.text[bx.start..bx.end];
         let first_seg = p.seg_at(bx.start);
-        if !matches!(first_seg.kind, SegKind::Text) {
+        if !matches!(first_seg.kind, SegKind::Text { .. }) {
             return None;
         }
         let st = self.st(first_seg.style);
@@ -1326,7 +1335,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         if points.is_empty() {
             return None;
         }
-        let (face, px, _) = self.seg_face(first_seg);
+        let (face, px) = self.seg_face(first_seg);
         let hyph_w = self.env.fonts.width(face, px, "-");
         if word.len() > LONG_BOX_BYTES {
             // A very long box (soft hyphens in a giant word): widths added piece by piece
@@ -1425,9 +1434,8 @@ impl<'a, 'e> Flow<'a, 'e> {
                         desc = desc.max(h - a - shift);
                         img = Some((src.clone(), *w, *h));
                     }
-                    SegKind::Text => {
-                        let face = self.face(st);
-                        let (a, d) = self.env.fonts.vmetrics(face, st.font_size * seg.scale);
+                    &SegKind::Text { face, px } => {
+                        let (a, d) = self.env.fonts.vmetrics(face, px);
                         let l = self.line_height(st);
                         let hl = (l - (a - d)) / 2.0;
                         if shift == 0.0 {
@@ -1449,7 +1457,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 if let Some(last_p) = placed.last_mut() {
                     last_p.0.hyphen = true;
                     let seg = &segs[last_p.0.piece.seg as usize];
-                    let (face, px, _) = self.seg_face(seg);
+                    let (face, px) = self.seg_face(seg);
                     pen += self.env.fonts.width(face, px, "-");
                 }
             }
@@ -1571,7 +1579,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 SegKind::Break => {
                     key.get_or_insert((self.dom.node(seg.node).order, 0));
                 }
-                SegKind::Text => {
+                &SegKind::Text { face, px } => {
                     let raw = &text[pc.start..pc.end];
                     let mut shown: String = raw.chars().filter(|&c| c != SOFT_HYPHEN && c != '\n').collect();
                     if pl.hyphen {
@@ -1581,8 +1589,6 @@ impl<'a, 'e> Flow<'a, 'e> {
                     let ce = p.char_index(pc.end);
                     let dom_end = if ce < src.len() && src[ce].seg == pc.seg { src[ce].dom } else { src[ce - 1].dom + 1 };
                     key.get_or_insert((self.dom.node(seg.node).order, dom_start));
-                    let face = self.face(st);
-                    let px = st.font_size * seg.scale;
                     let mut width = pc.width;
                     if pl.hyphen {
                         width += self.env.fonts.width(face, px, "-");
