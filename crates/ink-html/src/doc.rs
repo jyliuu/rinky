@@ -660,14 +660,11 @@ impl HtmlDocument {
             }
             let Some(t) = dom.text(n) else { continue };
             let p = dom.node(n).parent;
-            if dom.element(p).is_some_and(|e| e.in_svg || e.name == "svg" || matches!(e.name.as_str(), "script" | "style")) {
+            if dom.element(p).is_some_and(|e| e.in_svg_tree() || matches!(e.name.as_str(), "script" | "style")) {
                 continue;
             }
-            // Nearest block ancestor: a new block starts a new line.
-            let mut b = p;
-            while b != dom.body && dom.element(b).is_some_and(|e| e.st.display == crate::style::Display::Inline) {
-                b = dom.node(b).parent;
-            }
+            // A new block starts a new line.
+            let b = dom.block_of(p);
             if b != last_block && !chars.is_empty() {
                 chars.push('\n');
                 map.push((n, 0));
@@ -1625,7 +1622,7 @@ impl Document for HtmlDocument {
                 break;
             }
             if let Some(t) = dom.text(n) {
-                if dom.element(dom.node(n).parent).is_some_and(|e| e.in_svg || e.name == "svg") {
+                if dom.element(dom.node(n).parent).is_some_and(crate::dom::Element::in_svg_tree) {
                     continue;
                 }
                 if order == key.0 {
@@ -1664,10 +1661,7 @@ impl Document for HtmlDocument {
             Some(k) => k,
             None => {
                 // An anchor inside a paragraph of a notes list: the paragraph is the note.
-                let mut b = node;
-                while b != ch.dom.body && ch.dom.element(b).is_some_and(|e| e.st.display == crate::style::Display::Inline) {
-                    b = ch.dom.node(b).parent;
-                }
+                let b = ch.dom.block_of(node);
                 if b == ch.dom.body {
                     return Ok(None);
                 }
@@ -1898,7 +1892,7 @@ fn note_body(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> (Option<String>, 
                 raw.push(NoteSpan { text: t.to_string(), bold, italic });
             }
             NodeKind::Element(e) => {
-                if e.in_svg || e.name == "svg" || is_backlink(dom, n, e) {
+                if e.in_svg_tree() || is_backlink(dom, n, e) {
                     continue;
                 }
                 if n != id && !seen {

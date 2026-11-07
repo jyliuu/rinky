@@ -59,6 +59,12 @@ impl Element {
             .map(|(_, v)| v.as_str())
     }
 
+    /// True for an `<svg>` element and everything inside one (its text is not reading
+    /// text).
+    pub fn in_svg_tree(&self) -> bool {
+        self.in_svg || self.name == "svg"
+    }
+
     /// Attribute by local name, ignoring any prefix (`type` finds `epub:type`).
     pub fn attr_local(&self, local: &str) -> Option<&str> {
         self.attr(local).or_else(|| {
@@ -220,6 +226,15 @@ impl Dom {
         }
     }
 
+    /// The nearest of `id` and its ancestors that is not an inline element (at most the
+    /// body).
+    pub fn block_of(&self, mut id: NodeId) -> NodeId {
+        while id != self.body && self.element(id).is_some_and(|e| e.st.display == Display::Inline) {
+            id = self.node(id).parent;
+        }
+        id
+    }
+
     /// Last node (in document order) inside `id`'s subtree, or `id` itself.
     pub fn last_descendant(&self, mut id: NodeId) -> NodeId {
         while let Some(&c) = self.node(id).children.last() {
@@ -241,7 +256,7 @@ impl Dom {
             match &self.node(n).kind {
                 NodeKind::Text(t) => out.push_str(t),
                 NodeKind::Element(e) => {
-                    if e.in_svg || e.name == "svg" {
+                    if e.in_svg_tree() {
                         continue;
                     }
                     stack.extend(self.node(n).children.iter().rev());
@@ -648,7 +663,7 @@ impl<'c> Builder<'c> {
             self.in_head = false;
         }
         let parent = self.top().unwrap_or(NONE);
-        let in_svg = parent != NONE && self.dom.element(parent).is_some_and(|p| p.in_svg || p.name == "svg");
+        let in_svg = parent != NONE && self.dom.element(parent).is_some_and(Element::in_svg_tree);
         let name = if in_svg { name.to_string() } else { name.to_ascii_lowercase() };
         let id = self.dom.nodes.len() as NodeId;
         self.dom.nodes.push(Node {

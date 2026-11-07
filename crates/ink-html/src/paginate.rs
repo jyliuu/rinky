@@ -284,7 +284,7 @@ pub fn chapter_text_bytes(dom: &crate::dom::Dom) -> u64 {
     for &id in &dom.preorder {
         if let Some(t) = dom.text(id) {
             let p = dom.node(id).parent;
-            if dom.element(p).is_some_and(|e| e.in_svg || e.name == "svg") {
+            if dom.element(p).is_some_and(crate::dom::Element::in_svg_tree) {
                 continue;
             }
             n += t.len() as u64;
