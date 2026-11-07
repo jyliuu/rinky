@@ -68,6 +68,8 @@ struct Shared {
     /// Frames whose canvas differed from the framebuffer outside every submitted
     /// update rect: (frame number, panel bounding box of those pixels, pixel count).
     uncovered: Vec<Uncovered>,
+    /// What the panel should hold after a frame (reused by [`Screen::frame_done`]).
+    want: Vec<u8>,
 }
 
 /// A frame whose canvas held pixels that no update rect covered (they never reached
@@ -195,14 +197,16 @@ impl Screen for HeadlessScreen {
         if canvas.size() != s.rotation.logical_size(panel) {
             return;
         }
-        let mut want = Canvas::new(s.fb.width, s.fb.height);
-        let stride = want.width;
-        copy_to_panel(canvas, canvas.bounds(), s.rotation, s.night, panel, &mut want.pixels, stride);
-        let (w, mut n) = (want.width, 0usize);
-        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-        for (i, (a, b)) in want.pixels.iter().zip(&s.fb.pixels).enumerate() {
+        let stride = s.fb.width;
+        s.want.resize(s.fb.pixels.len(), 0);
+        copy_to_panel(canvas, canvas.bounds(), s.rotation, s.night, panel, &mut s.want, stride);
+        if s.want == s.fb.pixels {
+            return;
+        }
+        let (mut n, mut x0, mut y0, mut x1, mut y1) = (0usize, usize::MAX, usize::MAX, 0, 0);
+        for (i, (a, b)) in s.want.iter().zip(&s.fb.pixels).enumerate() {
             if a != b {
-                let (x, y) = (i % w, i / w);
+                let (x, y) = (i % stride, i / stride);
                 n += 1;
                 x0 = x0.min(x);
                 y0 = y0.min(y);
@@ -210,13 +214,11 @@ impl Screen for HeadlessScreen {
                 y1 = y1.max(y);
             }
         }
-        if n > 0 {
-            let rect = Rect::new(x0 as i32, y0 as i32, (x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32);
-            log::warn!("headless frame {}: {n} pixels drawn outside every update rect, in {rect:?}", s.frames);
-            s.uncovered.push(Uncovered { frame: s.frames, updates: s.log.len(), rect, pixels: n });
-            if std::env::var_os("INK_COVERAGE_PANIC").is_some() {
-                panic!("headless frame {}: {n} pixels drawn outside every update rect, in {rect:?}", s.frames);
-            }
+        let rect = Rect::new(x0 as i32, y0 as i32, (x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32);
+        log::warn!("headless frame {}: {n} pixels drawn outside every update rect, in {rect:?}", s.frames);
+        s.uncovered.push(Uncovered { frame: s.frames, updates: s.log.len(), rect, pixels: n });
+        if std::env::var_os("INK_COVERAGE_PANIC").is_some() {
+            panic!("headless frame {}: {n} pixels drawn outside every update rect, in {rect:?}", s.frames);
         }
     }
 }
@@ -262,6 +264,7 @@ pub fn open(opts: HeadlessOptions) -> (Device, HeadlessProbe) {
         log: Vec::new(),
         frames: 0,
         uncovered: Vec::new(),
+        want: Vec::new(),
     }));
     let device = Device {
         info: DeviceInfo { backend: "headless", model: "simulated PW12".into(), firmware: String::new(), page_wave: true },
@@ -306,5 +309,23 @@ mod tests {
         dev.screen.set_rotation(Rotation::Clockwise).unwrap();
         assert_eq!(dev.screen.size(), Size::new(30, 20));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn frames_with_pixels_outside_every_update_are_recorded() {
+        let (mut dev, probe) = open(HeadlessOptions { panel: Size::new(20, 30), ..Default::default() });
+        dev.screen.set_rotation(Rotation::Clockwise).unwrap();
+        let mut c = Canvas::new(30, 20);
+        c.fill_rect(2, 3, 4, 5, 0);
+        dev.screen.update(&c, Rect::new(2, 3, 4, 5), RefreshClass::Gl16).unwrap();
+        dev.screen.frame_done(&c);
+        assert!(probe.uncovered().is_empty());
+        // Drawn, but only part of it sent to the panel.
+        c.fill_rect(10, 10, 3, 2, 0);
+        dev.screen.update(&c, Rect::new(10, 10, 1, 2), RefreshClass::Gl16).unwrap();
+        dev.screen.frame_done(&c);
+        let rect = Rotation::Clockwise.rect_to_panel(Rect::new(11, 10, 2, 2), Size::new(20, 30));
+        assert_eq!(probe.uncovered(), vec![Uncovered { frame: 2, updates: 2, rect, pixels: 4 }]);
+        assert_eq!(probe.frames(), 2);
     }
 }
