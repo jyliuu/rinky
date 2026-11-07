@@ -200,13 +200,21 @@ impl Screen for HeadlessScreen {
         copy_to_panel(canvas, canvas.bounds(), s.rotation, s.night, panel, &mut want.pixels, stride);
         let (w, mut n) = (want.width, 0usize);
         let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-        for (i, (a, b)) in want.pixels.iter().zip(&s.fb.pixels).enumerate() {
-            if a != b {
-                let (x, y) = (i % w, i / w);
-                n += 1;
-                x0 = x0.min(x);
+        // Whole rows are compared as slices (a memcmp even in a debug build); only rows
+        // that differ are walked pixel by pixel. This runs after every frame of every
+        // headless test, and a per-pixel loop over the panel dominated their run time.
+        if w > 0 && want.pixels != s.fb.pixels {
+            for (y, (a, b)) in want.pixels.chunks_exact(w).zip(s.fb.pixels.chunks_exact(w)).enumerate() {
+                if a == b {
+                    continue;
+                }
+                let differs = |(p, q): (&u8, &u8)| p != q;
+                let first = a.iter().zip(b).position(differs).unwrap_or(0);
+                let last = a.iter().zip(b).rposition(differs).unwrap_or(0);
+                n += a.iter().zip(b).filter(|&(p, q)| p != q).count();
+                x0 = x0.min(first);
                 y0 = y0.min(y);
-                x1 = x1.max(x);
+                x1 = x1.max(last);
                 y1 = y1.max(y);
             }
         }
@@ -306,5 +314,21 @@ mod tests {
         dev.screen.set_rotation(Rotation::Clockwise).unwrap();
         assert_eq!(dev.screen.size(), Size::new(30, 20));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pixels_outside_every_update_are_reported_with_their_box_and_count() {
+        let (mut dev, probe) = open(HeadlessOptions { panel: Size::new(20, 30), ..Default::default() });
+        let mut c = Canvas::new(20, 30);
+        c.fill_rect(2, 3, 4, 5, 0);
+        dev.screen.update(&c, Rect::new(2, 3, 4, 5), RefreshClass::Gc16).unwrap();
+        dev.screen.frame_done(&c);
+        assert_eq!(probe.uncovered(), vec![]);
+        // Two pixels drawn but never sent, on different rows and columns.
+        c.set(17, 4, 0);
+        c.set(1, 25, 0);
+        dev.screen.update(&c, Rect::new(2, 3, 4, 5), RefreshClass::Du).unwrap();
+        dev.screen.frame_done(&c);
+        assert_eq!(probe.uncovered(), vec![Uncovered { frame: 2, updates: 2, rect: Rect::new(1, 4, 17, 22), pixels: 2 }]);
     }
 }
