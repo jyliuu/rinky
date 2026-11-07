@@ -3,7 +3,7 @@
 //! e-ink panel. Transparent pixels are composited on white.
 
 use image::{GrayImage, ImageReader};
-use std::collections::HashMap;
+use ink_device::Canvas;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -497,29 +497,28 @@ fn write_svg(dom: &crate::dom::Dom, id: crate::dom::NodeId, out: &mut String, ro
     }
 }
 
-/// A small cache of decoded, scaled and dithered images for rendering.
+/// A small cache of decoded, scaled and dithered images for rendering, ready to blit:
+/// the 8 made last.
 #[derive(Default)]
 pub struct ImageCache {
-    entries: HashMap<(String, u32, u32), Arc<GrayImage>>,
-    order: Vec<(String, u32, u32)>,
+    entries: Vec<((String, u32, u32), Arc<Canvas>)>,
 }
 
 impl ImageCache {
-    /// The dithered image for `key`, decoding with `make` on a miss. Keeps 8 entries.
-    pub fn get(&mut self, key: (String, u32, u32), make: impl FnOnce() -> Option<GrayImage>) -> Option<Arc<GrayImage>> {
-        if let Some(i) = self.entries.get(&key) {
-            return Some(i.clone());
+    /// The dithered image `name` at `w` x `h`, decoding with `make` on a miss.
+    pub fn get(&mut self, name: &str, w: u32, h: u32, make: impl FnOnce() -> Option<GrayImage>) -> Option<Arc<Canvas>> {
+        if let Some((_, img)) = self.entries.iter().find(|((n, ew, eh), _)| n == name && (*ew, *eh) == (w, h)) {
+            return Some(img.clone());
         }
-        let mut img = make()?;
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        dither16(img.as_mut(), w, h);
-        let img = Arc::new(img);
-        if self.order.len() >= 8 {
-            let old = self.order.remove(0);
-            self.entries.remove(&old);
+        let img = make()?;
+        let (iw, ih) = (img.width() as usize, img.height() as usize);
+        let mut px = img.into_raw();
+        dither16(&mut px, iw, ih);
+        let img = Arc::new(Canvas::from_pixels(iw, ih, px));
+        if self.entries.len() >= 8 {
+            self.entries.remove(0);
         }
-        self.order.push(key.clone());
-        self.entries.insert(key, img.clone());
+        self.entries.push(((name.to_string(), w, h), img.clone()));
         Some(img)
     }
 }

@@ -1234,10 +1234,10 @@ impl Document for HtmlDocument {
         let images = &self.images;
         let mut fonts = self.fonts.borrow_mut();
         fonts.set_embolden(self.layout.embolden);
-        let mut img = |src: &str, w: u32, h: u32| -> Option<Arc<image::GrayImage>> {
+        let mut img = |src: &str, w: u32, h: u32| -> Option<Arc<Canvas>> {
             // An inline SVG is named by its node, which is only unique in its chapter.
-            let key = if src.starts_with("#svg:") { format!("{src}@{c}") } else { src.to_string() };
-            images.borrow_mut().get((key, w, h), || {
+            let name = if src.starts_with("#svg:") { std::borrow::Cow::Owned(format!("{src}@{c}")) } else { std::borrow::Cow::Borrowed(src) };
+            images.borrow_mut().get(&name, w, h, || {
                 if let Some(node) = src.strip_prefix("#svg:") {
                     let node: u32 = node.parse().ok()?;
                     let ch = book.chapter(c);
