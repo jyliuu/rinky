@@ -17,7 +17,7 @@
 //!   date, cover page), `document-info/id`, `publish-info` (publisher, ISBN, year).
 
 use crate::book::{Book, BookInfo, Cover, Identifier, Target, TocNode};
-use crate::util::{base64_decode, read_limited, sniff_media_type, MAX_ENTRY};
+use crate::util::{base64_decode, find_bytes, read_limited, sniff_media_type, MAX_ENTRY};
 use crate::xml::{self, escape_text, Element, Node};
 use crate::Format;
 use ink_doc::{DocError, MemoryLoader, Result};
@@ -63,8 +63,11 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
 
 /// Parses FB2 bytes into the `FictionBook` element.
 pub fn parse(bytes: &[u8]) -> Result<Element> {
-    let text = xml::decode_xml_bytes(bytes);
-    let root = xml::parse(&text).map_err(|e| DocError::Format(format!("FB2: {e}")))?;
+    parse_text(&xml::decode_xml_bytes(bytes))
+}
+
+fn parse_text(text: &str) -> Result<Element> {
+    let root = xml::parse(text).map_err(|e| DocError::Format(format!("FB2: {e}")))?;
     if root.name != "FictionBook" {
         return Err(DocError::Format(format!("FB2: root element is <{}>, not <FictionBook>", root.name)));
     }
@@ -133,20 +136,38 @@ pub fn info_of(root: &Element) -> BookInfo {
     info
 }
 
-/// The `binary` elements: path -> (media type, bytes). With `only`, decodes just that path.
-pub fn binaries(root: &Element, only: Option<&str>) -> HashMap<String, (String, Vec<u8>)> {
-    let mut out = HashMap::new();
-    for b in root.children_named("binary") {
-        let Some(id) = b.attr("id") else { continue };
-        let path = image_path(id);
-        if only.is_some_and(|o| o != path) {
+/// The `binary` elements: path -> (media type, bytes).
+pub fn binaries(root: &Element) -> HashMap<String, (String, Vec<u8>)> {
+    root.children_named("binary").filter_map(|b| Some((image_path(b.attr("id")?), binary(b)))).collect()
+}
+
+/// Media type and bytes of a `binary` element.
+fn binary(b: &Element) -> (String, Vec<u8>) {
+    let bytes = base64_decode(b.text().as_bytes());
+    let mt = sniff_media_type(&bytes).map(str::to_string).or_else(|| b.attr("content-type").map(str::to_string)).unwrap_or_default();
+    (mt, bytes)
+}
+
+/// The last `binary` element of `text` whose id gives `path`, parsed alone (the rest
+/// of the book is not built into a tree).
+fn find_binary(text: &str, path: &str) -> Option<(String, Vec<u8>)> {
+    let b = text.as_bytes();
+    let mut found = None;
+    let mut at = 0;
+    while let Some(start) = find_bytes(b, b"<binary", at) {
+        let Some(gt) = xml::tag_end(b, start) else { break };
+        at = gt;
+        let open = text[start..gt].trim_end_matches('/');
+        let Ok(tag) = xml::parse(&format!("{open}/>")) else { continue };
+        if tag.name != "binary" || tag.attr("id").map(image_path).as_deref() != Some(path) {
             continue;
         }
-        let bytes = base64_decode(b.text().as_bytes());
-        let mt = sniff_media_type(&bytes).map(str::to_string).or_else(|| b.attr("content-type").map(str::to_string)).unwrap_or_default();
-        out.insert(path, (mt, bytes));
+        let end = if b[gt - 1] == b'/' { gt + 1 } else { find_bytes(b, b"</binary>", gt).map_or(text.len(), |e| e + "</binary>".len()) };
+        if let Ok(el) = xml::parse(&text[start..end]) {
+            found = Some(binary(&el));
+        }
     }
-    out
+    found
 }
 
 /// One chapter of the conversion: what it is made of.
@@ -473,7 +494,7 @@ pub fn convert(mut root: Element) -> Result<Book> {
     let mut info = info_of(&root);
     let mut n = 0;
     assign_section_ids(&mut root, "fb2", &mut n);
-    let images = binaries(&root, None);
+    let images = binaries(&root);
     let bodies: Vec<&Element> = root.children_named("body").collect();
     let main = bodies.iter().copied().find(|b| is_main_body(b)).or(bodies.first().copied()).ok_or_else(|| DocError::Format("FB2 has no <body>".into()))?;
     let mut units = units_of(main);
@@ -580,14 +601,19 @@ pub fn load(path: &Path) -> Result<Book> {
 }
 
 /// Metadata and cover of an FB2 file.
+///
+/// Only the part before the first `body` or `binary` (the description) is built into a
+/// tree, and the cover's `binary` element alone: a book of many MB of text and images
+/// is not parsed whole for the library.
 pub fn read_info(path: &Path) -> Result<BookInfo> {
-    let root = parse(&read_bytes(path)?)?;
-    let mut info = info_of(&root);
+    let text = xml::decode_xml_bytes(&read_bytes(path)?);
+    let head_end = [find_bytes(text.as_bytes(), b"<body", 0), find_bytes(text.as_bytes(), b"<binary", 0)].into_iter().flatten().min();
+    let mut info = info_of(&parse_text(&text[..head_end.unwrap_or(text.len())])?);
     if info.metadata.title.is_empty() {
         info.metadata.title = crate::title_from(path);
     }
     if let Some(cover) = info.metadata.cover.clone() {
-        match binaries(&root, Some(&cover)).remove(&cover) {
+        match find_binary(&text, &cover) {
             Some((media_type, bytes)) => info.cover = Some(Cover { path: cover, media_type, bytes }),
             None => info.metadata.cover = None,
         }
@@ -663,6 +689,43 @@ Ggo=</binary>
         assert_eq!(book.toc[1].title, "Notes");
         assert_eq!(book.resources.read("images/pic.png").unwrap(), b"\x89PNG\r\n\x1a\n");
         assert!(book.resources.read("fb2.css").is_ok());
+    }
+
+    #[test]
+    fn read_info_parses_the_description_and_the_cover_alone() {
+        // What the whole tree gives (the old read_info), for the sample and variants: the
+        // cover binary before the body, given twice (the last one counts), self-closing,
+        // missing.
+        let whole = |src: &str| {
+            let root = parse(src.as_bytes()).unwrap();
+            let info = info_of(&root);
+            let cover = info.metadata.cover.as_ref().and_then(|c| binaries(&root).remove(c));
+            (info.metadata, cover)
+        };
+        let dir = std::env::temp_dir().join(format!("ink-fb2-info-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = "<binary id=\"cover.png\" content-type=\"image/png\">iVBORw0KGgo=</binary>";
+        let jpg = "<binary content-type=\"image/jpeg\" id=\"cover.png\">/9j/4AAQ</binary>";
+        let variants = [
+            SAMPLE.to_string(),
+            SAMPLE.replacen("<body>", &format!("{png}<body>"), 1),
+            SAMPLE.replace("</FictionBook>", &format!("{jpg}</FictionBook>")),
+            SAMPLE.replace(png, "<binary id=\"cover.png\" content-type=\"image/png\"/>"),
+            SAMPLE.replace(png, ""),
+        ];
+        for (i, src) in variants.iter().enumerate() {
+            let f = dir.join(format!("v{i}.fb2"));
+            std::fs::write(&f, src).unwrap();
+            let info = read_info(&f).unwrap();
+            let (meta, cover) = whole(src);
+            assert_eq!(info.metadata.title, meta.title, "{i}");
+            assert_eq!(info.metadata.authors, meta.authors, "{i}");
+            assert_eq!(info.metadata.cover, cover.as_ref().map(|_| "images/cover.png".to_string()), "{i}");
+            assert_eq!(info.cover.map(|c| (c.media_type, c.bytes)), cover, "{i}");
+        }
+        assert_eq!(whole(&variants[2]).1.map(|c| c.0).as_deref(), Some("image/jpeg"));
+        assert_eq!(whole(&variants[4]).1, None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
