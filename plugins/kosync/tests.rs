@@ -294,6 +294,27 @@ fn failed_pushes_are_queued_and_sent_later() {
 }
 
 #[test]
+fn a_queue_send_that_cannot_start_is_tried_again() {
+    let s = TestServer::start().unwrap();
+    s.state.add_user("reader", &userkey("pw"));
+    let mut e = Env::new(&s, "drain-retry");
+    e.login("reader", "pw");
+    let old = Progress { document: "other".into(), progress: xp(2), percentage: 0.02, device: DEFAULT_DEVICE.into(), device_id: "X".repeat(32), timestamp: None, metadata: None };
+    let mut q = SyncQueue::default();
+    q.push(old, e.clock.get());
+    std::fs::create_dir_all(&e.store.dir).unwrap();
+    q.save(&e.store.dir.join("queue.json")).unwrap();
+    // A wake without the network worker: the send cannot start.
+    let mut cx = HostCtx::new(&mut e.ui, &mut e.store, &e.perms);
+    assert!(e.plugin.on_resume(&mut cx).is_err());
+    // The next wake sends it.
+    e.call(|p, cx| p.on_resume(cx));
+    e.settle();
+    assert_eq!(pushes(&s).len(), 1);
+    assert!(SyncQueue::load(&e.store.dir.join("queue.json")).items.is_empty());
+}
+
+#[test]
 fn no_account_means_no_requests() {
     let s = TestServer::start().unwrap();
     let mut e = Env::new(&s, "noacct");

@@ -294,8 +294,10 @@ impl KoSyncPlugin {
         let open = self.book.as_ref().map(|b| b.id.clone()).unwrap_or_default();
         let Some(first) = q.items.iter().find(|i| i.progress.document != open).map(|i| i.progress.clone()) else { return Ok(()) };
         let req = build(&account, |c| c.push(&first))?;
+        // Marked only once the request runs: a send that could not start is tried again.
+        self.start(cx, req, Call::Drain { progress: first })?;
         self.draining = true;
-        self.start(cx, req, Call::Drain { progress: first })
+        Ok(())
     }
 
     /// Drops every queued push of `doc`: called after a push or pull of it succeeded,
