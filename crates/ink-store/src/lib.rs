@@ -216,6 +216,12 @@ const SETTLE_DELAYS_MS: [u64; 7] = [1, 2, 4, 8, 16, 32, 64];
 
 static SETTLE_WAITS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+thread_local! {
+    /// [`SETTLE_WAITS`] for loads on this thread only: tests in the same process wait too.
+    static SETTLE_WAITS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// How many times loads in this process found a file missing while a save of it might
 /// be running and read it again (diagnostics for the selftest and the tests).
 pub fn load_waits() -> u64 {
@@ -237,6 +243,8 @@ fn read_settled(path: &Path, check_backup: bool) -> std::io::Result<Option<Vec<u
                 match waits.next() {
                     Some(&ms) if busy => {
                         SETTLE_WAITS.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(test)]
+                        SETTLE_WAITS_HERE.with(|w| w.set(w.get() + 1));
                         std::thread::sleep(Duration::from_millis(ms));
                     }
                     _ => return Ok(None),
@@ -671,10 +679,11 @@ mod tests {
         assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Primary, Some(3)));
         assert!(load_waits() > before);
         // A file that never existed (no backup, no temporary file) is not waited for.
-        let t = std::time::Instant::now();
+        // Counted on this thread: a time bound below the 127 ms of waits can be missed on
+        // a busy machine, and the process-wide count includes other tests' loads.
+        let here = SETTLE_WAITS_HERE.with(|w| w.get());
         assert_eq!(load_recovering(&dir.path().join("new.json"), parse_json).unwrap().source, LoadSource::Missing);
-        // Waiting would take the whole 127 ms.
-        assert!(t.elapsed() < Duration::from_millis(120));
+        assert_eq!(SETTLE_WAITS_HERE.with(|w| w.get()), here, "a missing file with nothing pending is not waited for");
     }
 
     #[test]
