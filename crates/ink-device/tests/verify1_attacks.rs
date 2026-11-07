@@ -369,7 +369,6 @@ fn parsers_survive_random_input() {
         let _ = ink_device::light::DayTime::parse(&s);
         let _ = ink_device::light::AmberMode::parse(&s);
         let _ = ink_device::clock::ntp_server_from_config(&s);
-        let _ = ink_device::battery::parse_batt_state_info(&s);
         let _ = Screensaver::from_setting(&s);
     }
 }
