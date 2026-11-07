@@ -39,7 +39,11 @@ pub fn supplies(root: &SysRoot) -> Vec<(String, String)> {
 
 /// True when any charger supply (not a battery, not the moisture sensor) is online.
 pub fn external_power(root: &SysRoot) -> bool {
-    supplies(root)
+    any_charger_online(root, &supplies(root))
+}
+
+fn any_charger_online(root: &SysRoot, supplies: &[(String, String)]) -> bool {
+    supplies
         .iter()
         .filter(|(_, t)| matches!(t.as_str(), "Mains" | "USB" | "USB_DCP" | "USB_CDP" | "USB_ACA" | "Wireless"))
         .any(|(n, _)| root.read_int(&format!("{PSY}/{n}/online")).unwrap_or(0) == 1)
@@ -52,14 +56,12 @@ pub fn charging(root: &SysRoot) -> bool {
 
 /// Reads the first `Battery` supply.
 pub fn read_sysfs(root: &SysRoot) -> Option<BatteryInfo> {
-    let (name, _) = supplies(root).into_iter().find(|(_, t)| t == "Battery")?;
+    let all = supplies(root);
+    let (name, _) = all.iter().find(|(_, t)| t == "Battery")?;
     let base = format!("{PSY}/{name}");
     let percent = root.read_int(&format!("{base}/capacity")).ok()?.clamp(0, 100) as u8;
     let status = root.read(&format!("{base}/status")).unwrap_or_default();
-    let charging = match root.read_int(&format!("{base}/charging")) {
-        Ok(v) => v != 0,
-        Err(_) => status == "Charging",
-    } || status == "Charging";
+    let charging = status == "Charging" || root.read_int(&format!("{base}/charging")).is_ok_and(|v| v != 0);
     Some(BatteryInfo {
         percent,
         charging,
@@ -67,7 +69,7 @@ pub fn read_sysfs(root: &SysRoot) -> Option<BatteryInfo> {
         // Tenths of a degree, as power_supply reports.
         temperature_c: root.read_int(&format!("{base}/temp")).ok().map(|t| t as f32 / 10.0),
         voltage_mv: root.read_int(&format!("{base}/voltage_now")).ok().map(|uv| (uv / 1000).max(0) as u32),
-        external_power: external_power(root),
+        external_power: any_charger_online(root, &all),
         source: format!("sysfs:{name}"),
     })
 }
