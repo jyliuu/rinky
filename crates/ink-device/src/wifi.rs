@@ -50,6 +50,12 @@ fn yes(h: &LipcHash, k: &str) -> bool {
     s(h, k) == "yes"
 }
 
+/// A hash's `signal` out of `signal_max` (default 5) as 0..=5 bars.
+fn bars(h: &LipcHash) -> u8 {
+    let max = h.get("signal_max").and_then(LipcValue::as_int).filter(|m| *m > 0).unwrap_or(5);
+    (h.get("signal").and_then(LipcValue::as_int).unwrap_or(0).max(0).saturating_mul(5) / max).min(5) as u8
+}
+
 /// Parses `signalStrength` (`"5/5"`, `"0/5"`, `""`) to 0..=5.
 pub fn parse_signal(v: &str) -> Option<u8> {
     let (a, b) = v.trim().split_once('/')?;
@@ -70,8 +76,7 @@ pub fn networks_from_scan(list: &[LipcHash]) -> Vec<WifiNetwork> {
         if essid.is_empty() {
             continue;
         }
-        let max = h.get("signal_max").and_then(LipcValue::as_int).filter(|m| *m > 0).unwrap_or(5);
-        let signal = (h.get("signal").and_then(LipcValue::as_int).unwrap_or(0).max(0).saturating_mul(5) / max).min(5) as u8;
+        let signal = bars(h);
         let net = WifiNetwork { essid: essid.clone(), signal, secured: yes(h, "secured"), known: yes(h, "known") };
         match out.iter_mut().find(|n| n.essid == essid) {
             Some(n) if n.signal >= signal => {}
@@ -98,12 +103,7 @@ pub fn profiles_from(list: &[LipcHash]) -> Vec<WifiProfile> {
 /// The current network from `currentEssid`.
 pub fn current_from(list: &[LipcHash]) -> Option<CurrentNetwork> {
     let h = list.first()?;
-    let max = h.get("signal_max").and_then(LipcValue::as_int).filter(|m| *m > 0).unwrap_or(5);
-    Some(CurrentNetwork {
-        essid: s(h, "essid"),
-        connected: yes(h, "connected"),
-        signal: (h.get("signal").and_then(LipcValue::as_int).unwrap_or(0).max(0) * 5 / max).min(5) as u8,
-    })
+    Some(CurrentNetwork { essid: s(h, "essid"), connected: yes(h, "connected"), signal: bars(h) })
 }
 
 /// The `createProfile` hash for a network; `password` `None` = open network.
@@ -227,6 +227,11 @@ mod tests {
         let prof = "Hash Index: 0\n\tnetid = (1)\n\tessid = \"inktest1\"\n\tsecured = \"no\"\n\tpsk = \"\"\nHash Index: 1\n\tnetid = (2)\n\tessid = \"inktest2\"\n\tsecured = \"yes\"\n\tpsk = \"x\"\n";
         let p = profiles_from(&parse_hash_output(prof));
         assert_eq!(p[1], WifiProfile { essid: "inktest2".into(), netid: 2, secured: true });
+        // A wifid reply with a huge signal value (hostile or broken): full bars, no
+        // overflow.
+        let huge = format!("Hash Index: 0\n\tessid = \"x\"\n\tconnected = \"yes\"\n\tsignal = ({})\n", i64::MAX);
+        assert_eq!(current_from(&parse_hash_output(&huge)).map(|c| c.signal), Some(5));
+        assert_eq!(networks_from_scan(&parse_hash_output(&huge))[0].signal, 5);
         assert_eq!(parse_signal("5/5"), Some(5));
         assert_eq!(parse_signal("1/5"), Some(1));
         assert_eq!(parse_signal("3/4"), Some(3));
