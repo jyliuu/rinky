@@ -332,6 +332,11 @@ fn saved_ranges(hl: &[Highlight]) -> Vec<(Position, Position)> {
     hl.iter().filter_map(|h| Some((h.start.parse::<Position>().ok()?, h.end.parse::<Position>().ok()?))).collect()
 }
 
+/// True when `p` is within `slop` pixels of `r` (targets widened for fingers).
+fn near(r: &Rect, p: Point, slop: i32) -> bool {
+    Rect::new(r.x - slop, r.y - slop, r.w + 2 * slop as u32, r.h + 2 * slop as u32).contains(p)
+}
+
 /// Side of the bookmark mark in the top-right corner of a bookmarked page.
 pub const DOG_EAR: i32 = 64;
 
@@ -929,11 +934,7 @@ impl ReaderScreen {
             self.links = Some((page, links));
         }
         let (_, links) = self.links.as_ref()?;
-        const SLOP: i32 = 18;
-        links
-            .iter()
-            .find(|l| l.rect.is_some_and(|r| Rect::new(r.x - SLOP, r.y - SLOP, r.w + 2 * SLOP as u32, r.h + 2 * SLOP as u32).contains(pos)))
-            .cloned()
+        links.iter().find(|l| l.rect.is_some_and(|r| near(&r, pos, 18))).cloned()
     }
 
     /// Follows a tapped link: a footnote opens a popup, another internal link jumps
@@ -1094,8 +1095,7 @@ impl ReaderScreen {
     /// document that cannot map a saved range (fixed layouts) has the rectangles kept
     /// for the highlights made this session.
     fn highlight_at(&mut self, pos: Point) -> Option<(Position, Position, Vec<Rect>)> {
-        const NEAR: i32 = 8;
-        let near = |rects: &[Rect]| rects.iter().any(|r| Rect::new(r.x - NEAR, r.y - NEAR, r.w + 2 * NEAR as u32, r.h + 2 * NEAR as u32).contains(pos));
+        let near = |rects: &[Rect]| rects.iter().any(|r| near(r, pos, 8));
         let page = self.page;
         let doc = self.doc.as_deref_mut()?;
         let mapped = self.saved_hl.iter().rev().find_map(|(start, end)| {
@@ -1161,11 +1161,9 @@ impl ReaderScreen {
             (TouchKind::Hold, None) if self.sel.is_none() => {
                 let Some(doc) = self.doc.as_deref_mut() else { return false };
                 // A hold away from any text (blank space, margins) is not a selection.
-                const NEAR: i32 = 30;
-                let near = |r: &Rect| Rect::new(r.x - NEAR, r.y - NEAR, r.w + 2 * NEAR as u32, r.h + 2 * NEAR as u32).contains(t.pos);
                 let t0 = Instant::now();
                 match selection::word_hit(doc, page, t.pos) {
-                    Some(w) if w.sel.rects.iter().any(near) => {
+                    Some(w) if w.sel.rects.iter().any(|r| near(r, t.pos, 30)) => {
                         log::info!(
                             "reader: long press at {},{} selects {:?} on page {} ({} ms)",
                             t.pos.x,
@@ -2271,21 +2269,8 @@ impl ReaderScreen {
                 _ => {}
             },
             UiEvent::Gesture(g) => match *g {
-                Gesture::Tap { pos } if self.pill_shown() && back_rect(size).contains(pos) => {
-                    self.go_back_from_link();
-                }
-                // A tap on a saved highlight: its selection card (Remove highlight, Note,
-                // Insightful, ...).
-                Gesture::Tap { pos } if self.highlight_at(pos).is_some() => {
-                    if let Some((start, end, rects)) = self.highlight_at(pos) {
-                        self.open_highlight(start, end, rects, cx);
-                    }
-                }
-                Gesture::Tap { pos } if self.link_at(pos).is_some() => {
-                    if let Some(link) = self.link_at(pos) {
-                        self.follow_link(link, cx);
-                    }
-                }
+                // The Back pill, a saved highlight or a link under the finger.
+                Gesture::Tap { pos } if self.tap_target(pos, cx) => {}
                 // The hold already selected a word (TouchKind::Hold, just before): the long
                 // press that comes with it while the finger is down is that selection.
                 Gesture::LongPress { .. } if self.sel.is_some() => {}
@@ -2304,6 +2289,23 @@ impl ReaderScreen {
             _ => {}
         }
         Ok(Transition::None)
+    }
+
+    /// A tap on something on the page: the "Back to p. N" pill returns, a saved
+    /// highlight opens its selection card (Remove highlight, Note, Insightful, ...), a
+    /// link is followed. False when the tap is on none of them (it goes to the gesture
+    /// map). Each target is looked up once per tap.
+    fn tap_target(&mut self, pos: Point, cx: &mut AppCtx) -> bool {
+        if self.pill_shown() && back_rect(cx.screen.size()).contains(pos) {
+            self.go_back_from_link();
+        } else if let Some((start, end, rects)) = self.highlight_at(pos) {
+            self.open_highlight(start, end, rects, cx);
+        } else if let Some(link) = self.link_at(pos) {
+            self.follow_link(link, cx);
+        } else {
+            return false;
+        }
+        true
     }
 
     /// Edge slides ([`light_gestures`]): a vertical drag from the left or right edge
