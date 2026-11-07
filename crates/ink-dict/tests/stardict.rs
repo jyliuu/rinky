@@ -158,6 +158,11 @@ fn missing_and_broken_files() {
     std::fs::remove_file(dir.join("t.dict")).unwrap();
     assert!(Dictionary::open(&ifo).unwrap_err().to_string().contains("no .dict"));
     let ifo = writer::write(&dir, &base()).unwrap();
+    // A synonym pointing past the index is skipped; the others still work.
+    std::fs::write(dir.join("t.syn"), b"aaa\0\0\0\0\x63pomme\0\0\0\0\x01").unwrap();
+    let d = Dictionary::open(&ifo).unwrap();
+    assert!(d.find("aaa").is_empty());
+    assert_eq!(d.headword(d.find("pomme")[0]), "apple");
     // Truncated .dict: entries past the end give errors, not panics.
     std::fs::write(dir.join("t.dict"), b"abc").unwrap();
     let d = Dictionary::open(&ifo).unwrap();

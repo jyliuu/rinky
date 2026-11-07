@@ -98,7 +98,7 @@ impl Library {
             .map(|i| {
                 let (text, entry, markdown) = match d.fields(i) {
                     Ok(fields) => {
-                        let text = fields.iter().filter_map(|f| f.text()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n");
+                        let text = crate::stardict::join_text(&fields);
                         let entry = fields.iter().find_map(|f| crate::entry::parse(f.kind, &String::from_utf8_lossy(&f.data)));
                         let markdown = fields.iter().filter_map(|f| f.markdown(&d.style)).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n");
                         (text, entry, markdown)
