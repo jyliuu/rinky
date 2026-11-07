@@ -178,6 +178,11 @@ fn col(cols: &HashSet<String>, t: &str, c: &str) -> String {
     }
 }
 
+/// [`col`] of each of `names`, separated by commas.
+fn col_list(cols: &HashSet<String>, t: &str, names: &[&str]) -> String {
+    names.iter().map(|c| col(cols, t, c)).collect::<Vec<_>>().join(", ")
+}
+
 /// Integer from any SQLite type (KOReader's columns are not strictly typed).
 fn opt_i64(r: &Row, i: usize) -> rusqlite::Result<Option<i64>> {
     Ok(match r.get_ref(i)? {
@@ -216,20 +221,8 @@ pub fn read_statistics_db(db: &Path, scratch: Option<&Path>) -> Result<KoStatist
         return Err(StoreError::Format(format!("{}: no `book` table, not a KOReader statistics database", db.display())));
     }
     let bc = columns(&conn, "book")?;
-    let sql = format!(
-        "SELECT b.id, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} FROM book b ORDER BY b.id",
-        col(&bc, "b", "title"),
-        col(&bc, "b", "authors"),
-        col(&bc, "b", "md5"),
-        col(&bc, "b", "pages"),
-        col(&bc, "b", "last_open"),
-        col(&bc, "b", "notes"),
-        col(&bc, "b", "highlights"),
-        col(&bc, "b", "series"),
-        col(&bc, "b", "language"),
-        col(&bc, "b", "total_read_time"),
-        col(&bc, "b", "total_read_pages"),
-    );
+    let fields = ["title", "authors", "md5", "pages", "last_open", "notes", "highlights", "series", "language", "total_read_time", "total_read_pages"];
+    let sql = format!("SELECT b.id, {} FROM book b ORDER BY b.id", col_list(&bc, "b", &fields));
     let mut st = conn.prepare(&sql)?;
     out.books = st
         .query_map([], |r| {
@@ -304,18 +297,8 @@ pub fn read_vocabulary(db: &Path, scratch: Option<&Path>) -> Result<Vec<KoVocabW
     } else {
         col(&vc, "v", "book_title")
     };
-    let sql = format!(
-        "SELECT v.word, {title}, {}, {}, {}, {}, {}, {}, {}, {} FROM vocabulary v ORDER BY {}, v.word",
-        col(&vc, "v", "create_time"),
-        col(&vc, "v", "review_time"),
-        col(&vc, "v", "due_time"),
-        col(&vc, "v", "review_count"),
-        col(&vc, "v", "streak_count"),
-        col(&vc, "v", "prev_context"),
-        col(&vc, "v", "next_context"),
-        col(&vc, "v", "highlight"),
-        col(&vc, "v", "create_time"),
-    );
+    let fields = ["create_time", "review_time", "due_time", "review_count", "streak_count", "prev_context", "next_context", "highlight"];
+    let sql = format!("SELECT v.word, {title}, {} FROM vocabulary v ORDER BY {}, v.word", col_list(&vc, "v", &fields), col(&vc, "v", "create_time"));
     let mut st = conn.prepare(&sql)?;
     let words = st
         .query_map([], |r| {
