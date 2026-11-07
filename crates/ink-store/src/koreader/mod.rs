@@ -342,30 +342,25 @@ pub fn metadata_path(book: &Path) -> PathBuf {
 pub fn metadata_candidates(book: &Path, ko: Option<&KoreaderDirs>, md5: Option<&str>) -> Vec<PathBuf> {
     let name = sidecar_filename(book);
     let doc_dir = koreader_sidecar_dir(book);
-    let doc_file = doc_dir.join(&name);
-    let mut v = vec![doc_file.clone(), with_suffix(&doc_file, ".old")];
+    // A file, then its `.old` backup.
+    let with_old = |f: PathBuf| {
+        let old = with_suffix(&f, ".old");
+        [f, old]
+    };
+    let mut v = Vec::from(with_old(doc_dir.join(&name)));
     if let Some(base) = book.file_name() {
-        let mut legacy = base.to_os_string();
-        legacy.push(".lua");
-        v.push(doc_dir.join(legacy));
+        v.push(doc_dir.join(with_suffix(Path::new(base), ".lua")));
     }
     if let Some(ko) = ko {
         // KOReader: DOCSETTINGS_DIR .. "<absolute path without suffix>.sdr".
-        let sdr = koreader_sidecar_dir(book);
-        let b = os_bytes(sdr.as_os_str());
+        let b = os_bytes(doc_dir.as_os_str());
         let rel = os_from_bytes(b[b.iter().take_while(|&&c| c == b'/').count()..].to_vec());
-        let dir_file = ko.docsettings().join(rel).join(&name);
-        v.push(dir_file.clone());
-        v.push(with_suffix(&dir_file, ".old"));
+        v.extend(with_old(ko.docsettings().join(rel).join(&name)));
         // Only a real book id names a directory (it comes from a file).
         if let Some(md5) = md5.and_then(crate::md5::normalize_md5) {
-            let hash_file = ko.hashdocsettings().join(&md5[..2]).join(format!("{md5}.sdr")).join(&name);
-            v.push(hash_file.clone());
-            v.push(with_suffix(&hash_file, ".old"));
+            v.extend(with_old(ko.hashdocsettings().join(&md5[..2]).join(format!("{md5}.sdr")).join(&name)));
         }
-        let hist = ko.history().join(history_name(book));
-        v.push(hist.clone());
-        v.push(with_suffix(&hist, ".old"));
+        v.extend(with_old(ko.history().join(history_name(book))));
     }
     v.push(with_suffix(book, ".kpdfview.lua"));
     v
@@ -588,6 +583,29 @@ fn point_quad(p: Option<&Table>) -> Option<Quad> {
     Some(Quad { x0: x, y0: y, x1: x, y1: y }).filter(Quad::is_finite)
 }
 
+/// `pos0` and `pos1` of a fixed-layout annotation on `page`: a highlight starts at its
+/// first box and ends at its last (else at the points `t.pos0` and `t.pos1`); a
+/// bookmark has its page only.
+fn page_positions(page: u32, boxes: &[KoBox], t: &Table, highlighted: bool) -> (String, String) {
+    if !highlighted {
+        return (page_position(page, None), String::new());
+    }
+    let first = boxes.first().map(box_quad).or_else(|| point_quad(t.table("pos0")));
+    let last = boxes.last().map(box_quad).or_else(|| point_quad(t.table("pos1")));
+    (page_position(page, first), page_position(page, last))
+}
+
+impl KoAnnotationKind {
+    /// A bookmark without a highlighted range, else a note or a highlight.
+    fn of(highlighted: bool, has_note: bool) -> Self {
+        match (highlighted, has_note) {
+            (false, _) => KoAnnotationKind::Bookmark,
+            (true, true) => KoAnnotationKind::Note,
+            (true, false) => KoAnnotationKind::Highlight,
+        }
+    }
+}
+
 /// One entry of the `annotations` list.
 fn annotation(a: &Table, paging: bool) -> Option<KoAnnotation> {
     let note = non_empty(a.str("note"));
@@ -607,25 +625,14 @@ fn annotation(a: &Table, paging: bool) -> Option<KoAnnotation> {
         let page = page_number(a.get("page")).or_else(|| a.table("pos0").and_then(|p| page_number(p.get("page"))))?;
         out.page = Some(page);
         out.boxes = boxes(a.table("pboxes"));
-        if has_pos {
-            let first = out.boxes.first().map(box_quad).or_else(|| point_quad(a.table("pos0")));
-            let last = out.boxes.last().map(box_quad).or_else(|| point_quad(a.table("pos1")));
-            out.pos0 = page_position(page, first);
-            out.pos1 = page_position(page, last);
-        } else {
-            out.pos0 = page_position(page, None);
-        }
+        (out.pos0, out.pos1) = page_positions(page, &out.boxes, a, has_pos);
     } else if has_pos {
         out.pos0 = a.str("pos0")?.to_string();
         out.pos1 = a.str("pos1").unwrap_or(&out.pos0).to_string();
     } else {
         out.pos0 = a.str("page")?.to_string();
     }
-    out.kind = match (has_pos, out.note.is_some()) {
-        (false, _) => KoAnnotationKind::Bookmark,
-        (true, true) => KoAnnotationKind::Note,
-        (true, false) => KoAnnotationKind::Highlight,
-    };
+    out.kind = KoAnnotationKind::of(has_pos, out.note.is_some());
     Some(out)
 }
 
@@ -720,12 +727,7 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
             let Some(page) = page_number(bm.get("page")) else { continue };
             a.page = Some(page);
             a.boxes = boxes(hl.and_then(|h| h.table("pboxes")));
-            if highlighted {
-                a.pos0 = page_position(page, a.boxes.first().map(box_quad).or_else(|| point_quad(bm.table("pos0"))));
-                a.pos1 = page_position(page, a.boxes.last().map(box_quad).or_else(|| point_quad(bm.table("pos1"))));
-            } else {
-                a.pos0 = page_position(page, None);
-            }
+            (a.pos0, a.pos1) = page_positions(page, &a.boxes, &bm, highlighted);
         } else if highlighted {
             let Some(p0) = bm.str("pos0").or(bm.str("page")) else { continue };
             a.pos0 = p0.to_string();
@@ -734,11 +736,7 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
             let Some(p) = bm.str("page") else { continue };
             a.pos0 = p.to_string();
         }
-        a.kind = match (highlighted, a.note.is_some()) {
-            (false, _) => KoAnnotationKind::Bookmark,
-            (true, true) => KoAnnotationKind::Note,
-            (true, false) => KoAnnotationKind::Highlight,
-        };
+        a.kind = KoAnnotationKind::of(highlighted, a.note.is_some());
         out.push(a);
     }
     out
@@ -755,6 +753,16 @@ fn is_auto_text(text: &str, notes: &str, datetime: &str) -> bool {
 /// directory), merges it into our sidecar and saves our sidecar. KOReader's files are
 /// only read. Returns `None` when KOReader has nothing for this book.
 pub fn import_book(book: &Path, ko: Option<&KoreaderDirs>, prefer_koreader: bool) -> Result<Option<ImportSummary>> {
+    let Some((meta, mut state)) = metadata_and_state(book, ko)? else { return Ok(None) };
+    let sum = merge_into(&mut state, &meta, prefer_koreader);
+    state.save(book)?;
+    Ok(Some(sum))
+}
+
+/// KOReader's metadata for `book` and our sidecar state, which takes the hash of the
+/// file as it is now (it beats KOReader's stored checksum) when it has no md5. `None`
+/// when KOReader has nothing for this book.
+fn metadata_and_state(book: &Path, ko: Option<&KoreaderDirs>) -> Result<Option<(KoBookMetadata, BookState)>> {
     let md5 = crate::partial_md5(book).ok();
     let meta = match read_book_metadata_in(book, ko, md5.as_deref()) {
         Ok(m) => m,
@@ -762,13 +770,10 @@ pub fn import_book(book: &Path, ko: Option<&KoreaderDirs>, prefer_koreader: bool
         Err(e) => return Err(e),
     };
     let mut state = BookState::load(book)?;
-    // The hash of the file as it is now beats KOReader's stored checksum.
     if state.md5.is_none() {
         state.md5 = md5;
     }
-    let sum = merge_into(&mut state, &meta, prefer_koreader);
-    state.save(book)?;
-    Ok(Some(sum))
+    Ok(Some((meta, state)))
 }
 
 /// What [`sync_book`] did for one book.
@@ -793,16 +798,7 @@ fn mtime(p: &Path) -> Option<SystemTime> {
 /// sidecar or ours has no position; otherwise ours stay (the newer reader wins). With
 /// `dry_run` nothing is written. `None` when KOReader has nothing for this book.
 pub fn sync_book(book: &Path, ko: Option<&KoreaderDirs>, dry_run: bool) -> Result<Option<SyncResult>> {
-    let md5 = crate::partial_md5(book).ok();
-    let meta = match read_book_metadata_in(book, ko, md5.as_deref()) {
-        Ok(m) => m,
-        Err(StoreError::NotFound(_)) => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let mut state = BookState::load(book)?;
-    if state.md5.is_none() {
-        state.md5 = md5;
-    }
+    let Some((meta, mut state)) = metadata_and_state(book, ko)? else { return Ok(None) };
     let ours = mtime(&crate::sidecar::sidecar_path(book));
     let koreader_newer = state.position.is_none()
         || match (mtime(&meta.path), ours) {
@@ -814,7 +810,7 @@ pub fn sync_book(book: &Path, ko: Option<&KoreaderDirs>, dry_run: bool) -> Resul
     if !dry_run {
         state.save(book)?;
     }
-    Ok(Some(SyncResult { koreader_newer, summary, source: meta.path.clone() }))
+    Ok(Some(SyncResult { koreader_newer, summary, source: meta.path }))
 }
 
 #[cfg(test)]
