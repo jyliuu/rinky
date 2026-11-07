@@ -204,7 +204,7 @@ Exit rinky first.
 
 - **Kindle:** in KUAL choose *rinky > Uninstall rinky*, or over SSH
   `sh /mnt/us/rinky/uninstall.sh` (add `--keep-data` to keep settings and notes). The
-  [user guide](user-guide.md#8-uninstall) lists exactly what it removes.
+  [user guide](user-guide.md#10-uninstall) lists exactly what it removes.
 - **Kobo:** connect it by USB and delete the folder `.adds/rinky` and the file
   `.adds/nm/rinky`. Leave the rest of `.adds` if you use NickelMenu for anything else.
 
