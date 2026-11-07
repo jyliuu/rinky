@@ -14,6 +14,7 @@
 
 use crate::sidecar::{Bookmark, Highlight};
 use crate::{write_atomic, BookEntry, BookState, LibraryIndex, Paths, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Where an entry is in the book, for the page and percent line.
@@ -255,15 +256,23 @@ pub fn export_all(paths: &Paths, index: &LibraryIndex) -> ExportReport {
             Err(e) => report.failed.push((b.path.clone(), e.to_string())),
         }
     }
-    let count = |names: &[String], n: &str| names.iter().filter(|x| x.to_lowercase() == n.to_lowercase()).count();
+    // How many of `names` equal each one, ignoring case.
+    let counts = |names: &[String]| {
+        let mut tally: HashMap<String, usize> = HashMap::new();
+        for n in names {
+            *tally.entry(n.to_lowercase()).or_default() += 1;
+        }
+        names.iter().map(|n| tally[&n.to_lowercase()]).collect::<Vec<_>>()
+    };
     let stems: Vec<String> = loaded.iter().map(|(b, _)| sanitize_file_name(&b.title, &file_stem_of(&b.path))).collect();
     let with_format: Vec<String> =
-        loaded.iter().zip(&stems).map(|((b, _), s)| if count(&stems, s) > 1 { format!("{s} ({})", b.format) } else { s.clone() }).collect();
+        loaded.iter().zip(&stems).zip(counts(&stems)).map(|(((b, _), s), n)| if n > 1 { format!("{s} ({})", b.format) } else { s.clone() }).collect();
     let final_names: Vec<String> = loaded
         .iter()
         .zip(&with_format)
-        .map(|((b, _), s)| {
-            if count(&with_format, s) < 2 {
+        .zip(counts(&with_format))
+        .map(|(((b, _), s), n)| {
+            if n < 2 {
                 return s.clone();
             }
             let md5 = b.md5.clone().or_else(|| crate::partial_md5(&b.path).ok()).unwrap_or_default();
