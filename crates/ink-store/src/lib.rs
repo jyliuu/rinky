@@ -285,7 +285,9 @@ pub struct Recovered<T> {
 ///
 /// A missing file is read again for up to 127 ms while a save of it may be running (see
 /// `read_settled`); if it is still missing, a complete temporary copy newer than the
-/// backup is used ([`LoadSource::Temp`]) before the backup.
+/// backup is used ([`LoadSource::Temp`]) before the backup. When there is no such copy
+/// the file is read once more: a save that renamed its copy in place after the last read
+/// but before the copies were listed has made the file appear.
 pub fn load_recovering<T>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Result<T, String>) -> Result<Recovered<T>> {
     let mut out = Recovered { value: None, source: LoadSource::Missing, set_aside: Vec::new(), errors: Vec::new() };
     // Takes the parsed bytes of `file`, or moves the file aside when they do not parse.
@@ -307,6 +309,8 @@ pub fn load_recovering<T>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Res
             out.value = newest_temp_copy(path, backup_time, &parse);
             if out.value.is_some() {
                 out.source = LoadSource::Temp;
+            } else if let Ok(bytes) = std::fs::read(path) {
+                take(&mut out, path, &bytes, LoadSource::Primary);
             }
         }
     }
@@ -680,6 +684,30 @@ mod tests {
         assert_eq!(load_recovering(&dir.path().join("new.json"), parse_json).unwrap().source, LoadSource::Missing);
         // Waiting would take the whole 127 ms.
         assert!(t.elapsed() < Duration::from_millis(120));
+    }
+
+    /// A save that renames its copy into place after the load's last read, while the
+    /// load tries the temporary copies, is still found: the file is read once more
+    /// before the older backup is used.
+    #[test]
+    fn a_rename_during_the_temp_scan_is_not_missed() {
+        let dir = TempDir::new("rename-late");
+        let f = dir.path().join("state.json");
+        let valid = |b: &[u8]| parse_json(b).is_ok();
+        save_with_backup(&f, b"{\"v\":1}", valid).unwrap();
+        save_with_backup(&f, b"{\"v\":2}", valid).unwrap();
+        std::fs::remove_file(&f).unwrap();
+        // A partial temporary copy: the load waits for it, then tries it, and the save
+        // finishes while it does.
+        std::fs::write(with_suffix(&f, ".tmp.4242.0"), b"{\"v\":").unwrap();
+        let parse = |b: &[u8]| {
+            if b == b"{\"v\":" && !f.exists() {
+                std::fs::write(&f, b"{\"v\":3}").unwrap();
+            }
+            parse_json(b)
+        };
+        let r = load_recovering(&f, parse).unwrap();
+        assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Primary, Some(3)));
     }
 
     #[test]
