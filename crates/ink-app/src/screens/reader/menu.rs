@@ -503,7 +503,8 @@ impl super::ReaderScreen {
     /// Chapter starts and the return page for the menu.
     pub(super) fn menu_extra(&mut self) -> MenuExtra {
         let page = self.page;
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return MenuExtra::default() };
         let top = toc.iter().map(|e| e.level).min().unwrap_or(0);
         let mut chapters: Vec<ChapterMark> = toc

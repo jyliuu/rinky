@@ -832,20 +832,22 @@ impl ReaderScreen {
         log::debug!("reader: position page {} saved in {} ms", self.page + 1, t.elapsed().as_millis());
     }
 
-    fn toc(&mut self) -> &[TocEntry] {
+    /// Reads the table of contents into `self.toc` unless it is there (it is dropped
+    /// when page numbers change). Callers borrow `self.toc` and `self.doc` side by side.
+    fn load_toc(&mut self) {
         if self.toc.is_none() {
             self.toc = Some(self.doc.as_ref().map(|d| d.toc()).unwrap_or_default());
         }
-        self.toc.as_deref().unwrap_or_default()
     }
 
     /// What the menu bars show for the current page.
     fn menu_info(&mut self) -> MenuInfo {
         let page = self.page;
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return MenuInfo::default() };
         let count = doc.page_count();
-        let chapter = current_chapter(doc, &toc, page).map(|i| toc[i].title.clone());
+        let chapter = current_chapter(doc, toc, page).map(|i| toc[i].title.clone());
         let bookmarked = self.marks.iter().any(|b| mark_page(doc, b) == Some(page));
         MenuInfo {
             title: doc.metadata().title.clone(),
@@ -862,7 +864,8 @@ impl ReaderScreen {
 
     fn goto_info(&mut self, tab: usize) -> goto::GotoInfo {
         let page = self.page;
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return goto::GotoInfo::default() };
         let rows = toc
             .iter()
@@ -879,20 +882,21 @@ impl ReaderScreen {
             })
             .collect();
         self.listed_marks = marks.into_iter().map(|(_, b)| b).collect();
-        goto::GotoInfo { tab, toc: rows, current: current_chapter(doc, &toc, page), bookmarks, percent: footer::bar_progress(doc, page) }
+        goto::GotoInfo { tab, toc: rows, current: current_chapter(doc, toc, page), bookmarks, percent: footer::bar_progress(doc, page) }
     }
 
     /// Adds a bookmark on the current page, or removes the ones on it. Returns true when
     /// the page is bookmarked afterwards.
     fn mark_page_toggle(&mut self) -> bool {
         let page = self.page;
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return false };
         let n = self.marks.len();
         self.marks.retain(|b| mark_page(doc, b) != Some(page));
         let marked = if self.marks.len() == n {
             let Ok(pos) = doc.position_of_page(page) else { return false };
-            let chapter = current_chapter(doc, &toc, page).map(|i| toc[i].title.clone());
+            let chapter = current_chapter(doc, toc, page).map(|i| toc[i].title.clone());
             let created = ink_device::clock::TimeZone::local().at(std::time::SystemTime::now()).format();
             let fixed = doc.kind() == ink_doc::DocKind::Fixed;
             self.marks.push(Bookmark {
@@ -1064,7 +1068,8 @@ impl ReaderScreen {
             None => return,
         };
         let page = pages.first().map_or(self.page, |(p, _)| *p);
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let (Some(doc), Some(sel)) = (self.doc.as_deref(), self.sel.as_ref()) else { return };
         let created = ink_device::clock::TimeZone::local().at(std::time::SystemTime::now()).format();
         let fixed = doc.kind() == ink_doc::DocKind::Fixed;
@@ -1073,7 +1078,7 @@ impl ReaderScreen {
             end: sel.end.to_string(),
             text: sel.text.clone(),
             style: "lighten".into(),
-            chapter: current_chapter(doc, &toc, page).map(|i| toc[i].title.clone()),
+            chapter: current_chapter(doc, toc, page).map(|i| toc[i].title.clone()),
             created: created.get(..19).unwrap_or(&created).to_string(),
             page: fixed.then_some(page as u32),
             note: note.filter(|n| !n.trim().is_empty()),
@@ -1423,7 +1428,8 @@ impl ReaderScreen {
     /// The chapter title of each hit's page (empty when unknown). The TOC pages are
     /// looked up once, not once per hit.
     fn hit_chapters(&mut self, rows: &[search::HitRow]) -> Vec<String> {
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return Vec::new() };
         let starts: Vec<(usize, &str)> = toc.iter().filter_map(|e| Some((e.page.or_else(|| doc.page_of(&e.position).ok())?, e.title.trim()))).collect();
         rows.iter()
@@ -1694,14 +1700,15 @@ impl ReaderScreen {
         if stale {
             self.toc = None;
         }
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let doc = self.doc.as_deref()?;
         if stale {
-            self.chapter_map = Some(footer::ChapterMap::build(doc, &toc));
+            self.chapter_map = Some(footer::ChapterMap::build(doc, toc));
         }
         let map = self.chapter_map.as_ref()?;
         self.counting_shown = !doc.page_count().complete;
-        Some(footer::info(doc, &toc, map, self.page, self.speed))
+        Some(footer::info(doc, toc, map, self.page, self.speed))
     }
 
     /// Closes the overlay; the page comes back from its buffer with one full update.
@@ -1756,7 +1763,8 @@ impl ReaderScreen {
                 }
             }
             _ if a.starts_with("toc:") => {
-                let pos = a[4..].parse::<usize>().ok().and_then(|i| self.toc().get(i).map(|e| e.position.clone()));
+                self.load_toc();
+                let pos = a[4..].parse::<usize>().ok().and_then(|i| self.toc.as_deref()?.get(i).map(|e| e.position.clone()));
                 if let Some(pos) = pos {
                     self.close_overlay();
                     self.go_to_position(&pos);
