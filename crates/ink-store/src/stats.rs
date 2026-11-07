@@ -82,22 +82,9 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// Gap that ends a session when sessions are rebuilt from page records (KOReader data).
 pub const SESSION_GAP_SECS: u64 = 600;
 
-const SCHEMA: &str = r#"
-    CREATE TABLE IF NOT EXISTS book
-        (
-            id integer PRIMARY KEY autoincrement,
-            title text,
-            authors text,
-            notes      integer,
-            last_open  integer,
-            highlights integer,
-            pages      integer,
-            series text,
-            language text,
-            md5 text,
-            total_read_time  integer,
-            total_read_pages integer
-        );
+const SCHEMA: &str = concat!(
+    crate::koreader::sqlite::schema::book_table!(),
+    r#"
     CREATE UNIQUE INDEX IF NOT EXISTS book_title_authors_md5 ON book(title, authors, md5);
     CREATE INDEX IF NOT EXISTS book_md5 ON book(md5);
     CREATE TABLE IF NOT EXISTS page_stat_data
@@ -122,7 +109,8 @@ const SCHEMA: &str = r#"
             source     text NOT NULL DEFAULT 'rinky'
         );
     CREATE INDEX IF NOT EXISTS session_book_start ON session(id_book, start_time);
-"#;
+"#
+);
 
 /// A book as the statistics know it.
 #[derive(Clone, Debug, Default, PartialEq)]

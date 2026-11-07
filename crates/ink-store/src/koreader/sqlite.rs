@@ -322,8 +322,11 @@ pub fn read_vocabulary(db: &Path, scratch: Option<&Path>) -> Result<Vec<KoVocabW
 /// Schema statements copied from KOReader (`plugins/statistics.koplugin/main.lua`,
 /// `plugins/vocabbuilder.koplugin/db.lua`), for test fixtures and the selftest.
 pub mod schema {
-    /// Statistics, schema 20221111.
-    pub const STATISTICS: &str = r#"
+    /// KOReader's `book` table, the same in every statistics schema (and in ours,
+    /// `crate::stats`, so its rows copy over as they are).
+    macro_rules! book_table {
+        () => {
+            r#"
         CREATE TABLE IF NOT EXISTS book
             (
                 id integer PRIMARY KEY autoincrement,
@@ -339,6 +342,15 @@ pub mod schema {
                 total_read_time  integer,
                 total_read_pages integer
             );
+"#
+        };
+    }
+    pub(crate) use book_table;
+
+    /// Statistics, schema 20221111.
+    pub const STATISTICS: &str = concat!(
+        book_table!(),
+        r#"
         CREATE UNIQUE INDEX IF NOT EXISTS book_title_authors_md5 ON book(title, authors, md5);
         CREATE TABLE IF NOT EXISTS page_stat_data
             (
@@ -373,25 +385,13 @@ pub mod schema {
                 JOIN (SELECT number as idx FROM numbers) AS N ON idx <= (last_page - first_page + 1)
             );
         PRAGMA user_version=20221111;
-    "#;
+    "#
+    );
 
     /// Statistics before 2020-10 (`page_stat` table with `period`).
-    pub const STATISTICS_2019: &str = r#"
-        CREATE TABLE IF NOT EXISTS book
-            (
-                id integer PRIMARY KEY autoincrement,
-                title text,
-                authors text,
-                notes      integer,
-                last_open  integer,
-                highlights integer,
-                pages      integer,
-                series text,
-                language text,
-                md5 text,
-                total_read_time  integer,
-                total_read_pages integer
-            );
+    pub const STATISTICS_2019: &str = concat!(
+        book_table!(),
+        r#"
         CREATE TABLE IF NOT EXISTS page_stat
             (
                 id_book integer,
@@ -405,7 +405,8 @@ pub mod schema {
             (
                 version integer
             );
-    "#;
+    "#
+    );
 
     /// Vocabulary builder, schema 20240905.
     pub const VOCABULARY: &str = r#"
