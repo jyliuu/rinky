@@ -190,33 +190,42 @@ impl Canvas {
         }
         let (sw, sh) = (self.width as f32, self.height as f32);
         let (fx, fy) = (sw / w as f32, sh / h as f32);
-        for y in 0..h {
-            for x in 0..w {
-                let v = if fx > 1.0 || fy > 1.0 {
-                    // Average the source box this pixel covers.
-                    let x0 = (x as f32 * fx) as usize;
-                    let y0 = (y as f32 * fy) as usize;
-                    let x1 = (((x + 1) as f32 * fx) as usize).clamp(x0 + 1, self.width);
-                    let y1 = (((y + 1) as f32 * fy) as usize).clamp(y0 + 1, self.height);
-                    let mut sum = 0u32;
-                    for yy in y0..y1 {
-                        for xx in x0..x1 {
-                            sum += self.pixels[yy * self.width + xx] as u32;
-                        }
-                    }
-                    (sum / ((x1 - x0) * (y1 - y0)) as u32) as u8
-                } else {
-                    let sx = ((x as f32 + 0.5) * fx - 0.5).clamp(0.0, sw - 1.0);
-                    let sy = ((y as f32 + 0.5) * fy - 0.5).clamp(0.0, sh - 1.0);
-                    let (x0, y0) = (sx as usize, sy as usize);
-                    let (x1, y1) = ((x0 + 1).min(self.width - 1), (y0 + 1).min(self.height - 1));
-                    let (tx, ty) = (sx - x0 as f32, sy - y0 as f32);
-                    let p = |xx: usize, yy: usize| self.pixels[yy * self.width + xx] as f32;
-                    let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
-                    let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-                    (top * (1.0 - ty) + bot * ty).round() as u8
-                };
-                out.pixels[y * w + x] = v;
+        if fx > 1.0 || fy > 1.0 {
+            // Average the source box each pixel covers: the rows of an output row are
+            // summed per source column once, then each output column sums its span.
+            let span = |i: usize, f: f32, n: usize| {
+                let a = (i as f32 * f) as usize;
+                (a, (((i + 1) as f32 * f) as usize).clamp(a + 1, n))
+            };
+            let cols: Vec<(usize, usize)> = (0..w).map(|x| span(x, fx, self.width)).collect();
+            let mut sums = vec![0u32; self.width];
+            for (y, out_row) in out.pixels.chunks_exact_mut(w).enumerate() {
+                let (y0, y1) = span(y, fy, self.height);
+                sums.fill(0);
+                for row in self.pixels[y0 * self.width..y1 * self.width].chunks_exact(self.width) {
+                    sums.iter_mut().zip(row).for_each(|(s, p)| *s += *p as u32);
+                }
+                for (o, &(x0, x1)) in out_row.iter_mut().zip(&cols) {
+                    *o = (sums[x0..x1].iter().sum::<u32>() / ((x1 - x0) * (y1 - y0)) as u32) as u8;
+                }
+            }
+        } else {
+            // Bilinear: the two source pixels and the weight of the second, per column
+            // and per row.
+            let taps = |i: usize, f: f32, n: usize| {
+                let s = ((i as f32 + 0.5) * f - 0.5).clamp(0.0, n as f32 - 1.0);
+                let a = s as usize;
+                (a, (a + 1).min(n - 1), s - a as f32)
+            };
+            let cols: Vec<(usize, usize, f32)> = (0..w).map(|x| taps(x, fx, self.width)).collect();
+            for (y, out_row) in out.pixels.chunks_exact_mut(w).enumerate() {
+                let (y0, y1, ty) = taps(y, fy, self.height);
+                let (r0, r1) = (&self.pixels[y0 * self.width..], &self.pixels[y1 * self.width..]);
+                for (o, &(x0, x1, tx)) in out_row.iter_mut().zip(&cols) {
+                    let top = r0[x0] as f32 * (1.0 - tx) + r0[x1] as f32 * tx;
+                    let bot = r1[x0] as f32 * (1.0 - tx) + r1[x1] as f32 * tx;
+                    *o = (top * (1.0 - ty) + bot * ty).round() as u8;
+                }
             }
         }
         out
@@ -415,6 +424,25 @@ mod tests {
         assert_eq!(f.get(9, 4), Some(255));
     }
 
+    /// Shrinking averages exactly the source box each pixel covers, in either
+    /// direction, also when the other one grows.
+    #[test]
+    fn shrinking_averages_each_source_box() {
+        let mut c = Canvas::new(61, 37);
+        c.pixels.iter_mut().enumerate().for_each(|(i, p)| *p = (i * 37 % 251) as u8);
+        for (w, h) in [(20, 12), (7, 37), (61, 5), (100, 9), (1, 1)] {
+            let (fx, fy) = (61.0 / w as f32, 37.0 / h as f32);
+            let s = c.scaled(w, h);
+            for (y, x) in (0..h).flat_map(|y| (0..w).map(move |x| (y, x))) {
+                let (x0, y0) = ((x as f32 * fx) as usize, (y as f32 * fy) as usize);
+                let x1 = (((x + 1) as f32 * fx) as usize).clamp(x0 + 1, 61);
+                let y1 = (((y + 1) as f32 * fy) as usize).clamp(y0 + 1, 37);
+                let sum: u32 = (y0..y1).flat_map(|yy| (x0..x1).map(move |xx| (xx, yy))).map(|(xx, yy)| c.pixels[yy * 61 + xx] as u32).sum();
+                assert_eq!(s.pixels[y * w + x] as u32, sum / ((x1 - x0) * (y1 - y0)) as u32, "{w}x{h} at {x},{y}");
+            }
+        }
+    }
+
     #[test]
     fn blit_crop_invert() {
         let mut a = Canvas::new(10, 10);
@@ -429,4 +457,5 @@ mod tests {
         assert_eq!(a.get(0, 0), Some(0));
     }
 }
+
 
