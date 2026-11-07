@@ -1,13 +1,17 @@
 //! Small helpers the compiled-in plugins share: typed reads of plugin settings, menus
-//! built from owned labels, and text for the Markdown viewer and cards.
+//! built from owned labels, a table of HTTP requests in flight ([`Requests`]), and text
+//! for the Markdown viewer and cards.
 //!
 //! The setting and menu helpers are inherent methods of [`HostCtx`] and go through its
 //! checked accessors, so a plugin without the `storage` permission reads every setting
 //! as unset.
 
 use crate::host::{HostCtx, UiRequest};
+use crate::net::{HttpEvent, StreamMode};
 use crate::Result;
+use ink_net::Request;
 use serde_json::Value;
+use std::collections::HashMap;
 
 impl HostCtx<'_> {
     /// The plugin setting `key`; `None` when it is unset or the plugin has no `storage`
@@ -41,6 +45,86 @@ impl HostCtx<'_> {
         let items = items.into_iter().map(|(l, a)| (l.into(), a.into())).collect();
         self.ui()?.request(UiRequest::Menu { id, title: title.into(), items });
         Ok(())
+    }
+}
+
+/// A request in flight: what it is for, and its status and content type once the
+/// headers are in.
+#[derive(Debug)]
+pub struct Pending<J> {
+    /// What the request is for.
+    pub job: J,
+    /// HTTP status (0 until the headers are in).
+    pub status: u16,
+    /// The `Content-Type` header, trimmed (empty until the headers are in).
+    pub content_type: String,
+}
+
+impl<J> Pending<J> {
+    /// The media type of [`Pending::content_type`]: lowercase, without parameters.
+    pub fn mime(&self) -> String {
+        self.content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
+    }
+
+    /// True for a 2xx status.
+    pub fn success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
+
+/// A body (empty when it was streamed in chunks) or the error that ended the request.
+pub type Answer = std::result::Result<Vec<u8>, String>;
+
+/// The HTTP requests of a plugin in flight, by request id, each with its job `J`.
+/// [`Requests::event`] keeps the status and content type and hands back the finished
+/// request, so `Plugin::on_http` only has to act on the answer.
+#[derive(Debug)]
+pub struct Requests<J>(HashMap<u32, Pending<J>>);
+
+impl<J> Default for Requests<J> {
+    fn default() -> Self {
+        Requests(HashMap::new())
+    }
+}
+
+impl<J> Requests<J> {
+    /// Starts `req` with [`HostCtx::start_request`] and remembers `job` for it.
+    pub fn start(&mut self, cx: &mut HostCtx, req: Request, mode: StreamMode, job: J) -> Result<u32> {
+        let id = cx.start_request(req, mode)?;
+        self.0.insert(id, Pending { job, status: 0, content_type: String::new() });
+        Ok(id)
+    }
+
+    /// The request `id`, while it runs.
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut Pending<J>> {
+        self.0.get_mut(&id)
+    }
+
+    /// Forgets request `id` (after cancelling it).
+    pub fn remove(&mut self, id: u32) -> Option<Pending<J>> {
+        self.0.remove(&id)
+    }
+
+    /// The jobs in flight.
+    pub fn jobs(&self) -> impl Iterator<Item = &J> {
+        self.0.values().map(|p| &p.job)
+    }
+
+    /// Takes event `ev` of request `id`: `Response` records the status and content type;
+    /// `Done` and `Error` end the request and return it with its [`Answer`]. Other events
+    /// and unknown ids return `None`.
+    pub fn event(&mut self, id: u32, ev: &HttpEvent) -> Option<(Pending<J>, Answer)> {
+        match ev {
+            HttpEvent::Response { status, headers } => {
+                let p = self.0.get_mut(&id)?;
+                p.status = *status;
+                p.content_type = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+                None
+            }
+            HttpEvent::Done { body } => Some((self.0.remove(&id)?, Ok(body.clone().unwrap_or_default()))),
+            HttpEvent::Error(m) => Some((self.0.remove(&id)?, Err(m.clone()))),
+            HttpEvent::Chunk(_) | HttpEvent::Sse(_) => None,
+        }
     }
 }
 
@@ -80,8 +164,9 @@ pub fn cut_at(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cut_at, md_escape};
-    use crate::{HostCtx, MemoryStorage, Permission, PluginError, UiQueue, UiRequest};
+    use super::{cut_at, md_escape, Requests};
+    use crate::{HostCtx, HttpEvent, MemoryStorage, NetHost, Permission, PluginError, StreamMode, UiQueue, UiRequest};
+    use ink_net::Request;
     use serde_json::json;
 
     #[test]
@@ -117,5 +202,34 @@ mod tests {
         assert_eq!(cut_at("one two three four", 12), "one two…");
         assert_eq!(cut_at("one two, • three", 10), "one two…");
         assert_eq!(cut_at("abcdefghijkl", 5), "abcde…");
+    }
+
+    struct Jobs(u32);
+    impl NetHost for Jobs {
+        fn start(&mut self, _req: Request, _mode: StreamMode) -> crate::Result<u32> {
+            self.0 += 1;
+            Ok(self.0)
+        }
+        fn cancel(&mut self, _id: u32) {}
+    }
+
+    #[test]
+    fn requests_keep_status_and_hand_back_the_answer() {
+        let (mut ui, mut st, mut jobs) = (UiQueue::default(), MemoryStorage::default(), Jobs(0));
+        let perms = [Permission::Network];
+        let mut cx = HostCtx::new(&mut ui, &mut st, &perms).with_jobs(Some(&mut jobs));
+        let mut r: Requests<&str> = Requests::default();
+        let a = r.start(&mut cx, Request::get("https://x.org/a"), StreamMode::Chunks, "a").unwrap();
+        let b = r.start(&mut cx, Request::get("https://x.org/b"), StreamMode::Chunks, "b").unwrap();
+        let headers = vec![("Content-Type".to_string(), " Application/Atom+XML; charset=utf-8 ".to_string())];
+        assert!(r.event(a, &HttpEvent::Response { status: 200, headers }).is_none());
+        assert!(r.event(a, &HttpEvent::Chunk(b"x".to_vec())).is_none());
+        assert_eq!(r.jobs().count(), 2);
+        let (p, answer) = r.event(a, &HttpEvent::Done { body: Some(b"feed".to_vec()) }).unwrap();
+        assert_eq!((p.job, p.status, p.success(), p.content_type.as_str(), p.mime(), answer), ("a", 200, true, "Application/Atom+XML; charset=utf-8", "application/atom+xml".into(), Ok(b"feed".to_vec())));
+        assert!(r.event(a, &HttpEvent::Done { body: None }).is_none(), "ended requests are forgotten");
+        let (p, answer) = r.event(b, &HttpEvent::Error("timed out".into())).unwrap();
+        assert_eq!((p.job, p.status, p.success(), answer), ("b", 0, false, Err("timed out".into())));
+        assert_eq!(r.jobs().count(), 0);
     }
 }

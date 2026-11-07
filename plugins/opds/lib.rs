@@ -17,8 +17,8 @@
 use ink_net::opds::{self, OpdsEntry, OpdsFeed, SearchLink};
 use ink_net::Request;
 use ink_plugin::serde_json::{json, Value};
+use ink_plugin::kit::{Answer, Pending, Requests};
 use ink_plugin::{HostCtx, HttpEvent, Permission, Plugin, PluginError, PluginManifest, Registrar, Result, StreamMode};
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -107,16 +107,10 @@ enum Job {
     Download { part: PathBuf, target: PathBuf, file: Option<std::fs::File>, bytes: u64 },
 }
 
-struct Inflight {
-    job: Job,
-    status: u16,
-    mime: String,
-}
-
 /// The OPDS plugin.
 pub struct OpdsPlugin {
     manifest: PluginManifest,
-    inflight: HashMap<u32, Inflight>,
+    inflight: Requests<Job>,
     /// Open catalog: its auth and the feeds browsed (top = shown).
     auth: Option<(String, String)>,
     stack: Vec<OpdsFeed>,
@@ -141,7 +135,7 @@ impl OpdsPlugin {
     pub fn new() -> Self {
         OpdsPlugin {
             manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Ui, Permission::Storage, Permission::Network]),
-            inflight: HashMap::new(),
+            inflight: Requests::default(),
             auth: None,
             stack: Vec::new(),
             book: None,
@@ -204,8 +198,7 @@ impl OpdsPlugin {
 
     fn start(&mut self, cx: &mut HostCtx, req: Request, mode: StreamMode, job: Job) -> Result<()> {
         log::info!("opds: GET {}", req.url);
-        let id = cx.start_request(req, mode)?;
-        self.inflight.insert(id, Inflight { job, status: 0, mime: String::new() });
+        self.inflight.start(cx, req, mode, job)?;
         Ok(())
     }
 
@@ -318,15 +311,16 @@ impl OpdsPlugin {
         }
     }
 
-    fn finish(&mut self, cx: &mut HostCtx, f: Inflight, body: std::result::Result<Vec<u8>, String>) -> Result<()> {
+    fn finish(&mut self, cx: &mut HostCtx, f: Pending<Job>, body: Answer) -> Result<()> {
+        // Only a 2xx answer has a usable body.
+        let body = match body {
+            Ok(b) if f.success() => Ok(b),
+            Ok(_) => Err(format!("server answered {}", f.status)),
+            Err(e) => Err(e),
+        };
         match f.job {
             Job::Feed { url, push } => {
-                let parsed = match body {
-                    Ok(b) if (200..300).contains(&f.status) => opds::parse_any(&b, &f.mime, &url).map_err(|e| e.to_string()),
-                    Ok(_) => Err(format!("server answered {}", f.status)),
-                    Err(e) => Err(e),
-                };
-                match parsed {
+                match body.and_then(|b| opds::parse_any(&b, &f.content_type, &url).map_err(|e| e.to_string())) {
                     Ok(feed) => {
                         if !push {
                             self.stack.pop();
@@ -342,13 +336,10 @@ impl OpdsPlugin {
                 }
             }
             Job::OpenSearch { url, terms } => {
-                let template = match body {
-                    Ok(b) if (200..300).contains(&f.status) => {
-                        let urls = opds::parse_opensearch(&String::from_utf8_lossy(&b), &url).unwrap_or_default();
-                        opds::pick_search_template(&urls).map(str::to_string)
-                    }
-                    _ => None,
-                };
+                let template = body.ok().and_then(|b| {
+                    let urls = opds::parse_opensearch(&String::from_utf8_lossy(&b), &url).unwrap_or_default();
+                    opds::pick_search_template(&urls).map(str::to_string)
+                });
                 match template {
                     Some(t) => {
                         let u = opds::fill_template(&t, &terms);
@@ -362,13 +353,8 @@ impl OpdsPlugin {
             }
             Job::Download { part, target, file, bytes } => {
                 drop(file);
-                let ok = body.is_ok() && (200..300).contains(&f.status);
-                if !ok {
+                if let Err(why) = body {
                     let _ = std::fs::remove_file(&part);
-                    let why = match body {
-                        Err(e) => e,
-                        Ok(_) => format!("server answered {}", f.status),
-                    };
                     log::warn!("opds: download {} failed: {why}", target.display());
                     cx.ui()?.toast(&format!("Download failed: {why}"));
                     return Ok(());
@@ -497,49 +483,25 @@ impl Plugin for OpdsPlugin {
     }
 
     fn on_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
-        match ev {
-            HttpEvent::Response { status, headers } => {
-                if let Some(f) = self.inflight.get_mut(&id) {
-                    f.status = *status;
-                    f.mime = headers
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-                        .map(|(_, v)| v.trim().to_string())
-                        .unwrap_or_default();
-                }
-                Ok(())
+        if let HttpEvent::Chunk(data) = ev {
+            let Some(Job::Download { file: Some(file), bytes, part, .. }) = self.inflight.get_mut(id).map(|f| &mut f.job) else { return Ok(()) };
+            if let Err(e) = file.write_all(data) {
+                let msg = format!("cannot write {}: {e}", part.display());
+                let _ = std::fs::remove_file(&*part);
+                cx.cancel_request(id);
+                self.inflight.remove(id);
+                cx.ui()?.toast(&format!("Download failed: {msg}"));
+                return Ok(());
             }
-            HttpEvent::Chunk(data) => {
-                let Some(f) = self.inflight.get_mut(&id) else { return Ok(()) };
-                if let Job::Download { file: Some(file), bytes, part, .. } = &mut f.job {
-                    if let Err(e) = file.write_all(data) {
-                        let msg = format!("cannot write {}: {e}", part.display());
-                        let _ = std::fs::remove_file(&*part);
-                        cx.cancel_request(id);
-                        self.inflight.remove(&id);
-                        cx.ui()?.toast(&format!("Download failed: {msg}"));
-                        return Ok(());
-                    }
-                    *bytes += data.len() as u64;
-                }
-                Ok(())
-            }
-            HttpEvent::Done { body } => match self.inflight.remove(&id) {
-                Some(mut f) => {
-                    if let Job::Download { file: Some(file), .. } = &mut f.job {
-                        file.flush().map_err(failed)?;
-                        file.sync_all().ok();
-                    }
-                    self.finish(cx, f, Ok(body.clone().unwrap_or_default()))
-                }
-                None => Ok(()),
-            },
-            HttpEvent::Error(m) => match self.inflight.remove(&id) {
-                Some(f) => self.finish(cx, f, Err(m.clone())),
-                None => Ok(()),
-            },
-            _ => Ok(()),
+            *bytes += data.len() as u64;
+            return Ok(());
         }
+        let Some((mut f, body)) = self.inflight.event(id, ev) else { return Ok(()) };
+        if let (Job::Download { file: Some(file), .. }, Ok(_)) = (&mut f.job, &body) {
+            file.flush().map_err(failed)?;
+            file.sync_all().ok();
+        }
+        self.finish(cx, f, body)
     }
 }
 

@@ -21,9 +21,9 @@
 use ink_net::kosync::{self, decide, KoSyncAccount, KoSyncClient, Progress, SyncDecision, SyncQueue};
 use ink_net::{HttpClient, NetError, Request, Response};
 use ink_plugin::serde_json::{self, json, Value};
+use ink_plugin::kit::{Answer, Pending, Requests};
 use ink_plugin::{HostCtx, HttpEvent, Permission, Plugin, PluginError, PluginManifest, Registrar, Result, StreamMode};
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 /// Plugin name.
 pub const NAME: &str = "kosync";
@@ -102,12 +102,6 @@ enum Call {
     Drain { progress: Progress },
 }
 
-struct Inflight {
-    call: Call,
-    status: u16,
-    mime: String,
-}
-
 /// The open book as the plugin sees it.
 #[derive(Clone, Debug, Default)]
 struct Book {
@@ -128,7 +122,7 @@ struct Book {
 pub struct KoSyncPlugin {
     manifest: PluginManifest,
     clock: Box<dyn Fn() -> u64>,
-    inflight: HashMap<u32, Inflight>,
+    inflight: Requests<Call>,
     book: Option<Book>,
     last_push_at: u64,
     /// Remote position offered in the jump dialog.
@@ -156,7 +150,7 @@ impl KoSyncPlugin {
         KoSyncPlugin {
             manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]),
             clock: Box::new(now_secs),
-            inflight: HashMap::new(),
+            inflight: Requests::default(),
             book: None,
             last_push_at: 0,
             offer: None,
@@ -206,9 +200,7 @@ impl KoSyncPlugin {
 
     fn start(&mut self, cx: &mut HostCtx, req: Request, call: Call) -> Result<u32> {
         log::info!("kosync: {} {} ({call:?})", req.method.as_str(), req.url);
-        let id = cx.start_request(req, StreamMode::Whole { limit: 1 << 20 })?;
-        self.inflight.insert(id, Inflight { call, status: 0, mime: String::new() });
-        Ok(id)
+        self.inflight.start(cx, req, StreamMode::Whole { limit: 1 << 20 }, call)
     }
 
     fn queue_path(cx: &mut HostCtx) -> Result<std::path::PathBuf> {
@@ -379,13 +371,14 @@ impl KoSyncPlugin {
     }
 
     /// `answer` is the body, or the transport error message.
-    fn finish(&mut self, cx: &mut HostCtx, f: Inflight, answer: std::result::Result<Vec<u8>, String>) -> Result<()> {
+    fn finish(&mut self, cx: &mut HostCtx, f: Pending<Call>, answer: Answer) -> Result<()> {
+        let mime = f.mime();
         let check = |ok: &[u16]| match &answer {
-            Ok(b) => check_answer(f.status, &f.mime, b, ok),
+            Ok(b) => check_answer(f.status, &mime, b, ok),
             Err(m) if m.contains("timed out") => Err(NetError::Timeout),
             Err(m) => Err(NetError::Http(m.clone())),
         };
-        match f.call {
+        match f.job {
             Call::Auth => match check(&[200]) {
                 Ok(v) if matches!(v.get("authorized").and_then(|a| a.as_str()), Some("OK") | None) => {
                     let user = Self::setting(cx, "user").unwrap_or_default();
@@ -540,7 +533,7 @@ impl Plugin for KoSyncPlugin {
             b.changed_at = now;
         }
         let due = b.pulled && self.offer.is_none() && b.synced.as_deref() != Some(b.progress.as_str()) && now.saturating_sub(self.last_push_at) >= PUSH_EVERY;
-        if due && Self::auto_sync(cx) && self.inflight.values().all(|f| !matches!(f.call, Call::Push { .. })) {
+        if due && Self::auto_sync(cx) && self.inflight.jobs().all(|c| !matches!(c, Call::Push { .. })) {
             self.push_now(cx, false, false)?;
         }
         Ok(())
@@ -647,27 +640,9 @@ impl Plugin for KoSyncPlugin {
     }
 
     fn on_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
-        match ev {
-            HttpEvent::Response { status, headers } => {
-                if let Some(f) = self.inflight.get_mut(&id) {
-                    f.status = *status;
-                    f.mime = headers
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-                        .map(|(_, v)| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
-                        .unwrap_or_default();
-                }
-                Ok(())
-            }
-            HttpEvent::Done { body } => match self.inflight.remove(&id) {
-                Some(f) => self.finish(cx, f, Ok(body.clone().unwrap_or_default())),
-                None => Ok(()),
-            },
-            HttpEvent::Error(m) => match self.inflight.remove(&id) {
-                Some(f) => self.finish(cx, f, Err(m.clone())),
-                None => Ok(()),
-            },
-            _ => Ok(()),
+        match self.inflight.event(id, ev) {
+            Some((f, answer)) => self.finish(cx, f, answer),
+            None => Ok(()),
         }
     }
 }
