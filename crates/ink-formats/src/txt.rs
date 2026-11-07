@@ -12,7 +12,7 @@
 //! - Gutenberg headers (`Title:`, `Author:`, `Language:`) fill the metadata.
 
 use crate::book::{Book, BookInfo, Target, TocNode};
-use crate::encoding::decode_text;
+use crate::encoding::{decode_text, decode_text_owned};
 use crate::xml::{escape_text, push_text};
 use crate::Format;
 use ink_doc::{DirLoader, DocError, Result};
@@ -465,7 +465,7 @@ pub fn looks_binary(text: &str) -> bool {
 /// Opens a text file. Binary data (an image or program renamed to `.txt`) is refused.
 pub fn open(path: &Path) -> Result<Book> {
     // The raw bytes are freed once decoded.
-    let d = decode_text(&std::fs::read(path)?);
+    let d = decode_text_owned(std::fs::read(path)?);
     if looks_binary(&d.text) {
         return Err(DocError::Format(format!(
             "{} is not a text file (binary data; detected encoding {})",

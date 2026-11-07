@@ -72,18 +72,44 @@ pub fn guess_legacy(bytes: &[u8]) -> &'static Encoding {
 
 /// Decodes `bytes` with detection (BOM, UTF-16 pattern, UTF-8, chardetng).
 pub fn decode_text(bytes: &[u8]) -> Decoded {
+    match legacy_or_decoded(bytes) {
+        Ok(d) => d,
+        Err(()) => match std::str::from_utf8(bytes) {
+            Ok(s) => Decoded { text: s.to_string(), encoding: UTF_8.name(), source: EncodingSource::ValidUtf8 },
+            Err(_) => decode_invalid_utf8(bytes),
+        },
+    }
+}
+
+/// [`decode_text`] taking the bytes: valid UTF-8 (most books) becomes the text without
+/// a copy, so a big file is not held twice while it is decoded.
+pub fn decode_text_owned(bytes: Vec<u8>) -> Decoded {
+    match legacy_or_decoded(&bytes) {
+        Ok(d) => d,
+        Err(()) => match String::from_utf8(bytes) {
+            Ok(text) => Decoded { text, encoding: UTF_8.name(), source: EncodingSource::ValidUtf8 },
+            Err(e) => decode_invalid_utf8(e.as_bytes()),
+        },
+    }
+}
+
+/// Text recognised by its byte order mark or UTF-16 zero pattern; `Err` when the bytes
+/// should be tried as UTF-8.
+fn legacy_or_decoded(bytes: &[u8]) -> Result<Decoded, ()> {
     if let Some((enc, bom)) = Encoding::for_bom(bytes) {
         let text = enc.decode_without_bom_handling(&bytes[bom..]).0.into_owned();
-        return Decoded { text, encoding: enc.name(), source: EncodingSource::Bom };
+        return Ok(Decoded { text, encoding: enc.name(), source: EncodingSource::Bom });
     }
     if let Some(enc) = utf16_without_bom(bytes) {
         let text = enc.decode_without_bom_handling(bytes).0.into_owned();
-        return Decoded { text, encoding: enc.name(), source: EncodingSource::ZeroPattern };
+        return Ok(Decoded { text, encoding: enc.name(), source: EncodingSource::ZeroPattern });
     }
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return Decoded { text: s.to_string(), encoding: UTF_8.name(), source: EncodingSource::ValidUtf8 };
-    }
-    // Valid UTF-8 except for a sequence cut at the end (a truncated download).
+    Err(())
+}
+
+/// Bytes that are not valid UTF-8: UTF-8 with a sequence cut at the end (a truncated
+/// download), else the legacy encoding `chardetng` guesses.
+fn decode_invalid_utf8(bytes: &[u8]) -> Decoded {
     if let Err(e) = std::str::from_utf8(bytes) {
         if e.error_len().is_none() && e.valid_up_to() + 4 > bytes.len() && e.valid_up_to() > 0 {
             let text = String::from_utf8_lossy(bytes).into_owned();
@@ -159,5 +185,17 @@ mod tests {
         let mut b = "Søren Kierkegaard".as_bytes().to_vec();
         b.extend_from_slice(&"ø".as_bytes()[..1]);
         assert_eq!(decode_text(&b).encoding, "UTF-8");
+    }
+
+    #[test]
+    fn owned_and_borrowed_decode_alike() {
+        let ru = RU.repeat(8);
+        let (cp1251, _, _) = encoding_rs::WINDOWS_1251.encode(&ru);
+        let mut cut = "Søren".as_bytes().to_vec();
+        cut.push(0xC3);
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain("Æ text".encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
+        for b in [RU.as_bytes().to_vec(), cp1251.into_owned(), cut, utf16, Vec::new()] {
+            assert_eq!(decode_text_owned(b.clone()), decode_text(&b));
+        }
     }
 }
