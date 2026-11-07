@@ -183,6 +183,11 @@ fn opds2_catalogs_browse_too() {
     assert_eq!(e.last_menu().1, "rinky OPDS 2 test");
     let a = e.action("Epsilon");
     e.answer(FEED, &a);
+    // A download that cannot start (no network worker) leaves no partial file, which
+    // would push the next download to "Epsilon (2).epub".
+    let mut cx = HostCtx::new(&mut e.ui, &mut e.store, &e.perms);
+    assert!(e.plugin.on_ui_result(&mut cx, BOOK, "d0").is_err());
+    assert!(!e.books.join("Epsilon.epub.part").exists());
     e.answer(BOOK, "d0");
     assert_eq!(std::fs::read(e.books.join("Epsilon.epub")).unwrap().len(), 5000);
 }

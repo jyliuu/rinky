@@ -255,7 +255,10 @@ impl OpdsPlugin {
         let part = PathBuf::from(format!("{}.part", target.display()));
         let file = std::fs::File::create(&part).map_err(|err| failed(format!("cannot write {}: {err}", part.display())))?;
         let req = self.request(&link.href, "*/*");
-        self.start(cx, req, StreamMode::Chunks, Job::Download { part, target: target.clone(), file: Some(file), bytes: 0 })?;
+        if let Err(err) = self.start(cx, req, StreamMode::Chunks, Job::Download { part: part.clone(), target: target.clone(), file: Some(file), bytes: 0 }) {
+            let _ = std::fs::remove_file(&part);
+            return Err(err);
+        }
         let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
         cx.ui()?.toast(&format!("Downloading {name}..."));
         Ok(())
