@@ -162,10 +162,8 @@ impl Widget for Slider {
         let (px, small) = (cx.theme.font_px, cx.theme.small_px);
         let top = Rect::new(b.x + 8, b.y, b.w.saturating_sub(16), b.h / 2);
         cx.text_left(top, &self.label, small * 1.15, Style::Regular, fg);
-        let v = self.value_text();
-        let vw = cx.text_width(Style::Bold, px, &v);
         let baseline = cx.baseline_in(top, px, Style::Bold);
-        cx.draw_text_clipped(Style::Bold, px, top.right() as f32 - vw, baseline, &v, fg, b);
+        cx.draw_text_right(Style::Bold, px, top.right() as f32, baseline, &self.value_text(), fg, b);
         let (minus, track, plus) = Slider::parts(b);
         for (r, icon) in [(minus, Icon::Minus), (plus, Icon::Plus)] {
             stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, 3.0, fg);

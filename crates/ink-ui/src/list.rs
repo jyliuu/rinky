@@ -419,9 +419,8 @@ impl Widget for List {
                 right = cr.x - 20;
             }
             if let Some(d) = &item.detail {
-                let w = cx.text_width(Style::Regular, small, d);
                 let baseline = cx.baseline_in(r, small, Style::Regular);
-                cx.draw_text_clipped(Style::Regular, small, right as f32 - w, baseline, d, if pressed { tfg } else { muted }, r);
+                let w = cx.draw_text_right(Style::Regular, small, right as f32, baseline, d, if pressed { tfg } else { muted }, r);
                 right -= w as i32 + 24;
             }
             let tw = (right - x).max(0) as u32;

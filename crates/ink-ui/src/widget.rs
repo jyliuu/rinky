@@ -158,6 +158,15 @@ impl<'a> PaintCx<'a> {
         self.put_run(&run, x, baseline, value, Some(clip))
     }
 
+    /// Like [`PaintCx::draw_text_clipped`], but `text` ends at `right` (right-aligned);
+    /// returns its width.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_right(&mut self, style: Style, px: f32, right: f32, baseline: f32, text: &str, value: u8, clip: Rect) -> f32 {
+        let run = self.fonts.shape(style, px, text);
+        self.put_run(&run, right - run.width, baseline, value, Some(clip));
+        run.width
+    }
+
     /// Draws `text` with its left edge at `x` and baseline at `baseline` in gray `value`
     /// (shaped: kerning, ligatures, fallback faces).
     pub fn draw_text(&mut self, style: Style, px: f32, x: f32, baseline: f32, text: &str, value: u8) {
