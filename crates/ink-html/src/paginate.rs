@@ -418,13 +418,10 @@ pub fn resolve_interest(book: &Book, i: usize, keys: &[(u32, u32)], interest: &I
 /// here (no shared loader). A layout made with an unknown size is not the foreground's
 /// layout.
 pub fn shared_image_size_known(book: &Book, path: &str) -> (Option<(u32, u32)>, bool) {
-    if let Some(s) = book.images.lock().unwrap().get(path) {
-        return (*s, true);
+    match book.image_size(path, book.loader.as_deref().map(|l| l as &dyn ink_doc::ResourceLoader)) {
+        Some(size) => (size, true),
+        None => (None, false),
     }
-    let Some(loader) = book.loader.as_ref() else { return (None, false) };
-    let size = loader.read(path).ok().and_then(|b| crate::images::intrinsic_size(&b));
-    book.images.lock().unwrap().insert(path.to_string(), size);
-    (size, true)
 }
 
 /// The cache file for a book and layout.

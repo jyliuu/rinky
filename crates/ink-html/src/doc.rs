@@ -236,12 +236,7 @@ impl HtmlDocument {
     }
 
     fn fg_image_size(&self, path: &str) -> Option<(u32, u32)> {
-        if let Some(s) = self.book.images.lock().unwrap().get(path) {
-            return *s;
-        }
-        let size = self.resources.read(path).ok().and_then(|b| crate::images::intrinsic_size(&b));
-        self.book.images.lock().unwrap().insert(path.to_string(), size);
-        size
+        self.book.image_size(path, Some(self.resources.as_ref())).flatten()
     }
 
     /// Reads the sizes of every image referenced by the spine (used when the resource
@@ -319,13 +314,7 @@ impl HtmlDocument {
                 let cached = self.laid.borrow().get(&i).cloned().filter(|l| l.complete);
                 let laid = match cached {
                     Some(l) => l,
-                    None => {
-                        let lay = self.with_env(|env| layout_chapter(&self.book, i, &params, env));
-                        let pages = paginate(&lay, params.content_h);
-                        let l = Arc::new(LaidOut { lay, pages, complete: true });
-                        self.keep_laid(i, l.clone());
-                        l
-                    }
+                    None => self.lay_out_now(i)?,
                 };
                 ChapterPages { keys: laid.pages.iter().map(|p| p.key).collect(), text_bytes: chapter_text_bytes(&self.book.chapter(i).dom) }
             } else {
@@ -1609,10 +1598,7 @@ impl Document for HtmlDocument {
             }
         }
         let (c, key) = self.chapter_key(pos).ok()?;
-        let mut bytes = 0u64;
-        for i in 0..c {
-            bytes += self.chapter_bytes(i);
-        }
+        let mut bytes: u64 = (0..c).map(|i| self.chapter_bytes(i)).sum();
         let ch = self.book.chapter(c);
         let dom = &ch.dom;
         for &n in &dom.preorder {

@@ -395,6 +395,17 @@ impl Book {
         }
     }
 
+    /// The size of image `path`: cached, else read through `loader` and cached. `None`
+    /// when it is not cached and there is no loader.
+    pub fn image_size(&self, path: &str, loader: Option<&dyn ResourceLoader>) -> Option<ImageSize> {
+        if let Some(s) = self.images.lock().unwrap().get(path) {
+            return Some(*s);
+        }
+        let size = loader?.read(path).ok().and_then(|b| crate::images::intrinsic_size(&b));
+        self.images.lock().unwrap().insert(path.to_string(), size);
+        Some(size)
+    }
+
     /// Index of the chapter with DocFragment number `n`.
     pub fn chapter_of_fragment(&self, n: u32) -> Option<usize> {
         self.chapters.iter().position(|c| c.fragment == Some(n))
