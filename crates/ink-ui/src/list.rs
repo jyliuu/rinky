@@ -15,7 +15,7 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Direction, Gesture, TouchKind};
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{follow_press, follow_press_on, look_damage, press_class, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Canvas, Rect, RefreshClass};
 use ink_text::Style;
@@ -289,18 +289,9 @@ impl Widget for Card {
         }
         match ev {
             UiEvent::Touch(t) => {
-                // No feedback on touch-down: the touch may still become a swipe.
-                let now = t.press_on(self.pressed, b.contains(t.pos));
-                if now != self.pressed {
-                    self.pressed = now;
-                    self.changed = true;
-                    EventResult::Handled
-                } else if t.kind == TouchKind::Down {
-                    // Capture the contact (for its Press) without a repaint.
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                }
+                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
+                self.changed |= changed;
+                res
             }
             UiEvent::Gesture(Gesture::Tap { .. }) => {
                 self.changed |= std::mem::take(&mut self.pressed);
@@ -312,20 +303,11 @@ impl Widget for Card {
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        if self.pressed {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.pressed)
     }
 
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
-        // An event that changed nothing (a touch-down, a quick tap) refreshes nothing.
-        if std::mem::take(&mut self.changed) {
-            None
-        } else {
-            Some(Vec::new())
-        }
+        look_damage(&mut self.changed)
     }
 }
 
@@ -480,20 +462,13 @@ impl Widget for List {
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         match ev {
             UiEvent::Touch(t) => {
+                let before = self.pressed;
                 let under = self.item_at(b, t.pos.x, t.pos.y);
-                // Pressed only after Press (not on touch-down: the touch may still become
-                // a swipe), and while the finger stays on the same row within the slop.
-                let now = t.press_target(self.pressed, under);
-                if now != self.pressed {
-                    self.changed.extend(self.pressed);
-                    self.changed.extend(now);
-                    self.pressed = now;
-                    EventResult::Handled
-                } else if t.kind == TouchKind::Down && b.contains(t.pos) {
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
+                let (res, changed) = follow_press(t, &mut self.pressed, under, b.contains(t.pos));
+                if changed {
+                    self.changed.extend(before.into_iter().chain(self.pressed));
                 }
+                res
             }
             UiEvent::Gesture(Gesture::Tap { pos }) => {
                 if let Some(i) = self.item_at(b, pos.x, pos.y) {
@@ -519,11 +494,7 @@ impl Widget for List {
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        if self.pressed.is_some() {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.pressed.is_some())
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {

@@ -15,7 +15,7 @@
 //! Layout is explicit: whoever adds a widget gives its bounds (helpers [`split_rows`],
 //! [`split_cols`]).
 
-use crate::gesture::{Gesture, TouchKind};
+use crate::gesture::{Gesture, Touch, TouchKind};
 use crate::icon::Icon;
 use crate::refresh::Damage;
 use crate::theme::Theme;
@@ -746,6 +746,53 @@ impl Button {
     }
 }
 
+/// Follows press feedback for a touch ([`Touch::press_target`]) on a widget whose part
+/// `T` under the finger shows pressed (rows, cells, bar buttons). Returns what the widget
+/// answers and whether `pressed` changed: `Handled` on a change, or for a touch-down it
+/// takes (`take_down`: it captures the contact for its later `Press`, no repaint);
+/// else `Ignored`. Nothing shows on touch-down: the touch may still become a swipe.
+pub(crate) fn follow_press<T: Copy + PartialEq>(t: &Touch, pressed: &mut Option<T>, under: Option<T>, take_down: bool) -> (EventResult, bool) {
+    let now = t.press_target(*pressed, under);
+    if now != *pressed {
+        *pressed = now;
+        (EventResult::Handled, true)
+    } else if t.kind == TouchKind::Down && take_down {
+        (EventResult::Handled, false)
+    } else {
+        (EventResult::Ignored, false)
+    }
+}
+
+/// [`follow_press`] for a widget that shows pressed as a whole (a button, a card, an
+/// icon): `inside` tells whether the finger is on it; it takes every touch-down.
+pub(crate) fn follow_press_on(t: &Touch, pressed: &mut bool, inside: bool) -> (EventResult, bool) {
+    let mut p = pressed.then_some(());
+    let res = follow_press(t, &mut p, inside.then_some(()), true);
+    *pressed = p.is_some();
+    res
+}
+
+/// The refresh class of a widget with press feedback: DU while pressed (fast black and
+/// white), GL16 otherwise (the released look gets its gray levels back).
+pub(crate) fn press_class(pressed: bool) -> RefreshClass {
+    if pressed {
+        RefreshClass::Du
+    } else {
+        RefreshClass::Gl16
+    }
+}
+
+/// [`Widget::damage`] of a widget whose events change only its look: all of its bounds
+/// after a change, nothing after an event that changed nothing (a touch-down, a quick
+/// tap). Resets `changed`.
+pub(crate) fn look_damage(changed: &mut bool) -> Option<Vec<Rect>> {
+    if std::mem::take(changed) {
+        None
+    } else {
+        Some(Vec::new())
+    }
+}
+
 /// Paints a button face into `b`: what [`Button`] draws, for screens that paint
 /// directly. `pressed` inverts it (pure black and white, for a DU update).
 pub fn paint_button(cx: &mut PaintCx, b: Rect, label: &str, icon: Option<Icon>, kind: ButtonKind, enabled: bool, pressed: bool) {
@@ -818,18 +865,9 @@ impl Widget for Button {
         }
         match ev {
             UiEvent::Touch(t) => {
-                // No feedback on touch-down: the touch may still become a swipe.
-                let now = t.press_on(self.pressed, b.contains(t.pos));
-                if now != self.pressed {
-                    self.pressed = now;
-                    self.changed = true;
-                    EventResult::Handled
-                } else if t.kind == TouchKind::Down {
-                    // Capture the contact (for its Press) without a repaint.
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                }
+                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
+                self.changed |= changed;
+                res
             }
             UiEvent::Gesture(Gesture::Tap { .. }) => {
                 self.changed |= std::mem::take(&mut self.pressed);
@@ -840,21 +878,11 @@ impl Widget for Button {
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        // Pressed feedback is fast black/white; the released state gets gray levels back.
-        if self.pressed {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.pressed)
     }
 
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
-        // An event that changed nothing (a touch-down, a quick tap) refreshes nothing.
-        if std::mem::take(&mut self.changed) {
-            None
-        } else {
-            Some(Vec::new())
-        }
+        look_damage(&mut self.changed)
     }
 }
 

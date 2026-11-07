@@ -2,7 +2,7 @@
 //! no image files or symbol fonts, and an [`IconView`] widget.
 
 use crate::draw::Path;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{follow_press_on, look_damage, EventResult, PaintCx, Widget};
 use crate::{Gesture, UiEvent};
 use ink_device::{Canvas, Rect, RefreshClass};
 use std::f32::consts::PI;
@@ -550,18 +550,9 @@ impl Widget for IconView {
         }
         match ev {
             UiEvent::Touch(t) => {
-                // No feedback on touch-down: the touch may still become a swipe.
-                let was = self.pressed;
-                self.pressed = t.press_on(was, b.contains(t.pos));
-                if was != self.pressed {
-                    self.changed = true;
-                    EventResult::Handled
-                } else if t.kind == crate::TouchKind::Down {
-                    // Capture the contact (for its Press) without a repaint.
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                }
+                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
+                self.changed |= changed;
+                res
             }
             UiEvent::Gesture(Gesture::Tap { .. }) => {
                 self.changed |= std::mem::take(&mut self.pressed);
@@ -576,12 +567,7 @@ impl Widget for IconView {
     }
 
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
-        // An event that changed nothing (a touch-down, a quick tap) refreshes nothing.
-        if std::mem::take(&mut self.changed) {
-            None
-        } else {
-            Some(Vec::new())
-        }
+        look_damage(&mut self.changed)
     }
 }
 
