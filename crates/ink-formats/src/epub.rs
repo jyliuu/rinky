@@ -732,8 +732,9 @@ pub fn read_toc<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> (Vec<To
     (toc, pages)
 }
 
-/// [`load`] plus the engine's navigation (TOC and page list hrefs) for [`open`].
-fn load_parts(path: &Path) -> Result<(Book, ink_html::Navigation)> {
+/// [`load`], plus the engine's navigation (TOC and page list hrefs) for [`open`] when
+/// `with_nav` is set.
+fn load_parts(path: &Path, with_nav: bool) -> Result<(Book, Option<ink_html::Navigation>)> {
     use ink_doc::timing::step;
     let t = std::time::Instant::now();
     let (loader, pkg, drm) = prepare(path)?;
@@ -751,8 +752,10 @@ fn load_parts(path: &Path) -> Result<(Book, ink_html::Navigation)> {
     let t = step("spine read", t);
     let (toc, page_list) = read_toc(&loader, &pkg);
     // TOC and page list for the engine itself (NCX / EPUB 3 nav parsed by ink-html,
-    // api-request html.md): `open` hands it to HtmlDocument::set_navigation.
-    let nav = loader.read(&pkg.opf_path).map(|b| ink_html::nav::from_opf(&text_of(b), &pkg.opf_path, &loader)).unwrap_or_default();
+    // api-request html.md): `open` hands it to HtmlDocument::set_navigation. The book's
+    // own TOC above is what `load` callers use, so they skip this second parse.
+    let nav = with_nav
+        .then(|| loader.read(&pkg.opf_path).map(|b| ink_html::nav::from_opf(&text_of(b), &pkg.opf_path, &loader)).unwrap_or_default());
     step("toc+nav read", t);
     Ok((Book { info, chapters, toc, page_list, resources: Box::new(loader) }, nav))
 }
@@ -822,15 +825,15 @@ fn read_spine(file: &Path, loader: &ZipLoader<File>, paths: Vec<String>) -> Vec<
 
 /// Converts an EPUB file. DRM-protected books are refused.
 pub fn load(path: &Path) -> Result<Book> {
-    Ok(load_parts(path)?.0)
+    Ok(load_parts(path, false)?.0)
 }
 
 /// Opens an EPUB file as the plain engine document, with the engine's own TOC and page
 /// list (crengine xpointers resolved by ink-html).
 pub fn open(path: &Path) -> Result<HtmlDocument> {
-    let (book, nav) = load_parts(path)?;
+    let (book, nav) = load_parts(path, true)?;
     let mut doc = book.into_html_document()?;
-    doc.set_navigation(nav);
+    doc.set_navigation(nav.unwrap_or_default());
     Ok(doc)
 }
 
