@@ -1673,3 +1673,38 @@ fn page_turns_carry_the_hardware_wave() {
     assert_eq!((last(&h).rect, last(&h).wave), (FULL, None));
     assert_eq!(h.probe.uncovered(), vec![]);
 }
+
+/// A document that cannot map a saved range to rectangles (fixed layouts): the
+/// highlights made this session are drawn from the rectangles kept for their page and
+/// layout, found under a tap, and forgotten when removed.
+#[test]
+fn session_highlights_of_an_unmappable_document() {
+    let dir = tmp("session-hl");
+    let mut r = ReaderScreen::new(dir.join("book.pdf"));
+    let mut doc = selection::tests::three_pages();
+    let key = ink_doc::Document::layout(&doc).cache_key();
+    let start: Position = "flow:0.1.0".parse().unwrap();
+    let end: Position = "flow:0.1.5".parse().unwrap();
+    let rect = Rect::new(100, 160, 100, 50);
+    let mark = |layout: &str, page: usize| SessionMark { layout: layout.into(), page, rects: vec![rect], start: start.clone() };
+    let saved = vec![(start.clone(), end.clone())];
+    let lit = |doc: &mut selection::tests::PagedDoc, page: usize, session: &[SessionMark]| {
+        let mut c = Canvas::new(400, 400);
+        c.pixels.fill(255);
+        draw_highlights(doc, page, &mut c, &saved, session);
+        c.pixels[200 * 400 + 150] != 255
+    };
+    assert!(lit(&mut doc, 0, &[mark(&key, 0)]), "drawn on its page");
+    assert!(!lit(&mut doc, 1, &[mark(&key, 0)]), "not on another page");
+    assert!(!lit(&mut doc, 0, &[mark("other-layout", 0)]), "not in another layout");
+    r.doc = Some(Box::new(doc));
+    r.saved_hl = saved.clone();
+    r.session_hl = vec![mark("other-layout", 0), mark(&key, 0)];
+    let (s, e, rects) = r.highlight_at(Point::new(150, 185)).expect("the mark under the tap");
+    assert_eq!((s, e, rects), (start.clone(), end.clone(), vec![rect]));
+    assert!(r.highlight_at(Point::new(150, 400)).is_none());
+    r.remove_highlight(&start, &end);
+    assert!(r.session_hl.is_empty() && r.saved_hl.is_empty());
+    assert!(r.highlight_at(Point::new(150, 185)).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}

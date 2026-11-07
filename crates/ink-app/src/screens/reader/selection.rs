@@ -844,7 +844,7 @@ pub fn note_editor(quote: &str, size: Size) -> Overlay {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -1014,7 +1014,7 @@ mod tests {
     /// A paged text: page `p` has lines at y 100 + 60 l (50 px high), characters 20 px
     /// wide from x 100; a point maps to the character containing it (clamped to the
     /// page's text). Positions are `flow:page.line.col`.
-    struct PagedDoc {
+    pub(in crate::screens::reader) struct PagedDoc {
         pages: Vec<Vec<&'static str>>,
         meta: ink_doc::Metadata,
         layout: ink_doc::LayoutSettings,
@@ -1093,7 +1093,7 @@ mod tests {
         }
     }
 
-    fn three_pages() -> PagedDoc {
+    pub(in crate::screens::reader) fn three_pages() -> PagedDoc {
         PagedDoc::new(vec![
             vec!["Two households, both", "alike in dignity, In"],
             vec!["fair Verona, where we", "lay our scene, From"],

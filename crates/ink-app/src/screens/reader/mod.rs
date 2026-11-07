@@ -124,20 +124,41 @@ fn publish_bars(hidden: Option<bool>) {
     READER_BARS.with(|c| c.set(hidden));
 }
 
+/// A highlight made this session as it was drawn on one page: kept for documents that
+/// cannot map a saved range back to rectangles (`range_rects` empty: fixed layouts).
+struct SessionMark {
+    /// Layout key ([`LayoutSettings::cache_key`]) the rectangles are for.
+    layout: String,
+    page: usize,
+    rects: Vec<Rect>,
+    /// Start of the saved highlight.
+    start: Position,
+}
+
+impl SessionMark {
+    /// True when the mark is drawn on `page` of layout `layout`.
+    fn on(&self, layout: &str, page: usize) -> bool {
+        self.page == page && self.layout == layout
+    }
+}
+
 /// Draws the highlights on `page` (drawn on `canvas`): saved ones mapped to it in the
 /// current layout, and this session's that the document could not map (fixed layouts).
-fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, saved: &[(Position, Position)], session: &[(String, usize, Vec<Rect>, String)]) {
-    let key = doc.layout().cache_key();
-    let mut drawn: Vec<String> = Vec::new();
+fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, saved: &[(Position, Position)], session: &[SessionMark]) {
+    let mut drawn: Vec<&Position> = Vec::new();
     for (start, end) in saved {
         let rects = doc.range_rects(page, start, end);
         if !rects.is_empty() {
             selection::lighten(canvas, &rects);
-            drawn.push(start.to_string());
+            drawn.push(start);
         }
     }
-    for (_, _, rects, _) in session.iter().filter(|(k, p, _, st)| *k == key && *p == page && !drawn.contains(st)) {
-        selection::lighten(canvas, rects);
+    if session.is_empty() {
+        return;
+    }
+    let key = doc.layout().cache_key();
+    for m in session.iter().filter(|m| m.on(&key, page) && !drawn.contains(&&m.start)) {
+        selection::lighten(canvas, &m.rects);
     }
 }
 
@@ -589,10 +610,9 @@ pub struct ReaderScreen {
     sel_shown: Vec<Rect>,
     /// The selection changed and must be drawn.
     sel_dirty: bool,
-    /// Highlights made in this session: (layout key, page, rectangles, start). Drawn
-    /// only when the document cannot map the saved range (`range_rects` empty: fixed
-    /// layouts).
-    session_hl: Vec<(String, usize, Vec<Rect>, String)>,
+    /// Highlights made in this session, per page drawn. Drawn only when the document
+    /// cannot map the saved range (`range_rects` empty: fixed layouts).
+    session_hl: Vec<SessionMark>,
     /// Saved highlight ranges of the book (start, end), drawn with `range_rects`.
     saved_hl: Vec<(Position, Position)>,
     /// The selection is a saved highlight that was tapped: its card offers "Remove
@@ -1134,7 +1154,7 @@ impl ReaderScreen {
         };
         let h_note = h.note.as_ref().map_or(0, |n| n.chars().count());
         let key = doc.layout().cache_key();
-        self.session_hl.extend(pages.iter().map(|(p, rects)| (key.clone(), *p, rects.clone(), h.start.clone())));
+        self.session_hl.extend(pages.iter().map(|(p, rects)| SessionMark { layout: key.clone(), page: *p, rects: rects.clone(), start: sel.start.clone() }));
         self.saved_hl.push((sel.start.clone(), sel.end.clone()));
         if self.update_sidecar("highlight", |state| state.add_highlight(h)) {
             log::info!("reader highlight on page {} ({} pages): {} chars, note {}", page + 1, pages.len(), sel.text.chars().count(), h_note);
@@ -1155,21 +1175,21 @@ impl ReaderScreen {
         if mapped.is_some() {
             return mapped;
         }
+        if self.session_hl.is_empty() {
+            return None;
+        }
         let key = doc.layout().cache_key();
-        let (.., rects, st) = self.session_hl.iter().rev().find(|(k, p, rects, _)| *k == key && *p == page && near(rects))?;
-        let (start, end) = self.saved_hl.iter().find(|(s, _)| s.to_string() == *st)?;
-        Some((start.clone(), end.clone(), rects.clone()))
+        let m = self.session_hl.iter().rev().find(|m| m.on(&key, page) && near(&m.rects))?;
+        let (start, end) = self.saved_hl.iter().find(|(s, _)| *s == m.start)?;
+        Some((start.clone(), end.clone(), m.rects.clone()))
     }
 
     /// Selects the saved highlight `start`..`end` (drawn at `rects` on the shown page)
     /// and opens its card, as after selecting the text by hand: plugins read it as the
     /// selection, and the card offers "Remove highlight".
     fn open_highlight(&mut self, start: Position, end: Position, rects: Vec<Rect>, cx: &mut AppCtx) {
-        let text = BookState::load(&self.path)
-            .ok()
-            .and_then(|st| st.highlights.into_iter().find(|h| h.start == start.to_string() && h.end == end.to_string()))
-            .map(|h| h.text)
-            .unwrap_or_default();
+        let (s, e) = (start.to_string(), end.to_string());
+        let text = BookState::load(&self.path).ok().and_then(|st| st.highlights.into_iter().find(|h| h.start == s && h.end == e)).map(|h| h.text).unwrap_or_default();
         log::info!("reader: tap on a highlight on page {} ({} chars)", self.page + 1, text.chars().count());
         let sel = Selection { start, end, text, page: self.page, rects: rects.clone() };
         if let Some(d) = self.doc.as_deref_mut() {
@@ -1185,10 +1205,9 @@ impl ReaderScreen {
     /// Removes the saved highlight `start`..`end` from the page and the book's sidecar.
     fn remove_highlight(&mut self, start: &Position, end: &Position) {
         self.saved_hl.retain(|(s, e)| !(s == start && e == end));
-        let key = start.to_string();
-        self.session_hl.retain(|(.., st)| *st != key);
+        self.session_hl.retain(|m| m.start != *start);
         let mut removed = false;
-        if self.update_sidecar("the removed highlight", |state| removed = state.remove_highlight(&key, &end.to_string())) {
+        if self.update_sidecar("the removed highlight", |state| removed = state.remove_highlight(&start.to_string(), &end.to_string())) {
             log::info!("reader: highlight removed ({})", if removed { "from the sidecar" } else { "not in the sidecar" });
         }
     }
