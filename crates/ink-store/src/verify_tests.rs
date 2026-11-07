@@ -744,8 +744,8 @@ fn verifier_koreader_wrong_shapes_never_panic() {
     }
 }
 
-/// Matching of legacy bookmarks and highlights is O(bookmarks x highlights); time a large
-/// but possible library of notes (2000 highlights, release numbers in the evidence).
+/// Matching of legacy bookmarks and highlights: time a large but possible library of
+/// notes (2000 highlights, release numbers in the evidence).
 #[test]
 fn verifier_koreader_legacy_many_highlights_timing() {
     let n = 2000;

@@ -140,10 +140,9 @@ fn verifier2_koreader_import_bookmarks_scale_linearly() {
     assert!(r < 3.0, "doubling the bookmarks multiplied the import time by {r:.2}");
 }
 
-/// The same for the pre-2024 format: every highlighted bookmark is compared with every
-/// highlight (`legacy_annotations`).
+/// The same for the pre-2024 format (bookmarks matched to highlights).
 #[test]
-#[ignore = "verifier: legacy KOReader import is quadratic (bookmark x highlight matching); a file within MAX_INPUT/MAX_VALUES hangs the import"]
+#[ignore = "slow: run with --ignored before a release"]
 fn verifier2_koreader_legacy_import_scales_linearly() {
     let r = scaling("legacy pairs", &legacy_pairs, 5_000, false);
     assert!(r < 3.0, "doubling the legacy bookmarks and highlights multiplied the import time by {r:.2}");

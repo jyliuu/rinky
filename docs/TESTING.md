@@ -47,7 +47,8 @@ cargo test -p ink-mupdf --test verify_attacks -- --ignored byte_flip_fuzz_does_n
   a_2000_page_pdf_opens_searches_and_lists_its_toc_in_time
 cargo test -p ink-mupdf --test verify_attacks_2 -- --ignored xobject_fanout_page_time_and_memory_are_measured
 cargo test -p ink-store --lib -- --ignored --exact verify_tests::verifier_library_truncated_index_uses_backup_every_7th_byte verify_tests::verifier_sidecar_truncated_at_every_byte \
-  verify2_tests::verifier2_koreader_import_highlights_scale_linearly verify2_tests::verifier2_koreader_import_bookmarks_scale_linearly
+  verify2_tests::verifier2_koreader_import_highlights_scale_linearly verify2_tests::verifier2_koreader_import_bookmarks_scale_linearly \
+  verify2_tests::verifier2_koreader_legacy_import_scales_linearly
 cargo test -p ink-text --test verify_text_cycle2 -- --ignored real_collections_and_every_7th_truncation
 ```
 

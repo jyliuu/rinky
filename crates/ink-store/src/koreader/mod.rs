@@ -27,7 +27,8 @@ pub use sqlite::{
 use crate::lua::{self, Table, Value};
 use crate::sidecar::{BookState, Bookmark, Highlight, Quad, ReadingStatus};
 use crate::{os_bytes, os_from_bytes, with_suffix, Result, StoreError};
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -636,6 +637,39 @@ fn annotation(a: &Table, paging: bool) -> Option<KoAnnotation> {
     Some(out)
 }
 
+/// The positions of a legacy bookmark or highlight as a hash key: `pos0` and `pos1`
+/// (xpointers, or the points' coordinates for fixed-layout books). `None` when a
+/// coordinate is NaN, which equals nothing.
+#[derive(PartialEq, Eq, Hash)]
+enum PosKey {
+    Page([Option<u64>; 4]),
+    Text(Option<String>, Option<String>),
+}
+
+fn pos_key(t: &Table, paging: bool) -> Option<PosKey> {
+    if !paging {
+        return Some(PosKey::Text(t.str("pos0").map(str::to_string), t.str("pos1").map(str::to_string)));
+    }
+    let mut key = [None; 4];
+    for (slot, (p, c)) in key.iter_mut().zip([("pos0", "x"), ("pos0", "y"), ("pos1", "x"), ("pos1", "y")]) {
+        match t.table(p).and_then(|x| x.num(c)) {
+            Some(v) if v.is_nan() => return None,
+            // `+ 0.0` turns -0.0 into 0.0, which `==` takes as equal.
+            v => *slot = v.map(|v| (v + 0.0).to_bits()),
+        }
+    }
+    Some(PosKey::Page(key))
+}
+
+/// Two datetimes agree unless both are set and differ.
+fn times_agree(a: Option<&str>, b: Option<&str>) -> bool {
+    !matches!((a, b), (Some(a), Some(b)) if a != b)
+}
+
+fn same_time(a: &Table, b: &Table) -> bool {
+    times_agree(a.str("datetime"), b.str("datetime"))
+}
+
 /// KOReader before 2024: `bookmarks` (list; `highlighted` ones are highlights, `notes` is
 /// the highlighted text and `text` the user's note or an automatic label) plus
 /// `highlight` (by page: style and, before 2014, highlights missing from `bookmarks`).
@@ -655,37 +689,47 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
             }
         }
     }
-    let same = |hl: &Table, bm: &Table| {
-        let dt_differs = matches!((hl.str("datetime"), bm.str("datetime")), (Some(a), Some(b)) if a != b);
-        if dt_differs {
-            return false;
+    // A highlighted bookmark and a highlight are the same when their positions are
+    // equal and their datetimes do not differ; the highlights are indexed by position so
+    // that matching is not a scan per bookmark.
+    let mut by_pos: HashMap<PosKey, Vec<usize>> = HashMap::new();
+    for (i, (_, h)) in hls.iter().enumerate() {
+        if let Some(k) = pos_key(h, paging) {
+            by_pos.entry(k).or_default().push(i);
         }
-        if paging {
-            let num = |t: &Table, p: &str, c: &str| t.table(p).and_then(|x| x.num(c));
-            ["x", "y"].iter().all(|c| num(hl, "pos0", c) == num(bm, "pos0", c) && num(hl, "pos1", c) == num(bm, "pos1", c))
-        } else {
-            hl.str("pos0") == bm.str("pos0") && hl.str("pos1") == bm.str("pos1")
-        }
-    };
-    let mut items: Vec<(Table, Option<&Table>)> = Vec::new();
+    }
+    let mut items: Vec<(Cow<Table>, Option<&Table>)> = Vec::new();
     let mut used = vec![false; hls.len()];
     if let Some(b) = bookmarks {
         for bm in b.seq().into_iter().filter_map(|x| x.as_table()) {
             let mut hl = None;
             if bm.bool("highlighted") == Some(true) {
-                if let Some(i) = hls.iter().position(|(_, h)| same(h, bm)) {
+                let found = pos_key(bm, paging).and_then(|k| by_pos.get(&k)).and_then(|c| c.iter().copied().find(|&i| same_time(hls[i].1, bm)));
+                if let Some(i) = found {
                     used[i] = true;
                     hl = Some(hls[i].1);
                 }
             }
-            items.push((bm.clone(), hl));
+            items.push((Cow::Borrowed(bm), hl));
         }
     }
     if import_old {
+        // The datetimes of the highlighted items by position.
+        let mut marked: HashMap<PosKey, Vec<Option<String>>> = HashMap::new();
+        let mark = |marked: &mut HashMap<PosKey, Vec<Option<String>>>, bm: &Table| {
+            if let Some(k) = pos_key(bm, paging).filter(|_| bm.bool("highlighted") == Some(true)) {
+                marked.entry(k).or_default().push(bm.str("datetime").map(str::to_string));
+            }
+        };
+        items.iter().for_each(|(bm, _)| mark(&mut marked, bm));
         // Before 2014 highlights were not added to the bookmarks.
         for (i, (page, h)) in hls.iter().enumerate() {
+            let is_marked = || {
+                let times = pos_key(h, paging).and_then(|k| marked.get(&k));
+                times.is_some_and(|t| t.iter().any(|d| times_agree(h.str("datetime"), d.as_deref())))
+            };
             // KOReader skips old highlights without `pos0` too.
-            if used[i] || h.get("pos0").is_none() || items.iter().any(|(bm, _)| bm.bool("highlighted") == Some(true) && same(h, bm)) {
+            if used[i] || h.get("pos0").is_none() || is_marked() {
                 continue;
             }
             let mut bm = Table::default();
@@ -702,7 +746,8 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
             bm.entries.push((lua::Key::Str("highlighted".into()), Value::Bool(true)));
             let page_v = if paging { Value::Int(*page) } else { h.get("pos0").cloned().unwrap_or(Value::Nil) };
             bm.entries.push((lua::Key::Str("page".into()), page_v));
-            items.push((bm, Some(h)));
+            mark(&mut marked, &bm);
+            items.push((Cow::Owned(bm), Some(h)));
         }
     }
     let mut out = Vec::new();
