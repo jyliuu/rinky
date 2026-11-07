@@ -28,11 +28,6 @@ impl SysRoot {
         SysRoot { root: root.into() }
     }
 
-    /// True for the real root.
-    pub fn is_system(&self) -> bool {
-        self.root == Path::new("/")
-    }
-
     /// The host path of an absolute device path.
     pub fn path(&self, p: &str) -> PathBuf {
         self.root.join(p.trim_start_matches('/'))
@@ -100,7 +95,6 @@ mod tests {
         let d = test_dir("sysfs");
         write_tree(&d, &[("/sys/class/x/value", "42\n"), ("/sys/class/x/name", "abc \n")]).unwrap();
         let r = SysRoot::at(&d);
-        assert!(!r.is_system());
         assert_eq!(r.read_int("/sys/class/x/value").unwrap(), 42);
         assert_eq!(r.read("/sys/class/x/name").unwrap(), "abc");
         assert!(r.read_int("/sys/class/x/name").is_err());
@@ -108,7 +102,6 @@ mod tests {
         assert_eq!(r.read_int("/sys/class/x/value").unwrap(), 7);
         assert_eq!(r.list("/sys/class/x"), vec!["name".to_string(), "value".to_string()]);
         assert!(r.list("/nope").is_empty());
-        assert!(SysRoot::system().is_system());
         std::fs::remove_dir_all(d).unwrap();
     }
 }

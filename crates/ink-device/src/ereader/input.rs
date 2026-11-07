@@ -634,11 +634,6 @@ impl ReaderInput {
         &self.touch
     }
 
-    /// Status of the lipc subscriptions.
-    pub fn hub_status(&mut self) -> Vec<crate::lipc::SubscriptionStatus> {
-        self.hub.as_mut().map(|(h, _)| h.status()).unwrap_or_default()
-    }
-
     fn read_cable(&self) -> UsbCable {
         let udc = usb::read_udc(&self.sys).map(|(_, s)| s);
         usb::cable_from(udc.as_deref(), battery::external_power(&self.sys), self.hal_plugged)
