@@ -89,9 +89,11 @@ commit).
 
 ```sh
 git fetch origin
-scripts/release.sh tag --ref origin/main            # checks, then creates vX.Y.Z locally
-scripts/release.sh tag --ref origin/main --push     # the same, and pushes the tag
+scripts/release.sh tag --ref origin/main --push     # checks, creates vX.Y.Z and pushes it
 ```
+
+Without `--push` it only creates the tag locally; push that one with
+`git push origin vX.Y.Z` (running `tag` again refuses, since the tag exists).
 
 The tag is annotated, message "rinky X.Y.Z", on the merge commit (as `v0.5.2` on
 5f40997). Never move or delete a tag that was pushed: a published release points at it,

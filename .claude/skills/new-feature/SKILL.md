@@ -25,7 +25,7 @@ upcoming release, the user may name a `release/X.Y.Z` branch instead.
 | PDF/CBZ | `crates/ink-mupdf/src/` | `crates/ink-mupdf/tests/` |
 | Widgets, gestures, keyboard, refresh | `crates/ink-ui/src/` | unit tests in the module |
 | Fonts, shaping, hyphenation | `crates/ink-text/src/` | unit tests in the module |
-| Kindle/Kobo hardware (light, Wi-Fi, battery, sleep) | `crates/ink-device/src/` (backends `kindle/`, `kobo/`, `sim`, `headless`) | unit tests with fakes; real behaviour only on a device |
+| Kindle/Kobo hardware (light, Wi-Fi, battery, sleep) | `crates/ink-device/src/` (backends `ereader/` with `kindle.rs` and `kobo/`, `sim.rs`, `headless.rs`) | unit tests with fakes; real behaviour only on a device |
 | Settings, sidecars, library index, stats DB | `crates/ink-store/src/` | unit tests (temp dirs) |
 | A plugin | `plugins/<name>/` | see the `new-plugin` skill |
 | CLI subcommands, app loop, update | `crates/ink-app/src/{cli,app,update}.rs` | `crates/ink-app/tests/verify_cli.rs`, unit tests |

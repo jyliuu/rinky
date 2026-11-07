@@ -64,14 +64,16 @@ EMU_DEPLOY_BIN=$S/rinky-base-arm scripts/emu-slot.sh deploy $N --no-build
 
 Turn on debug logging: Settings › Diagnostics › log level `debug` (stored as
 `[plugins.diagnostics] log_level` in `/mnt/us/rinky/settings.toml`), or
-`RINKY_LOG=debug` for a binary started by hand. Then drive the same input on each
+`RINKY_LOG=debug` for a binary started by hand. Frames over the slow-frame threshold are logged as `slow frame: N ms` (warn), not
+`frame time:`; the grep below keeps both, or the slowest frames drop out of the numbers.
+Then drive the same input on each
 binary, e.g. open the same book and do 60 page turns with
 `scripts/emu-slot.sh tap $N 1000 900` (right two thirds: next page) (wait a second between taps), and collect:
 
 ```sh
 scripts/emu-slot.sh pull $N /mnt/us/rinky/rinky.log $S/base-rinky.log
 grep -o 'page [0-9]* drawn in [0-9.]* ms' $S/base-rinky.log      # reader draw time
-grep -o 'frame time: [0-9]* ms on screen [a-z]*' $S/base-rinky.log   # whole frame
+grep -oE '(frame time|slow frame): [0-9]+ ms on screen [A-Za-z_]+' $S/base-rinky.log   # whole frame
 scripts/emu-slot.sh ssh $N 'pid=$(cat /tmp/rinky/rinky.pid); grep -E "VmRSS|Threads" /proc/$pid/status; cat /proc/$pid/stat'
 ```
 

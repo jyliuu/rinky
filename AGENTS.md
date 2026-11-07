@@ -13,7 +13,7 @@ sim`), and most tests run headless on the host.
 ## Layout
 
 ```text
-crates/ink-device    screen, input, light, battery, power, Wi-Fi traits; kindle/kobo/sim backends
+crates/ink-device    screen, input, light, battery, power, Wi-Fi traits; ereader/ (Kindle, Kobo), sim, headless backends
 crates/ink-text      fonts, glyph cache, shaping, line breaking, hyphenation
 crates/ink-ui        widgets, damage, refresh scheduling, gestures, keyboard, dialogs
 crates/ink-doc       Document/Provider traits, positions, layout settings
