@@ -124,19 +124,17 @@ fn scaling(name: &str, make: &dyn Fn(usize) -> Vec<u8>, n: usize, paging: bool) 
 
 /// A KOReader metadata file with many highlights (all within MAX_INPUT and MAX_VALUES)
 /// must import in time linear in its size: doubling the highlights may at most about
-/// double the time. `merge_into` checks every new highlight against every highlight
-/// already added (`state.highlights.iter().any(..)`), which is quadratic.
+/// double the time (a timing ratio: run on an idle machine).
 #[test]
-#[ignore = "verifier: KOReader import is quadratic in the number of highlights (merge_into dedup); a file within MAX_INPUT/MAX_VALUES hangs the import"]
+#[ignore = "slow: run with --ignored before a release"]
 fn verifier2_koreader_import_highlights_scale_linearly() {
     let r = scaling("modern highlights", &modern_highlights, 20_000, false);
     assert!(r < 3.0, "doubling the highlights multiplied the import time by {r:.2}");
 }
 
-/// The same for page bookmarks: `BookState::add_bookmark` checks every bookmark already
-/// added.
+/// The same for page bookmarks.
 #[test]
-#[ignore = "verifier: KOReader import is quadratic in the number of bookmarks (add_bookmark dedup); a file within MAX_INPUT/MAX_VALUES hangs the import"]
+#[ignore = "slow: run with --ignored before a release"]
 fn verifier2_koreader_import_bookmarks_scale_linearly() {
     let r = scaling("modern bookmarks", &modern_bookmarks, 20_000, false);
     assert!(r < 3.0, "doubling the bookmarks multiplied the import time by {r:.2}");

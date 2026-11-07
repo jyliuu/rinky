@@ -27,6 +27,7 @@ pub use sqlite::{
 use crate::lua::{self, Table, Value};
 use crate::sidecar::{BookState, Bookmark, Highlight, Quad, ReadingStatus};
 use crate::{os_bytes, os_from_bytes, with_suffix, Result, StoreError};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -248,11 +249,18 @@ pub fn merge_into(state: &mut BookState, ko: &KoBookMetadata, prefer_koreader: b
     if ko.doc_pages.is_some() && state.pages.is_none() {
         state.pages = ko.doc_pages;
     }
+    // What `state` has, to skip equal entries without a scan per annotation (a sync
+    // merges every KOReader annotation again).
+    let mut have_highlights: HashSet<(String, String, Option<u32>)> = state.highlights.iter().map(|h| (h.start.clone(), h.end.clone(), h.page)).collect();
+    let mut have_bookmarks: HashSet<String> = state.bookmarks.iter().map(|b| b.position.clone()).collect();
     for a in &ko.annotations {
         let page = a.page.map(|p| p.saturating_sub(1));
         match a.kind {
             KoAnnotationKind::Bookmark => {
-                let added = state.add_bookmark(Bookmark {
+                if !have_bookmarks.insert(a.pos0.clone()) {
+                    continue;
+                }
+                state.bookmarks.push(Bookmark {
                     position: a.pos0.clone(),
                     label: a.text.clone(),
                     created: a.datetime.clone(),
@@ -260,10 +268,10 @@ pub fn merge_into(state: &mut BookState, ko: &KoBookMetadata, prefer_koreader: b
                     chapter: a.chapter.clone(),
                     page,
                 });
-                sum.bookmarks += added as usize;
+                sum.bookmarks += 1;
             }
             KoAnnotationKind::Highlight | KoAnnotationKind::Note => {
-                if state.highlights.iter().any(|h| h.start == a.pos0 && h.end == a.pos1 && h.page == page) {
+                if !have_highlights.insert((a.pos0.clone(), a.pos1.clone(), page)) {
                     continue;
                 }
                 state.highlights.push(Highlight {
