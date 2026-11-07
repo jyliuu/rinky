@@ -62,18 +62,16 @@ impl Read for Body {
 }
 
 #[test]
-#[ignore = "verifier: SSE id is cloned into every buffered event; one 8 KiB read of data lines holds ~1365 copies (memory cap bypassed)"]
 fn sse_reader_memory_stays_bounded_with_a_long_event_id() {
     // The cycle-1 fix caps the bytes held for the event being built (line + data + event
     // name, default 4 MiB). The `id:` value is not counted: it persists across events
     // (as it should) and every dispatched SseEvent gets its own clone of it. SseReader
-    // feeds a whole 8 KiB read into the parser and queues every event that read
-    // completes, so `data\n\n` (6 bytes per event) puts ~1365 events, each with its own
-    // copy of the id, in memory at once.
+    // used to feed a whole 8 KiB read into the parser and queue every event that read
+    // completed, so `data\n\n` (6 bytes per event) put ~1365 events, each with its own
+    // copy of the id, in memory at once (85 MiB here; 5.4 GiB after a 4 MiB id). It now
+    // parses one event at a time from the read.
     //
-    // Here: a 64 KiB id, then 24 KB of `data\n\n` -> about 85 MiB at peak with the
-    // default limit. The same stream after a 4 MiB id (allowed by the default limit)
-    // needs ~1365 x 4 MiB = 5.4 GiB for one 8 KiB read; the Kindle has about 400 MB free.
+    // Here: a 64 KiB id, then 24 KB of `data\n\n`.
     let mut head = b"id: ".to_vec();
     head.extend(std::iter::repeat_n(b'i', 64 << 10));
     head.extend_from_slice(b"\n");
