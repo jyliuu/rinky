@@ -31,6 +31,7 @@ use ink_doc::{LinkTarget, Metadata, Position, Selection};
 use mlua::{Function, HookTriggers, Lua, LuaOptions, MultiValue, StdLib, Table, Value, VmState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -503,7 +504,9 @@ struct HttpCall {
     callback: Option<Function>,
     whole: bool,
     status: Option<u16>,
-    headers: Vec<(String, String)>,
+    /// Shared, so every later event of the request (all of them carry the headers)
+    /// takes a reference instead of a copy.
+    headers: Rc<[(String, String)]>,
 }
 
 /// Plugin state the dispatcher changes.
@@ -709,8 +712,7 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_selection(&mut self, cx: &mut HostCtx, sel: &Selection) -> Result<()> {
-        let sel = sel.clone();
-        self.call_hook(cx, "on_selection", false, move |lua| Ok(mv(vec![Value::Table(selection_table(lua, &sel)?)])))
+        self.call_hook(cx, "on_selection", false, |lua| Ok(mv(vec![Value::Table(selection_table(lua, sel)?)])))
     }
 
     fn on_suspend(&mut self, cx: &mut HostCtx) -> Result<()> {
@@ -726,21 +728,21 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_action(&mut self, cx: &mut HostCtx, id: &str) -> Result<()> {
-        let id_s = id.to_string();
-        if let Some(f) = self.state.handlers.get(id).cloned() {
-            return self.call_fn(cx, f, move |lua| Ok(mv(vec![Value::String(lua.create_string(&id_s)?)])));
+        let args = |lua: &Lua| Ok(mv(vec![Value::String(lua.create_string(id)?)]));
+        match self.state.handlers.get(id).cloned() {
+            Some(f) => self.call_fn(cx, f, args),
+            None => self.call_hook(cx, "on_action", false, args),
         }
-        self.call_hook(cx, "on_action", false, move |lua| Ok(mv(vec![Value::String(lua.create_string(&id_s)?)])))
     }
 
     fn on_library_action(&mut self, cx: &mut HostCtx, id: &str, book: &Path) -> Result<()> {
-        let (id_s, book_s) = (id.to_string(), book.display().to_string());
-        let args = move |lua: &Lua| Ok(mv(vec![Value::String(lua.create_string(&book_s)?), Value::String(lua.create_string(&id_s)?)]));
+        let book_s = book.display().to_string();
+        let args = |lua: &Lua| Ok(mv(vec![Value::String(lua.create_string(&book_s)?), Value::String(lua.create_string(id)?)]));
         if let Some(f) = self.state.handlers.get(id).cloned() {
             return self.call_fn(cx, f, args);
         }
         if self.hook("on_library_action").is_some() {
-            return self.call_hook(cx, "on_library_action", false, move |lua| {
+            return self.call_hook(cx, "on_library_action", false, |lua| {
                 let mut a = args(lua)?.into_vec();
                 a.swap(0, 1);
                 Ok(mv(a))
@@ -750,7 +752,6 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_ui_result(&mut self, cx: &mut HostCtx, id: u32, result: &str) -> Result<()> {
-        let r = result.to_string();
         let kind = self.state.ui.get(&id).map(|(k, _)| *k);
         let callback = match kind {
             Some(UiKind::Viewer) if result != "closed" => self.state.ui.get(&id).map(|(_, f)| f.clone()),
@@ -758,19 +759,18 @@ impl Plugin for LuaPlugin {
             None => None,
         };
         match callback {
-            Some(f) => self.call_fn(cx, f, move |lua| Ok(mv(vec![Value::String(lua.create_string(&r)?)]))),
-            None => self.call_hook(cx, "on_ui_result", false, move |lua| Ok(mv(vec![Value::Integer(id as i64), Value::String(lua.create_string(&r)?)]))),
+            Some(f) => self.call_fn(cx, f, |lua| Ok(mv(vec![Value::String(lua.create_string(result)?)]))),
+            None => self.call_hook(cx, "on_ui_result", false, |lua| Ok(mv(vec![Value::Integer(id as i64), Value::String(lua.create_string(result)?)]))),
         }
     }
 
     fn on_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
         let Some(call) = self.state.http.get_mut(&id) else {
-            let ev = ev.clone();
-            return self.call_hook(cx, "on_http", false, move |lua| Ok(mv(vec![Value::Integer(id as i64), Value::Table(http_event_table(lua, &ev, None, &[])?)])));
+            return self.call_hook(cx, "on_http", false, |lua| Ok(mv(vec![Value::Integer(id as i64), Value::Table(http_event_table(lua, ev, None, &[])?)])));
         };
         if let HttpEvent::Response { status, headers } = ev {
             call.status = Some(*status);
-            call.headers = headers.clone();
+            call.headers = headers.as_slice().into();
             if call.whole {
                 return Ok(());
             }
@@ -781,8 +781,7 @@ impl Plugin for LuaPlugin {
             self.state.http.remove(&id);
         }
         let Some(f) = callback else { return Ok(()) };
-        let ev = ev.clone();
-        self.call_fn(cx, f, move |lua| Ok(mv(vec![Value::Table(http_event_table(lua, &ev, status, &headers)?)])))
+        self.call_fn(cx, f, |lua| Ok(mv(vec![Value::Table(http_event_table(lua, ev, status, &headers)?)])))
     }
 }
 
@@ -1384,7 +1383,7 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
             let r = host(cx, name)?.start_request(req, mode);
             match r {
                 Ok(id) => {
-                    state.http.insert(id, HttpCall { callback: f, whole: matches!(mode, StreamMode::Whole { .. }), status: None, headers: Vec::new() });
+                    state.http.insert(id, HttpCall { callback: f, whole: matches!(mode, StreamMode::Whole { .. }), status: None, headers: Rc::new([]) });
                     one(id, lua)
                 }
                 Err(e @ PluginError::Permission(_)) => Err(rt(format!("ink.http.request: {e}"))),
