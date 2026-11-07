@@ -491,41 +491,33 @@ impl SettingsList {
             cx.canvas.fill_rect(x, r.y, r.right() - margin - x, 1, fg);
         }
         let mut right = r.right() - margin;
+        // A square `side` px wide at the right end, centred in the row.
+        let square = |right: i32, side: i32| Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+        if let (Trail::Toggle(on) | Trail::Order { on, .. }, false) = (row.trail, pressed) {
+            // The ink-ui switch, painted into the right end of the row.
+            Toggle::new("", on, "").paint(cx, Rect::new(right - SWITCH_W, r.y, (SWITCH_W + 8) as u32, r.h));
+        }
         match row.trail {
             Trail::None => {}
             Trail::Chevron => {
-                let side = 40;
-                let cr = Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+                let cr = square(right, 40);
                 Icon::Forward.draw(cx.canvas, cr, muted);
                 right = cr.x - space(2);
             }
-            Trail::Toggle(on) => {
-                if !pressed {
-                    // The ink-ui switch, painted into the right end of the row.
-                    let sr = Rect::new(right - SWITCH_W, r.y, (SWITCH_W + 8) as u32, r.h);
-                    Toggle::new("", on, "").paint(cx, sr);
-                }
-                right -= SWITCH_W + space(3);
-            }
+            Trail::Toggle(_) => right -= SWITCH_W + space(3),
             Trail::Check(on) => {
-                let side = 48;
-                let cr = Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+                let cr = square(right, 48);
                 if on {
                     Icon::Check.draw(cx.canvas, cr, fg);
                 }
                 right = cr.x - space(3);
             }
             Trail::Icon(icon) => {
-                let side = 48;
-                let cr = Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+                let cr = square(right, 48);
                 icon.draw(cx.canvas, cr, fg);
                 right = cr.x - space(3);
             }
-            Trail::Order { on, up, down } => {
-                if !pressed {
-                    let sr = Rect::new(right - SWITCH_W, r.y, (SWITCH_W + 8) as u32, r.h);
-                    Toggle::new("", on, "").paint(cx, sr);
-                }
+            Trail::Order { up, down, .. } => {
                 let (ur, dr) = order_buttons(r);
                 for (b, icon, active) in [(ur, Icon::Up, up), (dr, Icon::Down, down)] {
                     // An inactive arrow: a thin outline only (no gray).
@@ -539,8 +531,7 @@ impl SettingsList {
             }
         }
         if row.lock {
-            let side = 44;
-            let lr = Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+            let lr = square(right, 44);
             paint_lock(cx, lr, fg);
             right = lr.x - space(2);
         }
@@ -699,10 +690,6 @@ impl Widget for SettingsList {
                     let (up, down) = order_buttons(self.visible(b).into_iter().find(|(k, _)| *k == i).map_or(b, |(_, r)| r));
                     let row = &mut self.rows[i];
                     return EventResult::Action(match &mut row.trail {
-                        Trail::Toggle(on) => {
-                            *on = !*on;
-                            format!("{}:{}", row.action, if *on { "on" } else { "off" })
-                        }
                         Trail::Order { up: can_up, .. } if up.contains(*pos) => {
                             if !*can_up {
                                 return EventResult::Handled;
@@ -715,7 +702,8 @@ impl Widget for SettingsList {
                             }
                             format!("{}:down", row.action)
                         }
-                        Trail::Order { on, .. } => {
+                        // A switch (an ordered item's too, outside its arrows) flips.
+                        Trail::Toggle(on) | Trail::Order { on, .. } => {
                             *on = !*on;
                             format!("{}:{}", row.action, if *on { "on" } else { "off" })
                         }
