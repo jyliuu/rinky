@@ -167,6 +167,11 @@ pub fn net_message(m: &str) -> String {
     }
 }
 
+/// The page's address: the summary's, else built from the title.
+fn page_url(sum: &Summary, lang: &str) -> String {
+    sum.url.clone().unwrap_or_else(|| format!("https://{}/wiki/{}", api::host(lang), api::title_segment(&sum.title)))
+}
+
 fn request(url: String, total: u64) -> Request {
     Request::get(url).header("Accept", "application/json").timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(15)).total_timeout(Some(Duration::from_secs(total)))
 }
@@ -285,16 +290,29 @@ impl WikipediaPlugin {
             return self.show_card(cx);
         }
         let (lang, query) = (s.langs[i].clone(), s.query.clone());
-        if let Some(sum) = self.cache(cx).get(&lang, &query) {
-            log::info!("wikipedia: {query:?} in {lang} from the cache");
+        let toast = format!("Looking up “{}” on {}…", api::cut_at(&query, 30), api::host(&lang));
+        self.summary(cx, i, query, &toast)
+    }
+
+    /// Shows the summary of `title` in language `i`: from the cache, or after a request
+    /// (with `toast` meanwhile: the next card replaces it, and it shows that something
+    /// happens).
+    fn summary(&mut self, cx: &mut HostCtx, i: usize, title: String, toast: &str) -> Result<()> {
+        let Some(lang) = self.lang(i) else { return Ok(()) };
+        if let Some(sum) = self.cache(cx).get(&lang, &title) {
+            log::info!("wikipedia: {title:?} in {lang} from the cache");
             if let Some(s) = self.session.as_mut() {
                 s.pages[i] = Some(Page::Found(sum));
             }
             return self.show_card(cx);
         }
-        // A toast: the next card replaces it, and it shows that something happens.
-        cx.ui()?.toast(&format!("Looking up “{}” on {}…", api::cut_at(&query, 30), api::host(&lang)));
-        self.start(cx, Job::Summary { lang: i, title: query })
+        cx.ui()?.toast(toast);
+        self.start(cx, Job::Summary { lang: i, title })
+    }
+
+    /// The code of language `i` of the session.
+    fn lang(&self, i: usize) -> Option<String> {
+        self.session.as_ref().map(|s| s.langs[i].clone())
     }
 
     /// Shows the card of the shown language.
@@ -348,16 +366,10 @@ impl WikipediaPlugin {
     fn pick_hit(&mut self, cx: &mut HostCtx, n: usize) -> Result<()> {
         let Some(s) = self.session.as_mut() else { return Ok(()) };
         let Some(title) = s.hits.get(n).cloned() else { return Ok(()) };
-        let (i, lang) = (s.hits_lang, s.langs[s.hits_lang].clone());
+        let i = s.hits_lang;
         s.shown = i;
-        if let Some(sum) = self.cache(cx).get(&lang, &title) {
-            if let Some(s) = self.session.as_mut() {
-                s.pages[i] = Some(Page::Found(sum));
-            }
-            return self.show_card(cx);
-        }
-        cx.ui()?.toast(&format!("Loading “{}”…", api::cut_at(&title, 30)));
-        self.start(cx, Job::Summary { lang: i, title })
+        let toast = format!("Loading “{}”…", api::cut_at(&title, 30));
+        self.summary(cx, i, title, &toast)
     }
 
     // ---- answers ----
@@ -409,13 +421,13 @@ impl WikipediaPlugin {
                 if run.status != 200 {
                     return self.failed(cx, &run.job, &format!("Wikipedia answered HTTP {}", run.status));
                 }
-                let l = self.session.as_ref().map(|s| s.langs[lang].clone()).unwrap_or_else(|| DEFAULT_LANG.into());
+                let l = self.lang(lang).unwrap_or_else(|| DEFAULT_LANG.into());
                 let text = match api::parse_article(body) {
                     Ok(Some((_, t))) if !t.is_empty() => t,
                     Ok(_) => return self.failed(cx, &run.job, "The article has no text."),
                     Err(e) => return self.failed(cx, &run.job, &format!("bad answer: {e}")),
                 };
-                let url = sum.url.clone().unwrap_or_else(|| format!("https://{}/wiki/{}", api::host(&l), api::title_segment(&sum.title)));
+                let url = page_url(&sum, &l);
                 if save {
                     self.save_article(cx, &l, &sum, &text, &url)?;
                 } else if self.view_open {
@@ -464,10 +476,9 @@ impl WikipediaPlugin {
 
     fn save(&mut self, cx: &mut HostCtx) -> Result<()> {
         let Some((lang, sum)) = self.shown_summary() else { return Ok(()) };
-        let l = self.session.as_ref().map(|s| s.langs[lang].clone()).unwrap_or_default();
-        if let Some(f) = self.full.as_ref().filter(|f| f.lang == l && f.title == sum.title) {
-            let (text, url) = (f.text.clone(), sum.url.clone().unwrap_or_else(|| format!("https://{}/wiki/{}", api::host(&l), api::title_segment(&sum.title))));
-            return self.save_article(cx, &l, &sum, &text, &url);
+        let l = self.lang(lang).unwrap_or_default();
+        if let Some(text) = self.full.as_ref().filter(|f| f.lang == l && f.title == sum.title).map(|f| f.text.clone()) {
+            return self.save_article(cx, &l, &sum, &text, &page_url(&sum, &l));
         }
         cx.ui()?.toast(&format!("Saving “{}”…", api::cut_at(&sum.title, 30)));
         self.start(cx, Job::Article { lang, sum, save: true })
