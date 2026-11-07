@@ -305,6 +305,33 @@ impl SrcRuns {
     }
 }
 
+/// The display text of an inline run being collected, with the source of each char and
+/// the segments the sources point into.
+#[derive(Default)]
+struct InlineText {
+    text: String,
+    src: SrcRuns,
+    segs: Vec<Seg>,
+}
+
+impl InlineText {
+    /// Adds a segment; returns its index.
+    fn add_seg(&mut self, seg: Seg) -> u32 {
+        self.segs.push(seg);
+        (self.segs.len() - 1) as u32
+    }
+
+    fn push(&mut self, c: char, seg: u32, dom: u32) {
+        self.text.push(c);
+        self.src.push(CharSrc { seg, dom });
+    }
+
+    fn pop(&mut self) {
+        self.text.pop();
+        self.src.pop();
+    }
+}
+
 /// A style segment of a paragraph (one text node, image or line break).
 #[derive(Clone, Debug)]
 struct Seg {
@@ -753,10 +780,10 @@ impl<'a, 'e> Flow<'a, 'e> {
 
     /// Children of a block container: inline runs become paragraphs.
     fn block_children(&mut self, id: NodeId, x: f32, w: f32) {
-        let kids = self.dom.node(id).children.clone();
+        let kids = &self.dom.node(id).children;
         if self.depth > 150 {
             // Deeper nesting is laid out as one paragraph.
-            self.paragraph(id, &kids, x, w);
+            self.paragraph(id, kids, x, w);
             return;
         }
         self.depth += 1;
@@ -783,9 +810,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.stopped
     }
 
-    fn block_children_inner(&mut self, id: NodeId, kids: Vec<NodeId>, x: f32, w: f32) {
+    fn block_children_inner(&mut self, id: NodeId, kids: &[NodeId], x: f32, w: f32) {
         let mut run: Vec<NodeId> = Vec::new();
-        for c in kids {
+        for &c in kids {
             if self.at_stop() {
                 // The text gathered so far stays out too: a paragraph is never cut.
                 return;
@@ -947,8 +974,7 @@ impl<'a, 'e> Flow<'a, 'e> {
     }
 
     /// Appends the display text of text node `n`.
-    #[allow(clippy::too_many_arguments)]
-    fn push_text(&mut self, n: NodeId, text: &mut String, src: &mut SrcRuns, segs: &mut Vec<Seg>, link: u32, shift: f32) {
+    fn push_text(&mut self, n: NodeId, out: &mut InlineText, link: u32, shift: f32) {
         let dom = self.dom;
         let Some(t) = dom.text(n) else { return };
         let parent = dom.node(n).parent;
@@ -958,59 +984,56 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         let face = self.face(st);
         let text_seg = |scale: f32| Seg { node: n, style: parent, link, kind: SegKind::Text { face, px: st.font_size * scale }, shift };
-        let mut seg = segs.len() as u32;
-        segs.push(text_seg(1.0));
+        let mut seg = out.add_seg(text_seg(1.0));
         let small_caps = st.small_caps;
         let mut small = false;
         let ws = st.white_space;
         let keep_spaces = ws.keeps_spaces();
         let keep_nl = ws.keeps_newlines();
         let tt = st.text_transform;
-        let mut prev_alpha = text.chars().last().is_some_and(|c| c.is_alphanumeric());
+        let mut prev_alpha = out.text.chars().last().is_some_and(|c| c.is_alphanumeric());
         for (i, c) in t.chars().enumerate() {
             let i = i as u32;
             if c == '\n' && keep_nl {
-                text.push('\n');
-                src.push(CharSrc { seg, dom: i });
+                out.push('\n', seg, i);
                 prev_alpha = false;
                 continue;
             }
             let c = if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c };
             if c == ' ' && !keep_spaces {
-                let last = text.chars().last();
+                let last = out.text.chars().last();
                 if matches!(last, None | Some(' ') | Some('\n')) {
                     continue;
                 }
             }
-            let mut out = match tt {
+            let mut shown = match tt {
                 TextTransform::Upper => c.to_uppercase().next().unwrap_or(c),
                 TextTransform::Lower => c.to_lowercase().next().unwrap_or(c),
                 TextTransform::Capitalize if !prev_alpha => c.to_uppercase().next().unwrap_or(c),
                 _ => c,
             };
-            if small_caps && out != ' ' {
+            if small_caps && shown != ' ' {
                 // Lower-case letters become smaller capitals (a segment per case run).
-                let want_small = out.is_lowercase();
+                let want_small = shown.is_lowercase();
                 if want_small != small {
                     small = want_small;
-                    seg = segs.len() as u32;
-                    segs.push(text_seg(if small { 0.78 } else { 1.0 }));
+                    seg = out.add_seg(text_seg(if small { 0.78 } else { 1.0 }));
                 }
                 if small {
-                    out = out.to_uppercase().next().unwrap_or(out);
+                    shown = shown.to_uppercase().next().unwrap_or(shown);
                 }
             }
             prev_alpha = c.is_alphanumeric();
-            text.push(out);
-            src.push(CharSrc { seg, dom: i });
+            out.push(shown, seg, i);
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn collect(&mut self, nodes: &[NodeId], owner: NodeId, text: &mut String, src: &mut SrcRuns, segs: &mut Vec<Seg>, link: u32, w: f32, shift: f32) {
+    /// Collects the display text of inline nodes of block `owner` (containing width `w`).
+    fn collect(&mut self, nodes: &[NodeId], owner: NodeId, out: &mut InlineText, link: u32, w: f32, shift: f32) {
+        let dom = self.dom;
         for &n in nodes {
-            match &self.dom.node(n).kind {
-                NodeKind::Text(_) => self.push_text(n, text, src, segs, link, shift),
+            match &dom.node(n).kind {
+                NodeKind::Text(_) => self.push_text(n, out, link, shift),
                 NodeKind::Element(e) => {
                     let st = self.st(n);
                     if st.display == Display::None {
@@ -1021,25 +1044,20 @@ impl<'a, 'e> Flow<'a, 'e> {
                         continue;
                     }
                     if name == "br" {
-                        let seg = segs.len() as u32;
-                        segs.push(Seg { node: n, style: n, link, kind: SegKind::Break, shift });
+                        let seg = out.add_seg(Seg { node: n, style: n, link, kind: SegKind::Break, shift });
                         // A trailing space before a forced break is dropped.
-                        if text.ends_with(' ') && !self.st(owner).white_space.keeps_spaces() {
-                            text.pop();
-                            src.pop();
+                        if out.text.ends_with(' ') && !self.st(owner).white_space.keeps_spaces() {
+                            out.pop();
                         }
-                        text.push('\n');
-                        src.push(CharSrc { seg, dom: 0 });
+                        out.push('\n', seg, 0);
                         continue;
                     }
                     if matches!(name, "img" | "image" | "svg") {
                         if let Some((s, dw, dh)) = self.image_box(n, w, self.p.content_h) {
                             let l = if link == NO_LINK { self.link_of(n) } else { link };
-                            let seg = segs.len() as u32;
                             let own = self.valign_shift(n);
-                            segs.push(Seg { node: n, style: n, link: l, kind: SegKind::Image { src: s, w: dw, h: dh }, shift: shift + own });
-                            text.push(OBJ);
-                            src.push(CharSrc { seg, dom: 0 });
+                            let seg = out.add_seg(Seg { node: n, style: n, link: l, kind: SegKind::Image { src: s, w: dw, h: dh }, shift: shift + own });
+                            out.push(OBJ, seg, 0);
                         }
                         continue;
                     }
@@ -1049,21 +1067,21 @@ impl<'a, 'e> Flow<'a, 'e> {
                             l = self.add_link(n, h);
                         }
                     }
-                    let kids = self.dom.node(n).children.clone();
+                    let kids = &dom.node(n).children;
                     let sh = shift + self.valign_shift(n);
                     if self.depth > 400 {
                         // Too deep: the rest of the subtree is plain text.
                         let mut stack: Vec<NodeId> = kids.iter().rev().copied().collect();
                         while let Some(k) = stack.pop() {
-                            match &self.dom.node(k).kind {
-                                NodeKind::Text(_) => self.push_text(k, text, src, segs, l, sh),
-                                NodeKind::Element(_) => stack.extend(self.dom.node(k).children.iter().rev()),
+                            match &dom.node(k).kind {
+                                NodeKind::Text(_) => self.push_text(k, out, l, sh),
+                                NodeKind::Element(_) => stack.extend(dom.node(k).children.iter().rev()),
                             }
                         }
                         continue;
                     }
                     self.depth += 1;
-                    self.collect(&kids, owner, text, src, segs, l, w, sh);
+                    self.collect(kids, owner, out, l, w, sh);
                     self.depth -= 1;
                 }
             }
@@ -1142,29 +1160,24 @@ impl<'a, 'e> Flow<'a, 'e> {
 
     /// Lays out an inline run as one paragraph owned by block `owner`.
     fn paragraph(&mut self, owner: NodeId, nodes: &[NodeId], x: f32, w: f32) {
-        let mut text = String::new();
-        let mut src = SrcRuns::default();
-        let mut segs: Vec<Seg> = Vec::new();
-        self.collect(nodes, owner, &mut text, &mut src, &mut segs, NO_LINK, w, 0.0);
-        let ost = self.st(owner);
-        let keep_spaces = ost.white_space.keeps_spaces();
-        // Trim leading and trailing collapsible spaces.
-        if !keep_spaces {
-            while text.ends_with(' ') {
-                text.pop();
-                src.pop();
+        let mut out = InlineText::default();
+        self.collect(nodes, owner, &mut out, NO_LINK, w, 0.0);
+        // Trailing collapsible spaces go (leading ones were never collected).
+        if !self.st(owner).white_space.keeps_spaces() {
+            while out.text.ends_with(' ') {
+                out.pop();
             }
         }
-        let only_breaks = !text.is_empty() && text.chars().all(|c| c == '\n');
+        let only_breaks = !out.text.is_empty() && out.text.chars().all(|c| c == '\n');
         if only_breaks {
             // `<p><br/></p>`: one empty line.
-            text.truncate(1);
-            src.truncate(1);
-        } else if text.ends_with('\n') {
+            out.text.truncate(1);
+            out.src.truncate(1);
+        } else if out.text.ends_with('\n') {
             // A final line break (or newline in pre text) makes no empty line.
-            text.pop();
-            src.pop();
+            out.pop();
         }
+        let InlineText { text, src, segs } = out;
         if text.is_empty() {
             return;
         }
