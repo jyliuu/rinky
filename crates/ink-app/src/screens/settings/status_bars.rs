@@ -29,6 +29,8 @@ use ink_ui::{Icon, PaintCx, Segmented, Slider, Widget};
 pub const SEPARATORS: &[(&str, &str)] = &[(" · ", "Dot"), (" | ", "Vertical bar"), (" – ", "Dash"), (" / ", "Slash"), ("   ", "Space")];
 /// Slot names, by index.
 const SLOTS: [&str; 3] = ["Left", "Centre", "Right"];
+/// Slot names in `sbar-move` actions, by index.
+const SLOT_KEYS: [&str; 3] = ["left", "center", "right"];
 /// Height of the preview.
 pub const PREVIEW_H: u32 = 300;
 
@@ -206,7 +208,7 @@ pub fn rows(bars: &StatusBars, view: &View) -> Vec<Row> {
             if i + 1 < len {
                 rows.push(mv("down", "Move later").icon(Icon::Forward));
             }
-            for (k, slot) in ["left", "center", "right"].iter().enumerate() {
+            for (k, slot) in SLOT_KEYS.iter().enumerate() {
                 if k != s {
                     rows.push(mv(slot, &format!("Move to the {} slot", SLOTS[k].to_lowercase())));
                 }
@@ -294,10 +296,7 @@ pub fn action(a: &str, bars: &mut StatusBars, view: &View) -> Option<Step> {
                     let to = j.unwrap_or(i);
                     return Some(Step::Saved(View::Item(e, s, to), format!("{} moved", label(STATUS_WIDGETS, &list[to]))));
                 }
-                "left" => 0,
-                "center" => 1,
-                "right" => 2,
-                _ => return None,
+                key => SLOT_KEYS.iter().position(|k| *k == key)?,
             };
             if target == s {
                 return Some(Step::Open(View::Item(e, s, i)));
