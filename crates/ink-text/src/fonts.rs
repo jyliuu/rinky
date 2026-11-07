@@ -18,6 +18,7 @@ use fontdue::{Font, FontSettings, Metrics};
 use ink_device::{Canvas, Rect};
 use rustybuzz::ttf_parser::GlyphId;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Range;
 use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
@@ -126,6 +127,54 @@ impl Shaping {
     }
 }
 
+/// The maps behind the glyph and metric caches. Their keys are a few small integers
+/// (style, char or glyph id, size bits), looked up once per glyph drawn or measured;
+/// the default SipHash costs more than the rest of such a lookup.
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
+
+/// FxHash's multiply-rotate mix, with the high half folded into the low bits at the end
+/// (the table picks buckets by the low bits).
+#[derive(Clone, Copy, Default)]
+struct FastHasher(u64);
+
+impl FastHasher {
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for FastHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.add(*b as u64);
+        }
+    }
+
+    fn write_u8(&mut self, v: u8) {
+        self.add(v as u64);
+    }
+
+    fn write_u16(&mut self, v: u16) {
+        self.add(v as u64);
+    }
+
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
+
+    fn write_usize(&mut self, v: usize) {
+        self.add(v as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 32)
+    }
+}
+
 /// Cache key of a shaped glyph bitmap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct GlyphKey {
@@ -139,7 +188,7 @@ struct GlyphKey {
 
 /// Glyph bitmaps with a byte budget; least recently used entries go first.
 struct GlyphCache {
-    map: HashMap<GlyphKey, (GlyphMask, u64)>,
+    map: FastMap<GlyphKey, (GlyphMask, u64)>,
     bytes: usize,
     budget: usize,
     tick: u64,
@@ -147,7 +196,7 @@ struct GlyphCache {
 
 impl GlyphCache {
     fn new(budget: usize) -> Self {
-        GlyphCache { map: HashMap::new(), bytes: 0, budget, tick: 0 }
+        GlyphCache { map: FastMap::default(), bytes: 0, budget, tick: 0 }
     }
 
     fn get_or_insert(&mut self, key: GlyphKey, make: impl FnOnce() -> GlyphMask) -> &GlyphMask {
@@ -195,11 +244,13 @@ pub const GLYPH_CACHE_BYTES: usize = 8 << 20;
 /// A set of faces (main family plus fallbacks) with caches.
 pub struct Fonts {
     fonts: [Font; 3],
-    advance: HashMap<(Style, char, u32), f32>,
+    advance: FastMap<(Style, char, u32), f32>,
+    /// The default hasher on purpose: with [`FastMap`] this map made drawing a line on
+    /// the prototype path slower (26 -> 32 us for 108 glyphs, host release build).
     glyphs: HashMap<(Style, char, u32, u32), ProtoGlyph>,
     faces: Vec<FaceData>,
     /// First fallback face with a glyph for a char (`None`: no face has it).
-    fallback_for: HashMap<char, Option<FaceId>>,
+    fallback_for: FastMap<char, Option<FaceId>>,
     /// Faces added with [`Fonts::add_face`]: drawn only on request, never fallbacks.
     own: Vec<FaceId>,
     shaped: GlyphCache,
@@ -257,10 +308,10 @@ impl Fonts {
     fn from_parts(fonts: [Font; 3], faces: Vec<FaceData>) -> Self {
         Fonts {
             fonts,
-            advance: HashMap::new(),
+            advance: FastMap::default(),
             glyphs: HashMap::new(),
             faces,
-            fallback_for: HashMap::new(),
+            fallback_for: FastMap::default(),
             own: Vec::new(),
             shaped: GlyphCache::new(GLYPH_CACHE_BYTES),
         }
