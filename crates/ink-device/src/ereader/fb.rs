@@ -239,31 +239,32 @@ pub fn send_update_request(epdc: Epdc) -> u32 {
 }
 
 /// The refresh struct for a controller, in u32 words (the ioctl copies as many bytes
-/// as its request number says: 72, 80, 88 or 96).
+/// as its request number says: 36, 72, 80, 88 or 96). Every layout starts {rect top,
+/// left, width, height; waveform_mode, update_mode, update_marker}:
 ///
-/// - `mxcfb_update_data`: [0..4] region, [4] waveform, [5] mode, [6] marker, [7]
-///   hist_bw, [8] hist_gray, [9] temp, [10] flags, [11..18] alt_buffer_data.
-/// - `_rex`: [0..7] as above up to the marker, [7] temp, [8] flags, [9] dither_mode,
-///   [10] quant_bit, [11..18] alt_buffer_data, [18] hist_bw, [19] hist_gray; `_zelda`
-///   adds [20] ts_pxp, [21] ts_epdc.
-/// - `_mtk`: see [`update_data`].
+/// - `hwtcon_update_data` (Kobo MTK): [7] flags, [8] dither_mode, all zero.
+/// - `mxcfb_update_data_v2` (Kobo i.MX): [7] temp, [8] flags, [9] dither_mode,
+///   [10] quant_bit, [11..18] alt_buffer_data; no dithering
+///   (`EPDC_FLAG_USE_DITHERING_PASSTHROUGH`).
+/// - `mxcfb_update_data`: [7] hist_bw, [8] hist_gray, [9] temp, [10] flags,
+///   [11..18] alt_buffer_data.
+/// - `_rex`: [7] temp, [8] flags, [9] dither_mode, [10] quant_bit, [11..18]
+///   alt_buffer_data, [18] hist_bw, [19] hist_gray; `_zelda` adds [20] ts_pxp,
+///   [21] ts_epdc.
+/// - `_mtk` (KOReader `mxcfb_kindle_h.lua`, 96 bytes): as `_rex` up to
+///   alt_buffer_data, then [18] swipe_data.direction, [19] swipe_data.steps, [20]
+///   hist_bw, [21] hist_gray, [22] ts_pxp, [23] ts_epdc.
 ///
 /// History waveforms as KOReader: DU for black and white, GC16_FAST (legacy) or GC16
-/// for gray, and the REAGL waveform for both when that is the update's own.
-pub fn update_data_epdc(epdc: Epdc, r: Rect, waveform: u32, mode: u32, marker: u32, swipe: Option<u32>) -> [u32; 24] {
-    if epdc == Epdc::Mtk {
-        return update_data(r, waveform, mode, marker, swipe);
-    }
-    // Every other layout starts {rect; waveform_mode, update_mode, update_marker}.
+/// for gray, and the REAGL waveform for both when that is the update's own. `swipe`
+/// (MTK only) sweeps the update in that `swipe_data.direction`.
+pub fn update_data(epdc: Epdc, r: Rect, waveform: u32, mode: u32, marker: u32, swipe: Option<u32>) -> [u32; 24] {
     let mut d = [0u32; 24];
     d[..7].copy_from_slice(&[r.y as u32, r.x as u32, r.w, r.h, waveform, mode, marker]);
     let flags = if waveform == WAVEFORM_DU { EPDC_FLAG_FORCE_MONOCHROME } else { 0 };
+    let history = if waveform == WAVEFORM_GLR16 { [waveform; 2] } else { [WAVEFORM_DU, WAVEFORM_GC16] };
     match epdc {
-        // Kobo hwtcon: {...; flags; dither_mode}, all zero.
         Epdc::KoboMtk => {}
-        Epdc::Mtk => unreachable!("built by update_data"),
-        // Kobo v2: {...; temp; flags; dither_mode; quant_bit; alt_buffer_data}, no
-        // dithering (EPDC_FLAG_USE_DITHERING_PASSTHROUGH).
         Epdc::KoboMxcfb => d[7] = TEMP_USE_AMBIENT,
         Epdc::Legacy => {
             let (bw, gray) = match waveform {
@@ -274,11 +275,18 @@ pub fn update_data_epdc(epdc: Epdc, r: Rect, waveform: u32, mode: u32, marker: u
             d[7..11].copy_from_slice(&[bw, gray, TEMP_USE_AUTO, flags]);
         }
         Epdc::Rex | Epdc::Zelda => {
-            d[7] = TEMP_USE_AMBIENT;
-            d[8] = flags;
-            let (bw, gray) = if waveform == WAVEFORM_GLR16 { (waveform, waveform) } else { (WAVEFORM_DU, WAVEFORM_GC16) };
-            d[18] = bw;
-            d[19] = gray;
+            d[7..9].copy_from_slice(&[TEMP_USE_AMBIENT, flags]);
+            d[18..20].copy_from_slice(&history);
+        }
+        Epdc::Mtk => {
+            d[7..9].copy_from_slice(&[TEMP_USE_AMBIENT, flags]);
+            // The driver crashes when the area is smaller than the number of steps.
+            if let Some(dir) = swipe.filter(|_| r.w >= SWIPE_STEPS && r.h >= SWIPE_STEPS) {
+                d[8] |= EPDC_FLAG_ENABLE_SWIPE;
+                d[18] = dir;
+            }
+            d[19] = SWIPE_STEPS;
+            d[20..22].copy_from_slice(&history);
         }
     }
     d
@@ -292,35 +300,6 @@ pub fn swipe_direction(wave: Wave, rotation: Rotation, panel: Size) -> u32 {
         (0, -1) => SWIPE_UP,
         _ => SWIPE_DOWN,
     }
-}
-
-/// The fixed part of `struct mxcfb_update_data_mtk` (KOReader `mxcfb_kindle_h.lua`):
-/// 24 u32 words, 96 bytes. [0..4] update_region top, left, width, height; [4]
-/// waveform_mode; [5] update_mode; [6] update_marker; [7] temp; [8] flags; [9]
-/// dither_mode; [10] quant_bit; [11..18] alt_buffer_data (phys_addr, width, height,
-/// alt_update_region); [18] swipe_data.direction; [19] swipe_data.steps; [20]
-/// hist_bw_waveform_mode; [21] hist_gray_waveform_mode; [22] ts_pxp; [23] ts_epdc.
-pub fn update_data(r: Rect, waveform: u32, mode: u32, marker: u32, swipe: Option<u32>) -> [u32; 24] {
-    let mut d = [0u32; 24];
-    d[0] = r.y as u32; // top
-    d[1] = r.x as u32; // left
-    d[2] = r.w;
-    d[3] = r.h;
-    d[4] = waveform;
-    d[5] = mode;
-    d[6] = marker;
-    d[7] = TEMP_USE_AMBIENT;
-    d[8] = if waveform == WAVEFORM_DU { EPDC_FLAG_FORCE_MONOCHROME } else { 0 };
-    // The driver crashes when the area is smaller than the number of steps.
-    if let Some(dir) = swipe.filter(|_| r.w >= SWIPE_STEPS && r.h >= SWIPE_STEPS) {
-        d[8] |= EPDC_FLAG_ENABLE_SWIPE;
-        d[18] = dir;
-    }
-    d[19] = SWIPE_STEPS;
-    let (bw, gray) = if waveform == WAVEFORM_GLR16 { (waveform, waveform) } else { (WAVEFORM_DU, WAVEFORM_GC16) };
-    d[20] = bw;
-    d[21] = gray;
-    d
 }
 
 fn env_on(name: &str) -> bool {
@@ -642,7 +621,7 @@ impl Framebuffer {
         self.wait(w);
         self.marker = self.marker.wrapping_add(1).max(1);
         let swipe = swipe.filter(|_| self.page_wave());
-        let mut d = update_data_epdc(self.epdc, r, waveform, mode, self.marker, swipe);
+        let mut d = update_data(self.epdc, r, waveform, mode, self.marker, swipe);
         let fw = self.epdc.flags_word();
         if self.hw_night && self.epdc.night() == NightMethod::UpdateFlag {
             d[fw] |= KOBO_EPDC_FLAG_ENABLE_INVERSION;
@@ -852,7 +831,7 @@ fn set_depth(fd: i32, bpp: u32, mdp: Option<&str>) -> std::io::Result<()> {
 fn probe_epdc(fd: i32) -> Option<Epdc> {
     let r = Rect::new(0, 0, 16, 16);
     for (i, epdc) in Epdc::PROBE_ORDER.into_iter().enumerate() {
-        let mut d = update_data_epdc(epdc, r, WAVEFORM_GC16, UPDATE_MODE_PARTIAL, 0x7fff_0000 + i as u32, None);
+        let mut d = update_data(epdc, r, WAVEFORM_GC16, UPDATE_MODE_PARTIAL, 0x7fff_0000 + i as u32, None);
         match ioctl(fd, send_update_request(epdc), d.as_mut_ptr().cast()) {
             Ok(()) => {
                 log::info!("fb0: unknown model; the {} refresh ioctl works", epdc.name());
@@ -1055,23 +1034,21 @@ mod tests {
         // Original i.MX: history before temp and flags.
         let (wf, mode) = waveform_epdc(Epdc::Legacy, RefreshClass::Reagl, false, NightUi::Glkw16);
         assert_eq!((wf, mode), (LEGACY_WAVEFORM_REAGL, UPDATE_MODE_FULL));
-        let d = update_data_epdc(Epdc::Legacy, r, wf, mode, 5, Some(SWIPE_LEFT));
+        let d = update_data(Epdc::Legacy, r, wf, mode, 5, Some(SWIPE_LEFT));
         assert_eq!(&d[..11], &[20, 10, 300, 400, 8, 1, 5, 8, 8, TEMP_USE_AUTO, 0]);
         assert!(d[11..].iter().all(|w| *w == 0), "no swipe outside MTK");
-        let d = update_data_epdc(Epdc::Legacy, r, WAVEFORM_DU, UPDATE_MODE_PARTIAL, 6, None);
+        let d = update_data(Epdc::Legacy, r, WAVEFORM_DU, UPDATE_MODE_PARTIAL, 6, None);
         assert_eq!((d[7], d[8], d[10]), (WAVEFORM_DU, LEGACY_WAVEFORM_GC16_FAST, EPDC_FLAG_FORCE_MONOCHROME));
         assert_eq!(waveform_epdc(Epdc::Legacy, RefreshClass::Gl16, false, NightUi::Glkw16), (3, UPDATE_MODE_PARTIAL));
         // Rex / Zelda: temp and flags first, history after alt_buffer_data.
         let (wf, mode) = waveform_epdc(Epdc::Rex, RefreshClass::Reagl, false, NightUi::Glkw16);
-        let d = update_data_epdc(Epdc::Rex, r, wf, mode, 7, None);
+        let d = update_data(Epdc::Rex, r, wf, mode, 7, None);
         assert_eq!(&d[4..11], &[WAVEFORM_GLR16, UPDATE_MODE_FULL, 7, TEMP_USE_AMBIENT, 0, 0, 0]);
         assert_eq!((d[18], d[19]), (WAVEFORM_GLR16, WAVEFORM_GLR16));
-        let d = update_data_epdc(Epdc::Zelda, r, WAVEFORM_GL16, UPDATE_MODE_PARTIAL, 8, None);
+        let d = update_data(Epdc::Zelda, r, WAVEFORM_GL16, UPDATE_MODE_PARTIAL, 8, None);
         assert_eq!((d[18], d[19], d[20], d[21]), (WAVEFORM_DU, WAVEFORM_GC16, 0, 0));
         // No night waveforms on i.MX (night mode is software inversion there).
         assert_eq!(waveform_epdc(Epdc::Zelda, RefreshClass::Gc16, true, NightUi::Glkw16), (WAVEFORM_GC16, UPDATE_MODE_FULL));
-        // MTK is unchanged.
-        assert_eq!(update_data_epdc(Epdc::Mtk, r, 4, 1, 9, None), update_data(r, 4, 1, 9, None));
     }
 
     #[test]
@@ -1080,9 +1057,9 @@ mod tests {
         assert_eq!(send_update_request(Epdc::KoboMxcfb), 0x4048_462e);
         assert_eq!(size(send_update_request(Epdc::KoboMtk)), 36);
         let r = Rect::new(10, 20, 300, 400);
-        let d = update_data_epdc(Epdc::KoboMxcfb, r, KOBO_WAVEFORM_REAGL, UPDATE_MODE_FULL, 7, None);
+        let d = update_data(Epdc::KoboMxcfb, r, KOBO_WAVEFORM_REAGL, UPDATE_MODE_FULL, 7, None);
         assert_eq!(&d[..11], &[20, 10, 300, 400, 6, 1, 7, TEMP_USE_AMBIENT, 0, 0, 0]);
-        let d = update_data_epdc(Epdc::KoboMtk, r, WAVEFORM_GL16, UPDATE_MODE_PARTIAL, 8, None);
+        let d = update_data(Epdc::KoboMtk, r, WAVEFORM_GL16, UPDATE_MODE_PARTIAL, 8, None);
         assert_eq!(&d[..9], &[20, 10, 300, 400, 3, 0, 8, 0, 0]);
         let wf = |c, n| waveform_epdc(Epdc::KoboMxcfb, c, n, NightUi::Glkw16);
         assert_eq!(wf(RefreshClass::Reagl, false), (KOBO_WAVEFORM_REAGL, UPDATE_MODE_FULL));
@@ -1095,17 +1072,17 @@ mod tests {
     #[test]
     fn swipe_flag_direction_and_layout() {
         let full = Rect::new(0, 0, 1272, 1696);
-        let d = update_data(full, WAVEFORM_GLR16, UPDATE_MODE_FULL, 7, Some(SWIPE_LEFT));
+        let d = update_data(Epdc::Mtk, full, WAVEFORM_GLR16, UPDATE_MODE_FULL, 7, Some(SWIPE_LEFT));
         assert_eq!(std::mem::size_of_val(&d), 96);
         assert_eq!((d[2], d[3], d[4], d[5], d[6]), (1272, 1696, WAVEFORM_GLR16, UPDATE_MODE_FULL, 7));
-        assert_eq!(d[8], EPDC_FLAG_ENABLE_SWIPE);
-        assert_eq!((d[18], d[19]), (SWIPE_LEFT, SWIPE_STEPS));
+        assert_eq!(&d[7..], &[TEMP_USE_AMBIENT, EPDC_FLAG_ENABLE_SWIPE, 0, 0, 0, 0, 0, 0, 0, 0, 0, SWIPE_LEFT, SWIPE_STEPS, WAVEFORM_GLR16, WAVEFORM_GLR16, 0, 0]);
+        assert_eq!(update_data(Epdc::Mtk, full, WAVEFORM_DU, UPDATE_MODE_PARTIAL, 1, None)[20..22], [WAVEFORM_DU, WAVEFORM_GC16]);
         // Night: the waveform stays GLKW16/GCK16 with the flag.
-        let d = update_data(full, WAVEFORM_GLKW16, UPDATE_MODE_FULL, 8, Some(SWIPE_RIGHT));
+        let d = update_data(Epdc::Mtk, full, WAVEFORM_GLKW16, UPDATE_MODE_FULL, 8, Some(SWIPE_RIGHT));
         assert_eq!((d[4], d[8], d[18]), (WAVEFORM_GLKW16, EPDC_FLAG_ENABLE_SWIPE, SWIPE_RIGHT));
         // No wave: no flag; an area smaller than the steps never sweeps.
-        assert_eq!(update_data(full, WAVEFORM_GL16, UPDATE_MODE_PARTIAL, 9, None)[8], 0);
-        assert_eq!(update_data(Rect::new(0, 0, 11, 500), WAVEFORM_GLR16, UPDATE_MODE_FULL, 9, Some(SWIPE_LEFT))[8], 0);
+        assert_eq!(update_data(Epdc::Mtk, full, WAVEFORM_GL16, UPDATE_MODE_PARTIAL, 9, None)[8], 0);
+        assert_eq!(update_data(Epdc::Mtk, Rect::new(0, 0, 11, 500), WAVEFORM_GLR16, UPDATE_MODE_FULL, 9, Some(SWIPE_LEFT))[8], 0);
         // Directions follow the rotation (logical left, as seen on the panel).
         let p = Size::new(1272, 1696);
         assert_eq!(swipe_direction(Wave::Left, Rotation::Portrait, p), SWIPE_LEFT);
