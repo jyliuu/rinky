@@ -32,9 +32,11 @@ REF=
 file() {
     if [ -n "$REF" ]; then git show "$REF:$1"; else cat "$1"; fi
 }
-# [workspace.package] version of the Cargo.toml on stdin (same awk as release.yml).
+# [workspace.package] version of the Cargo.toml on stdin. It reads to the end (no
+# `exit`), so the writer of `file Cargo.toml | cargo_version` never gets SIGPIPE,
+# which pipefail would turn into a silent exit.
 cargo_version() {
-    awk '/^\[workspace\.package\]/ {s = 1; next} /^\[/ {s = 0} s && $1 == "version" {gsub(/"/, "", $3); print $3; exit}'
+    awk '/^\[workspace\.package\]/ {s = 1; next} /^\[/ {s = 0} s && $1 == "version" && !done {gsub(/"/, "", $3); print $3; done = 1}'
 }
 repo_url() {
     awk '/^\[workspace\.package\]/ {s = 1; next} /^\[/ {s = 0} s && $1 == "repository" {gsub(/"/, "", $3); print $3; exit}' Cargo.toml
@@ -64,7 +66,8 @@ cmd_check() {
     log=$(file CHANGELOG.md)
     grep -Eq "^## \[$v\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" <<<"$log" \
         || die "CHANGELOG.md has no dated heading '## [$v] - YYYY-MM-DD' (still Unreleased?)"
-    section "$v" <<<"$log" | grep -q '^- ' || die "CHANGELOG.md section $v has no entries"
+    # grep without -q: an early exit would SIGPIPE awk and fail the pipeline (pipefail).
+    section "$v" <<<"$log" | grep '^- ' >/dev/null || die "CHANGELOG.md section $v has no entries"
     grep -q "^\[$v\]: " <<<"$log" || die "CHANGELOG.md has no '[$v]: .../compare/...' link"
     echo "release: Cargo.toml and CHANGELOG.md agree on $v${REF:+ at $REF}"
 }
