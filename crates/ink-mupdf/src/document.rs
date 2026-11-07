@@ -1190,11 +1190,11 @@ impl Document for MupdfDocument {
         let screen = self.page_of(pos)?;
         let piece = self.pieces(screen).into_iter().find(|x| x.page == page);
         let raw = self.inner.borrow_mut().raw.links(page)?;
-        let text = self.page_text(page)?;
+        let labels = self.page_text(page)?.texts_under(&raw.iter().map(|l| l.rect).collect::<Vec<_>>());
         Ok(raw
             .into_iter()
-            .map(|l| {
-                let label = text.range_in(&[l.rect]).map(|r| text.text_of(r)).unwrap_or_default();
+            .zip(labels)
+            .map(|(l, label)| {
                 let footnote = !label.is_empty()
                     && label.chars().count() <= 3
                     && label.chars().all(|c| c.is_ascii_digit() || "*\u{2020}\u{2021}\u{a7}".contains(c));
