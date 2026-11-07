@@ -14,7 +14,7 @@ use crate::book::Book;
 use crate::dom::{Dom, ElemRef, NodeId, NodeKind, NONE};
 use crate::fonts::{FaceKey, FontBook};
 use crate::style::{
-    ua_rules, Cascade, ComputedStyle, Display, Hyphens, Len, LineHeight, ListStyle, PageBreak, StyleContext, TextAlign, TextTransform,
+    ua_rules, Cascade, ComputedStyle, Display, Edges, Hyphens, Len, LineHeight, ListStyle, PageBreak, StyleContext, TextAlign, TextTransform,
     VAlign,
 };
 use ink_doc::{resolve_href, LayoutSettings};
@@ -521,6 +521,11 @@ fn is_block_level(st: &ComputedStyle) -> bool {
     !matches!(st.display, Display::Inline | Display::InlineBlock | Display::None) || st.float != 0
 }
 
+/// Elements laid out as images.
+fn is_image(name: &str) -> bool {
+    matches!(name, "img" | "image" | "svg")
+}
+
 impl<'a, 'e> Flow<'a, 'e> {
     /// Lays out a chapter.
     pub fn layout(env: &'a mut Env<'e>, p: &'a Params, dom: &'a Dom, styles: &'a [Option<Box<ComputedStyle>>], chapter_path: &'a str, book_lang: Option<String>) -> ChapterLayout {
@@ -642,21 +647,15 @@ impl<'a, 'e> Flow<'a, 'e> {
         if st.break_before == PageBreak::Always && !self.in_cell {
             self.force_break = true;
         }
-        let ml = st.margin.left.resolve(w, 0.0);
-        let mr = st.margin.right.resolve(w, 0.0);
-        let mt = st.margin.top.resolve(w, 0.0);
-        let mb = st.margin.bottom.resolve(w, 0.0);
-        let pl = st.padding.left.resolve(w, 0.0);
-        let pr = st.padding.right.resolve(w, 0.0);
-        let pt = st.padding.top.resolve(w, 0.0);
-        let pb = st.padding.bottom.resolve(w, 0.0);
+        let Edges { top: mt, right: mr, bottom: mb, left: ml } = st.margin.resolve(w);
+        let Edges { top: pt, right: pr, bottom: pb, left: pl } = st.padding.resolve(w);
         let b = st.border;
         let mut box_x = x + ml;
         let mut box_w = (w - ml - mr).max(10.0);
-        let name = self.dom.name(id);
+        let image = is_image(self.dom.name(id));
         let is_table = st.display == Display::Table;
         if let Len::Px(_) | Len::Pct(_) = st.width {
-            if !matches!(name, "img" | "image" | "svg") {
+            if !image {
                 let want = st.width.resolve(w, box_w) + if is_table { 0.0 } else { pl + pr + b.left + b.right };
                 let want = want.min(box_w);
                 if st.margin.left.is_auto() && st.margin.right.is_auto() {
@@ -669,7 +668,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         if let Len::Px(_) | Len::Pct(_) = st.max_width {
             let mw = st.max_width.resolve(w, box_w);
-            if mw < box_w && !matches!(name, "img" | "image" | "svg") {
+            if mw < box_w && !image {
                 if st.margin.left.is_auto() && st.margin.right.is_auto() {
                     box_x += (box_w - mw) / 2.0;
                 }
@@ -690,7 +689,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         if st.display == Display::ListItem {
             self.list_marker(id, st);
         }
-        if matches!(name, "img" | "image" | "svg") {
+        if image {
             self.block_image(id, cx, cw);
         } else if is_table {
             self.table(id, cx, cw);
@@ -699,7 +698,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         self.first_line_pending = false;
         if let Len::Px(h) = st.height {
-            if !matches!(name, "img" | "image" | "svg") && self.y + self.margin - content_top < h {
+            if !image && self.y + self.margin - content_top < h {
                 self.flush_margin();
                 self.y = self.y.max(content_top + h);
             }
@@ -710,20 +709,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         self.y += pb + b.bottom;
         let box_bottom = self.y;
-        // Borders.
-        let gray = 0u8;
-        if b.top > 0.0 {
-            self.out.decor.push(RectRun { x: box_x, y: box_top, w: box_w, h: b.top, gray });
-        }
-        if b.bottom > 0.0 {
-            self.out.decor.push(RectRun { x: box_x, y: box_bottom - b.bottom, w: box_w, h: b.bottom, gray });
-        }
-        if b.left > 0.0 {
-            self.out.decor.push(RectRun { x: box_x, y: box_top, w: b.left, h: box_bottom - box_top, gray });
-        }
-        if b.right > 0.0 {
-            self.out.decor.push(RectRun { x: box_x + box_w - b.right, y: box_top, w: b.right, h: box_bottom - box_top, gray });
-        }
+        self.push_border(b, box_x, box_w, box_top, box_bottom, box_bottom - box_top);
         self.add_margin(mb);
         if !self.in_cell {
             match st.break_after {
@@ -740,6 +726,24 @@ impl<'a, 'e> Flow<'a, 'e> {
                     }
                 }
             }
+        }
+    }
+
+    /// The border rectangles of a box from `top` to `bottom` (`h`: the height of the
+    /// side borders).
+    fn push_border(&mut self, b: Edges<f32>, x: f32, w: f32, top: f32, bottom: f32, h: f32) {
+        let mut add = |x, y, w, h| self.out.decor.push(RectRun { x, y, w, h, gray: 0 });
+        if b.top > 0.0 {
+            add(x, top, w, b.top);
+        }
+        if b.bottom > 0.0 {
+            add(x, bottom - b.bottom, w, b.bottom);
+        }
+        if b.left > 0.0 {
+            add(x, top, b.left, h);
+        }
+        if b.right > 0.0 {
+            add(x + w - b.right, top, b.right, h);
         }
     }
 
@@ -1053,7 +1057,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                         out.push('\n', seg, 0);
                         continue;
                     }
-                    if matches!(name, "img" | "image" | "svg") {
+                    if is_image(name) {
                         if let Some((s, dw, dh)) = self.image_box(n, w, self.p.content_h) {
                             let l = if link == NO_LINK { self.link_of(n) } else { link };
                             let own = self.valign_shift(n);
@@ -1783,44 +1787,18 @@ impl<'a, 'e> Flow<'a, 'e> {
                 continue;
             }
             for (lay, cx, cw, c) in sub {
-                let link_base = self.out.links.len() as u32;
-                for it in lay.items {
-                    let mut it = shift_item(it, row_top);
-                    match &mut it {
-                        Draw::Text(t) if t.link != NO_LINK => t.link += link_base,
-                        Draw::Image(i) if i.link != NO_LINK => i.link += link_base,
-                        _ => {}
-                    }
-                    self.out.items.push(it);
-                }
-                for d in lay.decor {
-                    self.out.decor.push(RectRun { y: d.y + row_top, ..d });
-                }
-                self.out.links.extend(lay.links);
+                self.append_drawn(lay, row_top);
                 // Cell borders span the full row height.
-                let st = self.st(c);
-                let b = st.border;
-                let gray = 0;
-                if b.top > 0.0 {
-                    self.out.decor.push(RectRun { x: cx, y: row_top, w: cw, h: b.top, gray });
-                }
-                if b.bottom > 0.0 {
-                    self.out.decor.push(RectRun { x: cx, y: row_top + row_h - b.bottom, w: cw, h: b.bottom, gray });
-                }
-                if b.left > 0.0 {
-                    self.out.decor.push(RectRun { x: cx, y: row_top, w: b.left, h: row_h, gray });
-                }
-                if b.right > 0.0 {
-                    self.out.decor.push(RectRun { x: cx + cw - b.right, y: row_top, w: b.right, h: row_h, gray });
-                }
+                self.push_border(self.st(c).border, cx, cw, row_top, row_top + row_h, row_h);
             }
             self.y = row_top + row_h;
             self.push_slice(row_top, self.y, key, first_item);
         }
     }
 
-    fn append_sub(&mut self, lay: ChapterLayout, dy: f32) {
-        let item_base = self.out.items.len() as u32;
+    /// Appends the draw items, decorations and links of a cell's layout moved down by
+    /// `dy` (its link indexes rebased); returns its slices.
+    fn append_drawn(&mut self, lay: ChapterLayout, dy: f32) -> Vec<Slice> {
         let link_base = self.out.links.len() as u32;
         for it in lay.items {
             let mut it = shift_item(it, dy);
@@ -1832,10 +1810,15 @@ impl<'a, 'e> Flow<'a, 'e> {
             self.out.items.push(it);
         }
         self.out.links.extend(lay.links);
-        for d in lay.decor {
-            self.out.decor.push(RectRun { y: d.y + dy, ..d });
-        }
-        for s in lay.slices {
+        self.out.decor.extend(lay.decor.into_iter().map(|d| RectRun { y: d.y + dy, ..d }));
+        lay.slices
+    }
+
+    /// Appends a cell's layout as slices of this flow at `dy`.
+    fn append_sub(&mut self, lay: ChapterLayout, dy: f32) {
+        let item_base = self.out.items.len() as u32;
+        let height = lay.height;
+        for s in self.append_drawn(lay, dy) {
             self.out.slices.push(Slice {
                 top: s.top + dy,
                 bottom: s.bottom + dy,
@@ -1844,7 +1827,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 ..s
             });
         }
-        self.y = dy + lay.height;
+        self.y = dy + height;
     }
 
     /// Lays out a table cell in its own flow (y from 0).
@@ -1866,10 +1849,8 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.neg_margin = 0.0;
         self.first_line_pending = true;
         self.in_cell = true;
-        let pl = st.padding.left.resolve(w, 0.0) + st.border.left;
-        let pr = st.padding.right.resolve(w, 0.0) + st.border.right;
-        let pt = st.padding.top.resolve(w, 0.0) + st.border.top;
-        let pb = st.padding.bottom.resolve(w, 0.0) + st.border.bottom;
+        let (pad, b) = (st.padding.resolve(w), st.border);
+        let (pl, pr, pt, pb) = (pad.left + b.left, pad.right + b.right, pad.top + b.top, pad.bottom + b.bottom);
         self.y = pt;
         self.block_children(cell, x + pl, (w - pl - pr).max(10.0));
         self.y += pb;
@@ -1892,18 +1873,13 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut min = 0.0f32;
         let mut max = 0.0f32;
         let mut line = 0.0f32;
+        let dom = self.dom;
         let mut stack = vec![cell];
-        let mut order: Vec<NodeId> = Vec::new();
         while let Some(n) = stack.pop() {
-            order.push(n);
-            for &c in self.dom.node(n).children.iter().rev() {
-                stack.push(c);
-            }
-        }
-        for n in order {
-            match &self.dom.node(n).kind {
+            stack.extend(dom.node(n).children.iter().rev());
+            match &dom.node(n).kind {
                 NodeKind::Text(t) => {
-                    let st = self.st(self.dom.node(n).parent);
+                    let st = self.st(dom.node(n).parent);
                     if st.display == Display::None {
                         continue;
                     }
@@ -1916,7 +1892,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 }
                 NodeKind::Element(e) => {
                     let st = self.st(n);
-                    if matches!(e.name.as_str(), "img" | "image" | "svg") {
+                    if is_image(&e.name) {
                         if let Some((_, iw, _)) = self.image_box(n, w, self.p.content_h) {
                             min = min.max(iw.min(w / 2.0));
                             line += iw;

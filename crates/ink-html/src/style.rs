@@ -231,6 +231,14 @@ impl<T: Copy> Edges<T> {
     }
 }
 
+impl Edges<Len> {
+    /// Every side resolved against the containing block width `base` (`auto` = 0).
+    pub fn resolve(&self, base: f32) -> Edges<f32> {
+        let r = |l: Len| l.resolve(base, 0.0);
+        Edges { top: r(self.top), right: r(self.right), bottom: r(self.bottom), left: r(self.left) }
+    }
+}
+
 /// `line-height`.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum LineHeight {
