@@ -514,15 +514,15 @@ impl Download {
     }
 
     fn finish(&self, part: &Path, bytes: u64, resumed_from: u64, url: &str, mime: String, server_filename: Option<String>) -> Result<DownloadOutcome> {
-        let (sha256, md5) = digest_file(part)?;
+        let (sha256, md5) = digest_file(part, matches!(self.checksum, Some(Checksum::Md5(_))))?;
         if let Some(c) = &self.checksum {
             let actual = match c {
-                Checksum::Sha256(_) => &sha256,
-                Checksum::Md5(_) => &md5,
+                Checksum::Sha256(_) => sha256.clone(),
+                Checksum::Md5(_) => md5.unwrap_or_default(),
             };
-            if *actual != c.expected() {
+            if actual != c.expected() {
                 self.discard_partial();
-                return Err(NetError::Checksum { expected: c.expected(), actual: actual.clone() });
+                return Err(NetError::Checksum { expected: c.expected(), actual });
             }
         }
         std::fs::rename(part, &self.dest)?;
@@ -543,12 +543,13 @@ fn sync_dir(path: &Path) {
     let _ = path;
 }
 
-/// SHA-256 and MD5 of a file (lowercase hex).
-pub fn digest_file(path: &Path) -> Result<(String, String)> {
+/// SHA-256 of a file and, when `with_md5`, its MD5 (lowercase hex). Every download
+/// needs the SHA-256 ([`DownloadOutcome::sha256`]); the MD5 only an MD5 checksum.
+pub fn digest_file(path: &Path, with_md5: bool) -> Result<(String, Option<String>)> {
     use md5::Digest;
     let mut f = File::open(path)?;
     let mut sha = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut md5 = md5::Md5::new();
+    let mut md5 = with_md5.then(md5::Md5::new);
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = f.read(&mut buf)?;
@@ -556,9 +557,11 @@ pub fn digest_file(path: &Path) -> Result<(String, String)> {
             break;
         }
         sha.update(&buf[..n]);
-        md5.update(&buf[..n]);
+        if let Some(m) = md5.as_mut() {
+            m.update(&buf[..n]);
+        }
     }
-    Ok((hex(sha.finish().as_ref()), hex(&md5.finalize())))
+    Ok((hex(sha.finish().as_ref()), md5.map(|m| hex(&m.finalize()))))
 }
 
 /// SHA-256 of bytes (lowercase hex).
