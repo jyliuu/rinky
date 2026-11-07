@@ -1224,8 +1224,7 @@ impl ReaderScreen {
                         self.sel_end = selection::bounds(&w.sel.rects).map(|r| (r, t.pos));
                         self.sel_anchor_page = page;
                         self.sel_pages = vec![(page, w.sel.rects.clone())];
-                        self.sel_edge = None;
-                        self.sel_edge_lock = false;
+                        self.leave_edge();
                         self.sel_text_box = None;
                         self.sel = Some(w.sel.clone());
                         self.sel_word = Some(w);
@@ -1255,8 +1254,7 @@ impl ReaderScreen {
                     self.sel_edge_turn(cx);
                     return true;
                 }
-                self.sel_edge = None;
-                self.sel_edge_lock = false;
+                self.leave_edge();
                 if self.sel_end.is_some_and(|(r, q)| r.contains(p) || ((q.x - p.x).abs() < 24 && (q.y - p.y).abs() < 24)) {
                     return true;
                 }
@@ -1282,10 +1280,7 @@ impl ReaderScreen {
                 true
             }
             (TouchKind::Up, Some(_)) => {
-                self.selecting = None;
-                self.sel_end = None;
-                self.sel_edge = None;
-                self.sel_edge_lock = false;
+                self.end_drag();
                 self.swallow_gestures = true;
                 let Some(sel) = self.sel.clone() else {
                     self.end_bridge();
@@ -1300,14 +1295,13 @@ impl ReaderScreen {
                 };
                 log::info!("reader selection {pages}: {:?} ({})", note_excerpt(&sel.text, 60), if one_word { "one word" } else { "extended" });
                 cx.plugins.selection(doc, &sel);
-                let lookup = cx.plugins.selection_actions().iter().find(|a| a.id == "lookup").map(|a| (a.plugin.clone(), a.id.clone()));
                 // One word with long_press = dictionary: the lookup runs at once and its
                 // card becomes a sibling of the selection card in one overlay (a tap on
                 // the page closes both).
                 let mut card = None;
                 if one_word && cx.settings.gestures.action("long_press") == "dictionary" {
-                    match (lookup, self.doc.as_deref_mut()) {
-                        (Some((plugin, id)), Some(doc)) => {
+                    match cx.plugins.selection_actions().iter().find(|a| a.id == "lookup").map(|a| (a.plugin.clone(), a.id.clone())) {
+                        Some((plugin, id)) => {
                             log::info!("reader: long press looks up {:?} with {plugin}", sel.text);
                             cx.plugins.trigger(&plugin, &id, Some(doc));
                             match cx.plugins.take_card_dialog(&plugin) {
@@ -1315,7 +1309,7 @@ impl ReaderScreen {
                                 None => log::info!("reader: {plugin} answered the lookup without a card; it shows in the plugin layer"),
                             }
                         }
-                        _ => log::info!("reader: no dictionary lookup action; selection card only"),
+                        None => log::info!("reader: no dictionary lookup action; selection card only"),
                     }
                 }
                 let o = self.selection_overlay(&sel, card, None, cx);
@@ -1323,16 +1317,27 @@ impl ReaderScreen {
                 true
             }
             (TouchKind::Cancel, Some(_)) => {
-                self.selecting = None;
-                self.sel_end = None;
-                self.sel_edge = None;
-                self.sel_edge_lock = false;
+                self.end_drag();
                 self.close_overlay();
                 self.sel_dirty = true;
                 true
             }
             _ => false,
         }
+    }
+
+    /// The dragged end left the page-turn zones: no turn pending, and the next rest in a
+    /// zone may turn again.
+    fn leave_edge(&mut self) {
+        self.sel_edge = None;
+        self.sel_edge_lock = false;
+    }
+
+    /// The finger that dragged the selection lifted (or the touch was cancelled).
+    fn end_drag(&mut self) {
+        self.selecting = None;
+        self.sel_end = None;
+        self.leave_edge();
     }
 
     /// Extends the selection from the word it started on to `end` on the page shown
