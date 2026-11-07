@@ -121,6 +121,24 @@ pub fn collapse_ws(s: &str) -> String {
     out
 }
 
+/// `s` with every tag (`<...>`) replaced by one space; the text is not unescaped.
+pub(crate) fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                out.push(' ');
+            }
+            '>' if in_tag => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Appends `s` to `out` escaped for XML: `&`, `<` and `>` always, in an attribute value
 /// (double-quoted) also `"` and the white space a parser would normalise. Characters XML
 /// does not allow are left out. Runs that need no escaping are copied as slices.
