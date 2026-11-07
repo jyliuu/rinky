@@ -38,14 +38,27 @@ enum Mode {
     Line,
 }
 
-/// `\r\n`/`\r` to `\n`, form feeds to blank lines (a copy only when needed: a book
-/// can be tens of MB).
+/// `\r\n`/`\r` to `\n`, form feeds to blank lines (a copy only when needed, made in one
+/// pass: a book can be tens of MB).
 fn normalise(text: &str) -> Cow<'_, str> {
-    if text.contains(['\r', '\u{c}']) {
-        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n").replace('\u{c}', "\n\n"))
-    } else {
-        Cow::Borrowed(text)
+    if !text.contains(['\r', '\u{c}']) {
+        return Cow::Borrowed(text);
     }
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut rest = text;
+    while let Some(i) = rest.find(['\r', '\u{c}']) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        rest = if rest.as_bytes()[i] == b'\r' {
+            out.push('\n');
+            after.strip_prefix('\n').unwrap_or(after)
+        } else {
+            out.push_str("\n\n");
+            after
+        };
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
 /// Lines of normalised text without trailing whitespace (tabs and indents kept).
@@ -201,7 +214,7 @@ fn is_all_caps_title(line: &str) -> bool {
 }
 
 fn join_lines(lines: &[&str]) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
     for (i, l) in lines.iter().enumerate() {
         if i > 0 {
             out.push(' ');
@@ -501,6 +514,14 @@ mod tests {
             assert!(!looks_binary(&text), "{} taken as binary", p.display());
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn line_ends_and_form_feeds() {
+        for s in ["a\r\nb\rc\u{c}d", "\r\r\n\r", "x\r\u{c}\r\n", "\u{c}\u{c}", "plain\n", "", "é\r\nü\r"] {
+            let want = s.replace("\r\n", "\n").replace('\r', "\n").replace('\u{c}', "\n\n");
+            assert_eq!(normalise(s), want, "{s:?}");
+        }
     }
 
     #[test]
