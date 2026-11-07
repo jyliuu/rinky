@@ -2429,9 +2429,16 @@ mod tests {
     #[test]
     fn long_press_on_a_tile_opens_the_picker_before_the_lift() {
         for (name, x, y) in [("rotate", 1095, 852), ("wifi", 789, 852)] {
-            let none = run_cc(&format!("hold-{name}-none"), &format!("{OPEN}sleep 300\n")).probe.panel();
-            let held = run_cc(&format!("hold-{name}-held"), &format!("{OPEN}down {x} {y}\nsleep 900\n")).probe.panel();
-            let lifted = run_cc(&format!("hold-{name}-lifted"), &format!("{OPEN}down {x} {y}\nsleep 900\nup {x} {y}\nsleep 400\n")).probe.panel();
+            // Real-time scripts that mostly sleep: the three independent runs go at once.
+            let runs = [
+                (format!("hold-{name}-none"), format!("{OPEN}sleep 300\n")),
+                (format!("hold-{name}-held"), format!("{OPEN}down {x} {y}\nsleep 900\n")),
+                (format!("hold-{name}-lifted"), format!("{OPEN}down {x} {y}\nsleep 900\nup {x} {y}\nsleep 400\n")),
+            ];
+            let [none, held, lifted]: [ink_device::Canvas; 3] = std::thread::scope(|s| {
+                let handles: Vec<_> = runs.iter().map(|(n, script)| s.spawn(move || run_cc(n, script).probe.panel())).collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>().try_into().unwrap()
+            });
             let differing = none.pixels.iter().zip(&held.pixels).filter(|(a, b)| a != b).count();
             assert!(differing > 20_000, "{name}: the picker is not on the panel before the lift ({differing} pixels differ)");
             assert!(held.pixels == lifted.pixels, "{name}: the lift changed the panel");
