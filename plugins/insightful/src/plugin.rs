@@ -134,10 +134,6 @@ impl Default for InsightfulPlugin {
     }
 }
 
-fn now_ms() -> Instant {
-    Instant::now()
-}
-
 impl InsightfulPlugin {
     /// The plugin with default settings.
     pub fn new() -> InsightfulPlugin {
@@ -187,6 +183,12 @@ impl InsightfulPlugin {
             self.prompts = Some(PromptSet::load(Some(&dir)).map_err(PluginError::Failed)?);
         }
         Ok(())
+    }
+
+    /// The settings, the prompts and the open book's chats.
+    fn ensure(&mut self, cx: &mut HostCtx) -> Result<()> {
+        self.ensure_config(cx)?;
+        self.ensure_book(cx)
     }
 
     fn ensure_book(&mut self, cx: &mut HostCtx) -> Result<()> {
@@ -278,17 +280,30 @@ impl InsightfulPlugin {
         }
         if let Some(r) = self.run.as_mut().filter(|r| self.chat.as_deref() == Some(r.chat.as_str())) {
             r.flushed = r.live.text.len();
-            r.last_flush = now_ms();
+            r.last_flush = Instant::now();
         }
         Ok(())
     }
 
-    /// Starts a new chat with one user message and runs it.
-    fn start_chat(&mut self, cx: &mut HostCtx, content: &str, label: Option<&str>, sel: Option<SelectionInfo>) -> Result<()> {
-        self.ensure_config(cx)?;
-        self.ensure_book(cx)?;
+    /// True (after a toast) while another chat's answer is being written.
+    fn busy(&self, cx: &mut HostCtx) -> Result<bool> {
         if self.run.is_some() {
             cx.ui()?.toast(BUSY);
+        }
+        Ok(self.run.is_some())
+    }
+
+    /// Adds `msg` to the chat on screen and asks the model.
+    fn send(&mut self, cx: &mut HostCtx, msg: Message) -> Result<()> {
+        let Some(conv) = self.conv_mut() else { return Ok(()) };
+        conv.messages.push(msg);
+        self.begin_run(cx)
+    }
+
+    /// Starts a new chat with one user message and runs it.
+    fn start_chat(&mut self, cx: &mut HostCtx, content: &str, label: Option<&str>, sel: Option<SelectionInfo>) -> Result<()> {
+        self.ensure(cx)?;
+        if self.busy(cx)? {
             return Ok(());
         }
         let head = label.unwrap_or(content);
@@ -296,27 +311,17 @@ impl InsightfulPlugin {
             Some(s) if !s.text.trim().is_empty() => format!("{head}: {}", s.text),
             _ => head.to_string(),
         };
-        let book = self.book.as_mut().expect("book");
-        let id = book.chats.create(&title);
-        let msg = Message { role: "user".into(), content: content.into(), selection: sel, model: None, label: label.map(str::to_string), timestamp: chat::now(), usage: None };
-        book.chats.get_mut(&id).expect("chat").messages.push(msg);
-        self.chat = Some(id);
-        self.begin_run(cx)
+        self.chat = Some(self.book.as_mut().expect("book").chats.create(&title));
+        self.send(cx, Message::user(content, sel, label))
     }
 
     fn ask_followup(&mut self, cx: &mut HostCtx, q: &str) -> Result<()> {
-        if q.trim().is_empty() {
-            return Ok(());
-        }
-        if self.run.is_some() {
-            cx.ui()?.toast(BUSY);
+        if q.trim().is_empty() || self.busy(cx)? {
             return Ok(());
         }
         // A passage chosen with Ask AI… goes with this message.
         let sel = self.pending_sel.take();
-        let Some(conv) = self.conv_mut() else { return Ok(()) };
-        conv.messages.push(Message { role: "user".into(), content: q.trim().into(), selection: sel, model: None, label: None, timestamp: chat::now(), usage: None });
-        self.begin_run(cx)
+        self.send(cx, Message::user(q.trim(), sel, None))
     }
 
     fn begin_run(&mut self, cx: &mut HostCtx) -> Result<()> {
@@ -365,7 +370,7 @@ impl InsightfulPlugin {
             status: 0,
             err_body: Vec::new(),
             flushed: 0,
-            last_flush: now_ms(),
+            last_flush: Instant::now(),
         });
         // The user asked: the chat comes on screen, then the request starts.
         self.show(cx)?;
@@ -429,7 +434,7 @@ impl InsightfulPlugin {
     fn finish_answer(&mut self, cx: &mut HostCtx, text: String) -> Result<()> {
         let r = self.run.take().expect("run");
         if let Some(c) = self.chat_mut(&r.chat) {
-            c.messages.push(Message { role: "assistant".into(), content: text, selection: None, model: Some(r.profile.model.clone()), label: None, timestamp: chat::now(), usage: Some(r.usage) });
+            c.messages.push(Message::answer(text, &r.profile.model, r.usage));
             c.usage.merge(&r.usage);
             c.updated = chat::now();
         }
@@ -509,20 +514,16 @@ impl InsightfulPlugin {
     /// the current one (a new chat when there is none).
     fn quick_action(&mut self, cx: &mut HostCtx, id: &str, sel: Option<SelectionInfo>, new: bool) -> Result<()> {
         let Some((_, label, prompt)) = QUICK_ACTIONS.iter().find(|(a, _, _)| *a == id) else { return Ok(()) };
-        self.ensure_config(cx)?;
-        self.ensure_book(cx)?;
+        self.ensure(cx)?;
         let content = self.prompts.as_ref().expect("prompts").get(prompt).map_err(PluginError::Failed)?.to_string();
         if new || self.conv().is_none() {
             return self.start_chat(cx, &content, Some(label), sel);
         }
-        if self.run.is_some() {
-            cx.ui()?.toast(BUSY);
+        if self.busy(cx)? {
             return Ok(());
         }
         self.pending_sel = None;
-        let Some(conv) = self.conv_mut() else { return Ok(()) };
-        conv.messages.push(Message { role: "user".into(), content, selection: sel, model: None, label: Some(label.to_string()), timestamp: chat::now(), usage: None });
-        self.begin_run(cx)
+        self.send(cx, Message::user(&content, sel, Some(label)))
     }
 
     /// "New chat for highlighted actions" for the open book (else the default for all
@@ -540,8 +541,7 @@ impl InsightfulPlugin {
     /// (`None`), in a new chat or the current one by the setting, flipped by the
     /// menu's checkbox.
     fn open_from_highlight(&mut self, cx: &mut HostCtx, action: Option<&str>) -> Result<()> {
-        self.ensure_config(cx)?;
-        self.ensure_book(cx)?;
+        self.ensure(cx)?;
         let new = self.new_chat_on_highlight(cx) != std::mem::take(&mut self.sel_override);
         match action {
             Some(id) => {
@@ -572,8 +572,7 @@ impl InsightfulPlugin {
 
     /// The reader menu's Insightful page (`addToMainMenu`).
     fn book_sheet(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.ensure_config(cx)?;
-        self.ensure_book(cx)?;
+        self.ensure(cx)?;
         let on = self.new_chat_on_highlight(cx);
         // ★: the book's value is the default for other books (hold to make it so).
         let star = if on == Self::new_chat_default(cx) { "   ★" } else { "" };
@@ -600,7 +599,7 @@ impl InsightfulPlugin {
             return;
         }
         let Ok(path) = cx.data_file(STATS_FILE) else { return };
-        let mut all: Totals = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut all = read_totals(&path);
         all.merge(usage);
         let written = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string()).and_then(|d| ink_store::write_atomic(&path, &d).map_err(|e| e.to_string()));
         if let Err(e) = written {
@@ -629,15 +628,10 @@ impl InsightfulPlugin {
                 let b = self.book.as_ref().expect("book");
                 b.chats.totals().statistics(&format!("Current book\n{}", b.title))
             }
-            _ => {
-                let path = cx.data_file(STATS_FILE)?;
-                let all: Totals = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-                all.statistics("All books")
-            }
+            _ => read_totals(&cx.data_file(STATS_FILE)?).statistics("All books"),
         };
         let (title, body) = text.split_once("\n\n").unwrap_or((&text, ""));
-        cx.ui()?.dialog(0, title, body, &[("OK", "ok")]);
-        Ok(())
+        notice(cx, 0, title, body)
     }
 
     /// The chat view's title: Insightful and the book.
@@ -673,16 +667,14 @@ impl InsightfulPlugin {
     }
 
     fn open_chats(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.ensure_config(cx)?;
-        self.ensure_book(cx)?;
+        self.ensure(cx)?;
         self.show_list(cx)
     }
 
     /// Opens the chat last used in this book (the one open before, else the most recently
     /// changed); a toast when the book has no chats.
     fn open_last_chat(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.ensure_config(cx)?;
-        self.ensure_book(cx)?;
+        self.ensure(cx)?;
         let b = self.book.as_ref().expect("book");
         let id = self.chat.clone().filter(|c| b.chats.get(c).is_some()).or_else(|| b.chats.chats.iter().max_by_key(|c| c.updated.max(c.created)).map(|c| c.id.clone()));
         // No chat yet: an empty one, as KOReader's "Continue current chat" does.
@@ -709,8 +701,7 @@ impl InsightfulPlugin {
     /// selected passage that goes with the first message (if any) and the input bar,
     /// the keyboard closed until the bar is tapped.
     fn fresh_chat(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.ensure_config(cx)?;
-        self.ensure_book(cx)?;
+        self.ensure(cx)?;
         let mut md = String::from("*No conversation yet.*");
         if let Some(s) = self.pending_sel.as_ref().filter(|s| !s.text.trim().is_empty()) {
             let label = match s.section.as_deref().filter(|t| !t.trim().is_empty()) {
@@ -759,8 +750,7 @@ impl InsightfulPlugin {
             })
             .collect();
         if items.is_empty() {
-            cx.ui()?.dialog(0, "Insightful", &format!("No provider has an API key. Add one to {} in the plugin's data folder.", config::CONFIG_FILE), &[("OK", "ok")]);
-            return Ok(());
+            return Self::no_provider(cx);
         }
         cx.menu(MENU_PROVIDER, "Insightful provider", items)
     }
@@ -773,13 +763,11 @@ impl InsightfulPlugin {
     }
 
     fn no_provider(cx: &mut HostCtx) -> Result<()> {
-        cx.ui()?.dialog(0, "Insightful", &format!("No provider has an API key. Add one to {} in the plugin's data folder.", config::CONFIG_FILE), &[("OK", "ok")]);
-        Ok(())
+        notice(cx, 0, "Insightful", &format!("No provider has an API key. Add one to {} in the plugin's data folder.", config::CONFIG_FILE))
     }
 
     fn model_error(cx: &mut HostCtx, msg: &str) -> Result<()> {
-        cx.ui()?.dialog(DIALOG_MODEL, "Insightful", msg, &[("OK", "ok")]);
-        Ok(())
+        notice(cx, DIALOG_MODEL, "Insightful", msg)
     }
 
     /// Settings: `Provider <id>` and `Model <model>`.
@@ -946,44 +934,27 @@ impl Plugin for InsightfulPlugin {
     }
 
     fn on_action(&mut self, cx: &mut HostCtx, id: &str) -> Result<()> {
-        if QUICK_ACTIONS.iter().any(|(a, _, _)| *a == id) {
+        let quick = QUICK_ACTIONS.iter().any(|(a, _, _)| *a == id);
+        if quick || matches!(id, "menu" | "ask") {
+            // The reader clears its selection when the popup closes: keep it now.
             self.pending_sel = self.current_selection(cx);
             self.sel_override = false;
-            return self.open_from_highlight(cx, Some(id));
+        } else if matches!(id, "ask_book" | "new_chat" | "chats" | "last_chat") {
+            self.pending_sel = None;
         }
         match id {
+            _ if quick => self.open_from_highlight(cx, Some(id)),
             "menu" => {
-                // The reader clears its selection when the popup closes: keep it now.
-                self.pending_sel = self.current_selection(cx);
-                self.sel_override = false;
-                self.ensure_config(cx)?;
-                self.ensure_book(cx)?;
+                self.ensure(cx)?;
                 self.actions_sheet(cx)
             }
-            "ask" => {
-                self.pending_sel = self.current_selection(cx);
-                self.sel_override = false;
-                self.open_from_highlight(cx, None)
-            }
-            "ask_book" | "new_chat" => {
-                self.pending_sel = None;
-                self.fresh_chat(cx)
-            }
+            "ask" => self.open_from_highlight(cx, None),
+            "ask_book" | "new_chat" => self.fresh_chat(cx),
             "book_menu" => self.book_sheet(cx),
-            "chats" => {
-                self.pending_sel = None;
-                self.open_chats(cx)
-            }
-            "last_chat" => {
-                self.pending_sel = None;
-                self.open_last_chat(cx)
-            }
+            "chats" => self.open_chats(cx),
+            "last_chat" => self.open_last_chat(cx),
             "stats" => Self::sheet(cx, MENU_STATS, "Statistics", &[("General", "general", "info"), ("Current book", "book", "book"), ("All books", "all", "library")]),
-            "gestures" => {
-                let text = "Open Settings, then Gestures. Assign Insightful: show current chat or Insightful: show chats to a corner, swipe, or other gesture.";
-                cx.ui()?.dialog(0, "Gesture shortcuts", text, &[("OK", "ok")]);
-                Ok(())
-            }
+            "gestures" => notice(cx, 0, "Gesture shortcuts", "Open Settings, then Gestures. Assign Insightful: show current chat or Insightful: show chats to a corner, swipe, or other gesture."),
             "settings:provider" => self.settings_menu(cx),
             "settings:model" => self.model_menu(cx),
             _ => Ok(()),
@@ -1149,6 +1120,17 @@ impl Plugin for InsightfulPlugin {
         }
         Ok(())
     }
+}
+
+/// A dialog with an OK button.
+fn notice(cx: &mut HostCtx, id: u32, title: &str, body: &str) -> Result<()> {
+    cx.ui()?.dialog(id, title, body, &[("OK", "ok")]);
+    Ok(())
+}
+
+/// The token totals over all books in `path`; zero when missing or unreadable.
+fn read_totals(path: &std::path::Path) -> Totals {
+    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 /// The provider's name as the menus show it.

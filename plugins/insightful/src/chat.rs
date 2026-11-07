@@ -58,6 +58,18 @@ pub struct Message {
     pub usage: Option<Totals>,
 }
 
+impl Message {
+    /// The user's turn, sent now.
+    pub fn user(content: &str, selection: Option<SelectionInfo>, label: Option<&str>) -> Message {
+        Message { role: "user".into(), content: content.into(), selection, model: None, label: label.map(str::to_string), timestamp: now(), usage: None }
+    }
+
+    /// An answer of `model`, received now.
+    pub fn answer(content: String, model: &str, usage: Totals) -> Message {
+        Message { role: "assistant".into(), content, selection: None, model: Some(model.into()), label: None, timestamp: now(), usage: Some(usage) }
+    }
+}
+
 /// Token and cost totals.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Totals {
