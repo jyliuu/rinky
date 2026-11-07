@@ -94,6 +94,8 @@ pub struct App {
     repaint_after_wake: bool,
     /// Edge swipes recognised while the finger still moves.
     edge: EarlyEdgeSwipe,
+    /// Battery samples for the battery page.
+    battery_log: crate::battery_log::BatteryLog,
     /// What the panel shows, kept by the screen wrapper ([`crate::shown`]).
     shown: crate::shown::Shown,
     /// A panel screen above (the control center) was popped and only its rect came
@@ -264,6 +266,7 @@ impl App {
         crate::screens::register_all(&mut registry);
         let refresh = RefreshScheduler::new(settings.reader.flash_every);
         let plugins = PluginHost::load(crate::plugins::compiled_in(), &settings, &paths);
+        let battery_log = crate::battery_log::BatteryLog::new(paths.battery_log());
         crate::fonts::start(&paths, &settings); // aa: font registry and UI font
         App {
             device,
@@ -286,9 +289,17 @@ impl App {
             full_next: false,
             repaint_after_wake: false,
             edge: EarlyEdgeSwipe::default(),
+            battery_log,
             shown,
             revealed_part: false,
         }
+    }
+
+    /// Writes a battery sample (`awake` false: the device goes to sleep now).
+    fn note_battery(&mut self, awake: bool) {
+        let Ok(state) = self.device.battery.state() else { return };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        self.battery_log.note(now, state, awake);
     }
 
     /// Runs until a screen exits or the input ends.
@@ -370,10 +381,18 @@ impl App {
                 return Ok(());
             }
             let events = self.edge.filter(events, self.canvas.height as i32);
+            if self.battery_log.due() && self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake {
+                self.note_battery(true);
+            }
             for ev in events {
                 crate::perf::input_seen();
                 if let UiEvent::Gesture(g) = &ev {
                     log::info!("gesture: {g:?}");
+                }
+                match ev {
+                    UiEvent::Power(PowerEvent::GoingToScreenSaver) => self.note_battery(false),
+                    UiEvent::Power(PowerEvent::OutOfScreenSaver) => self.note_battery(true),
+                    _ => {}
                 }
                 if matches!(ev, UiEvent::Power(PowerEvent::OutOfScreenSaver)) {
                     self.repaint_after_wake = true;

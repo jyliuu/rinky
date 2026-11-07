@@ -160,7 +160,7 @@ fn without_device_services_every_page_opens() {
     // Unsupported services everywhere (headless as is): no page may fail.
     let pages: Vec<String> =
         main_rows(&MainValues::default()).into_iter().map(|r| r.action).filter(|a| a.starts_with("page:")).collect();
-    assert_eq!(pages.len(), 20);
+    assert_eq!(pages.len(), 21);
     let mut script = String::new();
     for (i, a) in pages.iter().enumerate() {
         script.push_str(&format!("{}shot page{i}\n{BACK}", main_tap(a)));
