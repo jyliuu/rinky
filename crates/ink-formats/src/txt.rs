@@ -13,11 +13,12 @@
 
 use crate::book::{Book, BookInfo, Target, TocNode};
 use crate::encoding::decode_text;
-use crate::xml::escape_text;
+use crate::xml::{escape_text, push_text};
 use crate::Format;
 use ink_doc::{DirLoader, DocError, Result};
 use ink_html::HtmlChapter;
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::path::Path;
 
 /// Characters of text per chapter when the book has no headings (keeps chapters small
@@ -200,7 +201,14 @@ fn is_all_caps_title(line: &str) -> bool {
 }
 
 fn join_lines(lines: &[&str]) -> String {
-    lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(l.trim());
+    }
+    out
 }
 
 fn blocks_of(groups: &[Vec<&str>], mode: Mode, allow_caps: bool) -> Vec<Block> {
@@ -317,7 +325,9 @@ pub fn convert_text(text: &str, title: &str) -> (Vec<HtmlChapter>, Vec<TocNode>)
                 chapter_title = t.clone();
                 let id = format!("h{headings}");
                 let tag = if level == 0 { "h1" } else { "h2" };
-                body.push_str(&format!("<{tag} id=\"{id}\">{}</{tag}>", escape_text(&t)));
+                let _ = write!(body, "<{tag} id=\"{id}\">");
+                push_text(&mut body, &t);
+                let _ = write!(body, "</{tag}>");
                 let node = TocNode::new(t, Target::id(chapters.len(), id));
                 match (level, toc.last_mut()) {
                     (1, Some(part)) if in_part => part.children.push(node),
@@ -334,7 +344,7 @@ pub fn convert_text(text: &str, title: &str) -> (Vec<HtmlChapter>, Vec<TocNode>)
                 }
                 chars += p.len();
                 body.push_str("<p>");
-                body.push_str(&escape_text(&p));
+                push_text(&mut body, &p);
                 body.push_str("</p>");
             }
         }

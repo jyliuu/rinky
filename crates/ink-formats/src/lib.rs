@@ -202,7 +202,7 @@ pub fn txt_to_xhtml(text: &str) -> String {
         let p = para.trim();
         if !p.is_empty() {
             out.push_str("<p>");
-            out.push_str(&xml::escape_text(p));
+            xml::push_text(&mut out, p);
             out.push_str("</p>");
         }
     }

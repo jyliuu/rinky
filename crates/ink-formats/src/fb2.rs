@@ -223,7 +223,7 @@ impl Conv<'_> {
     fn children(&mut self, el: &Element, depth: u8) {
         for c in &el.children {
             match c {
-                Node::Text(t) => self.out.push_str(&escape_text(t)),
+                Node::Text(t) => xml::push_text(&mut self.out, t),
                 Node::Element(e) => self.element(e, depth),
             }
         }

@@ -6,7 +6,7 @@
 //! A [`Rewrite`] sees every element before it is written and can rename it, change its
 //! attributes, drop it or unwrap it (keep the children only).
 
-use crate::xml::{escape_attr, escape_text, is_xml_name, tag_end};
+use crate::xml::{is_xml_name, push_attr, push_text, tag_end};
 use html5ever::tendril::StrTendril;
 use html5ever::tokenizer::{BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts};
 use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, Tracer, TreeBuilder, TreeBuilderOpts, TreeSink};
@@ -358,7 +358,7 @@ impl Writer<'_> {
         };
         match &node.data {
             NodeData::Document => push_children(stack, true),
-            NodeData::Text { contents } => self.out.push_str(&escape_text(&contents.borrow())),
+            NodeData::Text { contents } => push_text(&mut self.out, &contents.borrow()),
             NodeData::Element { name, attrs, .. } => {
                 let mut n = name.local.to_string();
                 if n == "script" || n == "noscript" || n == "template" {
@@ -391,14 +391,13 @@ impl Writer<'_> {
                 } else {
                     a.retain(|(k, _)| !k.starts_with("xmlns"));
                 }
+                // A repeated name keeps its first value. Elements have a few attributes:
+                // the earlier ones are scanned, a set is built only for long lists.
                 let mut seen = std::collections::HashSet::new();
-                for (k, v) in &a {
-                    if seen.insert(k.clone()) {
-                        self.out.push(' ');
-                        self.out.push_str(k);
-                        self.out.push_str("=\"");
-                        self.out.push_str(&escape_attr(v));
-                        self.out.push('"');
+                for (i, (k, v)) in a.iter().enumerate() {
+                    let repeated = if a.len() <= 8 { a[..i].iter().any(|(p, _)| p == k) } else { !seen.insert(k.as_str()) };
+                    if !repeated {
+                        push_attr(&mut self.out, k, v);
                     }
                 }
                 if node.children.borrow().is_empty() && is_void(&n) {

@@ -111,40 +111,65 @@ impl Element {
 
 /// Collapses whitespace runs to one space and trims.
 pub fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(s.len());
+    for w in s.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    out
+}
+
+/// Appends `s` to `out` escaped for XML: `&`, `<` and `>` always, in an attribute value
+/// (double-quoted) also `"` and the white space a parser would normalise. Characters XML
+/// does not allow are left out. Runs that need no escaping are copied as slices.
+fn escape_into(out: &mut String, s: &str, attr: bool) {
+    let mut last = 0;
+    for (i, c) in s.char_indices() {
+        let rep = match c {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' if attr => "&quot;",
+            '\n' if attr => "&#10;",
+            '\t' if attr => "&#9;",
+            '\r' if attr => "&#13;",
+            c if is_xml_char(c) => continue,
+            _ => "",
+        };
+        out.push_str(&s[last..i]);
+        out.push_str(rep);
+        last = i + c.len_utf8();
+    }
+    out.push_str(&s[last..]);
+}
+
+/// Appends `s` escaped as XML text content to `out`.
+pub fn push_text(out: &mut String, s: &str) {
+    escape_into(out, s, false);
+}
+
+/// Appends ` name="value"` to `out`, the value escaped.
+pub fn push_attr(out: &mut String, name: &str, value: &str) {
+    out.push(' ');
+    out.push_str(name);
+    out.push_str("=\"");
+    escape_into(out, value, true);
+    out.push('"');
 }
 
 /// Escapes text content for XML.
 pub fn escape_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            c if is_xml_char(c) => out.push(c),
-            _ => {}
-        }
-    }
+    push_text(&mut out, s);
     out
 }
 
 /// Escapes an attribute value for XML (double-quoted).
 pub fn escape_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\n' => out.push_str("&#10;"),
-            '\t' => out.push_str("&#9;"),
-            '\r' => out.push_str("&#13;"),
-            c if is_xml_char(c) => out.push(c),
-            _ => {}
-        }
-    }
+    escape_into(&mut out, s, true);
     out
 }
 
@@ -248,10 +273,6 @@ pub fn html_entity(name: &str) -> Option<&'static str> {
     })
 }
 
-fn resolve(name: &str) -> Option<&'static str> {
-    html_entity(name)
-}
-
 fn qname_parts(raw: &[u8]) -> (Option<String>, String) {
     let s = String::from_utf8_lossy(raw);
     match s.split_once(':') {
@@ -266,7 +287,7 @@ fn element_of(e: &BytesStart) -> Element {
     for a in e.attributes().with_checks(false).flatten() {
         let qname = String::from_utf8_lossy(a.key.as_ref()).into_owned();
         let local = String::from_utf8_lossy(a.key.local_name().as_ref()).into_owned();
-        let value = match a.unescape_value_with(resolve) {
+        let value = match a.unescape_value_with(html_entity) {
             Ok(v) => v.into_owned(),
             Err(_) => String::from_utf8_lossy(&a.value).into_owned(),
         };
@@ -339,15 +360,15 @@ pub fn parse(xml: &str) -> Result<Element, String> {
                 }
             }
             Event::Text(t) => {
-                let s = match t.unescape_with(resolve) {
+                let s = match t.unescape_with(html_entity) {
                     Ok(s) => s.into_owned(),
                     Err(_) => String::from_utf8_lossy(&t).into_owned(),
                 };
-                push_text(stack.last_mut().expect("document"), s);
+                append_text(stack.last_mut().expect("document"), s);
             }
             Event::CData(t) => {
                 let s = String::from_utf8_lossy(&t).into_owned();
-                push_text(stack.last_mut().expect("document"), s);
+                append_text(stack.last_mut().expect("document"), s);
             }
             Event::Eof => break,
             _ => {}
@@ -367,7 +388,7 @@ pub fn parse(xml: &str) -> Result<Element, String> {
         .ok_or_else(|| "XML: no root element".to_string())
 }
 
-fn push_text(el: &mut Element, s: String) {
+fn append_text(el: &mut Element, s: String) {
     if s.is_empty() {
         return;
     }
@@ -466,7 +487,7 @@ pub fn is_well_formed(xml: &str) -> bool {
             Ok(Event::End(_)) => depth = depth.saturating_sub(1),
             Ok(Event::Text(t)) => {
                 // Unknown entities break the v1 parser too.
-                if t.unescape_with(resolve).is_err() {
+                if t.unescape_with(html_entity).is_err() {
                     return false;
                 }
             }
@@ -572,6 +593,13 @@ mod tests {
     fn escaping_and_entities() {
         assert_eq!(escape_text("a<b&c>\u{1}"), "a&lt;b&amp;c&gt;");
         assert_eq!(escape_attr("\"x\"\n"), "&quot;x&quot;&#10;");
+        let mut out = String::from("<p");
+        push_attr(&mut out, "title", "a\tb & ü\u{0}");
+        out.push('>');
+        push_text(&mut out, "x \"y\" <é>");
+        assert_eq!(out, "<p title=\"a&#9;b &amp; ü\">x \"y\" &lt;é&gt;");
+        assert_eq!(collapse_ws("  a \n\t b  c "), "a b c");
+        assert_eq!(collapse_ws(" \n "), "");
         assert_eq!(html_entity("eacute"), Some("é"));
         assert_eq!(html_entity("nbsp"), Some("\u{a0}"));
         assert_eq!(html_entity("yuml"), Some("ÿ"));
