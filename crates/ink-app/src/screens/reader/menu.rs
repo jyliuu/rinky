@@ -545,19 +545,15 @@ impl super::ReaderScreen {
             }
             "more" => self.open_overlay(build_more(size), cx),
             PLUGIN_MORE => {
-                let labels: Vec<String> = super::plugin_menu(cx.plugins).into_iter().map(|m| m.label).collect();
-                self.open_overlay(build_plugin_more(&labels, size), cx);
+                self.open_overlay(build_plugin_more(&super::plugin_labels(cx), size), cx);
             }
             "return" => {
                 self.close_overlay();
                 self.go_back();
             }
-            "goto" => {
-                let o = self.goto_overlay(0, size);
-                self.open_overlay(o, cx);
-            }
-            _ if a.starts_with("gtab:") => {
-                let o = self.goto_overlay(a[5..].parse().unwrap_or(0), size);
+            _ if a == "goto" || a.starts_with("gtab:") => {
+                let tab = a.strip_prefix("gtab:").and_then(|t| t.parse().ok()).unwrap_or(0);
+                let o = self.goto_overlay(tab, size);
                 self.open_overlay(o, cx);
             }
             "export" => {
@@ -565,11 +561,8 @@ impl super::ReaderScreen {
                 crate::export::toast(cx.plugins, text);
             }
             _ if a.starts_with("hl:") => {
-                let pos = a[3..].parse::<usize>().ok().and_then(|i| self.highlight_targets().into_iter().nth(i));
-                if let Some(pos) = pos {
-                    self.close_overlay();
-                    self.go_to_position(&pos);
-                }
+                let pos = a[3..].parse::<usize>().ok().and_then(|i| self.highlight_rows().into_iter().nth(i)).map(|(_, p)| p);
+                self.go_to_row(pos);
             }
             _ => return Ok(None),
         }
@@ -591,11 +584,6 @@ impl super::ReaderScreen {
             doc?.page_of(&pos).ok().map(|p| p as u32)
         };
         crate::export::export_one(paths, &entry, &ink_store::export::Locator { page_of: &page_of, total: (total > 0).then_some(total) })
-    }
-
-    /// Start positions of the saved highlights in the Go to panel's order.
-    pub(super) fn highlight_targets(&mut self) -> Vec<Position> {
-        self.highlight_rows().into_iter().map(|(_, p)| p).collect()
     }
 }
 

@@ -990,6 +990,15 @@ impl ReaderScreen {
         marked
     }
 
+    /// A row of the Go to panel was tapped: the panel closes and the reader goes to the
+    /// row's place `pos` (nothing when the row is gone).
+    fn go_to_row(&mut self, pos: Option<Position>) {
+        if let Some(pos) = pos {
+            self.close_overlay();
+            self.go_to_position(&pos);
+        }
+    }
+
     /// Goes to `pos` (a TOC entry, bookmark or search hit), remembering the way back.
     fn go_to_position(&mut self, pos: &Position) {
         let Some(doc) = self.doc.as_deref() else { return };
@@ -1813,54 +1822,51 @@ impl ReaderScreen {
         if let Some(t) = self.menu_action(a, cx)? {
             return Ok(t);
         }
-        match a {
+        // `name:argument` (`toc:3`, `pct:42.5`, `pcard:next`), or a plain name.
+        let (name, arg) = a.split_once(':').unwrap_or((a, ""));
+        let index = arg.parse::<usize>().ok();
+        match name {
             "close" => self.close_overlay(),
             actions::EXIT_CONFIRMED => return Ok(Transition::Exit),
             "back" => return Ok(Transition::Pop),
-            _ if a.starts_with("page:") => {
-                if let Ok(n) = a[5..].parse::<usize>() {
+            "page" => {
+                if let Some(n) = index {
                     self.close_overlay();
                     self.navigate_to_page(n.saturating_sub(1));
                 }
             }
-            _ if a.starts_with("toc:") => {
+            "toc" => {
                 self.load_toc();
-                let pos = a[4..].parse::<usize>().ok().and_then(|i| self.toc.as_deref()?.get(i).map(|e| e.position.clone()));
-                if let Some(pos) = pos {
-                    self.close_overlay();
-                    self.go_to_position(&pos);
-                }
+                let pos = index.and_then(|i| self.toc.as_deref()?.get(i).map(|e| e.position.clone()));
+                self.go_to_row(pos);
             }
-            _ if a.starts_with("bm:") => {
-                let pos = a[3..].parse::<usize>().ok().and_then(|i| self.listed_marks.get(i)).and_then(|b| b.position.parse::<Position>().ok());
-                if let Some(pos) = pos {
-                    self.close_overlay();
-                    self.go_to_position(&pos);
-                }
+            "bm" => {
+                let pos = index.and_then(|i| self.listed_marks.get(i)).and_then(|b| b.position.parse::<Position>().ok());
+                self.go_to_row(pos);
             }
-            _ if a.starts_with("pct:") => {
-                if let (Ok(n), Some(doc)) = (a[4..].parse::<f32>(), self.doc.as_deref_mut()) {
+            "pct" => {
+                if let (Ok(n), Some(doc)) = (arg.parse::<f32>(), self.doc.as_deref_mut()) {
                     let page = percent_page(doc, n);
                     self.close_overlay();
                     self.navigate_to_page(page);
                 }
             }
             // aa: the Aa sheet and its actions (reader/aa.rs).
-            _ if a == "aa" || a.starts_with("aa-") => {
+            _ if name == "aa" || name.starts_with("aa-") => {
                 if let Some(t) = self.aa_action(a, cx)? {
                     return Ok(t);
                 }
             }
             "search" | "hits-list" => self.open_search_page(false, cx),
             "keyboard" => self.search_keys(cx),
-            "focus:query" => {
+            "focus" if arg == "query" => {
                 if !self.overlay.as_ref().is_some_and(|o| o.ids.contains_key("keyboard")) {
                     self.open_search_page(true, cx);
                 }
             }
             "search-go" => self.run_search(cx),
-            _ if a.starts_with("hit:") => {
-                if let Ok(i) = a[4..].parse::<usize>() {
+            "hit" => {
+                if let Some(i) = index {
                     self.show_hit(i, cx);
                 }
             }
@@ -1871,10 +1877,9 @@ impl ReaderScreen {
                     self.show_hit(i, cx);
                 }
             }
-            _ if a.starts_with("plugin-menu:") || a.starts_with("plugin-sel:") => {
-                let sel = a.starts_with("plugin-sel:");
-                let i: usize = a.rsplit(':').next().and_then(|n| n.parse().ok()).unwrap_or(usize::MAX);
-                let entry = if sel {
+            "plugin-menu" | "plugin-sel" => {
+                let i = index.unwrap_or(usize::MAX);
+                let entry = if name == "plugin-sel" {
                     cx.plugins.selection_actions().get(i).map(|x| (x.plugin.clone(), x.id.clone()))
                 } else {
                     plugin_menu(cx.plugins).get(i).map(|x| (x.plugin.clone(), x.id.clone()))
@@ -1909,7 +1914,7 @@ impl ReaderScreen {
                 }
             }
             "note-save" => self.save_note(),
-            "focus:note" => {}
+            "focus" => {}
             "sel-search" => {
                 let text = self.sel.as_ref().map(|s| s.text.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
                 self.close_overlay();
