@@ -65,7 +65,6 @@ pub fn parse_ncx(xml: &str, ncx_path: &str) -> Navigation {
     // (title, href) of the open navPoint / pageTarget entries.
     let mut stack: Vec<(String, Option<String>, bool, usize)> = Vec::new();
     let mut in_text = false;
-    let mut in_page_list = false;
     while let Ok(ev) = r.read_event() {
         match ev {
             Event::Start(e) | Event::Empty(e) => {
@@ -80,7 +79,6 @@ pub fn parse_ncx(xml: &str, ncx_path: &str) -> Navigation {
                         list.push(NavPoint { title: String::new(), href: String::new(), level: depth.clamp(0, 255) as u8 });
                         stack.push((String::new(), None, page, list.len() - 1));
                     }
-                    b"pageList" => in_page_list = true,
                     b"text" => in_text = true,
                     b"content" => {
                         if let Some(src) = e.attributes().flatten().find(|a| a.key.local_name().as_ref() == b"src") {
@@ -106,7 +104,6 @@ pub fn parse_ncx(xml: &str, ncx_path: &str) -> Navigation {
             }
             Event::End(e) => match e.local_name().as_ref() {
                 b"text" => in_text = false,
-                b"pageList" => in_page_list = false,
                 b"navPoint" | b"pageTarget" => {
                     if let Some((title, href, page, idx)) = stack.pop() {
                         let list = if page { &mut nav.page_list } else { &mut nav.toc };
@@ -123,7 +120,6 @@ pub fn parse_ncx(xml: &str, ncx_path: &str) -> Navigation {
             _ => {}
         }
     }
-    let _ = in_page_list;
     nav.toc.retain(|p| !p.href.is_empty());
     nav.page_list.retain(|p| !p.href.is_empty());
     nav

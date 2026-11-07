@@ -15,7 +15,7 @@ use crate::dom::{Dom, ElemRef, NodeId, NodeKind, NONE};
 use crate::fonts::{FaceKey, FontBook};
 use crate::style::{
     ua_rules, Cascade, ComputedStyle, Display, Hyphens, Len, LineHeight, ListStyle, PageBreak, StyleContext, TextAlign, TextTransform,
-    VAlign, WhiteSpace,
+    VAlign,
 };
 use ink_doc::{resolve_href, LayoutSettings};
 use ink_text::linebreak::{break_opportunities, Break};
@@ -611,7 +611,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         let content_top = self.y;
         self.first_line_pending = true;
         if st.display == Display::ListItem {
-            self.list_marker(id, st, cx);
+            self.list_marker(id, st);
         }
         if matches!(name, "img" | "image" | "svg") {
             self.block_image(id, cx, cw);
@@ -666,7 +666,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    fn list_marker(&mut self, id: NodeId, st: &ComputedStyle, _cx: f32) {
+    fn list_marker(&mut self, id: NodeId, st: &ComputedStyle) {
         if st.list_style == ListStyle::None {
             return;
         }
@@ -884,7 +884,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         let target = if external {
             h.to_string()
         } else if let Some(frag) = h.strip_prefix('#') {
-            format!("{}#{}", self.chapter_path_full(), frag)
+            format!("{}#{}", self.chapter_path, frag)
         } else {
             let frag = h.split_once('#').map(|(_, f)| f);
             let path = resolve_href(self.chapter_dir, h);
@@ -897,11 +897,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         (self.out.links.len() - 1) as u32
     }
 
-    fn chapter_path_full(&self) -> String {
-        self.chapter_path.to_string()
-    }
-
-    /// Collects the display text of an inline run.
     /// Appends the display text of text node `n`.
     #[allow(clippy::too_many_arguments)]
     fn push_text(&mut self, n: NodeId, text: &mut String, src: &mut SrcRuns, segs: &mut Vec<Seg>, link: u32, shift: f32) {
@@ -1244,7 +1239,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut lines: Vec<Line> = Vec::new();
         let mut cur: Vec<WordBox> = Vec::new();
         let mut cur_w = 0.0f32;
-        let mut i = 0;
         let mut queue: std::collections::VecDeque<WordBox> = boxes.into();
         while let Some(bx) = queue.pop_front() {
             let first_line = lines.is_empty();
@@ -1268,7 +1262,6 @@ impl<'a, 'e> Flow<'a, 'e> {
                     lines.push(Line { boxes: std::mem::take(&mut cur), forced: true, first: first_line });
                     cur_w = 0.0;
                 }
-                i += 1;
                 continue;
             }
             // Does not fit: try to hyphenate it into the remaining space.
@@ -1289,7 +1282,6 @@ impl<'a, 'e> Flow<'a, 'e> {
             let first = lines.is_empty();
             lines.push(Line { boxes: cur, forced: true, first });
         }
-        let _ = i;
         let n_lines = lines.len();
         for (li, line) in lines.into_iter().enumerate() {
             let last = li + 1 == n_lines;
@@ -1469,9 +1461,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         let justify = align == TextAlign::Justify && !last && !line.forced && spaces > 0 && !self.merge_runs;
         let extra = (avail - line_w).max(0.0);
         let mut x0 = x + first_indent;
-        if first_indent < 0.0 {
-            x0 = x + first_indent;
-        }
         match align {
             TextAlign::Center => x0 += extra / 2.0,
             TextAlign::Right => x0 += extra,
@@ -2037,17 +2026,6 @@ fn roman(n: i64) -> String {
         }
     }
     s
-}
-
-/// The keys of whitespace-collapsed text: helper for tests and search (the visible text
-/// of a chapter in reading order with the DOM position of each char).
-pub fn hyphenator_for(lang: &str) -> Option<Arc<crate::hyph::PatternHyphenator>> {
-    crate::hyph::for_lang(lang)
-}
-
-/// True when `st` asks for hyphenation (used by tests).
-pub fn wants_hyphens(st: &ComputedStyle, settings: &LayoutSettings) -> bool {
-    settings.hyphenate && st.hyphens == Hyphens::Auto && st.white_space != WhiteSpace::Pre
 }
 
 #[cfg(test)]

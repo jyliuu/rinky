@@ -754,11 +754,6 @@ pub fn font_dirs(extra: Option<&Path>) -> Vec<PathBuf> {
     v
 }
 
-/// The regular serif face bytes (used by tests).
-pub fn serif_regular() -> &'static [u8] {
-    embedded_font_bytes(Style::Regular)
-}
-
 /// FxHash (rustc's hasher): much cheaper than SipHash for the short keys of the width
 /// cache, which is never fed untrusted keys in a way that matters (a book can at worst
 /// slow its own layout down).
@@ -894,7 +889,7 @@ mod tests {
         assert_eq!(parsed(&fb, 1), [true, false, false, false]);
         // A book family with only a regular face: every request uses it.
         let mut s = FontSources::default();
-        s.families.push(("only".into(), FamilyBytes { regular: Some(Arc::new(serif_regular().to_vec())), ..Default::default() }));
+        s.families.push(("only".into(), FamilyBytes { regular: Some(Arc::new(embedded_font_bytes(Style::Regular).to_vec())), ..Default::default() }));
         let mut fb = s.build();
         let id = fb.family_by_name("only").unwrap();
         let k = FaceKey { family: id, bold: true, italic: true };

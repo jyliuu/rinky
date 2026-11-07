@@ -1816,16 +1816,6 @@ fn svg_resolver(loader: &dyn ResourceLoader, dir: &str, svg: &str) -> crate::ima
     Arc::new(move |h: &str| found.get(h).cloned())
 }
 
-impl MapState {
-    #[allow(dead_code)]
-    fn debug_summary(&self) -> String {
-        self.chapters.iter().map(|c| c.as_ref().map(|p| p.keys.len().to_string()).unwrap_or("?".into())).collect::<Vec<_>>().join(",")
-    }
-}
-
-/// Text of `id` with a space between block-level elements (an FB2 note's `<title>` number
-/// and its body paragraph: "1 The first footnote.", not "1The first footnote."). Inline
-/// elements join without a space ("<a>1</a>. Text" stays "1. Text").
 /// A backlink inside a note (back to the reference): `role="doc-backlink"`,
 /// `epub:type="backlink"`, or a link whose text is only an arrow (`↩`, `↑`, `^`).
 fn is_backlink(dom: &crate::dom::Dom, n: crate::dom::NodeId, e: &crate::dom::Element) -> bool {

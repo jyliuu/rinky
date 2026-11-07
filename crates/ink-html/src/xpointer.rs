@@ -211,15 +211,10 @@ pub fn char_to_byte(s: &str, offset: u32) -> usize {
     s.char_indices().nth(offset as usize).map(|(i, _)| i).unwrap_or(s.len())
 }
 
-/// Char offset of byte offset `byte` in `s`.
-pub fn byte_to_char(s: &str, byte: usize) -> u32 {
-    s[..byte.min(s.len())].chars().count() as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom::{Builder, Classifier};
+    use crate::dom::Classifier;
     use crate::style::{StructStyle, WhiteSpace};
 
     struct Defaults;
@@ -234,7 +229,6 @@ mod tests {
         let src = r#"<html><body><div><p>One</p><p>Two <i>it</i> three</p></div><div><img src="a.png"/></div></body></html>"#;
         let mut c = Defaults;
         let dom = crate::parse::parse_chapter(src, &mut c);
-        let _ = Builder::new(None);
         let texts: Vec<NodeId> = dom.preorder.iter().copied().filter(|&n| dom.text(n).is_some()).collect();
         let x = to_xpointer(&dom, 3, 5, DomPos::Text { node: texts[2], offset: 1 });
         assert_eq!(x.to_string(), "/body/DocFragment[3]/body/div[1]/p[2]/i/text().1");
@@ -262,6 +256,5 @@ mod tests {
         let k2 = order_key(&dom, DomPos::Element { node: dom.body, point: Some(1) });
         assert!(k1 < k2);
         assert_eq!(char_to_byte("añb", 2), 3);
-        assert_eq!(byte_to_char("añb", 3), 2);
     }
 }

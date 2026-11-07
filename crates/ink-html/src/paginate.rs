@@ -413,14 +413,10 @@ pub fn resolve_interest(book: &Book, i: usize, keys: &[(u32, u32)], interest: &I
     }
 }
 
-/// The image size function used off the main thread: cached sizes, else the shared loader.
-pub fn shared_image_size(book: &Book, path: &str) -> Option<(u32, u32)> {
-    shared_image_size_known(book, path).0
-}
-
-/// Like [`shared_image_size`], plus whether the size is known: false when the image is
-/// neither in the size cache nor readable here (no shared loader). A layout made with an
-/// unknown size is not the foreground's layout.
+/// The image size used off the main thread (cached sizes, else the shared loader), and
+/// whether it is known: false when the image is neither in the size cache nor readable
+/// here (no shared loader). A layout made with an unknown size is not the foreground's
+/// layout.
 pub fn shared_image_size_known(book: &Book, path: &str) -> (Option<(u32, u32)>, bool) {
     if let Some(s) = book.images.lock().unwrap().get(path) {
         return (*s, true);

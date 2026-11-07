@@ -748,14 +748,13 @@ impl<'c> Builder<'c> {
             return;
         }
         let Some(parent) = self.top() else { return };
-        let (pre, allow, is_block, in_svg) = {
+        let (pre, allow, is_block) = {
             let Some(e) = self.dom.element(parent) else { self.bad_stack_entry(parent) };
-            (e.st.white_space.parse_as_pre(), allows_text(&e.name, e.in_svg), e.st.display.is_block_like(), e.in_svg)
+            (e.st.white_space.parse_as_pre(), allows_text(&e.name, e.in_svg), e.st.display.is_block_like())
         };
         if !allow {
             return;
         }
-        let _ = in_svg;
         for chunk in split_raw_text(src) {
             let mut text = preprocess(chunk, pre, raw);
             let first = self.dom.node(parent).children.is_empty();

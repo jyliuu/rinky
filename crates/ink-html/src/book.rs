@@ -463,11 +463,6 @@ impl Book {
         self.doms.lock().unwrap().contains_key(&i)
     }
 
-    /// Drops cached DOMs except `keep` (memory control for huge books).
-    pub fn evict_chapters(&self, keep: &[usize]) {
-        self.doms.lock().unwrap().retain(|k, _| keep.contains(k));
-    }
-
     /// Drops the cached DOM of chapter `i`.
     pub fn evict_chapter(&self, i: usize) {
         self.doms.lock().unwrap().remove(&i);
