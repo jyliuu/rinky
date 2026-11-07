@@ -165,6 +165,9 @@ pub struct StatsScreen {
     dirty: Option<RefreshClass>,
 }
 
+/// Weekday names, Monday first (the calendar's columns, the 7-day chart's labels).
+const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
 const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 impl StatsScreen {
@@ -201,6 +204,18 @@ impl StatsScreen {
         let (y, m) = self.month;
         let i = y * 12 + m as i32 - 1 + d;
         self.month = (i.div_euclid(12), i.rem_euclid(12) as u32 + 1);
+    }
+
+    /// The next (`forward`) or previous page of the tab: books or months; the overview
+    /// has none.
+    fn step(&self, forward: bool) -> Option<Hit> {
+        match (self.tab, forward) {
+            (Tab::Books, true) => Some(Hit::NextPage),
+            (Tab::Books, false) => Some(Hit::PrevPage),
+            (Tab::Calendar, true) => Some(Hit::NextMonth),
+            (Tab::Calendar, false) => Some(Hit::PrevMonth),
+            (Tab::Overview, _) => None,
+        }
     }
 
     fn act(&mut self, hit: Hit, size: Size) -> Transition {
@@ -316,7 +331,7 @@ impl StatsScreen {
             // Labels: weekday initials for 7 days, every fifth day of the month for 30.
             let (_, mm, dd) = report::civil_from_days(*day);
             let label = if n == 7 {
-                ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][report::weekday(*day) as usize % 7].to_string()
+                WEEKDAYS[report::weekday(*day) as usize % 7].to_string()
             } else if (n - 1 - i) % 5 == 0 {
                 format!("{dd}/{mm}")
             } else {
@@ -346,7 +361,7 @@ impl StatsScreen {
         let cw = (w - 2 * MARGIN) / 7;
         let ch = 150;
         let wy = top + 104 + space(3);
-        for (i, name) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].iter().enumerate() {
+        for (i, name) in WEEKDAYS.iter().enumerate() {
             p.text_centered(Rect::new(MARGIN + i as i32 * cw, wy, cw as u32, 44), name, t.caption.px, t.caption.style, t.muted);
         }
         let grid = report::month_grid(y, m, &self.data.days);
@@ -464,23 +479,16 @@ impl AppScreen for StatsScreen {
             if !k.pressed {
                 return Ok(Transition::None);
             }
-            return Ok(match k.key {
-                Key::Back => Transition::Pop,
-                Key::PageNext if self.tab == Tab::Books => self.act(Hit::NextPage, size),
-                Key::PagePrev if self.tab == Tab::Books => self.act(Hit::PrevPage, size),
-                Key::PageNext if self.tab == Tab::Calendar => self.act(Hit::NextMonth, size),
-                Key::PagePrev if self.tab == Tab::Calendar => self.act(Hit::PrevMonth, size),
-                _ => Transition::None,
-            });
+            let hit = match k.key {
+                Key::Back => return Ok(Transition::Pop),
+                Key::PageNext | Key::PagePrev => self.step(k.key == Key::PageNext),
+                _ => None,
+            };
+            return Ok(hit.map_or(Transition::None, |h| self.act(h, size)));
         }
         if let Some(step) = swipe_step(ev) {
-            let hit = match (self.tab, step > 0) {
-                (Tab::Books, true) => Hit::NextPage,
-                (Tab::Books, false) => Hit::PrevPage,
-                (Tab::Calendar, true) => Hit::NextMonth,
-                (Tab::Calendar, false) => Hit::PrevMonth,
-                (Tab::Overview, more) => Hit::Range(if more { 30 } else { 7 }),
-            };
+            // On the overview a swipe switches the chart between 7 and 30 days.
+            let hit = self.step(step > 0).unwrap_or(Hit::Range(if step > 0 { 30 } else { 7 }));
             return Ok(self.act(hit, size));
         }
         if let Some(pos) = tap_pos(ev) {
