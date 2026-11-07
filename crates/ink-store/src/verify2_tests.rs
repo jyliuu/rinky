@@ -3,7 +3,9 @@
 //! a defect that is still open; run it with
 //! `cargo test -p ink-store --release verifier2_ -- --ignored --nocapture`.
 //! Tests marked `#[ignore = "measurement: ..."]` only print numbers (for the evidence);
-//! tests/e2e/store-verify2.sh runs them on ARM under a time limit.
+//! tests/e2e/store-verify2.sh runs them on ARM under a time limit. Tests marked
+//! `#[ignore = "slow: ..."]` reproduced a defect that is fixed and are timing ratios now;
+//! docs/TESTING.md lists them with the release run.
 
 use crate::koreader;
 use crate::lua;
