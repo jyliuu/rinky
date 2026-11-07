@@ -9,8 +9,10 @@
 //!   between keys, [`PAD`] px padding; [`Keyboard::bottom_rect`] places it.
 //! - Long-press alternates (accents, quotes, dashes): hold a key, a row of alternates
 //!   opens over the row above it, slide to one and lift.
-//! - Press feedback: only the pressed key is inverted and only its face is refreshed,
-//!   with GL16 (gray-preserving). An optional preview bubble ([`Keyboard::preview`]).
+//! - Press feedback: the pressed key gets a thick border ([`PRESS_BORDER`]) and only its
+//!   face is refreshed, with GL16 (gray-preserving). Inverting the whole key was slower
+//!   to show: every pixel of the face had to go black and back. An optional preview
+//!   bubble ([`Keyboard::preview`]).
 //! - Repeat on hold: backspace, space and the cursor keys repeat while held.
 //! - Shift is one-shot; holding shift locks capitals.
 //! - It works per finger ([`crate::Touch`] notifications), so two thumbs can type at once
@@ -27,6 +29,9 @@ use crate::widget::{EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Point, Rect, RefreshClass, Size};
 use ink_text::Style;
+
+/// Border of a pressed key (and of shift while it is on), px, drawn inside the face.
+pub const PRESS_BORDER: f32 = 6.0;
 
 /// What a key does.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -375,7 +380,7 @@ pub struct Keyboard {
     /// Index into `languages`.
     pub language: usize,
     /// Show a key preview bubble over the row above the pressed letter (off by
-    /// default, as in KOReader: the inverted key is the feedback).
+    /// default, as in KOReader: the pressed key's border is the feedback).
     pub preview: bool,
     pressed: Vec<Press>,
     popup: Option<AltPopup>,
@@ -700,31 +705,32 @@ impl Widget for Keyboard {
             let face = *face;
             let special = !matches!(k.action, KeyAction::Char(_));
             let down = pressed.contains(&i) || (k.action == KeyAction::Shift && self.upper());
-            // Every face is white (special keys too): a press flips black and white only.
-            let (kfg, kbg) = if down { (bg, fg) } else { (fg, bg) };
-            fill_round_rect(cx.canvas, face, radius, kbg);
-            stroke_round_rect(cx.canvas, face, radius, 2.0, fg);
+            // Every face is white (special keys too); a pressed key (and shift while on)
+            // only gets a thicker border, inside its face. Nothing else in the face
+            // changes, so the refresh changes few pixels.
+            fill_round_rect(cx.canvas, face, radius, bg);
+            stroke_round_rect(cx.canvas, face, radius, if down { PRESS_BORDER } else { 2.0 }, fg);
             let icon = match (&k.action, k.icon) {
                 (KeyAction::Shift, _) if self.caps_lock => Some(Icon::ShiftLocked),
                 (_, i) => i,
             };
             if let Some(icon) = icon {
                 let side = (face.h.min(face.w) as f32 * 0.45) as u32;
-                cx.icon(icon, face, side, kfg);
+                cx.icon(icon, face, side, fg);
             } else if k.action == KeyAction::Space {
                 // The language name only tells something when the globe can change it.
                 if self.languages.len() < 2 {
                     continue;
                 }
                 let name = language_name(self.current_language());
-                cx.text_centered(face, name, LABEL_PX * 0.7, Style::Italic, if down { kfg } else { cx.theme.muted });
+                cx.text_centered(face, name, LABEL_PX * 0.7, Style::Italic, cx.theme.muted);
             } else {
                 let label = if matches!(k.action, KeyAction::Char(_)) { self.cased(&k.label) } else { k.label.clone() };
                 let size = if special { LABEL_PX * 0.75 } else { LABEL_PX };
-                cx.text_centered(face, &label, size, Style::Regular, kfg);
+                cx.text_centered(face, &label, size, Style::Regular, fg);
                 if !k.alternates.is_empty() {
                     // A small dot marks keys with alternates.
-                    crate::draw::Path::new().circle(face.right() as f32 - 14.0, face.y as f32 + 14.0, 3.5).fill(cx.canvas, if down { kfg } else { cx.theme.muted });
+                    crate::draw::Path::new().circle(face.right() as f32 - 14.0, face.y as f32 + 14.0, 3.5).fill(cx.canvas, cx.theme.muted);
                 }
             }
         }
@@ -1046,10 +1052,13 @@ mod tests {
         let kb = tree.get_mut::<Keyboard>(id).unwrap();
         let (face, _) = kb.layout.key_rects(kb.keys_area(AREA)).into_iter().find(|(_, k)| k.label == "k").unwrap();
         assert_eq!(dmg.iter().map(|d| (d.rect, d.class)).collect::<Vec<_>>(), vec![(face, RefreshClass::Gl16)]);
-        // The key is inverted: mostly dark pixels inside its face.
-        let inner = crate::draw::inset(face, 8);
+        // The key gets a thick border; its inside stays white apart from the caption.
+        let mid = face.y + face.h as i32 / 2;
+        let border = (face.x..face.x + PRESS_BORDER as i32).all(|x| canvas.get(x, mid).unwrap() < 64);
+        assert!(border, "a {PRESS_BORDER} px border at the left edge");
+        let inner = crate::draw::inset(face, PRESS_BORDER as i32 + 2);
         let dark = (inner.y..inner.bottom()).flat_map(|y| (inner.x..inner.right()).map(move |x| (x, y))).filter(|(x, y)| canvas.get(*x, *y).unwrap() < 64).count();
-        assert!(dark as u32 > inner.w * inner.h / 2, "{dark}");
+        assert!((dark as u32) < inner.w * inner.h / 4, "not inverted: {dark}");
         // Release: the key face is refreshed again and typing reports an action.
         assert_eq!(tree.dispatch(&t(0, TouchKind::Up, k)).map(|r| r.1), Some(EventResult::Action("keyboard".into())));
         let dmg = tree.paint(&mut PaintCx::new(&mut canvas, &mut fonts, &theme));
