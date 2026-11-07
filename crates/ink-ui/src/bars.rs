@@ -145,7 +145,7 @@ fn icon_face(cx: &mut PaintCx, r: Rect, icon: Icon, pressed: bool) {
 
 impl Widget for AppBar {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let mut x = b.x + space(4);
         if self.back {
             let r = AppBar::back_rect(b);
@@ -284,7 +284,7 @@ impl NavBar {
 
 impl Widget for NavBar {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         cx.canvas.fill_rect(b.x, b.y, b.w as i32, t.rule_px, t.fg);
         let cap_h = (t.caption.px * 1.35) as i32;
         for (i, (r, item)) in self.cells(b).into_iter().zip(&self.items).enumerate() {

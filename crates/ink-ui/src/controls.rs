@@ -332,7 +332,7 @@ fn unit(v: f32) -> f32 {
 
 impl Widget for ProgressBar {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let small = t.caption.px;
         let text_w = match &self.label {
             Some(l) => cx.text_width(Style::Bold, small, l).ceil() as u32,
@@ -375,14 +375,14 @@ impl Widget for ProgressBar {
 impl ProgressBar {
     /// The gray track with a black read part (round ends).
     fn paint_gray(&self, cx: &mut PaintCx, area: Rect, bar: Rect, h: u32, done: u32) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let rad = h as f32 / 2.0;
+        fill_round_rect(cx.canvas, bar, rad, t.track());
+        if done > 0 {
+            fill_round_rect(cx.canvas, Rect::new(bar.x, bar.y, done.max(h).min(bar.w), h), rad, t.fg);
+        }
         match self.kind {
             ProgressKind::Thick => {
-                fill_round_rect(cx.canvas, bar, rad, t.track());
-                if done > 0 {
-                    fill_round_rect(cx.canvas, Rect::new(bar.x, bar.y, done.max(h).min(bar.w), h), rad, t.fg);
-                }
                 // Chapter starts: notches through the bar, white in the done part and
                 // black in the rest (white on the light track would not show).
                 let done_x = bar.x + done as i32;
@@ -395,10 +395,6 @@ impl ProgressBar {
                 stroke_round_rect(cx.canvas, bar, rad, t.border_px as f32, t.fg);
             }
             ProgressKind::Thin => {
-                fill_round_rect(cx.canvas, bar, rad, t.track());
-                if done > 0 {
-                    fill_round_rect(cx.canvas, Rect::new(bar.x, bar.y, done.max(h).min(bar.w), h), rad, t.fg);
-                }
                 // Chapter starts: black ticks reaching above and below the track.
                 let reach = (area.h as i32 - h as i32) / 2;
                 let tick = reach.clamp(0, 8);
@@ -407,14 +403,14 @@ impl ProgressBar {
                     cx.canvas.fill_rect(x - 2, bar.y - tick, 4, h as i32 + 2 * tick, t.fg);
                 }
             }
-                }
+        }
     }
 
     /// Black and white only ([`ProgressBar::two_level`]): read part the full track height,
     /// unread part a 2 px line on the track's centre (thick bars: a 2 px outline), square
     /// ends; chapter ticks black, white where they cross the read part.
     fn paint_two_level(&self, cx: &mut PaintCx, area: Rect, bar: Rect, h: u32, done: u32) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let line = 2.min(h as i32);
         match self.kind {
             ProgressKind::Thick => {
@@ -475,7 +471,7 @@ impl Widget for RingProgress {
     }
 
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let side = b.w.min(b.h) as f32;
         if side < 4.0 {
             return;
@@ -534,7 +530,7 @@ impl Segmented {
 
 impl Widget for Segmented {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let rad = b.h as f32 / 2.0;
         let cells = self.cells(b);
         let n = cells.len();
@@ -568,13 +564,19 @@ impl Widget for Segmented {
                 _ => EventResult::Ignored,
             };
         };
-        match self.cells(b).iter().position(|r| r.contains(*pos)) {
-            Some(i) if i != self.selected => {
-                self.selected = i;
-                EventResult::Action(format!("{}:{i}", self.action))
-            }
-            _ => EventResult::Handled,
+        select_tapped(&self.cells(b), *pos, &mut self.selected, &self.action)
+    }
+}
+
+/// Selects the cell of `cells` under a tap at `pos`: reports `"<action>:<index>"` when
+/// that is another cell than `selected`, else just takes the tap.
+fn select_tapped(cells: &[Rect], pos: Point, selected: &mut usize, action: &str) -> EventResult {
+    match cells.iter().position(|r| r.contains(pos)) {
+        Some(i) if i != *selected => {
+            *selected = i;
+            EventResult::Action(format!("{action}:{i}"))
         }
+        _ => EventResult::Handled,
     }
 }
 
@@ -638,7 +640,7 @@ impl Chips {
 
 impl Widget for Chips {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let h = Chips::CHIP_H.min(b.h);
         let px = t.label.px * 0.95;
         let check = (px * 0.9) as u32;
@@ -736,13 +738,7 @@ impl Widget for Tabs {
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         let UiEvent::Gesture(Gesture::Tap { pos }) = ev else { return EventResult::Ignored };
-        match self.cells(b).iter().position(|r| r.contains(*pos)) {
-            Some(i) if i != self.selected => {
-                self.selected = i;
-                EventResult::Action(format!("{}:{i}", self.action))
-            }
-            _ => EventResult::Handled,
-        }
+        select_tapped(&self.cells(b), *pos, &mut self.selected, &self.action)
     }
 }
 
@@ -860,28 +856,25 @@ impl Widget for TextBlock {
                 break;
             }
             let shown = if *hyphen { format!("{}-", text.trim_end_matches('\u{ad}')) } else { text.replace('\u{ad}', "") };
-            let w = cx.text_width(self.style, self.px, &shown);
-            match self.align {
-                Align::Left => {
-                    cx.draw_text_clipped(self.style, self.px, b.x as f32, baseline, &shown, fg, clip);
+            let words: Vec<&str> = match self.align {
+                Align::Justify if !*last_of_para => shown.split(' ').filter(|w| !w.is_empty()).collect(),
+                _ => Vec::new(),
+            };
+            if words.len() >= 2 {
+                let ws: Vec<f32> = words.iter().map(|w| cx.text_width(self.style, self.px, w)).collect();
+                let gap = (b.w as f32 - ws.iter().sum::<f32>()) / (words.len() - 1) as f32;
+                let mut x = b.x as f32;
+                for (w, ww) in words.iter().zip(&ws) {
+                    cx.draw_text_clipped(self.style, self.px, x, baseline, w, fg, clip);
+                    x += ww + gap;
                 }
-                Align::Center => {
-                    cx.draw_text_clipped(self.style, self.px, b.x as f32 + (b.w as f32 - w) / 2.0, baseline, &shown, fg, clip);
-                }
-                Align::Justify => {
-                    let words: Vec<&str> = shown.split(' ').filter(|w| !w.is_empty()).collect();
-                    if *last_of_para || words.len() < 2 {
-                        cx.draw_text_clipped(self.style, self.px, b.x as f32, baseline, &shown, fg, clip);
-                    } else {
-                        let ws: Vec<f32> = words.iter().map(|w| cx.text_width(self.style, self.px, w)).collect();
-                        let gap = (b.w as f32 - ws.iter().sum::<f32>()) / (words.len() - 1) as f32;
-                        let mut x = b.x as f32;
-                        for (w, ww) in words.iter().zip(&ws) {
-                            cx.draw_text_clipped(self.style, self.px, x, baseline, w, fg, clip);
-                            x += ww + gap;
-                        }
-                    }
-                }
+            } else {
+                // Left, centred, or the last line of a justified paragraph (left).
+                let x = match self.align {
+                    Align::Center => b.x as f32 + (b.w as f32 - cx.text_width(self.style, self.px, &shown)) / 2.0,
+                    _ => b.x as f32,
+                };
+                cx.draw_text_clipped(self.style, self.px, x, baseline, &shown, fg, clip);
             }
             baseline += self.px * self.line_height;
         }
