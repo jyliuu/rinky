@@ -18,7 +18,7 @@
 
 use crate::book::{Book, BookInfo, Cover, Identifier, Target, TocNode};
 use crate::util::{base64_decode, read_limited, sniff_media_type, MAX_ENTRY};
-use crate::xml::{self, escape_attr, escape_text, Element, Node};
+use crate::xml::{self, escape_text, Element, Node};
 use crate::Format;
 use ink_doc::{DocError, MemoryLoader, Result};
 use ink_html::HtmlChapter;
@@ -209,15 +209,59 @@ struct Conv<'a> {
     inline: bool,
 }
 
-fn heading(depth: u8) -> String {
-    format!("h{}", depth.clamp(1, 6))
-}
+/// FB2 elements written as one XHTML element: (FB2 name, tag, class, inline content).
+/// Block content keeps child elements only (white space between blocks is dropped).
+const ELEMENTS: &[(&str, &str, Option<&str>, bool)] = &[
+    ("p", "p", None, true),
+    ("v", "p", Some("v"), true),
+    ("subtitle", "p", Some("subtitle"), true),
+    ("text-author", "p", Some("text-author"), true),
+    ("date", "p", Some("date"), true),
+    ("epigraph", "blockquote", Some("epigraph"), false),
+    ("cite", "blockquote", Some("cite"), false),
+    ("poem", "div", Some("poem"), false),
+    ("stanza", "div", Some("stanza"), false),
+    ("annotation", "div", Some("annotation"), false),
+    ("table", "table", None, false),
+    ("tr", "tr", None, false),
+    ("strong", "strong", None, true),
+    ("emphasis", "em", None, true),
+    ("strikethrough", "s", None, true),
+    ("sub", "sub", None, true),
+    ("sup", "sup", None, true),
+    ("code", "code", None, true),
+];
+
+/// Table cell attributes kept (FB2 and FB3).
+pub(crate) const CELL_ATTRS: [&str; 4] = ["colspan", "rowspan", "align", "valign"];
 
 impl Conv<'_> {
+    /// Writes `<tag`, the class, the attributes `copy` of `el` and its id; the caller
+    /// adds more attributes or the closing `>`.
+    fn open(&mut self, tag: &str, class: Option<&str>, copy: &[&str], el: &Element) {
+        self.out.push('<');
+        self.out.push_str(tag);
+        if let Some(c) = class {
+            xml::push_attr(&mut self.out, "class", c);
+        }
+        for a in copy {
+            if let Some(v) = el.attr(a) {
+                xml::push_attr(&mut self.out, a, v);
+            }
+        }
+        self.id_attr(el);
+    }
+
     fn id_attr(&mut self, el: &Element) {
         if let Some(id) = el.attr("id") {
-            self.out.push_str(&format!(" id=\"{}\"", escape_attr(id)));
+            xml::push_attr(&mut self.out, "id", id);
         }
+    }
+
+    fn close(&mut self, tag: &str) {
+        self.out.push_str("</");
+        self.out.push_str(tag);
+        self.out.push('>');
     }
 
     fn children(&mut self, el: &Element, depth: u8) {
@@ -229,50 +273,42 @@ impl Conv<'_> {
         }
     }
 
-    /// Block children only (whitespace between blocks dropped).
-    fn blocks(&mut self, el: &Element, depth: u8) {
-        for e in el.elements() {
-            self.element(e, depth);
-        }
+    /// Text and inline elements, with images inline.
+    fn inline_children(&mut self, el: &Element, depth: u8) {
+        let was = std::mem::replace(&mut self.inline, true);
+        self.children(el, depth);
+        self.inline = was;
     }
 
-    fn wrap(&mut self, tag: &str, class: Option<&str>, el: &Element, depth: u8, inline: bool) {
-        self.out.push('<');
-        self.out.push_str(tag);
-        if let Some(c) = class {
-            self.out.push_str(&format!(" class=\"{c}\""));
-        }
-        self.id_attr(el);
+    fn wrap(&mut self, tag: &str, class: Option<&str>, copy: &[&str], el: &Element, depth: u8, inline: bool) {
+        self.open(tag, class, copy, el);
         self.out.push('>');
         if inline {
-            let was = std::mem::replace(&mut self.inline, true);
-            self.children(el, depth);
-            self.inline = was;
+            self.inline_children(el, depth);
         } else {
-            self.blocks(el, depth);
+            for e in el.elements() {
+                self.element(e, depth);
+            }
         }
-        self.out.push_str(&format!("</{tag}>"));
+        self.close(tag);
     }
 
     fn title(&mut self, el: &Element, depth: u8, section_title: bool) {
-        let lines: Vec<&Element> = el.elements().filter(|e| e.name == "p").collect();
-        if section_title {
-            let tag = heading(depth);
-            self.out.push_str(&format!("<{tag} class=\"title\""));
-            self.id_attr(el);
-            self.out.push('>');
-            let was = std::mem::replace(&mut self.inline, true);
-            for (i, p) in lines.iter().enumerate() {
-                if i > 0 {
-                    self.out.push_str("<br/>");
-                }
-                self.children(p, depth);
-            }
-            self.inline = was;
-            self.out.push_str(&format!("</{tag}>"));
-        } else {
-            self.wrap("div", Some("title"), el, depth, false);
+        if !section_title {
+            return self.wrap("div", Some("title"), &[], el, depth, false);
         }
+        let tag = format!("h{}", depth.clamp(1, 6));
+        self.open(&tag, Some("title"), &[], el);
+        self.out.push('>');
+        let was = std::mem::replace(&mut self.inline, true);
+        for (i, p) in el.children_named("p").enumerate() {
+            if i > 0 {
+                self.out.push_str("<br/>");
+            }
+            self.children(p, depth);
+        }
+        self.inline = was;
+        self.close(&tag);
     }
 
     fn image(&mut self, el: &Element, block: bool) {
@@ -284,100 +320,62 @@ impl Conv<'_> {
         if !self.images.contains_key(&path) {
             return;
         }
-        let alt = el.attr("alt").or_else(|| el.attr("title")).unwrap_or("");
-        let img = format!("<img src=\"{}\" alt=\"{}\"/>", escape_attr(&path), escape_attr(alt));
         if block {
-            self.out.push_str("<div class=\"image\"");
-            self.id_attr(el);
+            self.open("div", Some("image"), &[], el);
             self.out.push('>');
-            self.out.push_str(&img);
-            self.out.push_str("</div>");
-        } else {
-            self.out.push_str(&img);
+        }
+        self.out.push_str("<img");
+        xml::push_attr(&mut self.out, "src", &path);
+        xml::push_attr(&mut self.out, "alt", el.attr("alt").or_else(|| el.attr("title")).unwrap_or(""));
+        self.out.push_str("/>");
+        if block {
+            self.close("div");
         }
     }
 
     fn link(&mut self, el: &Element, depth: u8) {
-        let href = el.attr("href").unwrap_or("");
-        let target = self.chapters.href(href);
-        let note = el.attr("type") == Some("note");
-        self.out.push_str(&format!("<a href=\"{}\"", escape_attr(&target)));
-        if note {
+        self.out.push_str("<a");
+        xml::push_attr(&mut self.out, "href", &self.chapters.href(el.attr("href").unwrap_or("")));
+        if el.attr("type") == Some("note") {
             self.out.push_str(" class=\"note\" epub:type=\"noteref\"");
         }
         self.id_attr(el);
         self.out.push('>');
-        let was = std::mem::replace(&mut self.inline, true);
-        self.children(el, depth);
-        self.inline = was;
-        self.out.push_str("</a>");
+        self.inline_children(el, depth);
+        self.close("a");
     }
 
     fn element(&mut self, el: &Element, depth: u8) {
         match el.name.as_str() {
             "section" => {
-                let footnote = self.in_notes && el.attr("id").is_some();
-                self.out.push_str("<div class=\"section\"");
-                self.id_attr(el);
-                if footnote {
+                self.open("div", Some("section"), &[], el);
+                if self.in_notes && el.attr("id").is_some() {
                     self.out.push_str(" epub:type=\"footnote\"");
                 }
                 self.out.push('>');
                 for c in el.elements() {
-                    if c.name == "title" {
-                        self.title(c, depth, true);
-                    } else if c.name == "section" {
-                        self.element(c, depth.saturating_add(1));
-                    } else {
-                        self.element(c, depth);
+                    match c.name.as_str() {
+                        "title" => self.title(c, depth, true),
+                        "section" => self.element(c, depth.saturating_add(1)),
+                        _ => self.element(c, depth),
                     }
                 }
-                self.out.push_str("</div>");
+                self.close("div");
             }
             "title" => self.title(el, depth, false),
-            "p" => self.wrap("p", None, el, depth, true),
-            "v" => self.wrap("p", Some("v"), el, depth, true),
-            "subtitle" => self.wrap("p", Some("subtitle"), el, depth, true),
-            "text-author" => self.wrap("p", Some("text-author"), el, depth, true),
             "empty-line" => self.out.push_str("<p class=\"empty-line\">\u{a0}</p>"),
-            "epigraph" => self.wrap("blockquote", Some("epigraph"), el, depth, false),
-            "cite" => self.wrap("blockquote", Some("cite"), el, depth, false),
-            "poem" => self.wrap("div", Some("poem"), el, depth, false),
-            "stanza" => self.wrap("div", Some("stanza"), el, depth, false),
-            "annotation" => self.wrap("div", Some("annotation"), el, depth, false),
-            "date" => self.wrap("p", Some("date"), el, depth, true),
             "image" => self.image(el, !self.inline),
-            "table" => self.wrap("table", None, el, depth, false),
-            "tr" => self.wrap("tr", None, el, depth, false),
-            "th" | "td" => {
-                let tag = el.name.clone();
-                self.out.push('<');
-                self.out.push_str(&tag);
-                for a in ["colspan", "rowspan", "align", "valign"] {
-                    if let Some(v) = el.attr(a) {
-                        self.out.push_str(&format!(" {a}=\"{}\"", escape_attr(v)));
-                    }
-                }
-                self.id_attr(el);
-                self.out.push('>');
-                let was = std::mem::replace(&mut self.inline, true);
-                self.children(el, depth);
-                self.inline = was;
-                self.out.push_str(&format!("</{tag}>"));
-            }
-            "strong" => self.wrap("strong", None, el, depth, true),
-            "emphasis" => self.wrap("em", None, el, depth, true),
-            "strikethrough" => self.wrap("s", None, el, depth, true),
-            "sub" => self.wrap("sub", None, el, depth, true),
-            "sup" => self.wrap("sup", None, el, depth, true),
-            "code" => self.wrap("code", None, el, depth, true),
+            "th" | "td" => self.wrap(&el.name, None, &CELL_ATTRS, el, depth, true),
             "style" => {
                 let class = el.attr("name").map(|n| n.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_"));
-                self.wrap("span", class.as_deref(), el, depth, true)
+                self.wrap("span", class.as_deref(), &[], el, depth, true)
             }
             "a" => self.link(el, depth),
-            // Unknown elements: keep their content.
-            _ => self.children(el, depth),
+            name => match ELEMENTS.iter().find(|e| e.0 == name) {
+                Some(&(_, tag, class, inline)) => self.wrap(tag, class, &[], el, depth, inline),
+                // Unknown elements: keep their content.
+                None => self.children(el, depth),
+            },
         }
     }
 }
