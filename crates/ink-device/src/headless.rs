@@ -5,7 +5,7 @@
 //! lines save `NAME.png`.
 
 use crate::canvas::Canvas;
-use crate::eink::EinkPanel;
+use crate::eink::{panel_screen_state, EinkPanel};
 use crate::geom::{Rect, Rotation, Size};
 use crate::input::{Input, InputEvent};
 use crate::screen::{copy_to_panel, RefreshClass, Screen, Wave};
@@ -56,10 +56,7 @@ pub struct UpdateRecord {
 }
 
 struct Shared {
-    fb: Canvas,
     panel: EinkPanel,
-    rotation: Rotation,
-    night: bool,
     out_dir: Option<PathBuf>,
     save_frames: bool,
     log: Vec<UpdateRecord>,
@@ -127,40 +124,15 @@ impl HeadlessProbe {
 struct HeadlessScreen(Rc<RefCell<Shared>>);
 
 impl Screen for HeadlessScreen {
-    fn panel_size(&self) -> Size {
-        self.0.borrow().fb.size()
-    }
-
-    fn rotation(&self) -> Rotation {
-        self.0.borrow().rotation
-    }
-
-    fn set_rotation(&mut self, rotation: Rotation) -> Result<()> {
-        self.0.borrow_mut().rotation = rotation;
-        Ok(())
-    }
-
-    fn night_mode(&self) -> bool {
-        self.0.borrow().night
-    }
-
-    fn set_night_mode(&mut self, on: bool) -> Result<()> {
-        self.0.borrow_mut().night = on;
-        Ok(())
-    }
+    panel_screen_state!();
 
     fn update(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass) -> Result<()> {
         let mut s = self.0.borrow_mut();
-        let s = &mut *s;
-        let panel = s.fb.size();
-        let stride = s.fb.width;
-        let changed = copy_to_panel(canvas, rect, s.rotation, s.night, panel, &mut s.fb.pixels, stride);
-        s.panel.apply(&s.fb, changed, class);
+        let changed = s.panel.update(canvas, rect, class);
         s.log.push(UpdateRecord { rect: changed, class, wave: None });
         log::info!("headless update {}: {changed:?} {class:?}", s.panel.updates);
         if s.save_frames {
-            let name = format!("frame-{:04}", s.panel.updates);
-            s.save(&name)?;
+            s.save(&format!("frame-{:04}", s.panel.updates))?;
         }
         Ok(())
     }
@@ -175,15 +147,10 @@ impl Screen for HeadlessScreen {
 
     fn refresh_all(&mut self) -> Result<()> {
         let mut s = self.0.borrow_mut();
-        let s = &mut *s;
-        let r = s.fb.bounds();
-        s.panel.apply(&s.fb, r, RefreshClass::Gc16);
+        let r = s.panel.fb.bounds();
+        s.panel.refresh(r, RefreshClass::Gc16);
         s.log.push(UpdateRecord { rect: r, class: RefreshClass::Gc16, wave: None });
         Ok(())
-    }
-
-    fn screenshot(&self) -> Result<Canvas> {
-        Ok(self.0.borrow().panel.pixels.clone())
     }
 
     /// Compares the framebuffer with what the canvas would put there (rotation and
@@ -193,18 +160,18 @@ impl Screen for HeadlessScreen {
         let mut s = self.0.borrow_mut();
         let s = &mut *s;
         s.frames += 1;
-        let panel = s.fb.size();
-        if canvas.size() != s.rotation.logical_size(panel) {
+        let (fb, size, rotation) = (&s.panel.fb, s.panel.size(), s.panel.rotation);
+        if canvas.size() != rotation.logical_size(size) {
             return;
         }
-        let stride = s.fb.width;
-        s.want.resize(s.fb.pixels.len(), 0);
-        copy_to_panel(canvas, canvas.bounds(), s.rotation, s.night, panel, &mut s.want, stride);
-        if s.want == s.fb.pixels {
+        let stride = fb.width;
+        s.want.resize(fb.pixels.len(), 0);
+        copy_to_panel(canvas, canvas.bounds(), rotation, s.panel.night, size, &mut s.want, stride);
+        if s.want == fb.pixels {
             return;
         }
         let (mut n, mut x0, mut y0, mut x1, mut y1) = (0usize, usize::MAX, usize::MAX, 0, 0);
-        for (i, (a, b)) in s.want.iter().zip(&s.fb.pixels).enumerate() {
+        for (i, (a, b)) in s.want.iter().zip(&fb.pixels).enumerate() {
             if a != b {
                 let (x, y) = (i % stride, i / stride);
                 n += 1;
@@ -255,10 +222,7 @@ impl Input for HeadlessInput {
 /// Opens a headless device and a probe to inspect it.
 pub fn open(opts: HeadlessOptions) -> (Device, HeadlessProbe) {
     let shared = Rc::new(RefCell::new(Shared {
-        fb: Canvas::new(opts.panel.w as usize, opts.panel.h as usize),
         panel: EinkPanel::new(opts.panel, opts.ghosting),
-        rotation: Rotation::Portrait,
-        night: false,
         out_dir: opts.out_dir,
         save_frames: opts.save_frames,
         log: Vec::new(),

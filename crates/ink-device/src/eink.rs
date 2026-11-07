@@ -6,8 +6,8 @@
 //! flashes and wrong refresh classes are visible on the host.
 
 use crate::canvas::Canvas;
-use crate::geom::{Rect, Size};
-use crate::screen::RefreshClass;
+use crate::geom::{Rect, Rotation, Size};
+use crate::screen::{copy_to_panel, RefreshClass};
 
 /// Quantizes a gray value to 16 levels (0, 17, ..., 255).
 pub fn quantize16(v: u8) -> u8 {
@@ -23,11 +23,17 @@ pub fn quantize2(v: u8) -> u8 {
     }
 }
 
-/// Simulated panel state.
+/// Simulated panel: the framebuffer the app writes and what the panel shows.
 #[derive(Clone, Debug)]
 pub struct EinkPanel {
     /// What the panel shows, in panel orientation.
     pub pixels: Canvas,
+    /// The framebuffer: what the app wrote, rotated and inverted, refreshed or not.
+    pub fb: Canvas,
+    /// Screen rotation.
+    pub rotation: Rotation,
+    /// Night mode (the framebuffer holds inverted pixels).
+    pub night: bool,
     /// Leave a trace of the old image on non-flashing updates.
     pub ghosting: bool,
     /// Number of updates applied.
@@ -37,11 +43,32 @@ pub struct EinkPanel {
 impl EinkPanel {
     /// A white panel.
     pub fn new(size: Size, ghosting: bool) -> Self {
-        EinkPanel { pixels: Canvas::new(size.w as usize, size.h as usize), ghosting, updates: 0 }
+        let white = Canvas::new(size.w as usize, size.h as usize);
+        EinkPanel { pixels: white.clone(), fb: white, rotation: Rotation::Portrait, night: false, ghosting, updates: 0 }
     }
 
-    /// Applies `src` (panel orientation, same size as the panel) inside `rect`.
-    pub fn apply(&mut self, src: &Canvas, rect: Rect, class: RefreshClass) {
+    /// Native panel size.
+    pub fn size(&self) -> Size {
+        self.fb.size()
+    }
+
+    /// [`crate::Screen::update`]: writes `rect` (logical) of `canvas` into the
+    /// framebuffer and refreshes what changed; returns that panel rectangle.
+    pub fn update(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass) -> Rect {
+        let changed = self.write(canvas, rect);
+        self.refresh(changed, class);
+        changed
+    }
+
+    /// Writes `rect` (logical) of `canvas` into the framebuffer only; returns the panel
+    /// rectangle written.
+    pub fn write(&mut self, canvas: &Canvas, rect: Rect) -> Rect {
+        let stride = self.fb.width;
+        copy_to_panel(canvas, rect, self.rotation, self.night, self.size(), &mut self.fb.pixels, stride)
+    }
+
+    /// Shows the framebuffer inside panel rectangle `rect` with waveform `class`.
+    pub fn refresh(&mut self, rect: Rect, class: RefreshClass) {
         let rect = rect.intersect(&self.pixels.bounds());
         // Fraction (out of 16) of the old image left behind.
         let ghost: u32 = match (self.ghosting, class) {
@@ -54,7 +81,7 @@ impl EinkPanel {
         let (w, n) = (self.pixels.width, rect.w as usize);
         for y in rect.y as usize..rect.bottom() as usize {
             let i = y * w + rect.x as usize;
-            for (old, &new) in self.pixels.pixels[i..i + n].iter_mut().zip(&src.pixels[i..i + n]) {
+            for (old, &new) in self.pixels.pixels[i..i + n].iter_mut().zip(&self.fb.pixels[i..i + n]) {
                 let q = levels[new as usize];
                 *old = if ghost > 0 && *old != q { ((q as u32 * (16 - ghost) + *old as u32 * ghost) / 16) as u8 } else { q };
             }
@@ -62,6 +89,40 @@ impl EinkPanel {
         self.updates += 1;
     }
 }
+
+/// The [`crate::Screen`] methods of a screen that is an [`EinkPanel`] at
+/// `self.0.borrow().panel` (the headless and simulator screens): size, rotation, night
+/// mode and screenshot.
+macro_rules! panel_screen_state {
+    () => {
+        fn panel_size(&self) -> Size {
+            self.0.borrow().panel.size()
+        }
+
+        fn rotation(&self) -> Rotation {
+            self.0.borrow().panel.rotation
+        }
+
+        fn set_rotation(&mut self, rotation: Rotation) -> Result<()> {
+            self.0.borrow_mut().panel.rotation = rotation;
+            Ok(())
+        }
+
+        fn night_mode(&self) -> bool {
+            self.0.borrow().panel.night
+        }
+
+        fn set_night_mode(&mut self, on: bool) -> Result<()> {
+            self.0.borrow_mut().panel.night = on;
+            Ok(())
+        }
+
+        fn screenshot(&self) -> Result<Canvas> {
+            Ok(self.0.borrow().panel.pixels.clone())
+        }
+    };
+}
+pub(crate) use panel_screen_state;
 
 #[cfg(test)]
 mod tests {
@@ -83,14 +144,15 @@ mod tests {
         let mut black = Canvas::new(2, 1);
         black.clear(0);
         let white = Canvas::new(2, 1);
+        let all = Rect::from_size(size);
         let mut p = EinkPanel::new(size, true);
-        p.apply(&black, Rect::from_size(size), RefreshClass::Gc16);
-        p.apply(&white, Rect::from_size(size), RefreshClass::Reagl);
+        p.update(&black, all, RefreshClass::Gc16);
+        p.update(&white, all, RefreshClass::Reagl);
         assert!(p.pixels.pixels[0] < 255, "REAGL leaves a ghost");
-        p.apply(&white, Rect::from_size(size), RefreshClass::Gc16);
+        p.update(&white, all, RefreshClass::Gc16);
         assert_eq!(p.pixels.pixels[0], 255, "GC16 clears it");
         let mut clean = EinkPanel::new(size, false);
-        clean.apply(&black, Rect::from_size(size), RefreshClass::Reagl);
+        clean.update(&black, all, RefreshClass::Reagl);
         assert_eq!(clean.pixels.pixels, vec![0, 0]);
     }
 }
