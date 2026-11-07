@@ -274,6 +274,13 @@ struct Node {
     expires: Option<Instant>,
 }
 
+impl Node {
+    /// Marks the node for a repaint with at least `class`.
+    fn mark(&mut self, class: RefreshClass) {
+        self.dirty = Some(self.dirty.map_or(class, |c| c.max(class)));
+    }
+}
+
 /// The tree. Ids are stable until the widget is removed.
 #[derive(Default)]
 pub struct WidgetTree {
@@ -304,17 +311,25 @@ impl WidgetTree {
             full: true,
             expires: None,
         }));
-        match parent.and_then(|p| self.nodes.get_mut(p.0).and_then(Option::as_mut)) {
+        match parent.and_then(|p| self.node_mut(p)) {
             Some(p) => p.children.push(id),
             None => self.roots.push(id),
         }
         id
     }
 
+    fn node(&self, id: WidgetId) -> Option<&Node> {
+        self.nodes.get(id.0)?.as_ref()
+    }
+
+    fn node_mut(&mut self, id: WidgetId) -> Option<&mut Node> {
+        self.nodes.get_mut(id.0)?.as_mut()
+    }
+
     /// Adds a top-level layer that [`WidgetTree::expire`] removes after `ttl` (toasts).
     pub fn add_timed(&mut self, widget: Box<dyn Widget>, bounds: Rect, ttl: Duration) -> WidgetId {
         let id = self.add(None, widget, bounds);
-        if let Some(n) = self.nodes[id.0].as_mut() {
+        if let Some(n) = self.node_mut(id) {
             n.expires = Some(Instant::now() + ttl);
         }
         id
@@ -357,7 +372,7 @@ impl WidgetTree {
         for c in &node.children {
             self.remove(*c);
         }
-        match node.parent.and_then(|p| self.nodes.get_mut(p.0).and_then(Option::as_mut)) {
+        match node.parent.and_then(|p| self.node_mut(p)) {
             Some(p) => p.children.retain(|c| *c != id),
             None => self.roots.retain(|c| *c != id),
         }
@@ -371,7 +386,7 @@ impl WidgetTree {
         let mut out = Vec::new();
         let mut stack: Vec<WidgetId> = self.roots.clone();
         while let Some(id) = stack.pop() {
-            let Some(n) = self.nodes.get(id.0).and_then(Option::as_ref) else { continue };
+            let Some(n) = self.node(id) else { continue };
             if n.widget.adds_damage() {
                 if !n.bounds.is_empty() {
                     out.push(n.bounds);
@@ -385,25 +400,24 @@ impl WidgetTree {
 
     /// Bounds of a widget.
     pub fn bounds(&self, id: WidgetId) -> Option<Rect> {
-        self.nodes.get(id.0)?.as_ref().map(|n| n.bounds)
+        self.node(id).map(|n| n.bounds)
     }
 
     /// Moves or resizes a widget (marks it dirty; the old area is cleared).
     pub fn set_bounds(&mut self, id: WidgetId, r: Rect) {
-        if let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) {
-            if n.bounds != r && n.widget.adds_damage() {
-                self.exposed.push((n.bounds, n.widget.refresh_class()));
-            }
-            n.bounds = r;
-            n.dirty = Some(n.dirty.unwrap_or(RefreshClass::Du).max(n.widget.refresh_class()));
-            n.full = true;
+        let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) else { return };
+        if n.bounds != r && n.widget.adds_damage() {
+            self.exposed.push((n.bounds, n.widget.refresh_class()));
         }
+        n.bounds = r;
+        n.mark(n.widget.refresh_class());
+        n.full = true;
     }
 
     /// Marks a widget for a full repaint with at least `class`.
     pub fn mark_dirty(&mut self, id: WidgetId, class: RefreshClass) {
-        if let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) {
-            n.dirty = Some(n.dirty.map_or(class, |c| c.max(class)));
+        if let Some(n) = self.node_mut(id) {
+            n.mark(class);
             n.full = true;
         }
     }
@@ -412,8 +426,8 @@ impl WidgetTree {
     /// [`Widget::damage`] names is shown (a list whose one row changed), as after an event
     /// it took. [`WidgetTree::mark_dirty`] shows all of its bounds.
     pub fn mark_changed(&mut self, id: WidgetId, class: RefreshClass) {
-        if let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) {
-            n.dirty = Some(n.dirty.map_or(class, |c| c.max(class)));
+        if let Some(n) = self.node_mut(id) {
+            n.mark(class);
         }
     }
 
@@ -435,7 +449,7 @@ impl WidgetTree {
     /// The concrete widget behind `id`.
     pub fn get_mut<T: Widget + 'static>(&mut self, id: WidgetId) -> Option<&mut T> {
         // Deref the box first: Box<dyn Widget> is itself Any.
-        self.nodes.get_mut(id.0)?.as_mut()?.widget.as_mut().as_any_mut().downcast_mut::<T>()
+        self.node_mut(id)?.widget.as_mut().as_any_mut().downcast_mut::<T>()
     }
 
     /// Paints dirty widgets (parents before children, layers in order) and returns the
@@ -447,21 +461,20 @@ impl WidgetTree {
             cx.canvas.fill_rect(r.x, r.y, r.w as i32, r.h as i32, cx.theme.bg);
             for n in self.nodes.iter_mut().flatten() {
                 if !n.bounds.intersect(&r).is_empty() {
-                    n.dirty = Some(n.dirty.map_or(class, |c| c.max(class)));
+                    n.mark(class);
                     n.full = true;
                 }
             }
             damage.push(Damage { rect: r, class });
         }
-        let roots = self.roots.clone();
-        for r in roots {
-            self.paint_node(r, cx, None, &mut damage);
+        for i in 0..self.roots.len() {
+            self.paint_node(self.roots[i], cx, None, &mut damage);
         }
         crate::refresh::merge(damage)
     }
 
     fn paint_node(&mut self, id: WidgetId, cx: &mut PaintCx, inherited: Option<RefreshClass>, damage: &mut Vec<Damage>) {
-        let Some(node) = self.nodes.get_mut(id.0).and_then(Option::as_mut) else { return };
+        let Some(node) = self.node_mut(id) else { return };
         // The widget took an event that changed nothing on it (empty own damage): its
         // children are painted again (it drew over them) with the same pixels, so only
         // children with a change of their own report damage.
@@ -503,9 +516,10 @@ impl WidgetTree {
                 _ => damage.push(Damage { rect: b, class }),
             }
         }
-        let children = node.children.clone();
-        // Children repaint (fully) with their parent, which may have cleared them.
-        for c in children {
+        // Children repaint (fully) with their parent, which may have cleared them. A
+        // paint never adds or removes widgets, so the child list stays as it is.
+        for i in 0..node.children.len() {
+            let Some(c) = self.node(id).map(|n| n.children[i]) else { return };
             if quiet && !self.subtree_dirty(c) {
                 self.paint_node(c, cx, class, &mut Vec::new());
             } else {
@@ -516,7 +530,7 @@ impl WidgetTree {
 
     /// True when `id` or a widget below it is marked dirty.
     fn subtree_dirty(&self, id: WidgetId) -> bool {
-        let Some(n) = self.nodes.get(id.0).and_then(Option::as_ref) else { return false };
+        let Some(n) = self.node(id) else { return false };
         n.dirty.is_some() || n.full || n.children.iter().any(|c| self.subtree_dirty(*c))
     }
 
@@ -549,7 +563,7 @@ impl WidgetTree {
             self.collect(*r, &mut order);
         }
         for id in order.into_iter().rev() {
-            let Some(node) = self.nodes.get(id.0).and_then(Option::as_ref) else { continue };
+            let Some(node) = self.node(id) else { continue };
             if let Some(p) = pos {
                 if !node.bounds.contains(p) {
                     continue;
@@ -567,19 +581,18 @@ impl WidgetTree {
 
     /// Gives `ev` to one widget; `None` when it ignores it.
     fn deliver(&mut self, id: WidgetId, ev: &UiEvent) -> Option<(WidgetId, EventResult)> {
-        let node = self.nodes.get_mut(id.0).and_then(Option::as_mut)?;
+        let node = self.node_mut(id)?;
         match node.widget.event(ev, node.bounds) {
             EventResult::Ignored => None,
             r => {
-                let class = node.widget.refresh_class();
-                node.dirty = Some(node.dirty.map_or(class, |c| c.max(class)));
+                node.mark(node.widget.refresh_class());
                 Some((id, r))
             }
         }
     }
 
     fn collect(&self, id: WidgetId, out: &mut Vec<WidgetId>) {
-        if let Some(n) = self.nodes.get(id.0).and_then(Option::as_ref) {
+        if let Some(n) = self.node(id) {
             out.push(id);
             for c in &n.children {
                 self.collect(*c, out);
