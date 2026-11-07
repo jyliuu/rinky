@@ -169,18 +169,21 @@ fn make_module(info: &PageInfo) -> Box<dyn PageModule> {
     }
 }
 
-/// The main-list rows of the module pages in `section`.
 /// Value of the Reader gestures row: how many gestures have an action.
 fn gestures_summary(map: &ink_store::prefs::GestureMap) -> String {
     let set = ink_store::prefs::GESTURES.iter().filter(|(g, _)| map.action(g) != "none").count();
     format!("{set} of {} set", ink_store::prefs::GESTURES.len())
 }
 
+/// The main-list rows of the module pages in `section`, without values.
+fn module_nav_rows(section: &str) -> impl Iterator<Item = (&'static PageInfo, Row)> + '_ {
+    PAGE_MODULES.iter().filter(move |p| p.section == section).map(|p| (p, Row::nav(p.icon, p.title, format!("page:mod:{}", p.key))))
+}
+
+/// The main-list rows of the module pages in `section`, with their values.
 fn module_rows(section: &str, s: &Settings) -> Vec<Row> {
-    PAGE_MODULES
-        .iter()
-        .filter(|p| p.section == section)
-        .map(|p| {
+    module_nav_rows(section)
+        .map(|(p, row)| {
             // fonts and status_bars are Page variants (not PageModule): their own summaries.
             let value = match p.key {
                 "fonts" => fonts::summary(s),
@@ -188,7 +191,7 @@ fn module_rows(section: &str, s: &Settings) -> Vec<Row> {
                 "gestures" => gestures_summary(&s.gestures),
                 _ => make_module(p).summary(s),
             };
-            Row::nav(p.icon, p.title, format!("page:mod:{}", p.key)).value(value)
+            row.value(value)
         })
         .collect()
 }
@@ -328,16 +331,24 @@ pub fn refresh_name(n: u32) -> String {
     }
 }
 
+/// A plugin and whether the user wants it on (`plugins/disabled.txt`).
+pub type PluginChoice = (ink_plugin::PluginInfo, bool);
+
+/// How a plugin's running state differs from the user's choice `wanted` (`None`: it
+/// runs as chosen).
+fn plugin_change(p: &ink_plugin::PluginInfo, wanted: bool) -> Option<String> {
+    match (p.enabled, wanted) {
+        (true, true) | (false, false) => None,
+        (true, false) => Some("off at the next start".to_string()),
+        (false, true) if p.errors > 0 => Some(format!("stopped after {} errors", p.errors)),
+        (false, true) => Some("on at the next start".to_string()),
+    }
+}
+
 /// Second line of a plugin row: kind, state and description. `wanted` is the user's
 /// choice in `plugins/disabled.txt` (applied at the next start).
 pub fn plugin_detail(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
-    let state = match (p.enabled, wanted) {
-        (true, true) => "on".to_string(),
-        (false, false) => "off".to_string(),
-        (true, false) => "off at the next start".to_string(),
-        (false, true) if p.errors > 0 => format!("stopped after {} errors", p.errors),
-        (false, true) => "on at the next start".to_string(),
-    };
+    let state = plugin_change(p, wanted).unwrap_or_else(|| if wanted { "on" } else { "off" }.to_string());
     let mut s = format!("{} · {state}", p.kind);
     if !p.manifest.description.is_empty() {
         s.push_str(" · ");
@@ -351,12 +362,7 @@ pub fn plugin_detail(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
 /// and "Lua plugin" for a user plugin. The implementation kind of a built-in plugin
 /// ("rust") and a plain "on"/"off" are left out: the switch shows them.
 pub fn plugin_summary(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
-    let state = match (p.enabled, wanted) {
-        (true, true) | (false, false) => None,
-        (true, false) => Some("off at the next start".to_string()),
-        (false, true) if p.errors > 0 => Some(format!("stopped after {} errors", p.errors)),
-        (false, true) => Some("on at the next start".to_string()),
-    };
+    let state = plugin_change(p, wanted);
     let kind = (p.kind == "lua").then(|| "Lua plugin".to_string());
     let desc = Some(p.manifest.description.clone()).filter(|d| !d.is_empty());
     let parts: Vec<String> = [state, kind, desc].into_iter().flatten().collect();
@@ -557,11 +563,7 @@ pub struct MainValues {
 fn section_modules(v: &MainValues, section: &str) -> Vec<Row> {
     match v.modules.iter().find(|(s, _)| *s == section) {
         Some((_, rows)) => rows.clone(),
-        None => PAGE_MODULES
-            .iter()
-            .filter(|p| p.section == section)
-            .map(|p| Row::nav(p.icon, p.title, format!("page:mod:{}", p.key)))
-            .collect(),
+        None => module_nav_rows(section).map(|(_, row)| row).collect(),
     }
 }
 
@@ -637,7 +639,7 @@ pub fn light_rows(q: &QuickLight) -> Vec<Row> {
 
 /// The Plugins section of the main list: every plugin with its switch (`(info,
 /// wanted)`), followed by its settings pages (`(label, plugin)`, action `ppage:<index>`).
-pub fn plugin_section(pages: &[(String, String)], plugins: &[(ink_plugin::PluginInfo, bool)]) -> Vec<Row> {
+pub fn plugin_section(pages: &[(String, String)], plugins: &[PluginChoice]) -> Vec<Row> {
     let mut rows = Vec::new();
     for (p, wanted) in plugins {
         let name = &p.manifest.name;
@@ -709,7 +711,7 @@ pub fn wifi_rows(state: &WifiState, airplane: bool, networks: &[WifiNetwork]) ->
 
 /// The Plugins page: plugin settings pages (`(label, plugin)`), the plugins with their
 /// on/off switch (`(info, wanted)`), and the notifications row.
-pub fn plugin_rows(pages: &[(String, String)], plugins: &[(ink_plugin::PluginInfo, bool)], notifications: &str) -> Vec<Row> {
+pub fn plugin_rows(pages: &[(String, String)], plugins: &[PluginChoice], notifications: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     if !pages.is_empty() {
         rows.push(Row::header("Plugin settings"));
@@ -1148,18 +1150,7 @@ impl SettingsScreen {
             Ok(b) => format!("Battery {}%{}", b.percent, if b.charging { ", charging" } else { "" }),
             Err(_) => s.info.model.clone(),
         };
-        self.plugin_pages = hooks::settings_pages(cx);
-        let off = plugin_host::user_disabled(cx.paths);
-        let pages: Vec<(String, String)> = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
-        let plugins: Vec<(ink_plugin::PluginInfo, bool)> = cx
-            .plugins
-            .plugins()
-            .into_iter()
-            .map(|p| {
-                let wanted = !off.contains(&p.manifest.name);
-                (p, wanted)
-            })
-            .collect();
+        let (pages, plugins) = self.plugin_lists(cx);
         let st = current_settings(cx);
         let r = &st.reader;
         let v = MainValues {
@@ -1421,12 +1412,18 @@ impl SettingsScreen {
         self.tree.add(None, Box::new(Button::filled("Set time (NTP)", "ntp")), button);
     }
 
-    fn build_plugins(&mut self, cx: &mut AppCtx, content: Rect) {
+    /// Reads the plugin settings pages (kept for `ppage:<index>`) as `(label, plugin)`
+    /// and every plugin with the user's choice (`(info, wanted)`).
+    fn plugin_lists(&mut self, cx: &mut AppCtx) -> (Vec<(String, String)>, Vec<PluginChoice>) {
         self.plugin_pages = hooks::settings_pages(cx);
         let off = plugin_host::user_disabled(cx.paths);
-        let pages: Vec<(String, String)> = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
-        let plugins: Vec<(ink_plugin::PluginInfo, bool)> =
-            cx.plugins.plugins().into_iter().map(|p| { let wanted = !off.contains(&p.manifest.name); (p, wanted) }).collect();
+        let pages = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
+        let plugins = cx.plugins.plugins().into_iter().map(|p| { let wanted = !off.contains(&p.manifest.name); (p, wanted) }).collect();
+        (pages, plugins)
+    }
+
+    fn build_plugins(&mut self, cx: &mut AppCtx, content: Rect) {
+        let (pages, plugins) = self.plugin_lists(cx);
         let rows = plugin_rows(&pages, &plugins, &notifications_summary(cx));
         self.add_rows(rows, content);
     }
