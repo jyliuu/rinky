@@ -626,20 +626,8 @@ impl Fonts {
     /// Draws a shaped run blending toward gray `value` (0 = black ink, 255 = white text on
     /// a dark background).
     pub fn draw_run_value(&mut self, canvas: &mut Canvas, run: &TextRun, x: f32, baseline: f32, value: u8) -> f32 {
-        for g in &run.glyphs {
-            let m = self.glyph_mask(g.face, g.id, run.px, g.synth);
-            if m.coverage.is_empty() {
-                continue;
-            }
-            let gx = (x + g.x).round() as i32 + m.left;
-            let gy = (baseline - g.y).round() as i32 + m.top;
-            if value == 0 {
-                canvas.draw_mask(gx, gy, m.width, m.height, &m.coverage);
-            } else {
-                blend_mask(canvas, gx, gy, m, value);
-            }
-        }
-        x + run.width
+        let all = canvas.bounds();
+        self.draw_run_clipped(canvas, run, x, baseline, value, all)
     }
 
     /// Like [`Fonts::draw_run_value`], but only pixels inside `clip` change: glyph parts
@@ -652,51 +640,41 @@ impl Fonts {
     /// ([`Fonts::glyph_mask_extra`]); the pen advance stays the same.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_run_clipped_extra(&mut self, canvas: &mut Canvas, run: &TextRun, x: f32, baseline: f32, value: u8, clip: Rect, extra: u32) -> f32 {
-        let clip = clip.intersect(&canvas.bounds());
+        // Where pixels may change: `clip`, on the canvas, inside the canvas's own clip.
+        let mut clip = clip.intersect(&canvas.bounds());
+        if let Some(c) = canvas.clip() {
+            clip = clip.intersect(&c);
+        }
         if clip.is_empty() {
             return x + run.width;
         }
         for g in &run.glyphs {
             let m = self.glyph_mask_extra(g.face, g.id, run.px, g.synth, extra);
-            if m.coverage.is_empty() {
-                continue;
-            }
             let gx = (x + g.x).round() as i32 + m.left;
             let gy = (baseline - g.y).round() as i32 + m.top;
-            // Mask columns and rows that fall inside the clip.
-            let x0 = (clip.x - gx).max(0) as usize;
-            let y0 = (clip.y - gy).max(0) as usize;
-            let x1 = ((clip.right() - gx).max(0) as usize).min(m.width);
-            let y1 = ((clip.bottom() - gy).max(0) as usize).min(m.height);
-            for my in y0..y1 {
-                for mx in x0..x1 {
-                    let a = m.coverage[my * m.width + mx] as u32;
-                    if a == 0 {
-                        continue;
-                    }
-                    let (px, py) = (gx + mx as i32, gy + my as i32);
-                    if let Some(bg) = canvas.get(px, py) {
-                        // With value 0 this is exactly `Canvas::draw_mask`'s darkening.
-                        canvas.set(px, py, ((bg as u32 * (255 - a) + value as u32 * a) / 255) as u8);
-                    }
-                }
-            }
+            blend_mask(canvas, gx, gy, m, value, clip);
         }
         x + run.width
     }
 }
 
-/// Blends `value` into the canvas with the mask's coverage.
-fn blend_mask(canvas: &mut Canvas, x: i32, y: i32, m: &GlyphMask, value: u8) {
-    for my in 0..m.height {
-        for mx in 0..m.width {
-            let a = m.coverage[my * m.width + mx] as u32;
-            if a == 0 {
-                continue;
-            }
-            let (px, py) = (x + mx as i32, y + my as i32);
-            if let Some(bg) = canvas.get(px, py) {
-                canvas.set(px, py, ((bg as u32 * (255 - a) + value as u32 * a) / 255) as u8);
+/// Blends `value` into the canvas with the coverage of `m` placed at `(x, y)`, only
+/// inside `clip` (which lies on the canvas). Row slices, not a bounds-checked get/set
+/// per pixel: every line of UI text goes through here on each paint. With value 0 this
+/// is exactly `Canvas::draw_mask`'s darkening.
+fn blend_mask(canvas: &mut Canvas, x: i32, y: i32, m: &GlyphMask, value: u8, clip: Rect) {
+    let area = Rect::new(x, y, m.width as u32, m.height as u32).intersect(&clip);
+    if area.is_empty() {
+        return;
+    }
+    let (n, v) = (area.w as usize, value as u32);
+    for py in area.y..area.bottom() {
+        let mi = (py - y) as usize * m.width + (area.x - x) as usize;
+        let ci = py as usize * canvas.width + area.x as usize;
+        for (p, &a) in canvas.pixels[ci..ci + n].iter_mut().zip(&m.coverage[mi..mi + n]) {
+            if a != 0 {
+                let a = a as u32;
+                *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
             }
         }
     }
@@ -970,6 +948,12 @@ mod tests {
                     assert_eq!(cut.get(x, y), want, "({x}, {y}) value {value}");
                 }
             }
+            // The canvas's own clip limits drawing the same way.
+            let mut limited = Canvas::new(500, 100);
+            limited.clear(230);
+            limited.set_clip(Some(clip));
+            f.draw_run_value(&mut limited, &run, 5.0, 60.0, value);
+            assert_eq!(limited.pixels, cut.pixels, "value {value}");
             // A clip off the canvas draws nothing and does not panic.
             f.draw_run_clipped(&mut cut, &run, -1e6, 1e6, value, Rect::new(-50, -50, 10, 10));
         }
