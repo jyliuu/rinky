@@ -272,12 +272,10 @@ fn verifier2_sidecar_deep_plugin_value_never_makes_the_file_unloadable() {
 }
 
 /// One plugin value that is too deep must not stop the book's reading position from
-/// being saved. Today `BookState::save` refuses the whole state with `Invalid` (nothing
-/// written), so after one such `plugin_set` every later save of that book fails and the
-/// position is lost for the rest of the session. Expected: the position is saved (the
-/// bad value may be dropped, like non-finite numbers in `sanitized`).
+/// being saved. `BookState::save` used to refuse the whole state with `Invalid`
+/// (nothing written), so after one such `plugin_set` every later save of that book
+/// failed. Now `sanitized` drops the value, like non-finite numbers.
 #[test]
-#[ignore = "verifier: one too-deep plugin value makes every later BookState::save fail with Invalid (reading position no longer saved)"]
 fn verifier2_sidecar_deep_plugin_value_does_not_block_position_saves() {
     use crate::sidecar::BookState;
     let dir = crate::testutil::TempDir::new("v2-deep-pos");

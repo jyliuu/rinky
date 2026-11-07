@@ -423,6 +423,27 @@ fn finite(v: Option<f32>) -> Option<f32> {
     v.filter(|x| x.is_finite())
 }
 
+/// Deepest nesting of arrays and objects [`BookState::sanitized`] keeps in a plugin value
+/// or an unknown key. serde_json reads at most 128 levels in all, and the sidecar puts
+/// a plugin value three levels deep (`{"plugins": {"<plugin>": {"<key>": ...}}}`).
+pub const MAX_VALUE_DEPTH: usize = 100;
+
+/// Nesting depth of `v`: 0 for a scalar, 1 for a flat array or object. Walks with its
+/// own stack, so a value of any depth is measured without overflowing the thread's.
+pub fn value_depth(v: &Value) -> usize {
+    let mut max = 0;
+    let mut stack = vec![(v, 0)];
+    while let Some((v, d)) = stack.pop() {
+        match v {
+            Value::Array(a) => stack.extend(a.iter().map(|c| (c, d + 1))),
+            Value::Object(o) => stack.extend(o.values().map(|c| (c, d + 1))),
+            _ => continue,
+        }
+        max = max.max(d + 1);
+    }
+    max
+}
+
 /// The old shared `rinky.json` (or its `.old`) if it parses and belongs to `book`.
 /// Never moved aside or written: it may belong to another format of the same title.
 fn shared_sidecar(book: &Path) -> Option<BookState> {
@@ -508,18 +529,27 @@ impl BookState {
     /// The copy [`BookState::save`] writes: the current version, no non-finite numbers
     /// (JSON has none: serde_json writes `null`, which a plain `f32` refuses), so quads
     /// with one are dropped, a crop with one is unset and optional floats become unset;
-    /// and no key in `extra` or `settings.extra` that names a typed field (it would be
-    /// written twice, and serde refuses duplicate fields).
+    /// no key in `extra` or `settings.extra` that names a typed field (it would be
+    /// written twice, and serde refuses duplicate fields); and no plugin value or unknown
+    /// key nested deeper than [`MAX_VALUE_DEPTH`] (serde_json would not read it back).
     pub fn sanitized(&self) -> BookState {
         let mut s = self.clone();
         s.version = Self::VERSION;
         s.percent = finite(s.percent);
-        s.extra.retain(|k, _| !BOOK_STATE_FIELDS.contains(&k.as_str()));
+        let shallow = |_: &String, v: &mut Value| value_depth(v) <= MAX_VALUE_DEPTH;
+        s.extra.retain(|k, v| !BOOK_STATE_FIELDS.contains(&k.as_str()) && shallow(k, v));
+        s.plugins.retain(|name, p| match p.as_object_mut() {
+            Some(values) => {
+                values.retain(shallow);
+                true
+            }
+            None => shallow(name, p),
+        });
         for h in &mut s.highlights {
             h.quads.retain(Quad::is_finite);
         }
         let st = &mut s.settings;
-        st.extra.retain(|k, _| !BOOK_SETTINGS_FIELDS.contains(&k.as_str()));
+        st.extra.retain(|k, v| !BOOK_SETTINGS_FIELDS.contains(&k.as_str()) && shallow(k, v));
         if st.crop.is_some_and(|c| c.iter().any(|v| !v.is_finite())) {
             st.crop = None;
         }
@@ -752,6 +782,11 @@ mod tests {
         s.settings.extra.insert("columns".into(), serde_json::json!(2));
         s.extra.insert("highlights".into(), serde_json::json!("not a list"));
         s.extra.insert("future".into(), serde_json::json!({"x": 1}));
+        // A value as deep as serde_json reads back in the file stays; one level more goes.
+        let nested = |depth: usize| (0..depth).fold(serde_json::json!(1), |v, _| serde_json::json!([v]));
+        assert_eq!((value_depth(&nested(0)), value_depth(&nested(3)), value_depth(&serde_json::json!({"a": [1, {}]}))), (0, 3, 3));
+        s.plugin_set("p", "ok", nested(MAX_VALUE_DEPTH));
+        s.plugin_set("p", "deep", nested(MAX_VALUE_DEPTH + 1));
         s.save(&book).unwrap();
         let r = BookState::load_report(&book).unwrap();
         assert_eq!((r.source, r.set_aside.len()), (StateSource::Sidecar, 0), "{:?}", r.errors);
@@ -762,6 +797,7 @@ mod tests {
         assert!(!back.settings.extra.contains_key("font_px"));
         assert_eq!(back.extra.get("future"), Some(&serde_json::json!({"x": 1})));
         assert!(!back.extra.contains_key("highlights"));
+        assert!(back.plugin_get("p", "ok").is_some() && back.plugin_get("p", "deep").is_none());
         assert_eq!(back, s.sanitized());
     }
 
