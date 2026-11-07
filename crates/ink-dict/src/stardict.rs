@@ -96,6 +96,15 @@ impl Field {
             _ => None,
         }
     }
+
+    /// The field as Markdown with the dictionary's `style` ([`crate::markdown`]), `None`
+    /// for binary or resource fields.
+    pub fn markdown(&self, style: &crate::markdown::Style) -> Option<String> {
+        match self.kind {
+            'h' | 'x' | 'g' | 'k' => Some(crate::markdown::to_markdown(self.kind, &String::from_utf8_lossy(&self.data), style)),
+            _ => self.text().map(|t| crate::markdown::plain(&t)),
+        }
+    }
 }
 
 /// An open StarDict dictionary.
@@ -112,6 +121,8 @@ pub struct Dictionary {
     /// Per synonym: (start, length, entry index).
     syns: Vec<(u32, u32, u32)>,
     dict: DictData,
+    /// The dictionary's style sheet (`<stem>.css` next to the `.ifo`), for the full view.
+    pub style: crate::markdown::Style,
 }
 
 impl std::fmt::Debug for Dictionary {
@@ -160,7 +171,8 @@ impl Dictionary {
         } else {
             (Vec::new(), Vec::new())
         };
-        Ok(Dictionary { name, info, ifo: ifo.to_path_buf(), idx, entries, syn, syns, dict })
+        let style = std::fs::read_to_string(stem.with_extension("css")).map(|css| crate::markdown::Style::parse(&css)).unwrap_or_default();
+        Ok(Dictionary { name, info, ifo: ifo.to_path_buf(), idx, entries, syn, syns, dict, style })
     }
 
     /// Display name: `bookname`, or the file stem when it is empty.

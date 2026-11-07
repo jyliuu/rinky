@@ -96,6 +96,56 @@ fn single(text: &str) -> Option<char> {
 const SCAN_PX: i32 = 24;
 /// Scan step while a probe still returns the same character.
 const SCAN_STEP: i32 = 3;
+/// An x past the right end of any line: a probe there returns the line's last character.
+const LINE_END_X: i32 = 1 << 20;
+
+/// A hyphen, as a probe returns it.
+fn hyphen(text: &str) -> bool {
+    matches!(single(text), Some('-' | '\u{2010}' | '\u{2011}' | '\u{ad}'))
+}
+
+/// The word characters next to `from` on its line, nearest first: to the right
+/// (`forward`) or the left, up to a non-word character, a gap or the line's end.
+fn scan_line(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect, forward: bool) -> Vec<(char, Rect)> {
+    let y = from.y + from.h as i32 / 2;
+    let mut out: Vec<(char, Rect)> = Vec::new();
+    let mut cur = from;
+    while out.len() < 64 {
+        let mut x = if forward { cur.right() } else { cur.x - 1 };
+        let mut next = None;
+        while if forward { x <= cur.right() + SCAN_PX } else { x >= (cur.x - SCAN_PX).max(0) } {
+            match probe(Point::new(x, y)) {
+                Some((_, r)) if r == cur => x += if forward { SCAN_STEP } else { -SCAN_STEP },
+                Some((t, r)) if r.y == from.y && forward && r.right() > cur.right() && r.x <= cur.right() + 2 => {
+                    next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
+                    break;
+                }
+                Some((t, r)) if r.y == from.y && !forward && r.x < cur.x && r.right() >= cur.x - 2 => {
+                    next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let Some((c, r)) = next else { break };
+        out.push((c, r));
+        cur = r;
+    }
+    // Trim apostrophes and hyphens at the far end.
+    while out.last().is_some_and(|(c, _)| !c.is_alphanumeric()) {
+        out.pop();
+    }
+    out
+}
+
+/// The hyphen that ends `last`'s line right after it, if any: a hyphen of the book
+/// ("well-" | "known") or the one the layout added ("in-" | "finities"), which a
+/// document's selection leaves out of the text (so the probe returns no text).
+fn hyphen_after(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, last: Rect) -> Option<Rect> {
+    let (t, r) = probe(Point::new(LINE_END_X, last.y + last.h as i32 / 2))?;
+    let next_to = r.y == last.y && r.x >= last.right() - 2 && r.x <= last.right() + 2;
+    (next_to && (hyphen(&t) || t.is_empty())).then_some(r)
+}
 
 /// Finds the word around `start` with `probe`, which returns the character a point
 /// lands on (its text and rectangle; `Document::select` of one point). Returns the
@@ -108,6 +158,9 @@ const SCAN_STEP: i32 = 3;
 /// between characters (a space between text runs) or another line. Punctuation at the
 /// ends (quotes, commas, a trailing apostrophe or hyphen) is trimmed. A press on a space
 /// or a punctuation mark takes the word within 30 px.
+///
+/// A word hyphenated at the end of a line goes on at the start of the next: pressed on
+/// either part, the word is both (its first and last character are then on two lines).
 pub fn word_span(start: Point, probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>) -> Option<(Rect, Rect)> {
     let mut r0 = None;
     for dx in [0, -10, 10, -20, 20, -30, 30] {
@@ -119,55 +172,26 @@ pub fn word_span(start: Point, probe: &mut dyn FnMut(Point) -> Option<(String, R
         }
     }
     let r0 = r0?;
-    let y = r0.y + r0.h as i32 / 2;
-    // (char, rect) to the left (nearest first), then to the right.
-    let mut left: Vec<(char, Rect)> = Vec::new();
-    let mut cur = r0;
-    while left.len() < 64 {
-        let mut x = cur.x - 1;
-        let mut next = None;
-        while x >= (cur.x - SCAN_PX).max(0) {
-            match probe(Point::new(x, y)) {
-                Some((_, r)) if r == cur => x -= SCAN_STEP,
-                Some((t, r)) if r.y == r0.y && r.x < cur.x && r.right() >= cur.x - 2 => {
-                    next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
-                    break;
-                }
-                _ => break,
+    let mut first = scan_line(probe, r0, false).last().map_or(r0, |(_, r)| *r);
+    let mut last = scan_line(probe, r0, true).last().map_or(r0, |(_, r)| *r);
+    let h = r0.h as i32;
+    // The word ends its line with a hyphen: it goes on at the next line's start.
+    if hyphen_after(probe, last).is_some() {
+        let below = probe(Point::new(0, last.bottom() + h / 2));
+        if let Some((_, r)) = below.filter(|(t, r)| r.y > last.y && r.y <= last.bottom() + h / 2 && single(t).is_some_and(char::is_alphanumeric)) {
+            last = scan_line(probe, r, true).last().map_or(r, |(_, r)| *r);
+        }
+    }
+    // The word starts its line and the line before ends with a hyphen: it began there.
+    let starts_line = probe(Point::new(0, first.y + h / 2)).is_some_and(|(_, r)| r == first);
+    if starts_line {
+        let above = probe(Point::new(LINE_END_X, first.y - h / 2));
+        if let Some((_, r)) = above.filter(|(t, r)| r.y < first.y && r.bottom() + h / 2 >= first.y && (hyphen(t) || t.is_empty())) {
+            if let Some((_, w)) = scan_line(probe, r, false).last() {
+                first = *w;
             }
         }
-        let Some((c, r)) = next else { break };
-        left.push((c, r));
-        cur = r;
     }
-    let mut right: Vec<(char, Rect)> = Vec::new();
-    let mut cur = r0;
-    while right.len() < 64 {
-        let mut x = cur.right();
-        let mut next = None;
-        while x <= cur.right() + SCAN_PX {
-            match probe(Point::new(x, y)) {
-                Some((_, r)) if r == cur => x += SCAN_STEP,
-                Some((t, r)) if r.y == r0.y && r.right() > cur.right() && r.x <= cur.right() + 2 => {
-                    next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
-                    break;
-                }
-                _ => break,
-            }
-        }
-        let Some((c, r)) = next else { break };
-        right.push((c, r));
-        cur = r;
-    }
-    // Trim apostrophes and hyphens at the ends (r0 is a letter or digit, so one stays).
-    while left.last().is_some_and(|(c, _)| !c.is_alphanumeric()) {
-        left.pop();
-    }
-    while right.last().is_some_and(|(c, _)| !c.is_alphanumeric()) {
-        right.pop();
-    }
-    let first = left.last().map_or(r0, |(_, r)| *r);
-    let last = right.last().map_or(r0, |(_, r)| *r);
     Some((first, last))
 }
 
@@ -888,6 +912,109 @@ mod tests {
             // A press on the space after "said:" takes a word nearby.
             assert!(["said", "households"].contains(&word(t, 8, 10, midpoint).as_str()));
         }
+    }
+
+    /// Lines of text 50 px high from y 300, characters 20 px wide from x 100; a point
+    /// maps to the nearest character boundary of the nearest line (as ink-html does).
+    /// `~` is a hyphen the layout added, which the document's text leaves out.
+    fn lines_probe(lines: &'static [&'static str]) -> impl FnMut(Point) -> Option<(String, Rect)> {
+        move |p: Point| {
+            let l = ((p.y - 300).max(0) / 50).min(lines.len() as i32 - 1);
+            let chars: Vec<char> = lines[l as usize].chars().collect();
+            let n = chars.len() as i32;
+            let i = (0..n).find(|&i| p.x < 100 + i * 20 + 10).unwrap_or(n - 1);
+            let c = chars[i as usize];
+            let t = if c == '~' { String::new() } else { c.to_string().trim().to_string() };
+            Some((t, Rect::new(100 + i * 20, 300 + l * 50, 20, 50)))
+        }
+    }
+
+    /// The word [`word_span`] finds when pressing line `l`, character `at`, as
+    /// "first line part|second line part".
+    fn split_word(lines: &'static [&'static str], l: i32, at: i32) -> String {
+        let mut probe = lines_probe(lines);
+        let (a, b) = word_span(Point::new(100 + at * 20 + 5, 300 + l * 50 + 20), &mut probe).unwrap();
+        let (la, ca) = ((a.y - 300) / 50, (a.x - 100) / 20);
+        let (lb, cb) = ((b.y - 300) / 50, (b.x - 100) / 20);
+        let line = |l: i32| lines[l as usize].chars().collect::<Vec<char>>();
+        if la == lb {
+            line(la)[ca as usize..=cb as usize].iter().collect()
+        } else {
+            let (x, y) = (line(la), line(lb));
+            format!("{}|{}", x[ca as usize..].iter().collect::<String>(), y[..=cb as usize].iter().collect::<String>())
+        }
+    }
+
+    #[test]
+    fn a_word_hyphenated_at_a_line_end_is_selected_whole() {
+        // The layout's hyphen: pressed on either part, both parts.
+        let lines: &[&str] = &["Two of the in~", "finities here", "now."];
+        assert_eq!(split_word(lines, 0, 12), "in~|finities");
+        assert_eq!(split_word(lines, 0, 11), "in~|finities");
+        assert_eq!(split_word(lines, 1, 0), "in~|finities");
+        assert_eq!(split_word(lines, 1, 5), "in~|finities");
+        // Other words on those lines stay on their line.
+        assert_eq!(split_word(lines, 0, 5), "of");
+        assert_eq!(split_word(lines, 1, 10), "here");
+        assert_eq!(split_word(lines, 2, 1), "now");
+        // A hyphen of the book at a line end joins the same way.
+        let lines: &[&str] = &["a well-", "known one"];
+        assert_eq!(split_word(lines, 0, 3), "well-|known");
+        assert_eq!(split_word(lines, 1, 2), "well-|known");
+        // A line that ends in a word does not join the next line's first word.
+        let lines: &[&str] = &["the end", "of it"];
+        assert_eq!(split_word(lines, 0, 5), "end");
+        assert_eq!(split_word(lines, 1, 0), "of");
+        // A dash after a space is not part of the word.
+        let lines: &[&str] = &["the end -", "of it"];
+        assert_eq!(split_word(lines, 0, 5), "end");
+        assert_eq!(split_word(lines, 1, 0), "of");
+    }
+
+    /// In a book laid out by ink-html, a long press on either part of a word the layout
+    /// hyphenated selects the whole word.
+    #[test]
+    fn a_long_press_selects_a_hyphenated_word_in_a_book() {
+        use ink_doc::Document;
+        let book = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ink-html/tests/fixtures/lang.epub");
+        let mut d = ink_formats::open(&book).unwrap();
+        let mut s = ink_doc::LayoutSettings::for_screen(1272, 1696);
+        s.hyphenate = true;
+        d.set_layout(&s).unwrap();
+        assert!(d.wait_paginated(std::time::Duration::from_secs(300)));
+        let mut checked = 0;
+        for p in 0..d.page_count().pages {
+            let (l, span) = d.page_layout(p).unwrap();
+            let a = l.slices[span.first as usize].first_item as usize;
+            let b = l.slices[span.end as usize - 1].end_item as usize;
+            let runs: Vec<_> = l.items[a..b].iter().filter_map(|i| if let ink_html::layout::Draw::Text(t) = i { Some(t.clone()) } else { None }).collect();
+            let dy = 70.0 - span.y0;
+            for w in runs.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                // Runs are stretches of a line: the word is the last of one and the first of the next.
+                let head = a.text.trim_end_matches('-').rsplit(' ').next().unwrap_or_default();
+                let tail = b.text.split(' ').next().unwrap_or_default().trim_end_matches(|c: char| c.is_ascii_punctuation());
+                let word = format!("{head}{tail}");
+                // Words of letters (the book also has pages of noise).
+                if !a.hyphenated || head.len() < 3 || tail.is_empty() || b.line_top <= a.line_top || !word.chars().all(|c| c.is_ascii_alphabetic()) {
+                    continue;
+                }
+                let (ya, yb) = (((a.line_top + a.line_bottom) / 2.0 + dy) as i32, ((b.line_top + b.line_bottom) / 2.0 + dy) as i32);
+                // The hyphen ends the line: a press just left of it is on the word's last letter.
+                let hyphen = d.select(p, Point::new(LINE_END_X, ya), Point::new(LINE_END_X, ya)).unwrap().unwrap().rects[0];
+                let first = Point::new(hyphen.x - 6, ya);
+                let second = Point::new((b.x + 4.0) as i32, yb);
+                for at in [first, second] {
+                    let sel = word_at(&mut d, p, at).unwrap();
+                    assert_eq!(sel.text, word, "page {p}: {:?} | {:?}", a.text, b.text);
+                }
+                checked += 1;
+            }
+            if checked >= 5 {
+                break;
+            }
+        }
+        assert!(checked >= 3, "{checked} hyphenated words in the book");
     }
 
     /// A paged text: page `p` has lines at y 100 + 60 l (50 px high), characters 20 px

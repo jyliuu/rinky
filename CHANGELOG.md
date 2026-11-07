@@ -4,6 +4,30 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-11-07
+
+### Changed
+- Settings › Battery shows estimates much sooner. It counts the time up to now (not
+  only up to the last note), gives a rate once a point of charge is used in a quarter
+  of an hour, and, before any point is used, an upper bound after an hour ("under
+  0.2 % per hour", "over 16 days"). rinky also notes the charge each time it drops,
+  which times the rate better than the 10-minute notes alone.
+- Dictionary full view: entries in markup rinky has no parser of its own for keep the
+  dictionary's formatting (numbered and nested senses, bold and italics, paragraphs,
+  quotes). The definition is read by the book engine's HTML parser and styled with
+  the dictionary's style sheet (`<name>.css` next to its `.ifo`, as KOReader reads
+  it), where before it was flattened to plain lines. Bold and italics show in
+  the interface font's own bold and italic faces (other UI text keeps its light
+  titles).
+- Settings › Fonts › Interface font lists only families with bold and italic faces
+  (a family chosen before stays listed). The built-in Noto Sans now has its bold and
+  italic faces (+0.7 MB).
+
+### Fixed
+- A long press on a word hyphenated at the end of a line selected only the part on
+  the line pressed ("Char" of "Char-acteristically"). It now selects the whole word,
+  pressed on either part, so the dictionary and plugins get all of it.
+
 ## [0.5.2] - 2026-11-07
 
 ### Added
@@ -216,6 +240,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.5.3]: https://github.com/jyliuu/rinky/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/jyliuu/rinky/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/jyliuu/rinky/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jyliuu/rinky/compare/v0.4.3...v0.5.0

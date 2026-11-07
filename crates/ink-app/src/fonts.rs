@@ -37,11 +37,14 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 /// Name of the built-in family (embedded Noto Serif); `ink-html` maps it to its default.
 pub const BUILTIN: &str = "Noto Serif";
 
-/// Name of the built-in UI family: Noto Sans Regular, embedded (OFL,
-/// `fonts/LICENSE-Noto`). It draws bold and italic UI text too (light titles; the UI has
-/// no italic face of its own).
+/// Name of the built-in UI family: Noto Sans, embedded (OFL, `fonts/LICENSE-Noto`). The
+/// UI draws bold and italic text in its regular face (light titles); its bold and italic
+/// faces set text whose emphasis matters ([`emphasis_fonts`]).
 pub const UI_BUILTIN: &str = "Noto Sans";
 static UI_REGULAR: &[u8] = include_bytes!("../../../fonts/ui/NotoSans-Regular.ttf");
+/// Its bold and italic faces, for UI text whose emphasis matters ([`emphasis_fonts`]).
+static UI_BOLD: &[u8] = include_bytes!("../../../fonts/ui/NotoSans-Bold.ttf");
+static UI_ITALIC: &[u8] = include_bytes!("../../../fonts/ui/NotoSans-Italic.ttf");
 
 /// Family used for books when the user chose none and the Kindle has it.
 pub const PREFERRED_READING: &str = "Bookerly";
@@ -202,6 +205,25 @@ pub fn family_names() -> Vec<String> {
     registry::installed().iter().map(|f| f.name.clone()).collect()
 }
 
+/// Families the interface picker lists: the built-in Noto Sans and Noto Serif, then the
+/// installed families with a bold and an italic face (dictionary entries and other
+/// UI text with emphasis need both), and `current` (the family in use) in any case.
+pub fn ui_picker_names(current: &str) -> Vec<String> {
+    ui_list(&registry::installed(), current)
+}
+
+fn ui_list(installed: &[FontFamily], current: &str) -> Vec<String> {
+    let mut v = vec![BUILTIN.to_string(), UI_BUILTIN.to_string()];
+    for f in installed {
+        let complete = f.faces[1].is_some() && f.faces[2].is_some();
+        let listed = v.iter().any(|n| n.eq_ignore_ascii_case(&f.name));
+        if !listed && (complete || f.name.eq_ignore_ascii_case(current.trim())) {
+            v.push(f.name.clone());
+        }
+    }
+    v
+}
+
 /// Families a picker lists: the built-in family first, then the installed ones.
 pub fn picker_names() -> Vec<String> {
     let mut v = vec![BUILTIN.to_string()];
@@ -302,6 +324,48 @@ pub fn builtin_ui_fonts() -> Fonts {
     f
 }
 
+/// The UI family `name` with its bold and italic faces, for UI text whose emphasis
+/// matters (a dictionary entry). The interface picker offers only families that have
+/// both ([`ui_picker_names`]); a face missing from one chosen before is its regular
+/// face. Falls back to the built-in family.
+pub fn emphasis_fonts(name: &str) -> Fonts {
+    let built_in = || {
+        let mut f = Fonts::from_static([UI_REGULAR, UI_BOLD, UI_ITALIC]).expect("embedded UI font");
+        add_ui_fallbacks(&mut f, false);
+        f
+    };
+    let name = name.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case(UI_BUILTIN) {
+        built_in()
+    } else if name.eq_ignore_ascii_case(BUILTIN) {
+        let face = ink_text::embedded_font_bytes;
+        let mut f = Fonts::from_static([face(Style::Regular), face(Style::Bold), face(Style::Italic)]).expect("embedded font");
+        add_ui_fallbacks(&mut f, true);
+        f
+    } else {
+        let faces = registry::installed_family(name).and_then(|fam| {
+            let map = |f: Option<&FaceRef>| f.and_then(|f| ink_text::face::map_file(&f.path).ok());
+            let r = map(fam.regular())?;
+            Some([r, map(fam.face(true, false)).unwrap_or(r), map(fam.face(false, true)).unwrap_or(r)])
+        });
+        match faces.map(Fonts::from_static) {
+            Some(Ok(mut f)) => {
+                add_ui_fallbacks(&mut f, false);
+                f
+            }
+            _ => built_in(),
+        }
+    }
+}
+
+/// The UI family in use (empty: the built-in one), as last put in place by
+/// [`take_ui_fonts`].
+pub fn ui_family() -> String {
+    UI_FAMILY.lock().map(|n| n.clone()).unwrap_or_default()
+}
+
+static UI_FAMILY: Mutex<String> = Mutex::new(String::new());
+
 /// UI fonts for family `name` (empty or [`UI_BUILTIN`]: the embedded Noto Sans;
 /// [`BUILTIN`]: the embedded Noto Serif), with the UI fallback faces
 /// ([`add_ui_fallbacks`]). Bold text uses the regular face (light titles), and so does
@@ -372,7 +436,11 @@ pub fn ui_font_pending() -> bool {
 pub fn take_ui_fonts() -> Option<(String, Fonts)> {
     let mut slot = UI_READY.lock().unwrap_or_else(|e| e.into_inner());
     let (generation, name, fonts) = slot.take()?;
-    (generation == UI_GEN.load(Ordering::SeqCst)).then_some((name, fonts))
+    if generation != UI_GEN.load(Ordering::SeqCst) {
+        return None;
+    }
+    *UI_FAMILY.lock().unwrap_or_else(|e| e.into_inner()) = name.clone();
+    Some((name, fonts))
 }
 
 // ---- Drawing a family name in its own font ----
@@ -488,6 +556,33 @@ mod tests {
         // The reading fonts keep their bold face.
         let mut book = Fonts::load();
         assert_ne!(book.text_width(Style::Bold, "Library", 56.0), book.text_width(Style::Regular, "Library", 56.0));
+    }
+
+    /// The interface list: the built-in families, installed ones with a bold and an
+    /// italic face, and the one in use.
+    #[test]
+    fn the_interface_list_has_families_with_bold_and_italic() {
+        let face = |w| Some(FaceRef { path: "/f.ttf".into(), index: 0, weight: w });
+        let fam = |name: &str, b: bool, i: bool| FontFamily { name: name.into(), faces: [face(400), b.then(|| face(700)).flatten(), i.then(|| face(400)).flatten(), None] };
+        let installed = [fam("Bookerly", true, true), fam("Caecilia", true, false), fam("Futura", false, false), fam("Noto Sans", true, true)];
+        assert_eq!(ui_list(&installed, ""), ["Noto Serif", "Noto Sans", "Bookerly"]);
+        // A family chosen before stays listed, so its check mark shows.
+        assert_eq!(ui_list(&installed, "futura"), ["Noto Serif", "Noto Sans", "Bookerly", "Futura"]);
+    }
+
+    /// Text whose emphasis matters gets the family's real bold and italic faces.
+    #[test]
+    fn emphasis_fonts_have_real_bold_and_italic() {
+        for name in ["", UI_BUILTIN, BUILTIN] {
+            let mut f = emphasis_fonts(name);
+            let t = "Household";
+            let (regular, _) = render(&mut f, &[(Style::Regular, t)]);
+            for style in [Style::Bold, Style::Italic] {
+                let run = f.shape(style, 40.0, t);
+                assert!(run.glyphs.iter().all(|g| g.synth == ink_text::raster::Synth::NONE), "{name} {style:?}: synthesized");
+                assert!(render(&mut f, &[(style, t)]).0.pixels != regular.pixels, "{name} {style:?}: drawn as regular");
+            }
+        }
     }
 
     /// Dictionary pronunciations (OALD8 and NOAD StarDict) and symbols from their bodies.

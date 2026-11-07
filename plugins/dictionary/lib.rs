@@ -360,14 +360,15 @@ pub fn full_markdown(r: &LookupResult) -> String {
             md.push_str(&entry_markdown(&h.headword, e));
             continue;
         }
-        md.push_str(&format!("**{}**\n\n", md_escape(&h.headword)));
-        for line in h.text.split('\n').map(str::trim).filter(|l| !l.is_empty()) {
-            match line.strip_prefix("• ") {
-                Some(item) => md.push_str(&format!("- {}\n", md_escape(item))),
-                None => md.push_str(&format!("{}\n\n", md_escape(line))),
-            }
+        // Other markup: as the dictionary formats it (its HTML and style sheet), under
+        // the headword unless the entry starts with it.
+        let first = h.markdown.lines().next().unwrap_or_default().trim_start_matches(['*', '#', ' ']);
+        let starts = first.len() >= h.headword.len() && first.is_char_boundary(h.headword.len()) && first[..h.headword.len()].eq_ignore_ascii_case(&h.headword);
+        if !starts {
+            md.push_str(&format!("**{}**\n\n", md_escape(&h.headword)));
         }
-        md.push('\n');
+        md.push_str(&h.markdown);
+        md.push_str("\n\n");
     }
     if !r.form.is_empty() && !r.form.eq_ignore_ascii_case(&r.query) {
         md.push_str(&format!("*Looked up “{}” as “{}”.*\n", md_escape(&r.query), md_escape(&r.form)));
@@ -724,7 +725,7 @@ impl Plugin for DictionaryPlugin {
                 if let Some(l) = &self.last {
                     let title = l.word.word.clone();
                     // The full view opens on the dictionary the card shows.
-                    let md = full_markdown_tab(&l.result, l.shown);
+                    let md = format!(":::emphasis\n{}", full_markdown_tab(&l.result, l.shown));
                     cx.ui()?.view_markdown(ID_VIEW, &title, &md);
                 }
             }
@@ -733,7 +734,7 @@ impl Plugin for DictionaryPlugin {
                 // A dictionary tab: the open viewer takes the new text.
                 if let (Some(l), Ok(i)) = (&self.last, tab["dict:".len()..].parse::<usize>()) {
                     let title = l.word.word.clone();
-                    let md = full_markdown_tab(&l.result, i);
+                    let md = format!(":::emphasis\n{}", full_markdown_tab(&l.result, i));
                     cx.ui()?.view_markdown(ID_VIEW, &title, &md);
                 }
             }

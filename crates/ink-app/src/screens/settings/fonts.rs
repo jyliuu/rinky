@@ -3,8 +3,9 @@
 //!
 //! A segmented control switches between the two pickers; under it a sample block shows
 //! a sentence in the selected family, then the family list: the built-in Noto Serif and
-//! every installed family ([`crate::fonts`]), each name drawn in its own font, a check
-//! mark on the selected one. With more families than rows the last row turns the page.
+//! every installed family ([`crate::fonts`]; for the interface, the built-in Noto Sans
+//! and only families with bold and italic faces), each name drawn in its own font, a
+//! check mark on the selected one. With more families than rows the last row turns the page.
 //!
 //! Actions: `fonts-tab:I` (0 reading, 1 interface), `font-reading:NAME`,
 //! `font-ui:NAME`, `fonts-more`. The page is self-contained: the settings screen calls
@@ -113,12 +114,9 @@ pub fn build(tree: &mut WidgetTree, cx: &AppCtx, area: Rect) {
     tree.add(None, Box::new(Sample { family: selected.clone() }), Rect::new(x, y, w, SAMPLE_H));
     y += (SAMPLE_H as i32) + space(3);
     let h = (area.bottom() - y).max(ROW_H as i32) as u32;
-    let mut names = fonts::picker_names();
-    // The interface list always offers the embedded Noto Sans (also installed as a file
-    // on the Kindle, then listed once).
-    if tab == 1 && !names.iter().any(|n| n.eq_ignore_ascii_case(fonts::UI_BUILTIN)) {
-        names.insert(1, fonts::UI_BUILTIN.to_string());
-    }
+    // The interface list: families with a bold and an italic face, so dictionary
+    // entries show their emphasis in it.
+    let names = if tab == 0 { fonts::picker_names() } else { fonts::ui_picker_names(&s.ui.font_family) };
     let prefix = if tab == 0 { "font-reading" } else { "font-ui" };
     tree.add(None, Box::new(FamilyList { names, selected, prefix, page: LIST_PAGE.with(Cell::get) }), Rect::new(x, y, w, h));
 }

@@ -392,6 +392,10 @@ impl App {
                 match &ev {
                     UiEvent::Power(PowerEvent::GoingToScreenSaver) => self.note_battery(false),
                     UiEvent::Power(PowerEvent::OutOfScreenSaver) => self.note_battery(true),
+                    // The charge dropped a point: when it did tells the rate best.
+                    UiEvent::Power(PowerEvent::BatteryLevel(_)) if self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake => {
+                        self.note_battery(true);
+                    }
                     // wifid lost the connection: look for a saved network in range.
                     UiEvent::Power(PowerEvent::WifiState(s)) if !matches!(s.as_str(), "CONNECTED" | "PENDING") => {
                         self.device.wifi.look_for_networks();

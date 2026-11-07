@@ -18,6 +18,9 @@ pub struct Hit {
     /// The definition parsed into senses ([`crate::entry::parse`]) when its markup is a
     /// known one.
     pub entry: Option<Entry>,
+    /// The definition as Markdown with the dictionary's formatting
+    /// ([`crate::markdown`]).
+    pub markdown: String,
 }
 
 /// Result of [`Library::lookup`].
@@ -93,15 +96,20 @@ impl Library {
         d.find(word)
             .into_iter()
             .map(|i| {
-                let (text, entry) = match d.fields(i) {
+                let (text, entry, markdown) = match d.fields(i) {
                     Ok(fields) => {
                         let text = fields.iter().filter_map(|f| f.text()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n");
                         let entry = fields.iter().find_map(|f| crate::entry::parse(f.kind, &String::from_utf8_lossy(&f.data)));
-                        (text, entry)
+                        let markdown = fields.iter().filter_map(|f| f.markdown(&d.style)).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n");
+                        (text, entry, markdown)
                     }
-                    Err(e) => (format!("(cannot read this entry: {e})"), None),
+                    Err(e) => {
+                        let text = format!("(cannot read this entry: {e})");
+                        let markdown = crate::markdown::plain(&text);
+                        (text, None, markdown)
+                    }
                 };
-                Hit { dict: d.title().to_string(), headword: d.headword(i).to_string(), text, entry }
+                Hit { dict: d.title().to_string(), headword: d.headword(i).to_string(), text, entry, markdown }
             })
             .collect()
     }

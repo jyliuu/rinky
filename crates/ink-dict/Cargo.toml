@@ -12,6 +12,8 @@ publish.workspace = true
 doctest = false
 
 [dependencies]
+# The HTML parser and CSS cascade of the book engine, for definitions in the full view.
+ink-html.workspace = true
 thiserror.workspace = true
 # Already in Cargo.lock through zip and ink-formats (zlib-rs backend).
 flate2 = { workspace = true, features = ["zlib-rs"] }
