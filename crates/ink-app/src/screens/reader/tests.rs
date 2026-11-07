@@ -124,6 +124,13 @@ impl Harness {
 
     /// Feeds one input event as the app's loop does, then paints.
     pub fn feed(&mut self, ev: InputEvent) {
+        // The bars' minute tick follows the wall clock: a test that runs across a minute
+        // boundary (a loaded CI machine) would see the clock redrawn. A tick not yet due
+        // is moved out of reach; a test that makes it due (`next_tick = now`) still gets it.
+        let now = std::time::Instant::now();
+        if let Some(t) = self.reader.bars.next_tick.as_mut().filter(|t| **t > now) {
+            *t = now + std::time::Duration::from_secs(3600);
+        }
         let events = ink_ui::translate(&mut self.rec, ev);
         let p = providers();
         for ev in events {
