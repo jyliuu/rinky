@@ -2448,10 +2448,10 @@ impl MarkdownView {
     fn paint_content(&mut self, cx: &mut PaintCx, x0: f32, top: f32, cw: f32) {
         let t = cx.theme.clone();
         let (fg, muted) = (t.fg, t.muted);
-        let page = self.pages.get(self.page).cloned().unwrap_or_default();
+        let page: &[Line] = self.pages.get(self.page).map_or(&[], |p| p);
         let mut boxes: Vec<(usize, f32, f32)> = Vec::new();
         let mut y = top;
-        for l in &page {
+        for l in page {
             if let Some(g) = l.group {
                 match boxes.last_mut() {
                     Some(bx) if bx.0 == g => bx.2 = y + l.height,
@@ -2491,7 +2491,8 @@ impl MarkdownView {
         }
         let mut y = top;
         let canvas_h = cx.canvas.height as f32;
-        for line in &page {
+        let mut links = Vec::new();
+        for line in page {
             // Lines outside the canvas (a scrolled chat view) are not drawn.
             if y + line.height < 0.0 || y > canvas_h {
                 y += line.height;
@@ -2525,12 +2526,13 @@ impl MarkdownView {
                 if let Some(url) = &r.link {
                     let w = cx.fonts.shaped_width(r.style, r.px, &r.text);
                     cx.canvas.fill_rect((x0 + r.x) as i32, (base + 6.0) as i32, w.ceil() as i32, 2, fg);
-                    self.links.push((Rect::new((x0 + r.x) as i32, y as i32, w.ceil() as u32, line.height.ceil() as u32), url.clone()));
+                    links.push((Rect::new((x0 + r.x) as i32, y as i32, w.ceil() as u32, line.height.ceil() as u32), url.clone()));
                 }
             }
             y += line.height;
         }
         // Inline links win over the box around them.
+        self.links.extend(links);
         self.links.extend(box_links);
     }
 }
