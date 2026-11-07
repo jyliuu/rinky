@@ -229,12 +229,17 @@ pub fn changed_bands(old: &Canvas, new: &Canvas, damage: Vec<Damage>) -> Vec<Dam
         let r = d.rect.intersect(&new.bounds());
         // (top, last changed row, min x, max x)
         let mut band: Option<(i32, i32, i32, i32)> = None;
+        let n = r.w as usize;
         let push = |out: &mut Vec<Damage>, (top, last, x0, x1): (i32, i32, i32, i32)| {
             out.push(Damage { rect: Rect::new(x0, top, (x1 - x0 + 1) as u32, (last - top + 1) as u32), class: d.class });
         };
         for y in r.y..r.bottom() {
             let i = y as usize * w + r.x as usize;
-            let (a, b) = (&old.pixels[i..i + r.w as usize], &new.pixels[i..i + r.w as usize]);
+            let (a, b) = (&old.pixels[i..i + n], &new.pixels[i..i + n]);
+            // Most rows of a frame are unchanged: one slice compare (memcmp) settles them.
+            if a == b {
+                continue;
+            }
             let Some(first) = a.iter().zip(b).position(|(p, q)| p != q) else { continue };
             let last = a.iter().zip(b).rposition(|(p, q)| p != q).unwrap_or(first);
             let (x0, x1) = (r.x + first as i32, r.x + last as i32);
