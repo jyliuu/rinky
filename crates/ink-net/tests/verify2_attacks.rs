@@ -18,35 +18,18 @@ use ink_net::opds::parse_feed;
 use ink_net::sse::EventSource;
 use ink_net::testserver::{file_bytes, TestServer};
 use ink_net::{CancelToken, NetError};
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
+mod common;
+use common::header_of;
+
 // ---------------------------------------------------------------------------------------
 // Helpers.
-
-type Handler = dyn Fn(&mut std::net::TcpStream, String, usize) + Send + Sync;
-
-/// Reads one request head (up to the blank line).
-fn read_head(s: &mut dyn Read) -> String {
-    let mut buf = Vec::new();
-    let mut b = [0u8; 1];
-    while !buf.ends_with(b"\r\n\r\n") && buf.len() < 65536 {
-        match s.read(&mut b) {
-            Ok(1) => buf.push(b[0]),
-            _ => break,
-        }
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-fn header_of<'a>(head: &'a str, name: &str) -> Option<&'a str> {
-    head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim()))
-}
 
 /// `bytes=N-` -> N.
 fn range_start(head: &str) -> Option<usize> {
@@ -56,30 +39,11 @@ fn range_start(head: &str) -> Option<usize> {
 /// Plain HTTP server; `h(stream, request head, connection number)` runs per connection.
 /// Returns the base URL and the connection counter.
 fn raw_server(h: impl Fn(&mut std::net::TcpStream, String, usize) + Send + Sync + 'static) -> (String, Arc<AtomicUsize>) {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", l.local_addr().unwrap());
-    let h: Arc<Handler> = Arc::new(h);
-    let n = Arc::new(AtomicUsize::new(0));
-    let n2 = n.clone();
-    std::thread::spawn(move || {
-        for c in l.incoming() {
-            let Ok(mut s) = c else { continue };
-            let (h, i) = (h.clone(), n2.fetch_add(1, Ordering::SeqCst));
-            std::thread::spawn(move || {
-                let _ = s.set_nodelay(true);
-                let head = read_head(&mut s);
-                h(&mut s, head, i);
-            });
-        }
-    });
-    (base, n)
+    common::serve("http", |tcp| tcp, h)
 }
 
 fn tmpdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ink-net-verify2-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    common::tmpdir("verify2", name)
 }
 
 // ---------------------------------------------------------------------------------------
