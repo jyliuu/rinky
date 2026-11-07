@@ -163,15 +163,29 @@ fn held_library(name: &str, script: &str) -> (HeadlessProbe, PathBuf) {
 /// Real-time scripts: the finger goes down at (`x`, `y`) after `before`, the hold time
 /// passes with the finger still down, and the run ends there (no lift). A second run
 /// lifts the finger and waits. Returns the panels: without the hold, held, lifted.
+/// The three runs are independent and mostly sleep, so they run at the same time (as
+/// parallel tests do): one after the other they took up to 11 s.
 fn hold_panels(name: &str, before: &str, x: i32, y: i32) -> [ink_device::Canvas; 3] {
-    let none = held_library(&format!("{name}-none"), &format!("{before}sleep 300\n"));
-    let held = held_library(&format!("{name}-held"), &format!("{before}down {x} {y}\nsleep 900\nshot held\n"));
-    let lifted = held_library(&format!("{name}-lifted"), &format!("{before}down {x} {y}\nsleep 900\nshot held\nup {x} {y}\nsleep 400\nshot lifted\n"));
-    let panels = [none.0.panel(), held.0.panel(), lifted.0.panel()];
-    for d in [none.1, held.1, lifted.1] {
-        let _ = std::fs::remove_dir_all(d);
-    }
-    panels
+    let runs = [
+        (format!("{name}-none"), format!("{before}sleep 300\n")),
+        (format!("{name}-held"), format!("{before}down {x} {y}\nsleep 900\nshot held\n")),
+        (format!("{name}-lifted"), format!("{before}down {x} {y}\nsleep 900\nshot held\nup {x} {y}\nsleep 400\nshot lifted\n")),
+    ];
+    let panels: Vec<ink_device::Canvas> = std::thread::scope(|s| {
+        let handles: Vec<_> = runs
+            .iter()
+            .map(|(name, script)| {
+                s.spawn(move || {
+                    let (probe, dir) = held_library(name, script);
+                    let panel = probe.panel();
+                    let _ = std::fs::remove_dir_all(dir);
+                    panel
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    panels.try_into().unwrap()
 }
 
 /// The menu is on the panel while the finger is still down, and the lift changes
