@@ -368,12 +368,8 @@ pub fn parse(xml: &str) -> Result<Element, String> {
                 // Close up to the matching open element (tolerates unclosed children).
                 // The search is bounded by MAX_DEPTH.
                 if let Some(pos) = stack.iter().rposition(|el| el.name == name) {
-                    if pos == 0 {
-                        continue;
-                    }
-                    while stack.len() > pos {
-                        let el = stack.pop().expect("open element");
-                        stack.last_mut().expect("document").children.push(Node::Element(el));
+                    if pos > 0 {
+                        close_to(&mut stack, pos);
                     }
                 }
             }
@@ -392,10 +388,7 @@ pub fn parse(xml: &str) -> Result<Element, String> {
             _ => {}
         }
     }
-    while stack.len() > 1 {
-        let el = stack.pop().expect("open element");
-        stack.last_mut().expect("document").children.push(Node::Element(el));
-    }
+    close_to(&mut stack, 1);
     let doc = stack.pop().expect("document");
     doc.children
         .into_iter()
@@ -404,6 +397,15 @@ pub fn parse(xml: &str) -> Result<Element, String> {
             Node::Text(_) => None,
         })
         .ok_or_else(|| "XML: no root element".to_string())
+}
+
+/// Closes the open elements down to `len` (at least 1, the document), each becoming the
+/// last child of the one below it.
+fn close_to(stack: &mut Vec<Element>, len: usize) {
+    while stack.len() > len {
+        let el = stack.pop().expect("open element");
+        stack.last_mut().expect("document").children.push(Node::Element(el));
+    }
 }
 
 fn append_text(el: &mut Element, s: String) {

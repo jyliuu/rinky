@@ -146,11 +146,11 @@ fn convert(path: &Path, bytes: &[u8]) -> Converted {
     let xhtml = xhtml::to_xhtml(&d.text, &mut c);
     let mut info = BookInfo::new(Format::Html);
     info.version = format!("HTML {}", d.encoding);
-    info.metadata.title = c.title.clone().or_else(|| c.headings.first().map(|h| h.1.clone())).unwrap_or_else(|| crate::title_from(path));
-    info.metadata.authors = c.authors.clone();
-    info.metadata.language = c.language.clone();
-    info.metadata.description = c.description.clone();
     let toc = heading_toc(&c.headings, 0);
+    info.metadata.title = c.title.or_else(|| c.headings.into_iter().next().map(|h| h.1)).unwrap_or_else(|| crate::title_from(path));
+    info.metadata.authors = c.authors;
+    info.metadata.language = c.language;
+    info.metadata.description = c.description;
     Converted { xhtml, info, toc }
 }
 
