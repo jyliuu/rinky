@@ -446,6 +446,28 @@ impl Wifi for LipcServices {
         }
     }
 
+    fn after_wake(&mut self) {
+        // The state read before sleep is stale now.
+        self.remember(|k| k.wifi = None);
+        let lipc = self.lipc.clone();
+        let r = std::thread::Builder::new().name("wifi-wake".into()).spawn(move || {
+            std::thread::sleep(crate::services::WIFI_WAKE_SETTLE);
+            match read_wifi_state(&lipc) {
+                Ok(s) if s.searching() => {
+                    log::info!("wifi: not connected after wake ({}): scanning", s.state);
+                    if let Err(e) = lipc.set_str(WIFID, "scan", "") {
+                        log::warn!("wifi: scan after wake: {e}");
+                    }
+                }
+                Ok(s) => log::info!("wifi: after wake: {} (no scan)", s.state),
+                Err(e) => log::warn!("wifi: state after wake: {e}"),
+            }
+        });
+        if let Err(e) = r {
+            log::warn!("wifi: cannot start the wake scan: {e}");
+        }
+    }
+
     fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
         self.lipc.set_str(WIFID, "scan", "")?;
         // wifid reports "scanning" then "idle" (KOReader polls the same way, 20 s max).

@@ -377,6 +377,8 @@ impl App {
                 }
                 if matches!(ev, UiEvent::Power(PowerEvent::OutOfScreenSaver)) {
                     self.repaint_after_wake = true;
+                    // Carried somewhere else while asleep: look for networks there.
+                    self.device.wifi.after_wake();
                 }
                 if matches!(ev, UiEvent::Power(PowerEvent::GoingToScreenSaver | PowerEvent::OutOfScreenSaver | PowerEvent::Resuming)) {
                     // The screensaver (or a resume) changed the panel behind the app's back.

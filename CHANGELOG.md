@@ -4,6 +4,15 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-11-07
+
+### Fixed
+- After waking from sleep with Wi-Fi on but not connected (for example after the
+  e-reader was carried away from its network), rinky now scans for networks, so
+  Settings › Wi-Fi lists the networks around and a saved one in range can be joined.
+- Insightful: closing a chat started with Explain (or another highlight action) took
+  two taps. The chat opened twice, one copy under the other; it now opens once.
+
 ## [0.5.0] - 2026-11-06
 
 ### Added
@@ -185,6 +194,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.5.1]: https://github.com/jyliuu/rinky/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jyliuu/rinky/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/jyliuu/rinky/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jyliuu/rinky/compare/v0.4.1...v0.4.2

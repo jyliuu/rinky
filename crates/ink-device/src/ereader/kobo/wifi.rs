@@ -468,10 +468,15 @@ pub fn networks() -> Result<Vec<(i64, String)>> {
     Ok(parse_networks(&env().wpa(&["list_networks"])?))
 }
 
+/// Starts a scan without waiting for it (wpa_supplicant joins a saved network it finds).
+pub fn request_scan() -> Result<()> {
+    env().wpa(&["scan"]).map(|_| ())
+}
+
 /// Scans and returns what was found (waits up to 8 s for the results).
 pub fn scan() -> Result<Vec<WifiNetwork>> {
     let e = env();
-    e.wpa(&["scan"])?;
+    request_scan()?;
     let start = Instant::now();
     let mut raw = String::new();
     while start.elapsed() < Duration::from_secs(8) {
