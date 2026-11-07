@@ -166,7 +166,10 @@ pub fn cut_at(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let mut body: String = text.chars().take(max).collect();
-    if let Some(sp) = body.rfind(' ').filter(|n| *n > max / 2) {
+    // `rfind` gives a byte offset: compare it with the offset of the middle character,
+    // not with a character count (they differ outside ASCII).
+    let half = body.char_indices().nth(max / 2).map_or(body.len(), |(i, _)| i);
+    if let Some(sp) = body.rfind(' ').filter(|n| *n > half) {
         body.truncate(sp);
     }
     let keep = body.trim_end_matches([' ', '•', ',', ';', ':']).len();
@@ -215,6 +218,9 @@ mod tests {
         assert_eq!(cut_at("one two three four", 12), "one two…");
         assert_eq!(cut_at("one two, • three", 10), "one two…");
         assert_eq!(cut_at("abcdefghijkl", 5), "abcde…");
+        // The space is in the first half by characters (though not by bytes): no word cut.
+        assert_eq!(cut_at("абв гдежзиклмн", 10), "абв гдежзи…");
+        assert_eq!(cut_at("абвгдеж зиклмн", 10), "абвгдеж…");
         assert_eq!(squeeze(" a\n\t b  c "), "a b c");
         assert_eq!(squeeze(" \n "), "");
     }
