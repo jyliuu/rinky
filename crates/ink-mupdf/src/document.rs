@@ -845,6 +845,28 @@ impl MupdfDocument {
         }
     }
 
+    /// Draws `page` with `ctm` into the rectangle `clip` of `dst`, an image `dst_w`
+    /// pixels wide, and applies the contrast and gamma table. `clip` lies inside `dst`.
+    fn render_into(&self, page: usize, ctm: &Matrix, clip: Rect, dst: &mut [u8], dst_w: usize) -> Result<()> {
+        let (x, y, cw, ch) = (clip.x as usize, clip.y as usize, clip.w as usize, clip.h as usize);
+        if x == 0 && cw == dst_w {
+            // Whole rows (a page as wide as the screen): drawn in place.
+            let rows = &mut dst[y * dst_w..(y + ch) * dst_w];
+            self.inner.borrow_mut().raw.render(page, ctm, clip, rows)?;
+            self.apply_lut(rows);
+            return Ok(());
+        }
+        // The shim clears the area to white before drawing.
+        let mut tmp = vec![0u8; cw * ch];
+        self.inner.borrow_mut().raw.render(page, ctm, clip, &mut tmp)?;
+        self.apply_lut(&mut tmp);
+        for (row, src) in tmp.chunks_exact(cw).enumerate() {
+            let at = (y + row) * dst_w + x;
+            dst[at..at + cw].copy_from_slice(src);
+        }
+        Ok(())
+    }
+
     /// Renders `screen` into a new `w * h` buffer (no cache).
     fn draw_screen(&self, screen: usize) -> Result<Vec<u8>> {
         let s = self.setup();
@@ -854,32 +876,23 @@ impl MupdfDocument {
         if pieces.is_empty() {
             return Err(DocError::PageOutOfRange(screen));
         }
-        for p in pieces {
-            let c = p.clip;
-            if c.is_empty() {
-                continue;
-            }
-            let (cw, ch) = (c.w as usize, c.h as usize);
-            let mut tmp = vec![255u8; cw * ch];
-            self.inner.borrow_mut().raw.render(p.page, &p.ctm, c, &mut tmp)?;
-            self.apply_lut(&mut tmp);
-            for row in 0..ch {
-                let dy = c.y as usize + row;
-                let dx = c.x as usize;
-                buf[dy * w + dx..dy * w + dx + cw].copy_from_slice(&tmp[row * cw..(row + 1) * cw]);
-            }
+        for p in pieces.iter().filter(|p| !p.clip.is_empty()) {
+            self.render_into(p.page, &p.ctm, p.clip, &mut buf, w)?;
         }
         Ok(buf)
     }
 
-    fn screen_pixels(&self, screen: usize) -> Result<Vec<u8>> {
+    /// Calls `f` with the pixels of `screen`, from the cache or drawn (and cached) now,
+    /// without copying them.
+    fn with_screen<R>(&self, screen: usize, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
         if let Some(px) = self.inner.borrow_mut().screens.get(&screen) {
-            return Ok(px.clone());
+            return Ok(f(px));
         }
         let px = self.draw_screen(screen)?;
+        let r = f(&px);
         let bytes = px.len();
-        self.inner.borrow_mut().screens.insert(screen, px.clone(), bytes);
-        Ok(px)
+        self.inner.borrow_mut().screens.insert(screen, px, bytes);
+        Ok(r)
     }
 
     /// Renders `screen` into the cache without showing it (call after a page turn for the
@@ -929,16 +942,7 @@ impl MupdfDocument {
         if clip.is_empty() || canvas.pixels.len() < w * h {
             return Ok(());
         }
-        let (cw, ch) = (clip.w as usize, clip.h as usize);
-        let mut tmp = vec![255u8; cw * ch];
-        self.inner.borrow_mut().raw.render(page, &ctm, clip, &mut tmp)?;
-        self.apply_lut(&mut tmp);
-        for row in 0..ch {
-            let dy = clip.y as usize + row;
-            let dx = clip.x as usize;
-            canvas.pixels[dy * w + dx..dy * w + dx + cw].copy_from_slice(&tmp[row * cw..(row + 1) * cw]);
-        }
-        Ok(())
+        self.render_into(page, &ctm, clip, &mut canvas.pixels, w)
     }
 
     /// A thumbnail of the first page (the cover) that fits in `max_w` x `max_h`.
@@ -1039,18 +1043,20 @@ impl Document for MupdfDocument {
         if page >= self.screens() {
             return Err(DocError::PageOutOfRange(page));
         }
-        let px = self.screen_pixels(page)?;
         let (w, h) = (self.layout.width as usize, self.layout.height as usize);
-        if canvas.width == w && canvas.height == h {
-            canvas.pixels.copy_from_slice(&px);
-        } else {
-            canvas.clear(255);
-            for y in 0..h.min(canvas.height) {
+        self.with_screen(page, |px| {
+            if canvas.width == w && canvas.height == h {
+                canvas.pixels.copy_from_slice(px);
+            } else {
+                canvas.clear(255);
                 let n = w.min(canvas.width);
-                canvas.pixels[y * canvas.width..y * canvas.width + n].copy_from_slice(&px[y * w..y * w + n]);
+                if n > 0 {
+                    for (dst, src) in canvas.pixels.chunks_exact_mut(canvas.width).zip(px.chunks_exact(w)) {
+                        dst[..n].copy_from_slice(&src[..n]);
+                    }
+                }
             }
-        }
-        Ok(())
+        })
     }
 
     fn position_of_page(&self, page: usize) -> Result<Position> {
