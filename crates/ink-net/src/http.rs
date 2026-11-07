@@ -148,8 +148,7 @@ impl Request {
 
     /// `Authorization: Basic ...` (OPDS servers such as Calibre-Web).
     pub fn basic_auth(self, user: &str, password: &str) -> Self {
-        let token = base64(format!("{user}:{password}").as_bytes());
-        self.set_header("Authorization", &format!("Basic {token}"))
+        self.set_header("Authorization", &basic_auth_value(user, password))
     }
 
     /// Sets the head phase timeout ([`Request::timeout`]).
@@ -532,6 +531,11 @@ impl HttpClient for UreqClient {
             apply_redirect(&mut req, status, &location);
         }
     }
+}
+
+/// The `Authorization` value for HTTP Basic auth: `Basic base64(user:password)`.
+pub fn basic_auth_value(user: &str, password: &str) -> String {
+    format!("Basic {}", base64(format!("{user}:{password}").as_bytes()))
 }
 
 /// Standard base64 with padding.
