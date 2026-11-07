@@ -5,7 +5,7 @@
 
 use super::rows::Row;
 use super::{PageModule, Reply};
-use crate::battery_log::{self, hours_text, rate_text, Stats, Use};
+use crate::battery_log::{self, hours_text, Rate, Sample, Stats, Use};
 use crate::router::AppCtx;
 use ink_store::Settings;
 
@@ -39,22 +39,22 @@ pub fn rows_for(percent: Option<u8>, charging: bool, st: &Stats) -> Vec<Row> {
     ));
     let none = "Not enough data yet";
     rows.push(Row::header("Estimated time left"));
-    let left = |rate: Option<f32>| match (percent, charging) {
+    let left = |rate: Option<Rate>| match (percent, charging) {
         (_, true) => "Charging".to_string(),
-        (Some(p), false) => Stats::hours_left(p, rate).map_or_else(|| none.to_string(), hours_text),
+        (Some(p), false) => rate.and_then(|r| r.left_text(p)).unwrap_or_else(|| none.to_string()),
         (None, false) => none.to_string(),
     };
     rows.push(value_row("As you use it", left(st.per_hour())));
     rows.push(value_row("Reading all the time", left(st.awake.per_hour())));
     rows.push(value_row("Asleep all the time", left(st.asleep.per_hour())));
     rows.push(Row::header("Use per hour (last 7 days)"));
-    let rate = |u: &Use| u.per_hour().map_or_else(|| none.to_string(), rate_text);
+    let rate = |u: &Use| u.per_hour().map_or_else(|| none.to_string(), |r| r.text());
     rows.push(value_row("Awake", rate(&st.awake)).subtitle(used_text(&st.awake)));
     rows.push(value_row("Asleep", rate(&st.asleep)).subtitle(used_text(&st.asleep)));
     rows.push(Row::header("Since the last charge"));
     rows.push(value_row("Used", used_text(&st.since_charge)));
     rows.push(value_row("Per hour", rate(&st.since_charge)));
-    rows.push(Row::note("Noted while rinky runs: every 10 min awake, and at each sleep and wake."));
+    rows.push(Row::note("Noted while rinky runs: as the charge drops, at each sleep and wake."));
     rows
 }
 
@@ -65,8 +65,11 @@ impl PageModule for Page {
 
     fn rows(&mut self, cx: &mut AppCtx) -> Vec<Row> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let st = Stats::from_samples(&battery_log::load(&cx.paths.battery_log()), now);
         let b = cx.services.battery.state().ok();
+        // The charge now ends the last stretch, which the log has not noted yet.
+        let mut samples = battery_log::load(&cx.paths.battery_log());
+        samples.extend(b.map(|b| Sample { t: now, percent: b.percent, charging: b.charging, awake: true }));
+        let st = Stats::from_samples(&samples, now);
         rows_for(b.map(|b| b.percent), b.is_some_and(|b| b.charging), &st)
     }
 
@@ -98,6 +101,17 @@ mod tests {
         assert_eq!(get("Asleep all the time"), Some("6 days 16 h"));
         assert_eq!(get("Awake"), Some("5.0 % per hour"));
         assert_eq!(get("Used"), Some("20 % in 13 h"));
+    }
+
+    #[test]
+    fn rows_with_no_point_used_show_a_bound() {
+        let st = Stats { asleep: Use { percent: 0.0, hours: 8.0 }, since_charge: Use { percent: 0.0, hours: 8.0 }, ..Default::default() };
+        let v = values(&rows_for(Some(80), false, &st));
+        let get = |t: &str| v.iter().find(|(k, _)| k == t).map(|(_, v)| v.as_str());
+        assert_eq!(get("Asleep"), Some("under 0.1 % per hour"));
+        assert_eq!(get("Asleep all the time"), Some("over 26 days 16 h"));
+        assert_eq!(get("As you use it"), Some("over 26 days 16 h"));
+        assert_eq!(get("Awake"), Some("Not enough data yet"));
     }
 
     #[test]

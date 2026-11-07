@@ -4,8 +4,8 @@
 //! One sample per line in `battery.csv` in the home folder
 //! ([`ink_store::Paths::battery_log`]): `unix seconds,percent,charging,awake` (0/1). The
 //! `awake` flag tells what the device did until the next sample: a sample is written
-//! when the device goes to sleep (`0`) and when it wakes (`1`), and every
-//! [`BatteryLog::EVERY`] while awake. Samples older than [`KEEP`] are dropped when the
+//! when the device goes to sleep (`0`) and when it wakes (`1`), and while awake each
+//! time the charge changes and at least every [`BatteryLog::EVERY`]. Samples older than [`KEEP`] are dropped when the
 //! file is rewritten.
 
 use ink_device::BatteryState;
@@ -122,9 +122,45 @@ impl Use {
         self.hours += hours;
     }
 
-    /// Percent per hour, once there is enough to tell (half an hour and 2 %).
-    pub fn per_hour(&self) -> Option<f32> {
-        (self.hours >= 0.5 && self.percent >= 2.0).then(|| self.percent / self.hours)
+    /// Percent per hour: once a point is used in a quarter of an hour or more; until
+    /// then, after an hour, at most a point in that time.
+    pub fn per_hour(&self) -> Option<Rate> {
+        if self.percent >= 1.0 && self.hours >= 0.25 {
+            Some(Rate::About(self.percent / self.hours))
+        } else if self.hours >= 1.0 {
+            Some(Rate::Under(1.0 / self.hours))
+        } else {
+            None
+        }
+    }
+}
+
+/// Percent used per hour. The charge is read in whole points, so with no point used
+/// yet there is only an upper bound.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Rate {
+    /// About this many percent per hour.
+    About(f32),
+    /// Less than this many percent per hour.
+    Under(f32),
+}
+
+impl Rate {
+    /// `1.2 % per hour`, `under 0.2 % per hour`.
+    pub fn text(self) -> String {
+        match self {
+            Rate::About(r) => rate_text(r),
+            Rate::Under(r) => format!("under {}", rate_text(r)),
+        }
+    }
+
+    /// How long `percent` lasts at this rate: `12 h`, `over 3 days 4 h`.
+    pub fn left_text(self, percent: u8) -> Option<String> {
+        match self {
+            Rate::About(r) if r > 0.0 => Some(hours_text(percent as f32 / r)),
+            Rate::Under(r) if r > 0.0 => Some(format!("over {}", hours_text(percent as f32 / r))),
+            _ => None,
+        }
     }
 }
 
@@ -161,18 +197,12 @@ impl Stats {
         st
     }
 
-    /// Percent per hour for the time left: since the last charge when that tells
-    /// enough, else the last week's mix of awake and asleep.
-    pub fn per_hour(&self) -> Option<f32> {
-        self.since_charge.per_hour().or_else(|| {
-            let all = Use { percent: self.awake.percent + self.asleep.percent, hours: self.awake.hours + self.asleep.hours };
-            all.per_hour()
-        })
-    }
-
-    /// Hours `percent` lasts at `per_hour`.
-    pub fn hours_left(percent: u8, per_hour: Option<f32>) -> Option<f32> {
-        per_hour.filter(|r| *r > 0.0).map(|r| percent as f32 / r)
+    /// Percent per hour for the time left: since the last charge when a point was used
+    /// since, else the last week's mix of awake and asleep.
+    pub fn per_hour(&self) -> Option<Rate> {
+        let all = Use { percent: self.awake.percent + self.asleep.percent, hours: self.awake.hours + self.asleep.hours };
+        let since = self.since_charge.per_hour();
+        since.filter(|r| matches!(r, Rate::About(_))).or_else(|| all.per_hour()).or(since)
     }
 }
 
@@ -228,17 +258,16 @@ mod tests {
         assert_eq!(st.awake, Use { percent: 15.0, hours: 3.0 });
         assert_eq!(st.asleep, Use { percent: 5.0, hours: 10.0 });
         assert_eq!(st.since_charge, Use { percent: 20.0, hours: 13.0 });
-        assert_eq!(st.awake.per_hour(), Some(5.0));
-        assert_eq!(st.asleep.per_hour(), Some(0.5));
-        let left = Stats::hours_left(80, st.per_hour()).unwrap();
-        assert!((left - 52.0).abs() < 0.01, "{left}");
+        assert_eq!(st.awake.per_hour(), Some(Rate::About(5.0)));
+        assert_eq!(st.asleep.per_hour(), Some(Rate::About(0.5)));
+        assert_eq!(st.per_hour().unwrap().left_text(80).as_deref(), Some("2 days 4 h"));
         // Charged again: the run since the charge is empty, the week's rates stay.
         let mut more = samples.to_vec();
         more.push(s(t0 + 15 * H, 80, true, true));
         more.push(s(t0 + 16 * H, 100, false, true));
         let st = Stats::from_samples(&more, t0 + 16 * H);
         assert_eq!(st.since_charge, Use::default());
-        assert_eq!(st.per_hour(), Some(20.0 / 13.0));
+        assert_eq!(st.per_hour(), Some(Rate::About(20.0 / 13.0)));
     }
 
     #[test]
@@ -252,9 +281,25 @@ mod tests {
     }
 
     #[test]
+    fn a_point_in_a_quarter_hour_gives_a_rate_and_none_used_a_bound() {
+        let t0 = 1_700_000_000;
+        // 10 minutes: too short to tell.
+        assert_eq!(Stats::from_samples(&[s(t0, 80, false, true), s(t0 + 600, 79, false, true)], t0 + 600).per_hour(), None);
+        // A point in 20 minutes: 3 % per hour.
+        assert_eq!(Stats::from_samples(&[s(t0, 80, false, true), s(t0 + 1200, 79, false, true)], t0 + 1200).per_hour(), Some(Rate::About(3.0)));
+        // Asleep 8 h and no point used: under 1/8 % per hour, more than 50 days for 80 %.
+        let st = Stats::from_samples(&[s(t0, 80, false, false), s(t0 + 8 * H, 80, false, true)], t0 + 8 * H);
+        let r = st.asleep.per_hour().unwrap();
+        assert_eq!(r, Rate::Under(0.125));
+        assert_eq!((r.text().as_str(), r.left_text(80).as_deref()), ("under 0.1 % per hour", Some("over 26 days 16 h")));
+        // Awake with a rate: that rate wins over a bound since the charge.
+        let st = Stats::from_samples(&[s(t0, 80, false, false), s(t0 + 8 * H, 80, false, true), s(t0 + 9 * H, 78, false, true)], t0 + 9 * H);
+        assert_eq!(st.per_hour(), Some(Rate::About(2.0 / 9.0)));
+    }
+
+    #[test]
     fn too_little_data_gives_no_rate_and_old_samples_are_ignored() {
         let t0 = 1_700_000_000;
-        assert_eq!(Stats::from_samples(&[s(t0, 80, false, true), s(t0 + 600, 79, false, true)], t0 + 600).per_hour(), None);
         let old = [s(t0, 100, false, true), s(t0 + 5 * H, 50, false, true)];
         assert_eq!(Stats::from_samples(&old, t0 + KEEP.as_secs() + 6 * H), Stats::default());
     }

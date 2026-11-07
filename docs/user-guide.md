@@ -613,8 +613,10 @@ to sleep after 3 minutes.
 
 **Settings > Battery** shows how much charge the Kindle uses per hour awake and asleep,
 how much it used since the last charge, and how long the charge left may last. rinky
-notes the charge every 10 minutes while awake and at each sleep and wake, in
-`battery.csv` in its folder; the estimates appear after about half an hour of use. Tap
+notes the charge each time it drops, at each sleep and wake, and at least every 10
+minutes while awake, in `battery.csv` in its folder. A rate appears once a point of
+charge is used in a quarter of an hour or more; before that, after an hour with no
+point used, the page shows an upper bound ("under 0.2 % per hour"). Tap
 the battery card in **Settings > Device info** to get there, or add a **Battery** button
 to the control center (**Settings > Control center buttons**).
 
