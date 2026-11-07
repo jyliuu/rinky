@@ -141,6 +141,10 @@ fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, sav
     }
 }
 
+/// How often the reader looks whether pagination finished while its bars show an
+/// estimated total.
+const COUNTING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Longest a percent jump waits for pagination to finish.
 const PERCENT_WAIT: Duration = Duration::from_secs(10);
 
@@ -625,6 +629,9 @@ pub struct ReaderScreen {
     status_shown: [String; 3],
     /// Chapter starts for the footer (rebuilt when the layout changes).
     chapter_map: Option<footer::ChapterMap>,
+    /// The bars on screen were drawn while pagination still counted pages (an estimated
+    /// total, no chapter ticks or pages left): they are drawn again once it is done.
+    counting_shown: bool,
     /// Reading speed for "min left in chapter" (ink-stats, else 250 wpm).
     speed: footer::Speed,
     /// Hide both status bars (the `status_bars` action, [`ReaderScreen::toggle_status_bars`]).
@@ -714,6 +721,7 @@ impl ReaderScreen {
             sel_highlight: false,
             status_shown: Default::default(),
             chapter_map: None,
+            counting_shown: false,
             speed: footer::Speed::default(),
             status_bars_hidden: false,
             bars: footer::BarsState::default(),
@@ -1754,6 +1762,7 @@ impl ReaderScreen {
             self.chapter_map = Some(footer::ChapterMap::build(doc, &toc));
         }
         let map = self.chapter_map.as_ref()?;
+        self.counting_shown = !doc.page_count().complete;
         Some(footer::info(doc, &toc, map, self.page, self.speed))
     }
 
@@ -2269,11 +2278,18 @@ impl AppScreen for ReaderScreen {
         let save = self.position_due().map(|d| d.saturating_duration_since(Instant::now()));
         // A selection drag resting in a page-turn zone.
         let edge = self.sel_edge.filter(|_| !self.sel_edge_lock && self.selecting.is_some()).map(|(_, since)| selection::EDGE_DWELL.saturating_sub(since.elapsed()));
-        self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout()).into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).min() // aa: debounce; statusbar: minute tick; position save; selection edge
+        // Bars drawn while pagination counts: look again for the end of the count.
+        let counting = (self.counting_shown && !self.status_bars_hidden && self.overlay.is_none()).then_some(COUNTING_POLL);
+        self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout()).into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting).min() // aa: debounce; statusbar: minute tick; position save; selection edge; page count
     }
 }
 
 impl ReaderScreen {
+    /// True when the bars on screen show a count still in progress that is now done.
+    fn counting_done(&self) -> bool {
+        self.counting_shown && !self.status_bars_hidden && self.doc.as_deref().is_some_and(|d| d.page_count().complete)
+    }
+
     /// Ends the open trace once the first page went to the panel (`open:` log line).
     fn finish_open_trace(&mut self) {
         let Some(mut trace) = self.open_trace.take() else { return };
@@ -2282,7 +2298,7 @@ impl ReaderScreen {
         let state = if count.complete {
             "complete".to_string()
         } else {
-            let est = doc.page_estimate().map(|e| format!(", ~{e} estimated")).unwrap_or_default();
+            let est = doc.page_estimate().map(|e| format!(", {} estimated", footer::about(e))).unwrap_or_default();
             format!("{} pages known{est}, paginating", count.pages)
         };
         trace.finish(&doc.metadata().title, self.page, &state);
@@ -2436,6 +2452,22 @@ impl ReaderScreen {
             // page turn flash sooner (instead of a GC16 flash on every close).
             let c = cx.refresh.class_for(Change::FullOverlayClose);
             self.dirty = Some(self.dirty.map_or(c, |d| d.max(c)));
+        }
+        if self.dirty.is_none() && self.overlay.is_none() && !self.rerender && self.error.is_none() && self.counting_done() {
+            // Pagination finished after the bars were drawn (a font size change): only
+            // the bars again, with the counted total and the chapter ticks (the page
+            // itself is not rendered again).
+            let t = Instant::now();
+            match self.redraw_bars(cx, &status, footer::Part::All) {
+                Some(rows) => {
+                    log::info!("reader: pagination done; status bars drawn again in {} ms", t.elapsed().as_millis());
+                    bar_damage.extend(rows.into_iter().map(|r| cx.refresh.damage(Change::Status, r)));
+                }
+                None => {
+                    self.rerender = true;
+                    self.dirty = Some(RefreshClass::Gl16);
+                }
+            }
         }
         let swap_before = std::mem::take(&mut self.swap_same).then(|| cx.canvas.clone());
         let reveal = self.reveal_damage(cx);

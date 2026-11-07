@@ -170,6 +170,7 @@ pub const CONTROL_BUTTONS: &[(&str, &str)] = &[
     ("status_bars", "Status bars"),
     ("screenshot", "Screenshot"),
     ("sleep", "Sleep"),
+    ("battery", "Battery"),
     ("settings", "Settings"),
 ];
 

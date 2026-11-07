@@ -1175,6 +1175,10 @@ impl ControlCenterScreen {
             "status_bars" => toggle(Glyph::Icon(Icon::Info), bars_on),
             "screenshot" => Tile::new(Glyph::Icon(Icon::Download), caption, "Save the screen", None, a),
             "sleep" => Tile::new(Glyph::Icon(Icon::Night), caption, "Now", None, a),
+            "battery" => {
+                let state = cx.services.battery.state().map_or_else(|_| "Not available".into(), |b| if b.charging { format!("{}%, charging", b.percent) } else { format!("{}%", b.percent) });
+                Tile::new(Glyph::Icon(Icon::Battery), caption, state, None, a)
+            }
             "settings" => Tile::new(Glyph::Icon(Icon::Settings), caption, "All settings", None, a),
             _ => match ink_plugin::registry::parse_saved_id(name).and_then(|(p, id)| cx.plugins.control_tile(p, id)) {
                 // A tile of a plugin: icon, caption and state come from the plugin.
@@ -1705,6 +1709,11 @@ impl ControlCenterScreen {
             }
             "settings" => {
                 log::info!("control center: open settings");
+                return Ok(Transition::Replace(Route::Settings));
+            }
+            "battery" => {
+                log::info!("control center: open the battery page");
+                crate::screens::settings::open_at("mod:battery");
                 return Ok(Transition::Replace(Route::Settings));
             }
             other => log::warn!("control center: unknown button {other}"),

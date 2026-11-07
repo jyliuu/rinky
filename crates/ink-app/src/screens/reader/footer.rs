@@ -313,7 +313,7 @@ pub struct FooterInfo {
     /// Pages in the book (so far, while pagination runs).
     pub total: usize,
     /// Estimated page count while pagination runs ([`Document::page_estimate`]); shown
-    /// as "~N" instead of `total`.
+    /// as [`about`] instead of `total`.
     pub total_estimate: Option<usize>,
     /// Fraction read, 0..=1 (the bar).
     pub progress: f32,
@@ -400,6 +400,12 @@ pub fn time_left_text(minutes: u32, in_chapter: bool) -> String {
     format!("{} left in {}", duration_text(minutes), if in_chapter { "chapter" } else { "book" })
 }
 
+/// An estimated page count while pagination runs: `about 340`. (Not `~340`: at
+/// status-bar size the tilde read as a minus sign, "3 / -340"; the UI font has no `≈`.)
+pub fn about(pages: usize) -> String {
+    format!("about {pages}")
+}
+
 /// Percent shown in the bars: rounded down, 100 only at the end.
 pub fn percent_text(progress: f32) -> String {
     let p = if progress.is_nan() { 0.0 } else { progress.clamp(0.0, 1.0) };
@@ -432,7 +438,7 @@ pub fn widget_piece(name: &str, info: &FooterInfo) -> Option<Piece> {
         "page" => (info.total > 0).then(|| Piece::Text((info.page + 1).to_string(), Style::Regular)),
         "page_of_total" => (info.total > 0).then(|| {
             let text = match info.total_estimate {
-                Some(e) => format!("{} / ~{e}", info.page + 1),
+                Some(e) => format!("{} / {}", info.page + 1, about(e)),
                 None => format!("{} / {}", info.page + 1, info.total),
             };
             Piece::Text(text, Style::Regular)
@@ -912,6 +918,12 @@ impl ReaderScreen {
     /// when that is not enough: no document or page buffer, or the new texts change
     /// which rows the bars take (the page must then be drawn again).
     pub(super) fn redraw_bar_text(&mut self, cx: &mut AppCtx, status: &[String; 3]) -> Option<Vec<Rect>> {
+        self.redraw_bars(cx, status, Part::Text)
+    }
+
+    /// [`Self::redraw_bar_text`], with the progress bars too when `part` is [`Part::All`]
+    /// (pagination finished: the chapter ticks and the fill change).
+    pub(super) fn redraw_bars(&mut self, cx: &mut AppCtx, status: &[String; 3], part: Part) -> Option<Vec<Rect>> {
         if self.page_buf.as_ref().is_none_or(|b| b.size() != cx.canvas.size()) {
             return None;
         }
@@ -927,11 +939,20 @@ impl ReaderScreen {
             return None;
         }
         let bounds = cx.canvas.bounds();
-        let rows: Vec<Rect> = edges.iter().filter_map(|&e| rows_for(&layout, bars, e, &info).text).map(|r| r.intersect(&bounds)).filter(|r| !r.is_empty()).collect();
+        let rows: Vec<Rect> = edges
+            .iter()
+            .flat_map(|&e| {
+                let r = rows_for(&layout, bars, e, &info);
+                [r.text, r.progress.filter(|_| part == Part::All)]
+            })
+            .flatten()
+            .map(|r| r.intersect(&bounds))
+            .filter(|r| !r.is_empty())
+            .collect();
         for r in &rows {
             cx.canvas.fill_rect(r.x, r.y, r.w as i32, r.h as i32, 0xFF);
         }
-        draw_bars(cx.canvas, cx.fonts, &layout, bars, &info, Part::Text);
+        draw_bars(cx.canvas, cx.fonts, &layout, bars, &info, part);
         let w = cx.canvas.width;
         if let Some(buf) = self.page_buf.as_mut() {
             for r in &rows {
@@ -1013,6 +1034,9 @@ mod tests {
             other => format!("{other:?}"),
         };
         assert_eq!((t("page_of_total"), t("percent"), t("battery"), t("clock")), ("5 / 10".into(), "50%".into(), "80% +".into(), "09:05".into()));
+        // While pagination counts: the estimate in words, no tilde that reads as a minus.
+        let counting = FooterInfo { total_estimate: Some(340), ..info.clone() };
+        assert!(matches!(widget_piece("page_of_total", &counting), Some(Piece::Text(t, _)) if t == "5 / about 340"));
         assert_eq!(widget_piece("battery_icon_percent", &info), Some(Piece::Battery(80, true, true)));
         assert_eq!(widget_piece("battery_icon", &info), Some(Piece::Battery(80, true, false)));
         assert_eq!(t("pages_left_chapter"), "1 page left in chapter");

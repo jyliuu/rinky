@@ -35,6 +35,7 @@
 //! screen: the app pushes [`crate::router::Route::QuickLight`].
 
 pub mod advanced;
+pub mod battery;
 pub mod control_buttons;
 pub mod diagnostics;
 pub mod fakes;
@@ -122,6 +123,7 @@ pub const PAGE_MODULES: &[PageInfo] = &[
     PageInfo { key: "gestures", section: "Gestures", icon: Icon::Book, title: "Reader gestures", make: None },
     PageInfo { key: "control_center", section: "Control center", icon: Icon::Grid, title: "Control center buttons", make: Some(|| Box::new(control_buttons::Page)) },
     PageInfo { key: "keyboard", section: "Keyboard", icon: Icon::Globe, title: "Keyboard layouts", make: Some(|| Box::new(keyboard_layouts::Page)) },
+    PageInfo { key: "battery", section: "Device", icon: Icon::Battery, title: "Battery", make: Some(|| Box::new(battery::Page)) },
     PageInfo { key: "diagnostics", section: "Diagnostics", icon: Icon::Info, title: "Diagnostics", make: Some(|| Box::new(diagnostics::Page::default())) },
 ];
 
@@ -1402,7 +1404,8 @@ impl SettingsScreen {
                 if let Some(v) = b.voltage_mv {
                     details.push(format!("{v} mV"));
                 }
-                let mut c = Card::new(format!("Battery {}%", b.percent), "").subtitle(sub).progress(b.percent as f32 / 100.0);
+                // A tap opens the Battery page (use per hour, time left).
+                let mut c = Card::new(format!("Battery {}%", b.percent), "page:mod:battery").subtitle(sub).progress(b.percent as f32 / 100.0);
                 if !details.is_empty() {
                     c = c.body(details.join(" · "));
                 }

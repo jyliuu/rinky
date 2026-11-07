@@ -167,8 +167,8 @@ impl WifiState {
     }
 }
 
-/// How long [`Wifi::after_wake`] waits before it looks: the radio rejoins the network it
-/// had by itself when that one is still in range.
+/// How long a wake, the radio turned on or a lost connection waits before rinky looks for a network: the
+/// radio rejoins the network it had by itself when that one is still in range.
 pub const WIFI_WAKE_SETTLE: Duration = Duration::from_secs(5);
 
 /// A network found by a scan.
@@ -230,10 +230,11 @@ pub trait Wifi {
     fn set_airplane_mode(&mut self, _on: bool) -> Result<()> {
         unsupported("airplane mode")
     }
-    /// The device woke from sleep: when the radio is on but not connected (carried away
-    /// from the network it had), starts a scan in the background, so a saved network in
-    /// range is joined and the Wi-Fi page lists what is around. Returns at once.
-    fn after_wake(&mut self) {}
+    /// The device woke from sleep or the connection changed: when the radio is on but
+    /// not connected (carried away from the network it had), looks for networks in the
+    /// background, so a saved network in range is joined and the Wi-Fi page lists what is
+    /// around. Returns at once.
+    fn look_for_networks(&mut self) {}
 }
 
 /// USB state.

@@ -4,6 +4,28 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-11-07
+
+### Added
+- Settings › Battery: the use per hour awake and asleep, the use since the last
+  charge, and how long the charge left may last. rinky notes the charge every 10
+  minutes while awake and at each sleep and wake. The page opens from the battery
+  card in Device info and from a new Battery button for the control center.
+
+### Changed
+- With Wi-Fi on but not connected, rinky looks for saved networks by itself and joins
+  the strongest one in range. It scans every 15 s at first, then less often, up to
+  every 5 minutes; waking up or turning Wi-Fi on starts over. A network that fails to
+  join is skipped for 10 minutes. This replaces the single scan after a wake from 0.5.1.
+- Keyboard: a pressed key gets a thick border instead of turning black, which shows
+  sooner on e-ink.
+
+### Fixed
+- After a font size change (a pinch), the status bars kept an estimated page total
+  until the next page turn. They now show the counted total as soon as pagination
+  finishes. The estimate was written "~340", which read as a minus sign at
+  status-bar size; it is now "about 340".
+
 ## [0.5.1] - 2026-11-07
 
 ### Fixed
@@ -194,6 +216,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[0.5.2]: https://github.com/jyliuu/rinky/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/jyliuu/rinky/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jyliuu/rinky/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/jyliuu/rinky/compare/v0.4.2...v0.4.3

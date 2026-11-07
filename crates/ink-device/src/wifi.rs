@@ -18,6 +18,7 @@
 use crate::lipc::{LipcHash, LipcValue};
 use crate::services::WifiNetwork;
 use crate::{DeviceError, Result};
+use std::time::{Duration, Instant};
 
 /// A saved Wi-Fi profile.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,10 +130,82 @@ pub fn profile_hash(essid: &str, password: Option<&str>) -> Result<LipcHash> {
     Ok(h)
 }
 
+/// When and what to join while the radio is on but not connected: the strongest saved
+/// network a scan finds. Scans start often and get rarer while none is found (a wake,
+/// the radio turned on or a lost connection starts over); a network that failed to join is skipped for a while
+/// (a changed password must not be retried every minute).
+#[derive(Debug)]
+pub struct AutoJoin {
+    wait: Duration,
+    failed: Vec<(String, Instant)>,
+}
+
+impl Default for AutoJoin {
+    fn default() -> Self {
+        AutoJoin { wait: Self::FIRST, failed: Vec::new() }
+    }
+}
+
+impl AutoJoin {
+    /// The first wait between scans.
+    pub const FIRST: Duration = Duration::from_secs(15);
+    /// The longest wait between scans.
+    pub const MAX: Duration = Duration::from_secs(5 * 60);
+    /// How long a network that failed to join is skipped.
+    pub const SKIP_FAILED: Duration = Duration::from_secs(10 * 60);
+
+    /// Scans start often again.
+    pub fn reset(&mut self) {
+        self.wait = Self::FIRST;
+    }
+
+    /// The wait before the next scan; each call doubles the next one, up to [`Self::MAX`].
+    pub fn next_wait(&mut self) -> Duration {
+        let w = self.wait;
+        self.wait = (w * 2).min(Self::MAX);
+        w
+    }
+
+    /// The strongest saved network in `nets` (strongest first) not skipped at `now`.
+    pub fn pick<'a>(&mut self, nets: &'a [WifiNetwork], now: Instant) -> Option<&'a WifiNetwork> {
+        self.failed.retain(|(_, at)| now.duration_since(*at) < Self::SKIP_FAILED);
+        nets.iter().find(|n| n.known && !self.failed.iter().any(|(e, _)| *e == n.essid))
+    }
+
+    /// Joining `essid` failed at `now`.
+    pub fn failed(&mut self, essid: &str, now: Instant) {
+        self.failed.push((essid.to_string(), now));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lipc::{format_hash_input, parse_hash_output};
+
+    #[test]
+    fn auto_join_picks_the_strongest_saved_network_and_skips_failures() {
+        let net = |essid: &str, signal, known| WifiNetwork { essid: essid.into(), signal, secured: true, known };
+        let nets = [net("Cafe", 5, false), net("Home", 4, true), net("Office", 2, true)];
+        let mut a = AutoJoin::default();
+        let t = Instant::now();
+        assert_eq!(a.pick(&nets, t).map(|n| n.essid.as_str()), Some("Home"));
+        a.failed("Home", t);
+        assert_eq!(a.pick(&nets, t).map(|n| n.essid.as_str()), Some("Office"));
+        a.failed("Office", t);
+        assert_eq!(a.pick(&nets, t), None);
+        assert_eq!(a.pick(&nets, t + AutoJoin::SKIP_FAILED).map(|n| n.essid.as_str()), Some("Home"));
+        assert_eq!(a.pick(&[net("Cafe", 5, false)], t), None);
+    }
+
+    #[test]
+    fn auto_join_scans_get_rarer_until_reset() {
+        let mut a = AutoJoin::default();
+        let waits: Vec<u64> = (0..7).map(|_| a.next_wait().as_secs()).collect();
+        assert_eq!(waits, [15, 30, 60, 120, 240, 300, 300]);
+        a.reset();
+        assert_eq!(a.next_wait(), AutoJoin::FIRST);
+    }
 
     const SCAN: &str = "Hash Index: 0\n\tbssid = \"02:00:00:81:13:01\"\n\tessid = \"Kindle-QEMU\"\n\tsecured = \"no\"\n\tknown = \"no\"\n\tnetid = (-1)\n\tsignal = (5)\n\tsignal_max = (5)\n\tsupported = \"yes\"\n\twps = \"no\"\n\tenterprise = \"no\"\n\tkey_mgmt = \"\"\n\nHash Index: 1\n\tessid = \"\"\n\tsignal = (4)\n\nHash Index: 2\n\tessid = \"Home\"\n\tsecured = \"yes\"\n\tknown = \"yes\"\n\tsignal = (2)\n\tsignal_max = (5)\nHash Index: 3\n\tessid = \"Home\"\n\tsecured = \"yes\"\n\tknown = \"yes\"\n\tsignal = (3)\n\tsignal_max = (5)\n";
 

@@ -432,6 +432,11 @@ impl Paths {
         self.root.join("statistics.sqlite3")
     }
 
+    /// `battery.csv`: battery samples for the battery page (`ink_app::battery_log`).
+    pub fn battery_log(&self) -> PathBuf {
+        self.root.join("battery.csv")
+    }
+
     /// Cache directory (covers, page maps).
     pub fn cache(&self) -> PathBuf {
         self.root.join("cache")

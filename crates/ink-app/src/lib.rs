@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod battery_log;
 pub mod cli;
 pub mod export;
 pub mod logging;

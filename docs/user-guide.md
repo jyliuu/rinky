@@ -611,6 +611,13 @@ A cover can move a little in a bag. rinky ignores a cover that opens for less th
 half a second. If the Kindle wakes from the cover and nobody touches it, it goes back
 to sleep after 3 minutes.
 
+**Settings > Battery** shows how much charge the Kindle uses per hour awake and asleep,
+how much it used since the last charge, and how long the charge left may last. rinky
+notes the charge every 10 minutes while awake and at each sleep and wake, in
+`battery.csv` in its folder; the estimates appear after about half an hour of use. Tap
+the battery card in **Settings > Device info** to get there, or add a **Battery** button
+to the control center (**Settings > Control center buttons**).
+
 While rinky runs it stops the Amazon background services it does not use (cloud sync,
 usage reporting, audio, Bluetooth) and starts them again when you leave rinky. Power
 management, Wi-Fi, USB and battery protection stay on.

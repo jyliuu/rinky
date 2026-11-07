@@ -49,7 +49,7 @@ pub struct MenuInfo {
     pub pages: usize,
     /// Pagination finished.
     pub complete: bool,
-    /// Estimated page count while pagination runs; shown as "~N" instead of `pages`.
+    /// Estimated page count while pagination runs; shown as [`super::footer::about`] instead of `pages`.
     pub estimate: Option<usize>,
     /// Progress 0..=1.
     pub percent: f32,
@@ -59,18 +59,18 @@ pub struct MenuInfo {
     pub bookmarked: bool,
 }
 
-/// The page total as text: `208` when pagination is complete, `~8370` while the total is
+/// The page total as text: `208` when pagination is complete, `about 8370` while the total is
 /// an estimate, `40+` while pagination runs and there is no estimate.
 pub fn total_text(pages: usize, complete: bool, estimate: Option<usize>) -> String {
     match (complete, estimate.filter(|&e| e > pages)) {
         (true, _) => pages.to_string(),
-        (false, Some(e)) => format!("~{e}"),
+        (false, Some(e)) => super::footer::about(e),
         (false, None) => format!("{pages}+"),
     }
 }
 
 impl MenuInfo {
-    /// `Page 3 of 208 · 12%` (`of ~8370` while pagination runs).
+    /// `Page 3 of 208 · 12%` (`of about 8370` while pagination runs).
     pub fn progress_text(&self) -> String {
         format!("Page {} of {} · {}", self.page + 1, total_text(self.pages, self.complete, self.estimate), super::footer::percent_text(self.percent))
     }
@@ -633,7 +633,7 @@ mod tests {
         i.complete = false;
         assert_eq!(i.progress_text(), "Page 3 of 208+ · 12%");
         i.estimate = Some(8370);
-        assert_eq!(i.progress_text(), "Page 3 of ~8370 · 12%");
+        assert_eq!(i.progress_text(), "Page 3 of about 8370 · 12%");
         i.complete = true;
         assert_eq!(i.progress_text(), "Page 3 of 208 · 12%", "an exact count wins over a stale estimate");
     }
@@ -642,7 +642,7 @@ mod tests {
     fn scrubber_bubble_shows_the_estimate_while_counting() {
         let i = MenuInfo { page: 2, pages: 208, complete: false, estimate: Some(900), ..Default::default() };
         let s = Scrubber::new(&i, Vec::new());
-        assert_eq!(s.bubble_text(), "p. 3 of ~900");
+        assert_eq!(s.bubble_text(), "p. 3 of about 900");
     }
 
     #[test]
