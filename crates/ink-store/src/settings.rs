@@ -466,11 +466,17 @@ impl Settings {
     }
 
     /// Stores `value` as the `[plugins.<name>]` table. TOML has no `null` and no integers
-    /// above `i64::MAX`; such values are refused with [`StoreError::Invalid`] (fields that
-    /// are `None` are left out).
+    /// above `i64::MAX`, and the TOML reader limits nesting; such values are refused with
+    /// [`StoreError::Invalid`] (fields that are `None` are left out), so `settings.toml`
+    /// always loads again.
     pub fn set_plugin_value<T: Serialize>(&mut self, name: &str, value: &T) -> Result<()> {
         crate::plugin::validate_name(name)?;
-        let v = toml::Value::try_from(value).map_err(|e| StoreError::Invalid(format!("plugins.{name}: {e}")))?;
+        let invalid = |e: &dyn std::fmt::Display| StoreError::Invalid(format!("plugins.{name}: {e}"));
+        let v = toml::Value::try_from(value).map_err(|e| invalid(&e))?;
+        // The table as `save` writes it must read back.
+        let probe = toml::Table::from_iter([("plugins".to_string(), toml::Value::Table(toml::Table::from_iter([(name.to_string(), v.clone())])))]);
+        let text = toml::to_string_pretty(&probe).map_err(|e| invalid(&e))?;
+        toml::from_str::<toml::Table>(&text).map_err(|e| invalid(&e))?;
         self.plugins.insert(name.to_string(), v);
         Ok(())
     }
@@ -618,6 +624,10 @@ mod tests {
         assert_eq!(s.plugin_table("kosync").unwrap()["port"].as_integer(), Some(443));
         assert!(s.set_plugin_value("../evil", &1).is_err());
         assert!(s.set_plugin_value("big", &serde_json::json!({ "n": u64::MAX })).is_err());
+        // Nested deeper than the TOML reader reads back: refused, nothing stored.
+        let deep = (0..100).fold(serde_json::json!(1), |v, _| serde_json::json!({ "k": v }));
+        assert!(matches!(s.set_plugin_value("deep", &deep), Err(StoreError::Invalid(_))));
+        assert!(s.plugin_table("deep").is_none());
         assert!(s.plugin_value::<u32>("kosync").is_err());
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file).unwrap(), s);

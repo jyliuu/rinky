@@ -351,9 +351,9 @@ fn settings_deep_round_trip(f: &Path, shape: &str, depth: usize) -> (bool, bool,
 /// The global settings: a plugin's `[plugins.<name>]` table nested deeper than the TOML
 /// reader accepts. After `set_plugin_value` and `save`, the strict `Settings::load`
 /// (what ink-app calls at start) must still read the file, or `set_plugin_value`/`save`
-/// must refuse the value. Prints the smallest depth that breaks it.
+/// must refuse the value (it does). Prints the smallest depth that breaks it, if any
+/// (before the fix: 80 nested tables or 81 nested arrays).
 #[test]
-#[ignore = "verifier: Settings::save writes a [plugins.<name>] value nested deeper than the TOML reader accepts; strict Settings::load then fails on the whole settings.toml"]
 fn verifier2_settings_deep_plugin_value_keeps_settings_loadable() {
     let dir = crate::testutil::TempDir::new("v2-settings-deep");
     let f = dir.path().join("settings.toml");
