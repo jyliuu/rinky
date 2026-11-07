@@ -462,6 +462,21 @@ fn files_io_require_and_json() {
 }
 
 #[test]
+fn json_of_nested_arrays_is_linear() {
+    // Each level of arrays used to be converted twice (as an object, then as an array),
+    // so a tree of depth 14 took 37 s on the host (release) inside one host call, where
+    // the Lua time limit does not count.
+    let h = LuaHost::new().unwrap();
+    let tree: Value = h.lua().load("local function t(d) if d == 0 then return 1 end return { t(d - 1), t(d - 1) } end return t(14)").eval().unwrap();
+    let t = Instant::now();
+    let j = lua_to_json(&tree).unwrap();
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert_eq!(j[1][0][1][0][1][0][1][0][1][0][1][0][1][0], 1);
+    let mixed: Value = h.lua().load("return { 1, 2, x = { 3 }, [1.5] = true }").eval().unwrap();
+    assert_eq!(lua_to_json(&mixed).unwrap(), serde_json::json!({ "1": 1, "2": 2, "x": [3], "1.5": true }));
+}
+
+#[test]
 fn http_streaming_through_on_http() {
     let dir = tmpdir("http");
     let src = r#"

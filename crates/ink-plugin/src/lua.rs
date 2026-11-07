@@ -273,40 +273,35 @@ fn to_json(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
         // Error objects (from pcall) are kept as their message.
         Value::Error(e) => J::String(describe(e).lines().next().unwrap_or_default().to_string()),
         Value::Table(t) => {
+            // Look at the keys first and convert each value once: converting every value
+            // for the object form and again for the array form doubled the work at every
+            // level of nested arrays (2^depth).
             let len = t.raw_len();
-            let mut count = 0usize;
-            let mut obj = serde_json::Map::new();
-            let mut all_seq = true;
+            let mut pairs = Vec::new();
+            let mut seq = true;
             for pair in t.clone().pairs::<Value, Value>() {
                 let (k, val) = pair?;
-                count += 1;
                 let key = match &k {
                     Value::Integer(i) => {
-                        if *i < 1 || *i as usize > len {
-                            all_seq = false;
-                        }
+                        seq &= *i >= 1 && *i as usize <= len;
                         i.to_string()
                     }
                     Value::String(s) => {
-                        all_seq = false;
+                        seq = false;
                         s.to_string_lossy()
                     }
                     Value::Number(n) => {
-                        all_seq = false;
+                        seq = false;
                         n.to_string()
                     }
                     other => return Err(mlua::Error::RuntimeError(format!("table key of type {} has no JSON form", other.type_name()))),
                 };
-                obj.insert(key, to_json(&val, depth + 1)?);
+                pairs.push((key, val));
             }
-            if all_seq && count == len && len > 0 {
-                let mut arr = Vec::with_capacity(len);
-                for i in 1..=len {
-                    arr.push(to_json(&t.raw_get::<Value>(i)?, depth + 1)?);
-                }
-                J::Array(arr)
+            if seq && pairs.len() == len && len > 0 {
+                J::Array((1..=len).map(|i| to_json(&t.raw_get::<Value>(i)?, depth + 1)).collect::<mlua::Result<_>>()?)
             } else {
-                J::Object(obj)
+                J::Object(pairs.into_iter().map(|(k, v)| Ok((k, to_json(&v, depth + 1)?))).collect::<mlua::Result<_>>()?)
             }
         }
         other => return Err(mlua::Error::RuntimeError(format!("a {} has no JSON form", other.type_name()))),
