@@ -747,9 +747,9 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_ui_result(&mut self, cx: &mut HostCtx, id: u32, result: &str) -> Result<()> {
-        let kind = self.state.ui.get(&id).map(|(k, _)| *k);
-        let callback = match kind {
-            Some(UiKind::Viewer) if result != "closed" => self.state.ui.get(&id).map(|(_, f)| f.clone()),
+        // A viewer's callback stays for further link taps until it is closed.
+        let callback = match self.state.ui.get(&id) {
+            Some((UiKind::Viewer, f)) if result != "closed" => Some(f.clone()),
             Some(_) => self.state.ui.remove(&id).map(|(_, f)| f),
             None => None,
         };
