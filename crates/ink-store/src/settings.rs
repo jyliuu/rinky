@@ -94,39 +94,6 @@ pub enum FooterStyle {
     Full,
 }
 
-impl FooterStyle {
-    /// Every style, in the order a settings control lists them.
-    pub const ALL: [FooterStyle; 5] = [FooterStyle::None, FooterStyle::Pages, FooterStyle::Bar, FooterStyle::Chapters, FooterStyle::Full];
-
-    /// The stored name (`none`, `pages`, `bar`, `chapters`, `full`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FooterStyle::None => "none",
-            FooterStyle::Pages => "pages",
-            FooterStyle::Bar => "bar",
-            FooterStyle::Chapters => "chapters",
-            FooterStyle::Full => "full",
-        }
-    }
-
-    /// The style named `s`, if it is one.
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|f| f.as_str() == s)
-    }
-}
-
-impl From<String> for FooterStyle {
-    fn from(s: String) -> Self {
-        Self::parse(&s).unwrap_or_default()
-    }
-}
-
-impl From<FooterStyle> for String {
-    fn from(f: FooterStyle) -> Self {
-        f.as_str().to_string()
-    }
-}
-
 /// What the reader draws in the top margin. Stored like [`FooterStyle`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
@@ -140,36 +107,43 @@ pub enum HeaderStyle {
     Chapter,
 }
 
-impl HeaderStyle {
-    /// Every style, in the order a settings control lists them.
-    pub const ALL: [HeaderStyle; 3] = [HeaderStyle::None, HeaderStyle::Book, HeaderStyle::Chapter];
+/// The names of a style stored as a lowercase string: `ALL`, `as_str`, `parse`, and the
+/// `String` conversions serde uses (an unknown name reads as the default).
+macro_rules! named_style {
+    ($ty:ident { $($variant:ident = $name:literal),+ $(,)? }) => {
+        impl $ty {
+            /// Every style, in the order a settings control lists them.
+            pub const ALL: [$ty; [$($name),+].len()] = [$($ty::$variant),+];
 
-    /// The stored name (`none`, `book`, `chapter`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            HeaderStyle::None => "none",
-            HeaderStyle::Book => "book",
-            HeaderStyle::Chapter => "chapter",
+            /// The stored name.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $($ty::$variant => $name),+
+                }
+            }
+
+            /// The style named `s`, if it is one.
+            pub fn parse(s: &str) -> Option<Self> {
+                Self::ALL.into_iter().find(|f| f.as_str() == s)
+            }
         }
-    }
 
-    /// The style named `s`, if it is one.
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|f| f.as_str() == s)
-    }
+        impl From<String> for $ty {
+            fn from(s: String) -> Self {
+                Self::parse(&s).unwrap_or_default()
+            }
+        }
+
+        impl From<$ty> for String {
+            fn from(f: $ty) -> Self {
+                f.as_str().to_string()
+            }
+        }
+    };
 }
 
-impl From<String> for HeaderStyle {
-    fn from(s: String) -> Self {
-        Self::parse(&s).unwrap_or_default()
-    }
-}
-
-impl From<HeaderStyle> for String {
-    fn from(f: HeaderStyle) -> Self {
-        f.as_str().to_string()
-    }
-}
+named_style!(FooterStyle { None = "none", Pages = "pages", Bar = "bar", Chapters = "chapters", Full = "full" });
+named_style!(HeaderStyle { None = "none", Book = "book", Chapter = "chapter" });
 
 impl Default for ReaderSettings {
     fn default() -> Self {
@@ -270,27 +244,22 @@ pub const LEGACY_READER_TABLE: &str = "ui-reader";
 fn parse_settings(b: &[u8]) -> std::result::Result<Settings, String> {
     let text = std::str::from_utf8(b).map_err(|e| e.to_string())?;
     let table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
-    // `[status_bars]` defaults when absent, so its absence is only visible here.
-    let legacy = (!table.contains_key("status_bars")).then(|| {
-        let reader = table.get("reader").and_then(|r| r.as_table());
-        let key = |k: &str| reader.and_then(|r| r.get(k)).and_then(|v| v.as_str()).map(str::to_string);
-        (key("footer"), key("header"))
-    });
+    let reader = table.get("reader").and_then(|r| r.as_table());
+    let has = |k: &str| reader.is_some_and(|r| r.contains_key(k));
+    // `[status_bars]` defaults when absent, so its absence is only visible here: which
+    // of the old `footer` and `header` keys the file has.
+    let legacy = (!table.contains_key("status_bars")).then(|| (has("footer"), has("header")));
     // Same for the margin version; only the margin keys the file has are converted
     // (an absent key takes the new default, which needs no conversion).
-    let reader = table.get("reader").and_then(|r| r.as_table());
     let margin_version = reader.and_then(|r| r.get("margin_version")).and_then(|v| v.as_integer()).unwrap_or(1);
-    let old_margins = (margin_version < i64::from(MARGIN_VERSION)).then(|| {
-        let has = |k: &str| reader.is_some_and(|r| r.contains_key(k));
-        (has("margin_top"), has("margin_bottom"))
-    });
+    let old_margins = (margin_version < i64::from(MARGIN_VERSION)).then(|| (has("margin_top"), has("margin_bottom")));
     // `version` defaults to the current one when absent, so read the stored one here.
     let bars_version = table.get("status_bars").and_then(|t| t.get("version")).and_then(|v| v.as_integer()).unwrap_or(0);
     let mut s: Settings = table.try_into().map_err(|e: toml::de::Error| e.to_string())?;
     s.migrate();
     match legacy {
         Some((footer, header)) => {
-            s.migrate_status_bars(footer.is_some(), header.is_some());
+            s.migrate_status_bars(footer, header);
         }
         None if bars_version < i64::from(crate::prefs::STATUS_BARS_VERSION) => {
             s.repair_status_bars_v1();
@@ -347,27 +316,19 @@ impl Settings {
     /// older `slide`, `curl`, `fade`) becomes `on`. Returns true when something moved.
     pub fn migrate(&mut self) -> bool {
         let mut moved = false;
-        if let Some(table) = self.plugins.get_mut(LEGACY_UI_TABLE).and_then(|v| v.as_table_mut()) {
-            if let Some(old) = table.remove("screensaver") {
-                if let Some(v) = old.as_str().filter(|v| !v.is_empty()) {
-                    self.device.screensaver = v.to_string();
-                }
-                moved = true;
-                if table.is_empty() {
-                    self.plugins.remove(LEGACY_UI_TABLE);
-                }
+        type Field = fn(&mut Settings) -> &mut String;
+        let moves: [(&str, &str, Field); 2] =
+            [(LEGACY_UI_TABLE, "screensaver", |s| &mut s.device.screensaver), (LEGACY_READER_TABLE, "page_animation", |s| &mut s.reader.page_animation)];
+        for (table, key, field) in moves {
+            let Some(t) = self.plugins.get_mut(table).and_then(|v| v.as_table_mut()) else { continue };
+            let Some(old) = t.remove(key) else { continue };
+            if t.is_empty() {
+                self.plugins.remove(table);
             }
-        }
-        if let Some(table) = self.plugins.get_mut(LEGACY_READER_TABLE).and_then(|v| v.as_table_mut()) {
-            if let Some(old) = table.remove("page_animation") {
-                if let Some(v) = old.as_str().filter(|v| !v.is_empty()) {
-                    self.reader.page_animation = v.to_string();
-                }
-                moved = true;
-                if table.is_empty() {
-                    self.plugins.remove(LEGACY_READER_TABLE);
-                }
+            if let Some(v) = old.as_str().filter(|v| !v.is_empty()) {
+                *field(self) = v.to_string();
             }
+            moved = true;
         }
         let anim = self.reader.page_animation.as_str();
         if anim != "on" && anim != "off" {
