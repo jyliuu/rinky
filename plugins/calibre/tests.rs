@@ -4,6 +4,7 @@ use super::*;
 use crate::cache::Cache;
 use crate::protocol::{decode, encode, op, Frame, FrameError};
 use ink_plugin::serde_json::json;
+use ink_plugin::testing::TempDir;
 use ink_plugin::{MemoryStorage, Registrar, TileState, UiQueue, UiRequest};
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
@@ -100,16 +101,12 @@ fn cache_slim_add_remove_prune() {
     assert_eq!(back.remove("b.epub"), None);
     std::fs::write(&path, b"{not json").unwrap();
     assert!(Cache::load(&path).books.is_empty(), "a broken file gives an empty list");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // -- Mock calibre ----------------------------------------------------------------------------
 
-fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("calibre-test-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmp(tag: &str) -> TempDir {
+    TempDir::new(&format!("calibre-{tag}"))
 }
 
 fn config(root: &Path, password: &str) -> Config {
@@ -302,7 +299,6 @@ fn mock_calibre_full_session() {
         c.ok();
     });
     assert_eq!(end, End::Ejected);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -314,7 +310,6 @@ fn wrong_password() {
     });
     assert_eq!(end, End::WrongPassword);
     assert!(!events.iter().any(|e| matches!(e, Event::Connected { .. })));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -328,7 +323,6 @@ fn broken_streams_end_the_session() {
     }
     let (end, _, ()) = session_with(&cfg, &cancel, drop);
     assert_eq!(end, End::Closed);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -346,7 +340,6 @@ fn disconnect_mid_book_leaves_no_file() {
     let dir = root.join("Books/A");
     let left: Vec<_> = std::fs::read_dir(&dir).map(|r| r.map(|e| e.unwrap().file_name()).collect()).unwrap_or_default();
     assert!(left.is_empty(), "no book and no .part: {left:?}");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -365,7 +358,6 @@ fn unsafe_lpath_is_refused() {
     assert!(!root.join("evil.epub").exists());
     assert!(events.iter().any(|e| matches!(e, Event::ReceiveFailed { .. })));
     assert!(events.contains(&Event::BatchDone { total: 1 }));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -380,7 +372,6 @@ fn cancel_sends_a_parting_noop() {
     });
     assert_eq!(end, End::Cancelled);
     assert_eq!(parting.op, op::NOOP);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -454,7 +445,6 @@ fn plugin_connects_receives_and_rescans() {
     assert_eq!(items[0].0, "Not connected");
     assert_eq!(items[1].1, "connect");
     assert!(items.iter().any(|(l, _)| l == &format!("Server\t{addr}")));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -477,7 +467,6 @@ fn plugin_reports_refused_connection() {
     // Without the network permission nothing starts.
     let mut q = CalibrePlugin::new();
     assert!(q.connect(&mut HostCtx::new(&mut ui, &mut store, &[Permission::Ui, Permission::Storage])).is_err());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -546,5 +535,4 @@ fn tile_entry_and_the_open_settings_row() {
     q.on_action(&mut HostCtx::new(&mut ui, &mut store, &perms), "toggle").unwrap();
     q.on_action(&mut HostCtx::new(&mut ui, &mut store, &perms), "toggle").unwrap();
     assert_eq!(q.status(), &Status::Disconnecting);
-    let _ = std::fs::remove_dir_all(&root);
 }

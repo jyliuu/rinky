@@ -297,7 +297,7 @@ impl Plugin for StatsPlugin {
 mod tests {
     use super::*;
     use ink_doc::Metadata;
-    use ink_plugin::testing::FakeBook;
+    use ink_plugin::testing::{FakeBook, TempDir};
     use ink_plugin::{MemoryStorage, UiQueue};
     use std::cell::Cell;
     use std::rc::Rc;
@@ -309,22 +309,21 @@ mod tests {
         plugin: StatsPlugin,
         t: Rc<Cell<u64>>,
         db: PathBuf,
+        _dir: TempDir,
     }
 
     const MD5: &str = "0123456789abcdef0123456789abcdef";
 
     impl Env {
         fn new(test: &str, id: Option<&str>) -> Self {
-            let dir = std::env::temp_dir().join(format!("ink-stats-rec-{}-{test}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir = TempDir::new(&format!("stats-rec-{test}"));
             let db = dir.join("statistics.sqlite3");
             let t = Rc::new(Cell::new(1_700_000_000));
             let t2 = t.clone();
             let plugin = StatsPlugin::with(db.clone(), Box::new(move || t2.get()));
             let metadata = Metadata { title: "Romeo and Juliet".into(), authors: vec!["William Shakespeare".into()], ..Metadata::default() };
             let book = FakeBook { metadata, id: id.map(String::from), page: Some(0), pages: Some(100), ..FakeBook::default() };
-            Env { ui: UiQueue::default(), store: MemoryStorage::default(), book, plugin, t, db }
+            Env { ui: UiQueue::default(), store: MemoryStorage::default(), book, plugin, t, db, _dir: dir }
         }
         fn call(&mut self, f: impl FnOnce(&mut StatsPlugin, &mut HostCtx) -> Result<()>) {
             let perms = self.plugin.manifest().permissions.clone();

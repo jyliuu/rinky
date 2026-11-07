@@ -3,6 +3,7 @@
 use super::*;
 use ink_net::testserver::TestServer;
 use ink_net::UreqClient;
+use ink_plugin::testing::TempDir;
 use ink_plugin::{MemoryStorage, NetHost, NetWorker, UiQueue, UiRequest};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,19 +15,12 @@ struct Env {
     worker: NetWorker,
     perms: Vec<Permission>,
     books: PathBuf,
-    root: PathBuf,
-}
-
-impl Drop for Env {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
+    _root: TempDir,
 }
 
 impl Env {
     fn new(tag: &str) -> Env {
-        let root = std::env::temp_dir().join(format!("opds-test-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = TempDir::new(&format!("opds-{tag}"));
         let books = root.join("Books");
         let mut store = MemoryStorage { dir: root.join("data"), ..Default::default() };
         store.settings.insert("download_dir".into(), json!(books.to_str().unwrap()));
@@ -37,7 +31,7 @@ impl Env {
             worker: NetWorker::new(Arc::new(UreqClient::new())),
             perms: vec![Permission::Ui, Permission::Storage, Permission::Network],
             books,
-            root,
+            _root: root,
         }
     }
 
@@ -84,12 +78,10 @@ fn names_and_extensions() {
     assert_eq!(safe_name("Alpha & Omega: The/End?"), "Alpha & Omega_ The_End_");
     assert_eq!(safe_name("  ..  "), "book");
     assert_eq!(safe_name(&"x".repeat(200)).len(), 80);
-    let d = std::env::temp_dir().join(format!("opds-unique-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
+    let d = TempDir::new("opds-unique");
     std::fs::write(d.join("a.epub"), b"x").unwrap();
     assert_eq!(unique_path(&d, "a", "epub"), d.join("a (2).epub"));
     assert_eq!(unique_path(&d, "b", "epub"), d.join("b.epub"));
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]

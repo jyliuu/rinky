@@ -4,7 +4,7 @@ use super::*;
 use ink_net::kosync::userkey;
 use ink_net::testserver::TestServer;
 use ink_net::UreqClient;
-use ink_plugin::testing::FakeBook;
+use ink_plugin::testing::{FakeBook, TempDir};
 use ink_plugin::{DocumentAccess, MemoryStorage, NetHost, NetWorker, UiQueue, UiRequest};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -24,22 +24,13 @@ struct Env {
     _dir: TempDir,
 }
 
-struct TempDir(std::path::PathBuf);
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn xp(n: u32) -> String {
     format!("/body/DocFragment[{n}]/body/p[2]/text().0")
 }
 
 impl Env {
     fn new(server: &TestServer, tag: &str) -> Env {
-        let dir = std::env::temp_dir().join(format!("kosync-test-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TempDir::new(&format!("kosync-{tag}"));
         let clock = Rc::new(Cell::new(1_000_000u64));
         let c = clock.clone();
         let mut store = MemoryStorage { dir: dir.join("data"), ..Default::default() };
@@ -52,7 +43,7 @@ impl Env {
             doc: FakeBook { id: Some(DOC.into()), position: xp(1).parse().ok(), page: Some(0), pages: Some(100), ..FakeBook::titled("Juliet") },
             perms: vec![Permission::Document, Permission::Ui, Permission::Storage, Permission::Network],
             clock,
-            _dir: TempDir(dir),
+            _dir: dir,
         }
     }
 

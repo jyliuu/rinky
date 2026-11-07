@@ -1,8 +1,44 @@
-//! Test doubles for plugin tests: a [`DocumentAccess`] whose answers are plain fields.
+//! Test doubles for plugin tests: a [`DocumentAccess`] whose answers are plain fields,
+//! and a temporary folder that removes itself.
 
 use crate::host::DocumentAccess;
 use crate::{PluginError, Result};
 use ink_doc::{Link, Metadata, Position, SearchHit, Selection, TocEntry};
+use std::path::{Path, PathBuf};
+
+/// A fresh, empty folder for one test (`<temp>/rinky-<tag>-<pid>`), removed again when
+/// dropped. It dereferences to its [`Path`].
+#[derive(Debug)]
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    /// Creates the folder; one left over from an earlier run is emptied first.
+    pub fn new(tag: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("rinky-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temporary folder");
+        TempDir(dir)
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// An open book for plugin tests. Every answer comes from a field: no table of contents,
 /// search hits or links; `read_around` returns the first characters of [`FakeBook::text`];

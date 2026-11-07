@@ -31,7 +31,7 @@ mod tests {
     use ink_doc::{Position, Selection};
     use ink_plugin::lua::LuaPlugin;
     use ink_plugin::serde_json::json;
-    use ink_plugin::testing::FakeBook;
+    use ink_plugin::testing::{FakeBook, TempDir};
     use ink_plugin::{HostCtx, Lifecycle, MemoryStorage, PluginManager, UiQueue, UiRequest};
 
     const PAGES: [&str; 3] = ["Two households, both alike in dignity,", "In fair Verona, where we lay our scene,", "From ancient grudge break to new mutiny,"];
@@ -45,12 +45,12 @@ mod tests {
         store: MemoryStorage,
         book: FakeBook,
         mgr: PluginManager,
+        _root: TempDir,
     }
 
     impl Env {
         fn new(test: &str, exact: bool) -> Self {
-            let root = std::env::temp_dir().join(format!("ink-sample-lua-{}-{test}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
+            let root = TempDir::new(&format!("sample-lua-{test}"));
             let dir = install(&root).unwrap();
             let plugin = LuaPlugin::load(&dir).unwrap();
             let mut mgr = PluginManager::new();
@@ -59,7 +59,7 @@ mod tests {
             // `exact`: the engine can tell the text of a page.
             let page_texts = if exact { PAGES.map(String::from).to_vec() } else { Vec::new() };
             let book = FakeBook { position: Some(pos(0)), page: Some(0), pages: Some(PAGES.len()), text: PAGES.join(" "), page_texts, ..FakeBook::titled("Romeo and Juliet") };
-            Env { ui: UiQueue::default(), store: MemoryStorage { dir: dir.join("data"), ..Default::default() }, book, mgr }
+            Env { ui: UiQueue::default(), store: MemoryStorage { dir: dir.join("data"), ..Default::default() }, book, mgr, _root: root }
         }
 
         fn cx<R>(&mut self, f: impl FnOnce(&mut PluginManager, &mut HostCtx) -> R) -> R {
@@ -69,7 +69,7 @@ mod tests {
         }
 
         fn broadcast(&mut self, ev: Lifecycle) {
-            let Env { ui, store, book, mgr } = self;
+            let Env { ui, store, book, mgr, .. } = self;
             mgr.broadcast(&ev, |m, f| {
                 let mut cx = HostCtx::new(ui, store, &m.permissions).with_doc(Some(&mut *book));
                 f(&mut cx).unwrap();

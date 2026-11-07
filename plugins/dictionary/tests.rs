@@ -1,10 +1,9 @@
 //! Plugin tests with a fake book, an in-memory UI queue and a dictionary written to a
 //! temporary rinky home.
 
-use std::path::PathBuf;
 
 use ink_plugin::serde_json::json;
-use ink_plugin::testing::{selection, FakeBook};
+use ink_plugin::testing::{selection, FakeBook, TempDir};
 use ink_plugin::{DocumentAccess, HostCtx, MemoryStorage, Plugin, PluginStorage, Registrar, Registry, UiQueue, UiRequest};
 use ink_store::vocab::VocabDb;
 
@@ -17,9 +16,8 @@ fn reading(selected: Option<&str>) -> FakeBook {
 }
 
 /// A home with `dict/sample/` and the plugin data folder; returns (home, storage).
-fn home(tag: &str, with_dict: bool) -> (PathBuf, MemoryStorage) {
-    let h = std::env::temp_dir().join(format!("ink-dictionary-plugin-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&h);
+fn home(tag: &str, with_dict: bool) -> (TempDir, MemoryStorage) {
+    let h = TempDir::new(&format!("dictionary-{tag}"));
     if with_dict {
         ink_dict::writer::write(&h.join("dict/sample"), &ink_dict::writer::sample_english()).unwrap();
     }
@@ -311,9 +309,11 @@ fn swipes_page_the_card_through_the_dictionaries_with_a_hit() {
     let two = LookupResult { hits: vec![hit("A", "first"), hit("A", "again"), hit("B", "second")], ..one.clone() };
     assert_eq!(popup_page(&two, 0).unwrap().1, "first\n— 1/2 · A · +1 more");
     assert_eq!(popup_page(&two, 3).unwrap().1, "second\n— 2/2 · B");
-    let (_, mut st1) = home("paged-card-one", true);
+    let (_home, mut st1) = home("paged-card-one", true);
     let mut p1 = DictionaryPlugin::new();
     let mut book = reading(Some("household"));
     run(&mut p1, &mut st1, Some(&mut book), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     assert!(run(&mut p1, &mut st1, Some(&mut book), |p, cx| p.on_ui_result(cx, 1, "next").unwrap()).is_empty());
+    // The lookup is recorded before the folder goes.
+    p1.wait_recorded();
 }

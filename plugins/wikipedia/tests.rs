@@ -2,7 +2,7 @@
 //! API, a fake request runner (no threads, no network) and a temporary data folder.
 
 use ink_plugin::serde_json::json;
-use ink_plugin::testing::{selection, FakeBook};
+use ink_plugin::testing::{selection, FakeBook, TempDir};
 use ink_plugin::{DocumentAccess, HostCtx, MemoryStorage, NetHost, PluginError, Registrar, Registry, UiQueue, UiRequest};
 
 use super::*;
@@ -74,19 +74,12 @@ struct Env {
     st: MemoryStorage,
     jobs: FakeJobs,
     book: FakeBook,
-    root: PathBuf,
-}
-
-impl Drop for Env {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
+    root: TempDir,
 }
 
 impl Env {
     fn new(tag: &str) -> Env {
-        let root = std::env::temp_dir().join(format!("ink-wikipedia-test-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = TempDir::new(&format!("wikipedia-{tag}"));
         let mut st = MemoryStorage { dir: root.join("plugins/wikipedia/data"), ..MemoryStorage::default() };
         st.settings.insert("save_dir".into(), json!(root.join("Books").to_str().unwrap()));
         Env { p: WikipediaPlugin::new(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: FakeBook::titled("A Book"), root }
@@ -299,9 +292,7 @@ fn network_errors_get_clear_messages() {
 
 #[test]
 fn cache_keeps_fifty_and_survives_a_restart() {
-    let dir = std::env::temp_dir().join(format!("ink-wikipedia-cache-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TempDir::new("wikipedia-cache");
     let path = dir.join("cache.json");
     let mut c = Cache::default();
     for i in 0..60 {
@@ -323,7 +314,6 @@ fn cache_keeps_fifty_and_survives_a_restart() {
     std::fs::write(&path, "{ not json").unwrap();
     assert!(Cache::load(&path).is_empty());
     assert!(Cache::load(&dir.join("missing.json")).is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- the plugin ----

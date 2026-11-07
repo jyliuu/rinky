@@ -633,9 +633,7 @@ mod tests {
 
     #[test]
     fn corrupt_chat_file_is_kept_aside_and_chats_start_empty() {
-        let dir = std::env::temp_dir().join(format!("insightful-chats-bad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ink_plugin::testing::TempDir::new("insightful-chats-bad");
         let path = dir.join("abcd.json");
         std::fs::write(&path, b"{\"book_id\": \"abcd\", \"chats\": [{\"id\"").unwrap(); // truncated
         let mut b = BookChats::load(&path, "abcd").unwrap();
@@ -646,13 +644,11 @@ mod tests {
         b.create("new");
         b.save(&path).unwrap();
         assert_eq!(BookChats::load(&path, "abcd").unwrap().chats.len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn store_list_delete() {
-        let dir = std::env::temp_dir().join(format!("insightful-chats-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = ink_plugin::testing::TempDir::new("insightful-chats");
         let path = dir.join(file_name("ab/../cd"));
         assert!(path.ends_with("conversations/abcd.json"));
         let mut b = BookChats::load(&path, "abcd").unwrap();
@@ -670,6 +666,5 @@ mod tests {
         assert!(back.delete(&one) && !back.delete(&one));
         let three = back.create("again");
         assert_eq!(three, "c3", "ids are not reused");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

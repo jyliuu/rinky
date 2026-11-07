@@ -198,13 +198,11 @@ mod tests {
 
     #[test]
     fn override_from_folder() {
-        let dir = std::env::temp_dir().join(format!("insightful-prompts-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ink_plugin::testing::TempDir::new("insightful-prompts");
         std::fs::write(dir.join("explain.md"), "Say it simply.\r\n\r\n  ").unwrap();
         let p = PromptSet::load(Some(&dir)).unwrap();
         assert_eq!(p.get("explain").unwrap(), "Say it simply.");
         std::fs::write(dir.join("explain.md"), " \n").unwrap();
         assert!(PromptSet::load(Some(&dir)).unwrap_err().contains("prompt is empty"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
