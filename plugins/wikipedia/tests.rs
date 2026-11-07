@@ -1,8 +1,8 @@
 //! Wikipedia plugin tests: recorded-shape fixtures written by hand from the documented
 //! API, a fake request runner (no threads, no network) and a temporary data folder.
 
-use ink_doc::{Metadata, Position, Selection, TocEntry};
 use ink_plugin::serde_json::json;
+use ink_plugin::testing::{selection, FakeBook};
 use ink_plugin::{DocumentAccess, HostCtx, MemoryStorage, NetHost, PluginError, Registrar, Registry, UiQueue, UiRequest};
 
 use super::*;
@@ -45,42 +45,6 @@ const ARTICLE_MISSING: &str = r#"{"batchcomplete":true,"query":{"pages":[{"ns":0
 
 // ---- fakes ----
 
-struct Book {
-    selection: Option<Selection>,
-}
-
-impl DocumentAccess for Book {
-    fn metadata(&self) -> Metadata {
-        Metadata { title: "A Book".into(), ..Metadata::default() }
-    }
-    fn book_id(&self) -> Option<String> {
-        None
-    }
-    fn toc(&self) -> Vec<TocEntry> {
-        Vec::new()
-    }
-    fn search(&mut self, _q: &str, _l: usize) -> Result<Vec<ink_doc::SearchHit>> {
-        Ok(Vec::new())
-    }
-    fn read_around(&mut self, _p: &Position, _c: usize) -> Result<String> {
-        Ok(String::new())
-    }
-    fn links(&mut self, _p: &Position) -> Result<Vec<ink_doc::Link>> {
-        Ok(Vec::new())
-    }
-    fn current_position(&self) -> Result<Position> {
-        Ok("/body/DocFragment[3]/body/p[1]/text().0".parse().unwrap())
-    }
-    fn selection(&self) -> Option<Selection> {
-        self.selection.clone()
-    }
-}
-
-fn sel(text: &str) -> Selection {
-    let p: Position = "/body/DocFragment[3]/body/p[1]/text().4".parse().unwrap();
-    Selection { start: p.clone(), end: p, text: text.into(), page: 0, rects: vec![] }
-}
-
 /// Records requests; no thread runs.
 #[derive(Default)]
 struct FakeJobs {
@@ -109,7 +73,7 @@ struct Env {
     ui: UiQueue,
     st: MemoryStorage,
     jobs: FakeJobs,
-    book: Book,
+    book: FakeBook,
     root: PathBuf,
 }
 
@@ -125,7 +89,7 @@ impl Env {
         let _ = std::fs::remove_dir_all(&root);
         let mut st = MemoryStorage { dir: root.join("plugins/wikipedia/data"), ..MemoryStorage::default() };
         st.settings.insert("save_dir".into(), json!(root.join("Books").to_str().unwrap()));
-        Env { p: WikipediaPlugin::new(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: Book { selection: None }, root }
+        Env { p: WikipediaPlugin::new(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: FakeBook::titled("A Book"), root }
     }
 
     fn call(&mut self, f: impl FnOnce(&mut WikipediaPlugin, &mut HostCtx) -> Result<()>) {
@@ -136,7 +100,7 @@ impl Env {
 
     /// Selects `text` and triggers the selection action.
     fn select(&mut self, text: &str) {
-        self.book.selection = Some(sel(text));
+        self.book.selection = Some(selection(text));
         self.call(|p, cx| p.on_action(cx, ACTION_LOOKUP));
     }
 

@@ -28,67 +28,22 @@ pub fn install(plugins_dir: &Path) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ink_doc::{Metadata, Position, Selection, TocEntry};
+    use ink_doc::{Position, Selection};
     use ink_plugin::lua::LuaPlugin;
     use ink_plugin::serde_json::json;
-    use ink_plugin::{DocumentAccess, HostCtx, Lifecycle, MemoryStorage, PluginError, PluginManager, Result, UiQueue, UiRequest};
+    use ink_plugin::testing::FakeBook;
+    use ink_plugin::{HostCtx, Lifecycle, MemoryStorage, PluginManager, UiQueue, UiRequest};
 
     const PAGES: [&str; 3] = ["Two households, both alike in dignity,", "In fair Verona, where we lay our scene,", "From ancient grudge break to new mutiny,"];
-
-    struct Book {
-        page: usize,
-        exact: bool,
-        selection: Option<Selection>,
-    }
 
     fn pos(i: usize) -> Position {
         format!("/body/DocFragment[3]/body/p[{}]/text().0", i + 1).parse().unwrap()
     }
 
-    impl DocumentAccess for Book {
-        fn metadata(&self) -> Metadata {
-            Metadata { title: "Romeo and Juliet".into(), ..Metadata::default() }
-        }
-        fn book_id(&self) -> Option<String> {
-            None
-        }
-        fn toc(&self) -> Vec<TocEntry> {
-            Vec::new()
-        }
-        fn search(&mut self, _query: &str, _limit: usize) -> Result<Vec<ink_doc::SearchHit>> {
-            Ok(Vec::new())
-        }
-        fn read_around(&mut self, _pos: &Position, chars: usize) -> Result<String> {
-            Ok(PAGES.join(" ").chars().take(chars).collect())
-        }
-        fn links(&mut self, _pos: &Position) -> Result<Vec<ink_doc::Link>> {
-            Ok(Vec::new())
-        }
-        fn current_position(&self) -> Result<Position> {
-            Ok(pos(self.page))
-        }
-        fn selection(&self) -> Option<Selection> {
-            self.selection.clone()
-        }
-        fn current_page(&self) -> Option<usize> {
-            Some(self.page)
-        }
-        fn page_count(&self) -> Option<usize> {
-            Some(PAGES.len())
-        }
-        fn page_text(&mut self, page: usize) -> Result<String> {
-            if self.exact {
-                Ok(PAGES[page].to_string())
-            } else {
-                Err(PluginError::Unsupported("page text".into()))
-            }
-        }
-    }
-
     struct Env {
         ui: UiQueue,
         store: MemoryStorage,
-        book: Book,
+        book: FakeBook,
         mgr: PluginManager,
     }
 
@@ -101,7 +56,10 @@ mod tests {
             let mut mgr = PluginManager::new();
             mgr.load(vec![Box::new(plugin)]);
             assert!(mgr.errors.is_empty(), "{:?}", mgr.errors);
-            Env { ui: UiQueue::default(), store: MemoryStorage { dir: dir.join("data"), ..Default::default() }, book: Book { page: 0, exact, selection: None }, mgr }
+            // `exact`: the engine can tell the text of a page.
+            let page_texts = if exact { PAGES.map(String::from).to_vec() } else { Vec::new() };
+            let book = FakeBook { position: Some(pos(0)), page: Some(0), pages: Some(PAGES.len()), text: PAGES.join(" "), page_texts, ..FakeBook::titled("Romeo and Juliet") };
+            Env { ui: UiQueue::default(), store: MemoryStorage { dir: dir.join("data"), ..Default::default() }, book, mgr }
         }
 
         fn cx<R>(&mut self, f: impl FnOnce(&mut PluginManager, &mut HostCtx) -> R) -> R {
@@ -162,7 +120,7 @@ mod tests {
         env.broadcast(Lifecycle::BookOpen);
         assert_eq!(env.status().as_deref(), Some("Read 10 min"));
         for page in 0..3 {
-            env.book.page = page;
+            env.book.page = Some(page);
             env.broadcast(Lifecycle::PageChange(page));
         }
         env.broadcast(Lifecycle::Suspend);
@@ -220,7 +178,7 @@ mod tests {
         assert!(env.store.book.get("seconds").is_none());
 
         // Close: totals saved, one session line.
-        env.book.page = 0;
+        env.book.page = Some(0);
         env.broadcast(Lifecycle::PageChange(0));
         env.broadcast(Lifecycle::Close);
         assert_eq!(env.last_toast(), "Session: 0 min, 1 pages");

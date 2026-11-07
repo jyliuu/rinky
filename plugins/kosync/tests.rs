@@ -1,10 +1,10 @@
 //! KOSync plugin against ink-net's mock server (fake credentials, no real network).
 
 use super::*;
-use ink_doc::{Link, Metadata, Position, SearchHit, Selection, TocEntry};
 use ink_net::kosync::userkey;
 use ink_net::testserver::TestServer;
 use ink_net::UreqClient;
+use ink_plugin::testing::FakeBook;
 use ink_plugin::{DocumentAccess, MemoryStorage, NetHost, NetWorker, UiQueue, UiRequest};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -13,51 +13,12 @@ use std::time::Duration;
 
 const DOC: &str = "cf7ce9b8d4e135c8ac340f18d1e58c85";
 
-struct FakeDoc {
-    pos: String,
-    page: usize,
-    count: usize,
-}
-
-impl DocumentAccess for FakeDoc {
-    fn metadata(&self) -> Metadata {
-        Metadata { title: "Juliet".into(), ..Default::default() }
-    }
-    fn book_id(&self) -> Option<String> {
-        Some(DOC.into())
-    }
-    fn toc(&self) -> Vec<TocEntry> {
-        Vec::new()
-    }
-    fn search(&mut self, _q: &str, _l: usize) -> Result<Vec<SearchHit>> {
-        Ok(Vec::new())
-    }
-    fn read_around(&mut self, _p: &Position, _c: usize) -> Result<String> {
-        Ok(String::new())
-    }
-    fn links(&mut self, _p: &Position) -> Result<Vec<Link>> {
-        Ok(Vec::new())
-    }
-    fn current_position(&self) -> Result<Position> {
-        self.pos.parse().map_err(|e: ink_doc::DocError| PluginError::Failed(e.to_string()))
-    }
-    fn selection(&self) -> Option<Selection> {
-        None
-    }
-    fn current_page(&self) -> Option<usize> {
-        Some(self.page)
-    }
-    fn page_count(&self) -> Option<usize> {
-        Some(self.count)
-    }
-}
-
 struct Env {
     plugin: KoSyncPlugin,
     ui: UiQueue,
     store: MemoryStorage,
     worker: NetWorker,
-    doc: FakeDoc,
+    doc: FakeBook,
     perms: Vec<Permission>,
     clock: Rc<Cell<u64>>,
     _dir: TempDir,
@@ -88,7 +49,7 @@ impl Env {
             ui: UiQueue::default(),
             store,
             worker: NetWorker::new(Arc::new(UreqClient::new())),
-            doc: FakeDoc { pos: xp(1), page: 0, count: 100 },
+            doc: FakeBook { id: Some(DOC.into()), position: xp(1).parse().ok(), page: Some(0), pages: Some(100), ..FakeBook::titled("Juliet") },
             perms: vec![Permission::Document, Permission::Ui, Permission::Storage, Permission::Network],
             clock,
             _dir: TempDir(dir),
@@ -125,10 +86,15 @@ impl Env {
         std::mem::take(&mut self.ui.0)
     }
 
+    /// Puts the reader on `page` at position `pos`.
+    fn at(&mut self, page: usize, pos: &str) {
+        self.doc.page = Some(page);
+        self.doc.position = Some(pos.parse().unwrap());
+    }
+
     fn turn(&mut self, page: usize, pos: String, secs: u64) {
         self.clock.set(self.clock.get() + secs);
-        self.doc.page = page;
-        self.doc.pos = pos;
+        self.at(page, &pos);
         self.call(|p, cx| p.on_page_change(cx, page));
     }
 }
@@ -295,8 +261,7 @@ fn declining_the_jump_pushes_this_device_and_pdf_pages_are_one_based() {
     let mut e = Env::new(&s, "pdf");
     e.store.settings.insert("server".into(), json!(s.base()));
     e.login("reader", "pw");
-    e.doc.pos = "page:4".into();
-    e.doc.page = 4;
+    e.at(4, "page:4");
     e.call(|p, cx| p.on_book_open(cx));
     e.settle();
     assert!(e.ui.0.iter().any(|r| matches!(r, UiRequest::Dialog { id: JUMP, .. })));
@@ -383,8 +348,7 @@ fn an_old_queued_push_never_overwrites_a_newer_sync() {
     let mut q = SyncQueue::default();
     q.push(old, e.clock.get() - 2 * 86400);
     q.save(&qpath).unwrap();
-    e.doc.pos = xp(5);
-    e.doc.page = 5;
+    e.at(5, &xp(5));
     e.call(|p, cx| p.on_book_open(cx));
     e.settle();
     e.turn(6, xp(6), 1);
