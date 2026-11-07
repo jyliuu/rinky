@@ -93,6 +93,16 @@ impl<'a> PaintCx<'a> {
         ClipGuard { prev }
     }
 
+    /// Paints `widget` into `r`, keeping everything it draws (text, icons, shapes) inside
+    /// `r` and the clips already set: the tree clears and refreshes only `r`.
+    pub(crate) fn paint_inside(&mut self, widget: &mut dyn Widget, r: Rect) {
+        let _clip = self.push_clip(r);
+        let outer = self.canvas.clip();
+        self.canvas.set_clip(Some(outer.map_or(r, |o| o.intersect(&r))));
+        widget.paint(self, r);
+        self.canvas.set_clip(outer);
+    }
+
     /// Draws a shaped run inside the current clip (and inside `extra` when given).
     fn put_run(&mut self, run: &ink_text::TextRun, x: f32, baseline: f32, value: u8, extra: Option<Rect>) -> f32 {
         let clip = match (self.clip(), extra) {
@@ -504,16 +514,8 @@ impl WidgetTree {
             if node.widget.opaque() {
                 cx.canvas.fill_rect(b.x, b.y, b.w as i32, b.h as i32, cx.theme.bg);
             }
-            {
-                // Everything the widget draws (text, icons, shapes) stays inside its
-                // bounds: only they are cleared and refreshed. A row cut by a list edge
-                // never leaves ink over the app bar or under the list.
-                let _clip = cx.push_clip(b);
-                let outer = cx.canvas.clip();
-                cx.canvas.set_clip(Some(outer.map_or(b, |o| o.intersect(&b))));
-                node.widget.paint(cx, b);
-                cx.canvas.set_clip(outer);
-            }
+            // A row cut by a list edge never leaves ink over the app bar or under the list.
+            cx.paint_inside(node.widget.as_mut(), b);
             node.full = false;
             // Called even when unused: widgets reset their change record here.
             let own = node.widget.damage(b);

@@ -622,14 +622,10 @@ impl ScrollView {
 impl Widget for ScrollView {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         self.layout = self.page_from(b, self.first);
-        for (i, r) in self.layout.clone() {
+        for &(i, r) in &self.layout {
             cx.canvas.fill_rect(r.x, r.y, r.w as i32, r.h as i32, cx.theme.bg);
             // The child's text and drawing stay inside its slot.
-            let _clip = cx.push_clip(r);
-            let outer = cx.canvas.clip();
-            cx.canvas.set_clip(Some(outer.map_or(r, |o| o.intersect(&r))));
-            self.children[i].0.paint(cx, r);
-            cx.canvas.set_clip(outer);
+            cx.paint_inside(self.children[i].0.as_mut(), r);
         }
         // Scroll bar: track plus a thumb for the visible part.
         let total: u32 = self.children.iter().map(|(_, h)| h + self.gap).sum::<u32>().max(1);
@@ -686,7 +682,7 @@ impl Widget for ScrollView {
         // report (nothing for a touch-down).
         let scrolled = std::mem::take(&mut self.scrolled);
         let mut out = Vec::new();
-        for (i, r) in self.layout.clone() {
+        for &(i, r) in &self.layout {
             match self.children[i].0.damage(r) {
                 Some(rects) => out.extend(rects),
                 None => out.push(r),
