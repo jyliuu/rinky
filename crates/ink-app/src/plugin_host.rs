@@ -1348,16 +1348,40 @@ fn describe_request(r: &UiRequest) -> String {
 mod card;
 pub use card::CardDialog;
 
+/// The largest `k` in `0..=n` for which `fits(k)` holds, for a `fits` that holds up to
+/// some `k` and fails above it (`0` when it fails everywhere). A bisection: about
+/// log2(n) calls, where trimming one character at a time made `n` calls.
+fn last_fitting(n: usize, mut fits: impl FnMut(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (0, n);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// Truncates `text` with `...` to fit `max` pixels.
 fn fit(cx: &mut PaintCx, text: &str, px: f32, style: Style, max: f32) -> String {
     if cx.fonts.text_width(style, text, px) <= max {
         return text.to_string();
     }
-    let mut s: String = text.to_string();
-    while !s.is_empty() && cx.fonts.text_width(style, &format!("{s}..."), px) > max {
-        s.pop();
-    }
-    format!("{}...", s.trim_end())
+    // Byte ends of the proper prefixes, by character count.
+    let ends: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    let k = last_fitting(ends.len() - 1, |k| cx.fonts.text_width(style, &format!("{}...", &text[..ends[k]]), px) <= max);
+    format!("{}...", text[..ends[k]].trim_end())
+}
+
+/// The longest end of `text` that fits `max` pixels (the end of typed text, before the
+/// cursor).
+fn fit_end<'a>(cx: &mut PaintCx, text: &'a str, px: f32, max: f32) -> &'a str {
+    let starts: Vec<usize> = text.char_indices().map(|(i, _)| i).chain([text.len()]).collect();
+    let n = starts.len() - 1;
+    let kept = last_fitting(n, |m| cx.fonts.text_width(Style::Regular, &text[starts[n - m]..], px) <= max);
+    &text[starts[n - kept]..]
 }
 
 /// A plugin menu: the settings popup ([`SettingsPopup`]) with the menu's items as
@@ -2613,12 +2637,9 @@ fn paint_input_bar(cx: &mut PaintCx, bar: Rect, text: &str, color: u8, cursor: b
     let room = field.w as f32 - 80.0;
     let tr = Rect::new(field.x + 40, field.y, field.w.saturating_sub(80), field.h);
     if cursor {
-        let mut shown = text.to_string();
-        while !shown.is_empty() && cx.fonts.text_width(Style::Regular, &shown, px) > room - 8.0 {
-            shown.remove(0);
-        }
-        let w = cx.fonts.text_width(Style::Regular, &shown, px);
-        cx.text_left(tr, &shown, px, Style::Regular, color);
+        let shown = fit_end(cx, text, px, room - 8.0);
+        let w = cx.fonts.text_width(Style::Regular, shown, px);
+        cx.text_left(tr, shown, px, Style::Regular, color);
         cx.canvas.fill_rect(tr.x + w.ceil() as i32 + 2, field.y + 20, 3, field.h as i32 - 40, t.fg);
     } else {
         let shown = fit(cx, text, px, Style::Regular, room);
@@ -2725,14 +2746,11 @@ impl Widget for InputBox {
         cx.text_left(Rect::new(b.x + 32, b.y + 8, b.w - 64, 68), &prompt, heading.px, heading.style, fg);
         ink_ui::draw::stroke_round_rect(cx.canvas, field, cx.theme.radius, cx.theme.border_px as f32, fg);
         // Show the end of long text, with a cursor bar.
-        let mut shown = self.text.clone();
-        while !shown.is_empty() && cx.fonts.text_width(Style::Regular, &shown, px) > field.w as f32 - 40.0 {
-            shown.remove(0);
-        }
+        let shown = fit_end(cx, &self.text, px, field.w as f32 - 40.0);
         let (asc, desc) = cx.fonts.vmetrics(Style::Regular, px);
         let base = field.y as f32 + (field.h as f32 - (asc - desc)) / 2.0 + asc;
-        let w = cx.fonts.text_width(Style::Regular, &shown, px);
-        cx.draw_text(Style::Regular, px, (field.x + 16) as f32, base, &shown, fg);
+        let w = cx.fonts.text_width(Style::Regular, shown, px);
+        cx.draw_text(Style::Regular, px, (field.x + 16) as f32, base, shown, fg);
         cx.canvas.fill_rect(field.x + 18 + w as i32, field.y + 18, 3, field.h as i32 - 36, fg);
         paint_button(cx, cancel, "Cancel", None, ButtonKind::Outlined, true, false);
         paint_button(cx, ok, "OK", None, ButtonKind::Filled, true, false);
@@ -4464,6 +4482,39 @@ mod tests {
         ui.handle(&tap(f.x + 60, f.bottom() - 70), screen());
         s.ui(&mut ui, false);
         assert_eq!(s.canvas.pixels, page5.pixels);
+    }
+
+    /// The bisecting `fit` and `fit_end` cut where trimming one character at a time did.
+    #[test]
+    fn fitting_cuts_where_trimming_one_character_at_a_time_did() {
+        let mut canvas = Canvas::new(8, 8);
+        let mut fonts = Fonts::load();
+        let theme = Theme::day();
+        let mut cx = PaintCx { canvas: &mut canvas, fonts: &mut fonts, theme: &theme };
+        let px = 40.0;
+        let slow_fit = |cx: &mut PaintCx, text: &str, max: f32| {
+            if cx.fonts.text_width(Style::Regular, text, px) <= max {
+                return text.to_string();
+            }
+            let mut s = text.to_string();
+            while !s.is_empty() && cx.fonts.text_width(Style::Regular, &format!("{s}..."), px) > max {
+                s.pop();
+            }
+            format!("{}...", s.trim_end())
+        };
+        let slow_end = |cx: &mut PaintCx, text: &str, max: f32| {
+            let mut s = text.to_string();
+            while !s.is_empty() && cx.fonts.text_width(Style::Regular, &s, px) > max {
+                s.remove(0);
+            }
+            s
+        };
+        for text in ["", "a", "Household words", "Ünïcödé — ✓ wide WWWW iiii", "word word word word word word word word"] {
+            for max in [0.0, 5.0, 30.0, 61.0, 150.0, 333.0, 1000.0] {
+                assert_eq!(fit(&mut cx, text, px, Style::Regular, max), slow_fit(&mut cx, text, max), "fit {text:?} {max}");
+                assert_eq!(fit_end(&mut cx, text, px, max), slow_end(&mut cx, text, max), "fit_end {text:?} {max}");
+            }
+        }
     }
 
     #[test]
