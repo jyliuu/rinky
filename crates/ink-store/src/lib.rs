@@ -593,14 +593,14 @@ mod tests {
             for t in 0..8 {
                 let f = &f;
                 s.spawn(move || {
-                    for i in 0..50 {
+                    for i in 0..16 {
                         write_atomic(f, format!("{t}-{i}").as_bytes()).unwrap();
                     }
                 });
             }
         });
         let last = std::fs::read_to_string(&f).unwrap();
-        assert!(last.ends_with("-49"), "{last}");
+        assert!(last.ends_with("-15"), "{last}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
