@@ -877,7 +877,7 @@ impl ReaderScreen {
         }
         let mut info = self.footer_info()?;
         let doc = self.doc.as_deref()?;
-        info.bookmarked = uses_widget(bars, "bookmark") && self.marks.iter().any(|b| super::mark_page(doc, b) == Some(self.page));
+        info.bookmarked = uses_widget(bars, "bookmark") && super::page_marked(&self.marks, doc, self.page);
         info.device = self.bars.device.clone().unwrap_or_default();
         info.status = status.clone();
         info.night = cx.theme.night;

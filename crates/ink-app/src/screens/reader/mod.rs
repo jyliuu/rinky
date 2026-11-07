@@ -340,12 +340,29 @@ pub fn current_chapter(doc: &dyn Document, toc: &[TocEntry], page: usize) -> Opt
     best
 }
 
-/// Page of a bookmark in the current layout.
-fn mark_page(doc: &dyn Document, b: &Bookmark) -> Option<usize> {
-    match b.position.parse::<Position>().ok().and_then(|p| doc.page_of_known(&p)) {
-        Some(p) => Some(p),
-        None => b.page.map(|p| p as usize),
+/// A bookmark with its position parsed once: whether a page is marked is asked for
+/// every page drawn (the dog-ear, the status bar's bookmark).
+#[derive(Clone, Debug)]
+struct Mark {
+    bookmark: Bookmark,
+    at: Option<Position>,
+}
+
+impl Mark {
+    fn new(bookmark: Bookmark) -> Self {
+        let at = bookmark.position.parse().ok();
+        Mark { bookmark, at }
     }
+
+    /// Page in the current layout; else the page saved with it (fixed layouts).
+    fn page(&self, doc: &dyn Document) -> Option<usize> {
+        self.at.as_ref().and_then(|p| doc.page_of_known(p)).or(self.bookmark.page.map(|p| p as usize))
+    }
+}
+
+/// True when one of `marks` is on `page`.
+fn page_marked(marks: &[Mark], doc: &dyn Document, page: usize) -> bool {
+    marks.iter().any(|m| m.page(doc) == Some(page))
 }
 
 /// (start, end) of saved highlights whose positions parse.
@@ -555,7 +572,7 @@ pub struct ReaderScreen {
     /// An edge slide (brightness or warmth follows the finger) in progress.
     slide: Option<light_gestures::Slide>,
     /// The book's bookmarks (loaded on open, saved on every change).
-    marks: Vec<Bookmark>,
+    marks: Vec<Mark>,
     /// Bookmarks in the order the Go to panel lists them.
     listed_marks: Vec<Bookmark>,
     /// The book's own reading settings (Aa panel), over the global ones.
@@ -924,7 +941,7 @@ impl ReaderScreen {
         let Some(doc) = self.doc.as_deref() else { return MenuInfo::default() };
         let count = doc.page_count();
         let chapter = current_chapter(doc, toc, page).map(|i| toc[i].title.clone());
-        let bookmarked = self.marks.iter().any(|b| mark_page(doc, b) == Some(page));
+        let bookmarked = page_marked(&self.marks, doc, page);
         MenuInfo {
             title: doc.metadata().title.clone(),
             page,
@@ -947,7 +964,7 @@ impl ReaderScreen {
             .iter()
             .map(|e| goto::TocRow { title: e.title.clone(), level: e.level, page: e.page.or_else(|| doc.page_of_known(&e.position)) })
             .collect();
-        let mut marks: Vec<(Option<usize>, Bookmark)> = self.marks.iter().map(|b| (mark_page(doc, b), b.clone())).collect();
+        let mut marks: Vec<(Option<usize>, Bookmark)> = self.marks.iter().map(|m| (m.page(doc), m.bookmark.clone())).collect();
         marks.sort_by_key(|(p, _)| p.unwrap_or(usize::MAX));
         let bookmarks = marks
             .iter()
@@ -969,23 +986,17 @@ impl ReaderScreen {
         let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return false };
         let n = self.marks.len();
-        self.marks.retain(|b| mark_page(doc, b) != Some(page));
+        self.marks.retain(|m| m.page(doc) != Some(page));
         let marked = if self.marks.len() == n {
             let Ok(pos) = doc.position_of_page(page) else { return false };
             let chapter = current_chapter(doc, toc, page).map(|i| toc[i].title.clone());
-            self.marks.push(Bookmark {
-                position: pos.to_string(),
-                label: format!("Page {}", page + 1),
-                created: timestamp(),
-                chapter,
-                page: fixed_page(doc, page),
-                note: None,
-            });
+            // Parsed back from its text, as when the book is opened again.
+            self.marks.push(Mark::new(Bookmark { position: pos.to_string(), label: format!("Page {}", page + 1), created: timestamp(), chapter, page: fixed_page(doc, page), note: None }));
             true
         } else {
             false
         };
-        self.update_sidecar("bookmarks", |state| state.bookmarks = self.marks.clone());
+        self.update_sidecar("bookmarks", |state| state.bookmarks = self.marks.iter().map(|m| m.bookmark.clone()).collect());
         log::info!("reader bookmark page {}: {}", page + 1, if marked { "added" } else { "removed" });
         marked
     }
@@ -2174,7 +2185,7 @@ impl AppScreen for ReaderScreen {
                 return Ok(());
             }
         };
-        self.marks = state.as_ref().map(|s| s.bookmarks.clone()).unwrap_or_default();
+        self.marks = state.as_ref().map(|s| s.bookmarks.iter().cloned().map(Mark::new).collect()).unwrap_or_default();
         self.saved_hl = state.as_ref().map(|s| saved_ranges(&s.highlights)).unwrap_or_default();
         self.page = saved_pos.as_ref().and_then(|p| doc.page_of(p).ok()).unwrap_or(0);
         log::info!("saved position {:?} -> page {}", saved, self.page + 1);
@@ -2554,7 +2565,7 @@ impl ReaderScreen {
                         }
                     }
                 }
-                if self.marks.iter().any(|b| mark_page(doc, b) == Some(self.page)) {
+                if page_marked(&self.marks, doc, self.page) {
                     draw_dog_ear(cx.canvas);
                 }
                 if self.back_pill && self.back.last().is_some_and(|r| r.link) {
