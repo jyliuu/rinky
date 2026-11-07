@@ -141,24 +141,54 @@ pub(crate) fn strip_tags(s: &str) -> String {
 
 /// Appends `s` to `out` escaped for XML: `&`, `<` and `>` always, in an attribute value
 /// (double-quoted) also `"` and the white space a parser would normalise. Characters XML
-/// does not allow are left out. Runs that need no escaping are copied as slices.
+/// does not allow ([`is_xml_char`]) are left out. Runs that need no escaping are copied as
+/// slices; the scan is over bytes, as every character it acts on is ASCII except U+FFFE
+/// and U+FFFF (`EF BF BE`, `EF BF BF`).
 fn escape_into(out: &mut String, s: &str, attr: bool) {
+    /// Bytes that may need work: markup characters, controls and the lead byte of
+    /// U+FFFE/U+FFFF; `"` only matters in attributes, which also escape white space.
+    const fn table(attr: bool) -> [bool; 256] {
+        let mut t = [false; 256];
+        let mut i = 0;
+        while i < 0x20 {
+            t[i] = attr || !matches!(i as u8, b'\t' | b'\n' | b'\r');
+            i += 1;
+        }
+        t[b'&' as usize] = true;
+        t[b'<' as usize] = true;
+        t[b'>' as usize] = true;
+        t[b'"' as usize] = attr;
+        t[0xEF] = true;
+        t
+    }
+    const TEXT: [bool; 256] = table(false);
+    const ATTR: [bool; 256] = table(true);
+    let special = if attr { &ATTR } else { &TEXT };
+    let b = s.as_bytes();
     let mut last = 0;
-    for (i, c) in s.char_indices() {
-        let rep = match c {
-            '&' => "&amp;",
-            '<' => "&lt;",
-            '>' => "&gt;",
-            '"' if attr => "&quot;",
-            '\n' if attr => "&#10;",
-            '\t' if attr => "&#9;",
-            '\r' if attr => "&#13;",
-            c if is_xml_char(c) => continue,
-            _ => "",
+    let mut i = 0;
+    while let Some(k) = b[i..].iter().position(|&c| special[c as usize]) {
+        i += k;
+        let (rep, len) = match b[i] {
+            b'&' => ("&amp;", 1),
+            b'<' => ("&lt;", 1),
+            b'>' => ("&gt;", 1),
+            b'"' if attr => ("&quot;", 1),
+            b'\n' if attr => ("&#10;", 1),
+            b'\t' if attr => ("&#9;", 1),
+            b'\r' if attr => ("&#13;", 1),
+            0..=0x1F => ("", 1),
+            0xEF if b.get(i + 1) == Some(&0xBF) && matches!(b.get(i + 2), Some(0xBE | 0xBF)) => ("", 3),
+            // Another character starting with EF.
+            _ => {
+                i += 1;
+                continue;
+            }
         };
         out.push_str(&s[last..i]);
         out.push_str(rep);
-        last = i + c.len_utf8();
+        i += len;
+        last = i;
     }
     out.push_str(&s[last..]);
 }
@@ -618,6 +648,33 @@ mod tests {
         out.push('>');
         push_text(&mut out, "x \"y\" <é>");
         assert_eq!(out, "<p title=\"a&#9;b &amp; ü\">x \"y\" &lt;é&gt;");
+        // The byte scan against a char-by-char reference.
+        let reference = |s: &str, attr: bool| {
+            let mut o = String::new();
+            for c in s.chars() {
+                match c {
+                    '&' => o.push_str("&amp;"),
+                    '<' => o.push_str("&lt;"),
+                    '>' => o.push_str("&gt;"),
+                    '"' if attr => o.push_str("&quot;"),
+                    '\n' if attr => o.push_str("&#10;"),
+                    '\t' if attr => o.push_str("&#9;"),
+                    '\r' if attr => o.push_str("&#13;"),
+                    c if is_xml_char(c) => o.push(c),
+                    _ => {}
+                }
+            }
+            o
+        };
+        let all: String = (0u32..0x250)
+            .chain([0xD7FF, 0xE000, 0xEFBF, 0xFBBF, 0xFFBE, 0xFFFD, 0xFFFE, 0xFFFF, 0x10000, 0x1FFFE, 0x10FFFF])
+            .filter_map(char::from_u32)
+            .collect();
+        for attr in [false, true] {
+            let mut o = String::new();
+            escape_into(&mut o, &all, attr);
+            assert_eq!(o, reference(&all, attr));
+        }
         assert_eq!(collapse_ws("  a \n\t b  c "), "a b c");
         assert_eq!(collapse_ws(" \n "), "");
         assert_eq!(html_entity("eacute"), Some("é"));
