@@ -250,6 +250,23 @@ fn library_dir_default(defaults: &mut Map<String, Value>, settings: &Settings) {
     }
 }
 
+/// How many entries of each registry (plural names, as the start log says them) pass
+/// `of(plugin name)`.
+fn registrations(r: &ink_plugin::registry::Registry, of: impl Fn(&str) -> bool) -> [(&'static str, usize); 7] {
+    fn count<T>(entries: &[T], plugin: impl Fn(&T) -> &str, of: &impl Fn(&str) -> bool) -> usize {
+        entries.iter().filter(|e| of(plugin(e))).count()
+    }
+    [
+        ("menu items", count(&r.menu_items, |e| &e.plugin, &of)),
+        ("selection actions", count(&r.selection_actions, |e| &e.plugin, &of)),
+        ("gestures", count(&r.gestures, |e| &e.plugin, &of)),
+        ("gesture-map actions", count(&r.actions, |e| &e.plugin, &of)),
+        ("settings pages", count(&r.settings_pages, |e| &e.plugin, &of)),
+        ("library actions", count(&r.library_actions, |e| &e.plugin, &of)),
+        ("status widgets", count(&r.status_widgets, |e| &e.plugin, &of)),
+    ]
+}
+
 /// Runs `f` with the context of plugin `m`.
 #[allow(clippy::too_many_arguments)]
 fn with_cx<R>(
@@ -381,30 +398,12 @@ impl PluginHost {
             );
         }
         let r = &manager.registry;
+        let counts_text = |counts: [(&str, usize); 7]| counts.map(|(k, c)| format!("{c} {k}")).join(", ");
         for info in manager.info().iter().filter(|i| i.enabled) {
             let n = &info.manifest.name;
-            log::info!(
-                "plugins: {n} registered {} menu items, {} selection actions, {} gestures, {} gesture-map actions, {} settings pages, {} library actions, {} status widgets",
-                r.menu_items.iter().filter(|e| &e.plugin == n).count(),
-                r.selection_actions.iter().filter(|e| &e.plugin == n).count(),
-                r.gestures.iter().filter(|e| &e.plugin == n).count(),
-                r.actions.iter().filter(|e| &e.plugin == n).count(),
-                r.settings_pages.iter().filter(|e| &e.plugin == n).count(),
-                r.library_actions.iter().filter(|e| &e.plugin == n).count(),
-                r.status_widgets.iter().filter(|e| &e.plugin == n).count(),
-            );
+            log::info!("plugins: {n} registered {}", counts_text(registrations(r, |p| p == n)));
         }
-        log::info!(
-            "plugins: registry: {} menu items, {} selection actions, {} gestures, {} gesture-map actions, {} settings pages, {} library actions, {} status widgets ({:?})",
-            r.menu_items.len(),
-            r.selection_actions.len(),
-            r.gestures.len(),
-            r.actions.len(),
-            r.settings_pages.len(),
-            r.library_actions.len(),
-            r.status_widgets.len(),
-            t.elapsed()
-        );
+        log::info!("plugins: registry: {} ({:?})", counts_text(registrations(r, |_| true)), t.elapsed());
         let mut host = PluginHost {
             manager,
             ui: PluginUi::default(),
@@ -436,18 +435,13 @@ impl PluginHost {
         self.net = Net { client: Some(client.clone()), worker: Some(NetWorker::new(client)) };
     }
 
-    fn book_id(&self) -> Option<String> {
-        self.book.as_ref().and_then(|b| b.id.clone())
-    }
-
     fn broadcast(&mut self, mut doc: Option<&mut dyn Document>, ev: Lifecycle) {
         // Network events that arrived meanwhile go first (screens that do not call
         // handle_event yet still deliver them on every page turn).
         self.poll(reborrow(&mut doc));
-        let book_id = self.book_id();
-        let book_path = self.book.as_ref().map(|b| b.path.clone());
-        let mut access = doc.map(|d| DocAccess { doc: d, book_id });
-        let PluginHost { manager, cfg, stores, net, out, .. } = self;
+        let PluginHost { manager, cfg, stores, net, out, book, .. } = self;
+        let mut access = doc.map(|d| DocAccess { doc: d, book_id: book.as_ref().and_then(|b| b.id.clone()) });
+        let book_path = book.as_ref().map(|b| b.path.as_path());
         let hook = ev.hook();
         let arg = match &ev {
             Lifecycle::PageChange(p) => format!("({})", p + 1),
@@ -457,7 +451,7 @@ impl PluginHost {
         manager.broadcast(&ev, |m, f| {
             let t = Instant::now();
             let doc = access.as_mut().map(|a| a as &mut dyn DocumentAccess);
-            let r = with_cx(m, stores, cfg, book_path.as_deref(), net, doc, out, |cx| f(cx));
+            let r = with_cx(m, stores, cfg, book_path, net, doc, out, |cx| f(cx));
             log::info!("plugins: {hook}{arg} -> {} ({:.1} ms)", m.name, t.elapsed().as_secs_f64() * 1000.0);
             r.ok();
         });
@@ -470,15 +464,20 @@ impl PluginHost {
             log::warn!("plugins: {what}: no plugin {plugin}");
             return false;
         };
-        let book_id = self.book_id();
-        let book_path = book.map(Path::to_path_buf).or_else(|| self.book.as_ref().map(|b| b.path.clone()));
-        let mut access = doc.map(|d| DocAccess { doc: d, book_id });
-        let PluginHost { manager, cfg, stores, net, out, .. } = self;
         let t = Instant::now();
-        let r = with_cx(&m, stores, cfg, book_path.as_deref(), net, access.as_mut().map(|a| a as &mut dyn DocumentAccess), out, |cx| f(manager, cx));
+        let r = self.run_as(&m, doc, book, f);
         log::info!("plugins: {what} -> {plugin} ({:.1} ms){}", t.elapsed().as_secs_f64() * 1000.0, if r.is_ok() { "" } else { " failed" });
         self.after_calls();
         r.is_ok()
+    }
+
+    /// Runs `f` on the manager with the context of plugin `m`: `doc` as its document,
+    /// per-book storage for `book` (default: the open book).
+    fn run_as<R>(&mut self, m: &PluginManifest, doc: Option<&mut dyn Document>, book: Option<&Path>, f: impl FnOnce(&mut PluginManager, &mut HostCtx) -> R) -> R {
+        let PluginHost { manager, cfg, stores, net, out, book: open, .. } = self;
+        let mut access = doc.map(|d| DocAccess { doc: d, book_id: open.as_ref().and_then(|b| b.id.clone()) });
+        let book = book.or(open.as_ref().map(|b| b.path.as_path()));
+        with_cx(m, stores, cfg, book, net, access.as_mut().map(|a| a as &mut dyn DocumentAccess), out, |cx| f(manager, cx))
     }
 
     /// Sorts the requests of the last calls (status texts go to the registry,
@@ -818,16 +817,11 @@ impl PluginHost {
                 continue;
             }
             self.last_tick.insert(plugin.clone(), now);
-            let m = self.manager.manifest(&plugin).cloned();
-            let Some(m) = m else { continue };
+            let Some(m) = self.manager.manifest(&plugin).cloned() else { continue };
             // Not through `call`: a tick every 250 ms would flood the log.
-            let book_id = self.book_id();
-            let book_path = self.book.as_ref().map(|b| b.path.clone());
-            let mut access = reborrow(&mut doc).map(|d| DocAccess { doc: d, book_id });
-            let PluginHost { manager, cfg, stores, net, out, .. } = self;
-            let n = out.len();
-            let r = with_cx(&m, stores, cfg, book_path.as_deref(), net, access.as_mut().map(|a| a as &mut dyn DocumentAccess), out, |cx| manager.tick(&plugin, cx));
-            if r.is_err() || out.len() > n {
+            let n = self.out.len();
+            let r = self.run_as(&m, reborrow(&mut doc), None, |manager, cx| manager.tick(&plugin, cx));
+            if r.is_err() || self.out.len() > n {
                 log::info!("plugins: on_tick -> {plugin}{}", if r.is_ok() { "" } else { " failed" });
             }
             self.after_calls();
@@ -951,16 +945,10 @@ pub fn plugin_list(host: &PluginHost) -> Vec<String> {
             } else {
                 "failed"
             };
-            let regs = [
-                ("menu", r.menu_items.iter().filter(|e| &e.plugin == n).count()),
-                ("selection", r.selection_actions.iter().filter(|e| &e.plugin == n).count()),
-                ("gesture", r.gestures.iter().filter(|e| &e.plugin == n).count()),
-                ("action", r.actions.iter().filter(|e| &e.plugin == n).count()),
-                ("settings", r.settings_pages.iter().filter(|e| &e.plugin == n).count()),
-                ("library", r.library_actions.iter().filter(|e| &e.plugin == n).count()),
-                ("status", r.status_widgets.iter().filter(|e| &e.plugin == n).count()),
-            ];
-            let regs: Vec<String> = regs.iter().filter(|(_, c)| *c > 0).map(|(k, c)| format!("{k} {c}")).collect();
+            // The short names `rinky plugins list` has always printed, in registry order.
+            const SHORT: [&str; 7] = ["menu", "selection", "gesture", "action", "settings", "library", "status"];
+            let counts = registrations(r, |p| p == n);
+            let regs: Vec<String> = SHORT.iter().zip(counts).filter(|(_, (_, c))| *c > 0).map(|(k, (_, c))| format!("{k} {c}")).collect();
             let perms: Vec<&str> = i.manifest.permissions.iter().map(|p| p.name()).collect();
             format!(
                 "{n}\t{}\t{}\t{state}\terrors {}\t[{}]\t{}\t{}",
@@ -1315,10 +1303,7 @@ pub mod hooks {
     /// App loop: how long to wait for input, the smaller of the screen's timeout and the
     /// plugins' (toasts expiring, network requests running).
     pub fn app_timeout(screen: Option<Duration>, host: &PluginHost) -> Option<Duration> {
-        match (screen, host.timeout()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        screen.into_iter().chain(host.timeout()).min()
     }
 }
 
