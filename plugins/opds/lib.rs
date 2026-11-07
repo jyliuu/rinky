@@ -75,15 +75,14 @@ pub fn extension(mime: &str, href: &str) -> String {
 }
 
 /// A file name from a book title: letters, digits and a few marks kept, the rest
-/// replaced by `_`, at most 80 characters.
+/// replaced by `_`, at most 80 characters, no dot or space at either end (also where
+/// the 80 characters end).
 pub fn safe_name(title: &str) -> String {
-    let mut s: String = title.chars().map(|c| if c.is_alphanumeric() || " -_.,()'&".contains(c) { c } else { '_' }).collect();
-    s = squeeze(&s);
-    let s: String = s.trim_matches(|c: char| c == '.' || c == ' ').chars().take(80).collect();
-    if s.is_empty() {
-        "book".into()
-    } else {
-        s
+    let s: String = title.chars().map(|c| if c.is_alphanumeric() || " -_.,()'&".contains(c) { c } else { '_' }).collect();
+    let s: String = squeeze(&s).trim_matches(['.', ' ']).chars().take(80).collect();
+    match s.trim_end_matches(['.', ' ']) {
+        "" => "book".into(),
+        s => s.into(),
     }
 }
 

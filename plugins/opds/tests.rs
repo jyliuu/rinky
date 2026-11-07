@@ -78,6 +78,9 @@ fn names_and_extensions() {
     assert_eq!(safe_name("Alpha & Omega: The/End?"), "Alpha & Omega_ The_End_");
     assert_eq!(safe_name("  ..  "), "book");
     assert_eq!(safe_name(&"x".repeat(200)).len(), 80);
+    // The cut at 80 characters leaves no space or dot before the extension.
+    assert_eq!(safe_name(&format!("{} yyy", "x".repeat(79))), "x".repeat(79));
+    assert_eq!(safe_name(&format!("{}. Part two", "x".repeat(79))), "x".repeat(79));
     let d = TempDir::new("opds-unique");
     std::fs::write(d.join("a.epub"), b"x").unwrap();
     assert_eq!(unique_path(&d, "a", "epub"), d.join("a (2).epub"));
