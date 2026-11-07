@@ -1658,6 +1658,8 @@ pub struct MarkdownView {
     /// A chat view puts its `n`th `:::you` message at the top of the window at the next
     /// layout (a question was just sent: its answer streams in below it).
     anchor: Option<usize>,
+    /// Widths of the words laid out so far.
+    widths: WordWidths,
 }
 
 const FOOT_H: i32 = 80;
@@ -1694,12 +1696,69 @@ fn shift(lines: &mut [Line], dx: f32) {
     }
 }
 
+/// Shaped widths of the words a viewer laid out, kept across its layouts: streamed text
+/// lays the whole text out again on every update, mostly with the same words. Valid for
+/// one set of fonts ([`WordWidths::for_fonts`]).
+#[derive(Default)]
+struct WordWidths {
+    /// The UI family and emphasis the widths were measured with.
+    fonts: (String, bool),
+    /// (style, px bits) -> text -> width.
+    map: HashMap<(Style, u32), HashMap<String, f32>>,
+    entries: usize,
+}
+
+impl WordWidths {
+    /// Most widths kept; more start the cache again.
+    const MAX: usize = 20_000;
+
+    /// Forgets the widths when the fonts are not the ones they were measured with.
+    fn for_fonts(&mut self, family: String, emphasis: bool) {
+        if self.fonts != (family.clone(), emphasis) || self.entries > Self::MAX {
+            *self = WordWidths { fonts: (family, emphasis), ..WordWidths::default() };
+        }
+    }
+}
+
+/// A viewer layout in progress: the paint context and the word widths of the view.
+struct Lay<'a, 'c> {
+    cx: &'a mut PaintCx<'c>,
+    widths: &'a mut WordWidths,
+}
+
+impl<'c> std::ops::Deref for Lay<'_, 'c> {
+    type Target = PaintCx<'c>;
+    fn deref(&self) -> &PaintCx<'c> {
+        self.cx
+    }
+}
+
+impl std::ops::DerefMut for Lay<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.cx
+    }
+}
+
+impl Lay<'_, '_> {
+    /// The shaped width of `text` (a word, a run), measured once per view.
+    fn width(&mut self, style: Style, px: f32, text: &str) -> f32 {
+        let words = self.widths.map.entry((style, px.to_bits())).or_default();
+        if let Some(w) = words.get(text) {
+            return *w;
+        }
+        let w = self.cx.fonts.shaped_width(style, px, text);
+        words.insert(text.to_string(), w);
+        self.widths.entries += 1;
+        w
+    }
+}
+
 /// Right end of the widest line.
-fn extent(cx: &mut PaintCx, lines: &[Line]) -> f32 {
+fn extent(cx: &mut Lay, lines: &[Line]) -> f32 {
     let mut w: f32 = 0.0;
     for l in lines {
         for r in &l.runs {
-            w = w.max(r.x + cx.fonts.shaped_width(r.style, r.px, &r.text));
+            w = w.max(r.x + cx.width(r.style, r.px, &r.text));
         }
     }
     w
@@ -1739,7 +1798,7 @@ fn push_box(lines: &mut Vec<Line>, groups: &mut Vec<Group>, group: Group, body: 
 }
 
 /// Plain Markdown blocks laid out over `width`.
-fn layout_blocks(cx: &mut PaintCx, blocks: &[Block], base: f32, width: f32) -> Vec<Line> {
+fn layout_blocks(cx: &mut Lay, blocks: &[Block], base: f32, width: f32) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
     let gap = |lines: &mut Vec<Line>, h: f32| lines.push(gap_line(h));
     for block in blocks {
@@ -1790,11 +1849,11 @@ fn layout_blocks(cx: &mut PaintCx, blocks: &[Block], base: f32, width: f32) -> V
                 let mut longest = vec![0f32; ncol];
                 for (i, row) in rows.iter().enumerate() {
                     for (j, cell) in row.iter().enumerate() {
-                        let w: f32 = cell.iter().map(|sp| cx.fonts.shaped_width(span_style(sp, force(i)), base, &sp.text)).sum();
+                        let w: f32 = cell.iter().map(|sp| cx.width(span_style(sp, force(i)), base, &sp.text)).sum();
                         natural[j] = natural[j].max(w);
                         for sp in cell {
                             for word in sp.text.split(' ') {
-                                longest[j] = longest[j].max(cx.fonts.shaped_width(span_style(sp, force(i)), base, word));
+                                longest[j] = longest[j].max(cx.width(span_style(sp, force(i)), base, word));
                             }
                         }
                     }
@@ -1875,6 +1934,7 @@ impl MarkdownView {
             content_h: 0.0,
             window_h: 0.0,
             anchor: None,
+            widths: WordWidths::default(),
         };
         v.set_text(markdown);
         // A chat view opens at its newest message (`:::top`: at its start).
@@ -2098,10 +2158,13 @@ impl MarkdownView {
 
     fn layout(&mut self, cx: &mut PaintCx, b: Rect) {
         let emphasis = self.emphasis;
-        body_fonts(emphasis, cx, |cx| self.layout_text(cx, b));
+        let mut widths = std::mem::take(&mut self.widths);
+        widths.for_fonts(crate::fonts::ui_family(), emphasis);
+        body_fonts(emphasis, cx, |cx| self.layout_text(&mut Lay { cx, widths: &mut widths }, b));
+        self.widths = widths;
     }
 
-    fn layout_text(&mut self, cx: &mut PaintCx, b: Rect) {
+    fn layout_text(&mut self, cx: &mut Lay, b: Rect) {
         let t = cx.theme.clone();
         let base = t.font_px * 0.9;
         let cap = t.caption.px;
@@ -2290,7 +2353,7 @@ impl MarkdownView {
 }
 
 /// `text` as muted caption lines (`px`) wrapped to `width`.
-fn caption_lines(cx: &mut PaintCx, text: &str, px: f32, width: f32) -> Vec<Line> {
+fn caption_lines(cx: &mut Lay, text: &str, px: f32, width: f32) -> Vec<Line> {
     let mut lines = Vec::new();
     wrap_spans(cx, &[Span::plain(text)], px, Some(Style::Regular), 0.0, width, None, &mut lines);
     for r in lines.iter_mut().flat_map(|l| &mut l.runs) {
@@ -2317,7 +2380,7 @@ fn span_style(s: &Span, force: Option<Style>) -> Style {
 
 /// Greedy line breaking of styled spans into `lines`.
 #[allow(clippy::too_many_arguments)]
-fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, indent: f32, width: f32, marker: Option<String>, lines: &mut Vec<Line>) {
+fn wrap_spans(cx: &mut Lay, spans: &[Span], px: f32, force: Option<Style>, indent: f32, width: f32, marker: Option<String>, lines: &mut Vec<Line>) {
     let style_of = |s: &Span| span_style(s, force);
     // Words with their style; a word may span several spans (no space between).
     let mut words: Vec<Vec<(String, Style, Option<String>)>> = vec![Vec::new()];
@@ -2336,17 +2399,17 @@ fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, i
     }
     words.retain(|w| !w.is_empty());
     let height = px * 1.4;
-    let space = cx.fonts.shaped_width(Style::Regular, px, " ");
+    let space = cx.width(Style::Regular, px, " ");
     let mut line = Line { height, ..Line::default() };
     if let Some(m) = marker {
-        let mw = cx.fonts.shaped_width(Style::Regular, px, &m);
+        let mw = cx.width(Style::Regular, px, &m);
         line.runs.push(Run { x: (indent - mw - 14.0).max(0.0), text: m, style: Style::Regular, px, link: None, muted: false });
     }
     let mut x = indent;
     let mut first = true;
     for word in words {
         // Each part is shaped once here; its width is reused below.
-        let widths: Vec<f32> = word.iter().map(|(t, st, _)| cx.fonts.shaped_width(*st, px, t)).collect();
+        let widths: Vec<f32> = word.iter().map(|(t, st, _)| cx.width(*st, px, t)).collect();
         let ww: f32 = widths.iter().sum();
         if !first && x + space + ww > width {
             lines.push(std::mem::replace(&mut line, Line { height, ..Line::default() }));
@@ -4507,7 +4570,8 @@ mod tests {
         let (px, width) = (40.0, 600.0);
         let word = "https://example.org/a/very/long/link/that/does/not/fit/on/one/line/at/all";
         let mut lines = Vec::new();
-        wrap_spans(&mut cx, &[Span::plain(&format!("See {word} now"))], px, None, 0.0, width, None, &mut lines);
+        let mut widths = WordWidths::default();
+        wrap_spans(&mut Lay { cx: &mut cx, widths: &mut widths }, &[Span::plain(&format!("See {word} now"))], px, None, 0.0, width, None, &mut lines);
         let runs: Vec<&Run> = lines.iter().flat_map(|l| &l.runs).collect();
         let pieces: String = runs.iter().filter(|r| r.text != "See" && r.text != "now").map(|r| r.text.as_str()).collect();
         assert_eq!(pieces, word);
@@ -4516,6 +4580,33 @@ mod tests {
             assert!(r.x + cx.fonts.shaped_width(r.style, px, &r.text) <= width, "{r:?}");
         }
         assert_eq!((lines[0].runs.len(), runs[1].x), (1, 0.0), "the word starts a new line");
+    }
+
+    /// A streamed update lays the viewer out again from the widths it measured; other
+    /// fonts start the widths again.
+    #[test]
+    fn viewer_word_widths_are_kept_across_layouts_of_one_font() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        let text = "Some words of an answer, and some more words of it.";
+        ui.push("ai", UiRequest::TextViewer { id: 3, title: "Chat".into(), markdown: text.into() });
+        s.ui(&mut ui, false);
+        let entries = |ui: &PluginUi| match &ui.layers[0].kind {
+            Kind::Viewer(v) => v.widths.entries,
+            _ => unreachable!(),
+        };
+        let first = entries(&ui);
+        assert!(first > 5, "{first}");
+        ui.push("ai", UiRequest::TextViewer { id: 3, title: "Chat".into(), markdown: format!("{text} words") });
+        s.ui(&mut ui, false);
+        assert_eq!(entries(&ui), first, "no word measured again");
+        let mut w = WordWidths::default();
+        w.for_fonts("A".into(), false);
+        w.entries = 3;
+        w.for_fonts("A".into(), false);
+        assert_eq!(w.entries, 3);
+        w.for_fonts("B".into(), false);
+        assert_eq!(w.entries, 0, "another family");
     }
 
     #[test]
