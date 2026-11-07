@@ -1,5 +1,5 @@
 //! Text for rinky: fonts, glyph caches, measuring and drawing ([`Fonts`]), shaping
-//! ([`shape`], `rustybuzz`), fallback faces ([`face`], [`registry`]), glyph rasterizing
+//! (`rustybuzz`, [`Fonts::shape`]), fallback faces ([`face`], [`registry`]), glyph rasterizing
 //! ([`raster`]), line breaking ([`linebreak`]) and hyphenation ([`hyphen`]).
 //!
 //! Two text paths share one [`Fonts`]:
@@ -20,13 +20,11 @@ pub mod hyphen;
 pub mod linebreak;
 pub mod raster;
 pub mod registry;
-pub mod shape;
 
 pub use face::{FaceData, FaceInfo};
 pub use fonts::{embedded_font_bytes, FaceId, Fonts, Glyph, ShapeOptions, TextRun};
 pub use hyphen::{hyphenator_for, Hyphenator, Language, NoHyphenation, PatternHyphenator};
 pub use raster::{GlyphMask, Synth};
-pub use shape::{RustybuzzShaper, ShapedGlyph, ShapedRun, Shaper, SimpleShaper};
 
 /// Font style of a text run.
 ///

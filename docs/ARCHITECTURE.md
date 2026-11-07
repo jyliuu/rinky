@@ -11,7 +11,7 @@ device, ui, store, net, html, formats, mupdf, plugin, packaging).
 crates/
   ink-device   Canvas, geometry, Screen/Input/Light/Battery/Power/Wifi/Usb/Clock traits,
                evdev decoder, lipc runner; backends kindle, sim (minifb), headless
-  ink-text     Fonts (fontdue), glyph cache, draw_text, Shaper, line breaking, Hyphenator
+  ink-text     Fonts (fontdue), glyph cache, draw_text, shaping, line breaking, Hyphenator
   ink-ui       WidgetTree, Damage, RefreshScheduler, GestureRecognizer, keyboard,
                Dialog/Toast/Menu/BottomSheet, Theme, message screen
   ink-doc      Document + Provider traits, Position (xpointer / page / flow anchor),
@@ -157,14 +157,14 @@ Dev-dependencies only: ink-html -> ink-formats, ink-store; ink-formats -> ink-st
 ### ink-text
 
 `Fonts` (three embedded Noto Serif faces; `advance`, `text_width`, `vmetrics`, `glyph`,
-`draw_text`), `Style::{Regular, Bold, Italic}`, `Shaper` + `SimpleShaper`,
+`draw_text`), `Style::{Regular, Bold, Italic}`,
 `linebreak::{break_opportunities, greedy}`, `Hyphenator` + `NoHyphenation`,
 `registry::scan_font_dirs`. Golden pages depend on `Fonts`' exact math.
 Wave A (`ui`): shaped text (`Fonts::shape`, `draw_run`, `draw_run_clipped`, fallback faces
 via `Fonts::load_fallbacks(&registry::KINDLE_FONT_DIRS)`), `Style::BoldItalic`,
 `linebreak` items with Knuth-Plass (`knuth_plass`, `greedy_items`, `wrap`) and
 `hyphen::PatternHyphenator` (`hyphenator_for("da")`, 82 languages through `hyphenation`
-with `embed_all`). The prototype path (`text_width`, `draw_text`, `SimpleShaper`) keeps
+with `embed_all`). The prototype path (`text_width`, `draw_text`) keeps
 its exact math.
 
 ### ink-ui
