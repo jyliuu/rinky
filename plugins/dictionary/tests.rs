@@ -91,7 +91,8 @@ fn lookup_popup_full_view_and_record() {
     let reqs = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_ui_result(cx, id, "full").unwrap());
     let UiRequest::TextViewer { title, markdown, .. } = &reqs[0] else { panic!("{reqs:?}") };
     assert_eq!(title, "household");
-    assert!(markdown.starts_with("## Sample English Dictionary\n\n**household** *noun*\n\n"), "{markdown}");
+    // Bold and italics drawn as such, then the dictionary.
+    assert!(markdown.starts_with(":::emphasis\n## Sample English Dictionary\n\n**household** *noun*\n\n"), "{markdown}");
     assert!(markdown.contains("a house and its occupants"));
     assert!(!markdown.contains("Looked up"), "same word: no note");
     // "close" shows nothing more.

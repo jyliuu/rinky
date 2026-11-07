@@ -1550,8 +1550,8 @@ fn split_directives(md: &str) -> Directives {
                     back = Some(a);
                     continue;
                 }
-                // Read by `PluginUi::push`.
-                "top" => continue,
+                // Read by `PluginUi::push` and `MarkdownView::set_text`.
+                "top" | "emphasis" => continue,
                 _ => None,
             };
             if let Some(kind) = kind {
@@ -1564,6 +1564,30 @@ fn split_directives(md: &str) -> Directives {
     }
     flush(cur, &mut segs);
     (segs, input, sheet, back)
+}
+
+thread_local! {
+    /// The UI family with bold and italics for viewers with `:::emphasis`, and its name
+    /// (built again when the UI font changes).
+    static EMPHASIS_FONTS: std::cell::RefCell<Option<(String, ink_text::Fonts)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with the UI family's bold and italic faces
+/// ([`crate::fonts::emphasis_fonts`]) when `emphasis`, else with `cx`'s UI fonts, which
+/// draw bold and italic text in the regular face.
+fn body_fonts<R>(emphasis: bool, cx: &mut PaintCx, f: impl FnOnce(&mut PaintCx) -> R) -> R {
+    if !emphasis {
+        return f(cx);
+    }
+    EMPHASIS_FONTS.with(|s| {
+        let mut s = s.borrow_mut();
+        let family = crate::fonts::ui_family();
+        if s.as_ref().is_none_or(|(n, _)| *n != family) {
+            *s = Some((family.clone(), crate::fonts::emphasis_fonts(&family)));
+        }
+        let (_, fonts) = s.as_mut().expect("set above");
+        f(&mut PaintCx { canvas: &mut *cx.canvas, fonts, theme: cx.theme })
+    })
 }
 
 /// The icon called `name` (`chat`, `info`, ...; any case).
@@ -1599,6 +1623,9 @@ pub struct MarkdownView {
     pub sheet: bool,
     /// Link the Back button reports (`:::back`); no button when `None`.
     back: Option<String>,
+    /// Bold and italic text is drawn bold and italic (`:::emphasis`), not in the UI's
+    /// regular face.
+    emphasis: bool,
     /// Current page (0-based).
     pub page: usize,
     pages: Vec<Vec<Line>>,
@@ -1663,7 +1690,7 @@ fn extent(cx: &mut PaintCx, lines: &[Line]) -> f32 {
     let mut w: f32 = 0.0;
     for l in lines {
         for r in &l.runs {
-            w = w.max(r.x + cx.fonts.text_width(r.style, &r.text, r.px));
+            w = w.max(r.x + cx.fonts.shaped_width(r.style, r.px, &r.text));
         }
     }
     w
@@ -1754,11 +1781,11 @@ fn layout_blocks(cx: &mut PaintCx, blocks: &[Block], base: f32, width: f32) -> V
                 let mut longest = vec![0f32; ncol];
                 for (i, row) in rows.iter().enumerate() {
                     for (j, cell) in row.iter().enumerate() {
-                        let w: f32 = cell.iter().map(|sp| cx.fonts.text_width(span_style(sp, force(i)), &sp.text, base)).sum();
+                        let w: f32 = cell.iter().map(|sp| cx.fonts.shaped_width(span_style(sp, force(i)), base, &sp.text)).sum();
                         natural[j] = natural[j].max(w);
                         for sp in cell {
                             for word in sp.text.split(' ') {
-                                longest[j] = longest[j].max(cx.fonts.text_width(span_style(sp, force(i)), word, base));
+                                longest[j] = longest[j].max(cx.fonts.shaped_width(span_style(sp, force(i)), base, word));
                             }
                         }
                     }
@@ -1826,6 +1853,7 @@ impl MarkdownView {
             input: None,
             sheet: false,
             back: None,
+            emphasis: false,
             page: 0,
             pages: Vec::new(),
             groups: Vec::new(),
@@ -1853,6 +1881,7 @@ impl MarkdownView {
         self.input = input;
         self.sheet = sheet;
         self.back = back;
+        self.emphasis = markdown.lines().any(|l| l.trim() == ":::emphasis");
         self.laid_for = None;
     }
 
@@ -2055,6 +2084,11 @@ impl MarkdownView {
     }
 
     fn layout(&mut self, cx: &mut PaintCx, b: Rect) {
+        let emphasis = self.emphasis;
+        body_fonts(emphasis, cx, |cx| self.layout_text(cx, b));
+    }
+
+    fn layout_text(&mut self, cx: &mut PaintCx, b: Rect) {
         let t = cx.theme.clone();
         let base = t.font_px * 0.9;
         let cap = t.caption.px;
@@ -2288,16 +2322,16 @@ fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, i
     }
     words.retain(|w| !w.is_empty());
     let height = px * 1.4;
-    let space = cx.fonts.text_width(Style::Regular, " ", px);
+    let space = cx.fonts.shaped_width(Style::Regular, px, " ");
     let mut line = Line { height, ..Line::default() };
     if let Some(m) = marker {
-        let mw = cx.fonts.text_width(Style::Regular, &m, px);
+        let mw = cx.fonts.shaped_width(Style::Regular, px, &m);
         line.runs.push(Run { x: (indent - mw - 14.0).max(0.0), text: m, style: Style::Regular, px, link: None, muted: false });
     }
     let mut x = indent;
     let mut first = true;
     for word in words {
-        let ww: f32 = word.iter().map(|(t, st, _)| cx.fonts.text_width(*st, t, px)).sum();
+        let ww: f32 = word.iter().map(|(t, st, _)| cx.fonts.shaped_width(*st, px, t)).sum();
         if !first && x + space + ww > width {
             lines.push(std::mem::replace(&mut line, Line { height, ..Line::default() }));
             x = indent;
@@ -2309,10 +2343,10 @@ fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, i
         for (t, st, link) in word {
             // Hard-break words wider than the line.
             let mut t = t;
-            while cx.fonts.text_width(st, &t, px) > width - indent && t.chars().count() > 1 {
+            while cx.fonts.shaped_width(st, px, &t) > width - indent && t.chars().count() > 1 {
                 let mut head = String::new();
                 for c in t.chars() {
-                    if cx.fonts.text_width(st, &format!("{head}{c}"), px) > width - x {
+                    if cx.fonts.shaped_width(st, px, &format!("{head}{c}")) > width - x {
                         break;
                     }
                     head.push(c);
@@ -2326,7 +2360,7 @@ fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, i
                 x = indent;
                 t = rest;
             }
-            let w = cx.fonts.text_width(st, &t, px);
+            let w = cx.fonts.shaped_width(st, px, &t);
             line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false });
             x += w;
         }
@@ -2418,7 +2452,7 @@ impl MarkdownView {
                 let base = y + (line.height - (asc - desc)) / 2.0 + asc;
                 cx.draw_text(r.style, r.px, x0 + r.x, base, &r.text, if r.muted { muted } else { fg });
                 if let Some(url) = &r.link {
-                    let w = cx.fonts.text_width(r.style, &r.text, r.px);
+                    let w = cx.fonts.shaped_width(r.style, r.px, &r.text);
                     cx.canvas.fill_rect((x0 + r.x) as i32, (base + 6.0) as i32, w.ceil() as i32, 2, fg);
                     self.links.push((Rect::new((x0 + r.x) as i32, y as i32, w.ceil() as u32, line.height.ceil() as u32), url.clone()));
                 }
@@ -2458,7 +2492,8 @@ impl Widget for MarkdownView {
             tmp.clear(t.bg);
             {
                 let mut tcx = PaintCx { canvas: &mut tmp, fonts: &mut *cx.fonts, theme: cx.theme };
-                self.paint_content(&mut tcx, x0 - win.x as f32, -self.scroll, cw);
+                let emphasis = self.emphasis;
+                body_fonts(emphasis, &mut tcx, |cx| self.paint_content(cx, x0 - win.x as f32, -self.scroll, cw));
             }
             cx.canvas.blit(&tmp, win.x, win.y);
             self.links = std::mem::take(&mut self.links)
@@ -2470,7 +2505,8 @@ impl Widget for MarkdownView {
                 .collect();
             self.paint_scroll_bar(cx, win);
         } else {
-            self.paint_content(cx, x0, top, cw);
+            let emphasis = self.emphasis;
+            body_fonts(emphasis, cx, |cx| self.paint_content(cx, x0, top, cw));
         }
         // Footer: the input bar, or the page counter.
         let label = format!("{} / {}", self.page + 1, self.page_count());

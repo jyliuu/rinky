@@ -725,7 +725,7 @@ impl Plugin for DictionaryPlugin {
                 if let Some(l) = &self.last {
                     let title = l.word.word.clone();
                     // The full view opens on the dictionary the card shows.
-                    let md = full_markdown_tab(&l.result, l.shown);
+                    let md = format!(":::emphasis\n{}", full_markdown_tab(&l.result, l.shown));
                     cx.ui()?.view_markdown(ID_VIEW, &title, &md);
                 }
             }
@@ -734,7 +734,7 @@ impl Plugin for DictionaryPlugin {
                 // A dictionary tab: the open viewer takes the new text.
                 if let (Some(l), Ok(i)) = (&self.last, tab["dict:".len()..].parse::<usize>()) {
                     let title = l.word.word.clone();
-                    let md = full_markdown_tab(&l.result, i);
+                    let md = format!(":::emphasis\n{}", full_markdown_tab(&l.result, i));
                     cx.ui()?.view_markdown(ID_VIEW, &title, &md);
                 }
             }
