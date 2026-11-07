@@ -26,11 +26,17 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// Runs the binary with `args`, kills it after `limit`; returns the output and the time.
+/// Each run gets its own TMPDIR: `sim` and `demo` keep their state in `$TMPDIR/rinky-sim`,
+/// which would otherwise be shared with parallel tests, other checkouts' test runs and
+/// the developer's own `rinky sim` sessions.
 fn run<S: AsRef<OsStr>>(args: &[S], limit: Duration) -> (Output, Duration) {
+    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let home = scratch(&format!("tmpdir-{}", RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let t = Instant::now();
     let mut child = Command::new(bin())
         .args(args)
         .env("RUST_BACKTRACE", "0")
+        .env("TMPDIR", &home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -47,7 +53,9 @@ fn run<S: AsRef<OsStr>>(args: &[S], limit: Duration) -> (Output, Duration) {
         std::thread::sleep(Duration::from_millis(50));
     }
     let out = child.wait_with_output().unwrap();
-    (out, t.elapsed())
+    let took = t.elapsed();
+    let _ = std::fs::remove_dir_all(home);
+    (out, took)
 }
 
 /// Exit 1 with an `rinky: ...` message (or 2 with the usage text); no panic.

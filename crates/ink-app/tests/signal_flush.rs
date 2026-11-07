@@ -27,6 +27,8 @@ fn sigterm_right_after_a_page_turn_writes_the_position() {
         .arg(&script)
         .arg(&book)
         .env("RINKY_LOG", "debug")
+        // The sim keeps its state in $TMPDIR/rinky-sim; this run keeps its own.
+        .env("TMPDIR", &dir)
         .env_remove("RINKY_LOG_FILE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
