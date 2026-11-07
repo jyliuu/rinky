@@ -7,6 +7,7 @@
 //! (`/tmp/rinky/heartbeat`, a counter) moves while the app waits for input; a
 //! stuck app stops calling `next_event` and the heartbeat stops.
 
+use super::kindle::POWERD;
 use super::system;
 use super::Shared;
 use crate::battery::{self, LowBatteryMonitor};
@@ -461,22 +462,14 @@ impl SleepPlatform for Plat<'_> {
             system::backlight_restore(self.sys, self.light_saved);
             self.light_saved.clear();
             let sh = self.shared.borrow();
-            let _ = sh.journal.forget(&Entry::LipcInt {
-                publisher: "com.lab126.powerd".into(),
-                prop: "flIntensity".into(),
-                value: 0,
-            });
+            let _ = sh.journal.forget(&Entry::lipc_int(POWERD, "flIntensity", 0));
         } else {
             // A crash while asleep must not leave the light off: the launcher re-sets
             // powerd's level, which makes powerd drive the LEDs again. (Kobo: Nickel
             // sets its own level when it starts.)
-            if let Some(v) = self.lipc.and_then(|l| l.get_int("com.lab126.powerd", "flIntensity").ok()) {
+            if let Some(v) = self.lipc.and_then(|l| l.get_int(POWERD, "flIntensity").ok()) {
                 let sh = self.shared.borrow();
-                let _ = sh.journal.record(Entry::LipcInt {
-                    publisher: "com.lab126.powerd".into(),
-                    prop: "flIntensity".into(),
-                    value: v,
-                });
+                let _ = sh.journal.record(Entry::lipc_int(POWERD, "flIntensity", v));
             }
             *self.light_saved = system::backlight_off(self.sys);
         }
@@ -496,7 +489,7 @@ impl SleepPlatform for Plat<'_> {
         let Some(lipc) = self.lipc else { return };
         // Best effort: with lab126_gui stopped powerd refuses (lipcPropErrInvalidState);
         // the deferral is kept by rinky's own controller either way.
-        if let Err(e) = lipc.set_int("com.lab126.powerd", "deferSuspend", d.as_secs() as i64) {
+        if let Err(e) = lipc.set_int(POWERD, "deferSuspend", d.as_secs() as i64) {
             log::info!("sleep: powerd deferSuspend {} not set ({e}); deferred by rinky only", d.as_secs());
         }
     }
@@ -625,12 +618,12 @@ impl ReaderInput {
     /// `preventScreenSaver` (journaled: the launcher puts the old value back).
     fn keep_powerd_out_of_screensaver(&mut self) {
         let Some(lipc) = &self.lipc else { return };
-        let old = lipc.get_int("com.lab126.powerd", "preventScreenSaver");
+        let old = lipc.get_int(POWERD, "preventScreenSaver");
         if let Ok(v) = old {
             let sh = self.shared.borrow();
-            let _ = sh.journal.record(Entry::LipcInt { publisher: "com.lab126.powerd".into(), prop: "preventScreenSaver".into(), value: v });
+            let _ = sh.journal.record(Entry::lipc_int(POWERD, "preventScreenSaver", v));
         }
-        match lipc.set_int("com.lab126.powerd", "preventScreenSaver", 1) {
+        match lipc.set_int(POWERD, "preventScreenSaver", 1) {
             Ok(()) => log::info!("sleep: powerd preventScreenSaver 1 (was {old:?})"),
             Err(e) => log::warn!("sleep: powerd preventScreenSaver not set: {e}"),
         }
@@ -766,7 +759,7 @@ impl ReaderInput {
         let base = match self.amber_base {
             Some(b) => b,
             None => {
-                let cur = lipc.get_int("com.lab126.powerd", "currentAmberLevel").unwrap_or(0).max(0) as u32;
+                let cur = lipc.get_int(POWERD, "currentAmberLevel").unwrap_or(0).max(0) as u32;
                 let b = if sched.in_window(t) { 0 } else { cur };
                 self.amber_base = Some(b);
                 b
@@ -774,7 +767,7 @@ impl ReaderInput {
         };
         if let Some(w) = self.amber.tick(&sched, t, base) {
             say!("amber: schedule {}..{} level {} at {t}: warmth {w}", sched.start, sched.end, sched.level);
-            let _ = lipc.set_int("com.lab126.powerd", "currentAmberLevel", w as i64);
+            let _ = lipc.set_int(POWERD, "currentAmberLevel", w as i64);
         }
     }
 
@@ -947,7 +940,7 @@ impl ReaderInput {
             let name = e.event.name.clone();
             if matches!(e.publisher.as_str(), "com.lab126.hal" | "com.lab126.volumd" | "com.lab126.time") {
                 say!("{} lipc: {} {}", crate::clock::stamp(), e.publisher, e.event.line());
-            } else if e.publisher == "com.lab126.powerd" && !matches!(name.as_str(), "t1TimerReset" | "battLevelChanged") {
+            } else if e.publisher == POWERD && !matches!(name.as_str(), "t1TimerReset" | "battLevelChanged") {
                 // powerd's screensaver/suspend/cover events at info: they show whether
                 // powerd still runs its own flow while the framework is stopped.
                 log::info!("lipc event {} {}", e.publisher, e.event.line());
@@ -1226,11 +1219,7 @@ impl Drop for ReaderInput {
                     say!("{s}");
                 }
             }
-            let _ = self.shared.borrow().journal.forget(&Entry::LipcInt {
-                publisher: "com.lab126.volumd".into(),
-                prop: "disableMounting".into(),
-                value: 0,
-            });
+            let _ = self.shared.borrow().journal.forget(&Entry::lipc_int(VOLUMD, "disableMounting", 0));
         }
         if !self.light_saved.is_empty() {
             system::backlight_restore(&self.sys, &self.light_saved);

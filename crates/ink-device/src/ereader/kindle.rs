@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-const POWERD: &str = "com.lab126.powerd";
+pub(super) const POWERD: &str = "com.lab126.powerd";
 const WIFID: &str = "com.lab126.wifid";
 const CMD: &str = "com.lab126.cmd";
 
@@ -498,7 +498,7 @@ impl Power for LipcServices {
 
     fn prevent_screensaver(&mut self, prevent: bool) -> Result<()> {
         if let Ok(v) = self.lipc.get_int(POWERD, "preventScreenSaver") {
-            self.journal(Entry::LipcInt { publisher: POWERD.into(), prop: "preventScreenSaver".into(), value: v });
+            self.journal(Entry::lipc_int(POWERD, "preventScreenSaver", v));
         }
         self.lipc.set_int(POWERD, "preventScreenSaver", prevent as i64)
     }
@@ -647,7 +647,7 @@ impl Wifi for LipcServices {
     fn set_airplane_mode(&mut self, on: bool) -> Result<()> {
         self.remember(|k| (k.wifi, k.airplane) = (None, None));
         if let Ok(v) = self.lipc.get_int(CMD, "wirelessEnable") {
-            self.journal(Entry::LipcInt { publisher: CMD.into(), prop: "wirelessEnable".into(), value: v });
+            self.journal(Entry::lipc_int(CMD, "wirelessEnable", v));
         }
         self.lipc.set_int(CMD, "wirelessEnable", (!on) as i64)
     }

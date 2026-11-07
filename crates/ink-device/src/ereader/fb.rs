@@ -416,9 +416,7 @@ impl Framebuffer {
                 None => None,
             };
             if let Some(r) = target.filter(|r| *r != was) {
-                if let Some(j) = &journal {
-                    let _ = j.record(Entry::Fb { key: "rotate".into(), value: was as i64 });
-                }
+                record(&journal, "rotate", was);
                 match set_rotate(fd, r) {
                     Ok(()) => {
                         log::info!("fb0: rotate {was} -> {r} (upright)");
@@ -435,9 +433,7 @@ impl Framebuffer {
         let mut original_depth = None;
         if var[VAR_BPP] != 8 && !passive {
             let bpp = var[VAR_BPP];
-            if let Some(j) = &journal {
-                let _ = j.record(Entry::Fb { key: "bpp".into(), value: bpp as i64 });
-            }
+            record(&journal, "bpp", bpp);
             // The MTK driver resets bits_per_pixel to its MDP source format unless that
             // is switched first (FBInk `set_fbinfo`).
             let formats = model.epdc.mdp_formats();
@@ -514,9 +510,7 @@ impl Framebuffer {
         }
         // Stop the driver from silently turning partial updates into REAGL ones.
         if fb.epdc == Epdc::Mtk {
-            if let Some(j) = &fb.journal {
-                let _ = j.record(Entry::Fb { key: "fastmode".into(), value: 0 });
-            }
+            record(&fb.journal, "fastmode", 0);
             if let Err(e) = set_fast_mode(fb.file.as_raw_fd(), true) {
                 log::warn!("MXCFB_SET_UPDATE_FLAGS_MTK failed: {e}");
             }
@@ -759,11 +753,20 @@ impl Framebuffer {
             }
         }
         if let Some(j) = &self.journal {
-            let _ = j.forget(&Entry::Fb { key: "grayscale".into(), value: 0 });
-            let _ = j.forget(&Entry::Fb { key: "fastmode".into(), value: 0 });
-            let _ = j.forget(&Entry::Fb { key: "rotate".into(), value: 0 });
-            let _ = j.forget(&Entry::Fb { key: "bpp".into(), value: 0 });
+            for key in JOURNALED {
+                let _ = j.forget(&Entry::fb(key, 0));
+            }
         }
+    }
+}
+
+/// The framebuffer settings rinky journals before changing them.
+const JOURNALED: [&str; 4] = ["grayscale", "fastmode", "rotate", "bpp"];
+
+/// Journals a framebuffer setting's original value (best effort).
+fn record(journal: &Option<Journal>, key: &str, value: u32) {
+    if let Some(j) = journal {
+        let _ = j.record(Entry::fb(key, value as i64));
     }
 }
 
@@ -931,9 +934,7 @@ impl Screen for Framebuffer {
             // A flag on each update, nothing global to set.
             NightMethod::UpdateFlag => self.hw_night = on,
             NightMethod::GrayscaleFlag if on => {
-                if let Some(j) = &self.journal {
-                    let _ = j.record(Entry::Fb { key: "grayscale".into(), value: self.original_grayscale as i64 });
-                }
+                record(&self.journal, "grayscale", self.original_grayscale);
                 self.hw_night = match self.set_grayscale(GRAYSCALE_8BIT_INVERTED) {
                     Ok(()) => true,
                     Err(e) => {
