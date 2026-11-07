@@ -344,6 +344,16 @@ fn fixed_page(doc: &dyn Document, page: usize) -> Option<u32> {
     (doc.kind() == ink_doc::DocKind::Fixed).then_some(page as u32)
 }
 
+/// Copies the pixels of `r` from `src` to `dst` (two canvases of one size; `r` inside
+/// them): the page buffer and the screen canvas.
+fn copy_rect(dst: &mut Canvas, src: &Canvas, r: Rect) {
+    let (w, n) = (dst.width, r.w as usize);
+    for y in r.y..r.bottom() {
+        let i = y as usize * w + r.x as usize;
+        dst.pixels[i..i + n].copy_from_slice(&src.pixels[i..i + n]);
+    }
+}
+
 /// True when `p` is within `slop` pixels of `r` (targets widened for fingers).
 fn near(r: &Rect, p: Point, slop: i32) -> bool {
     Rect::new(r.x - slop, r.y - slop, r.w + 2 * slop as u32, r.h + 2 * slop as u32).contains(p)
@@ -788,9 +798,31 @@ impl ReaderScreen {
         self.rerender = true;
         self.turned = false;
         // The class is picked when the page is shown (paint_screen: Change::Jump).
-        self.dirty = Some(self.dirty.map_or(RefreshClass::Reagl, |d| d.max(RefreshClass::Reagl)));
+        self.raise_dirty(RefreshClass::Reagl);
         self.jumped = true;
         self.turn_wave = None;
+    }
+
+    /// The screen must be shown again with at least `class`.
+    fn raise_dirty(&mut self, class: RefreshClass) {
+        self.dirty = Some(self.dirty.map_or(class, |d| d.max(class)));
+    }
+
+    /// A highlight or bookmark changed: the page is drawn again and only the pixels that
+    /// changed are refreshed (`mark_change`).
+    fn marks_changed(&mut self) {
+        self.rerender = true;
+        self.mark_change = true;
+    }
+
+    /// The pages moved (relayout, zoom): page numbers kept for the TOC, the links and
+    /// the search hits are wrong now.
+    fn forget_page_numbers(&mut self) {
+        self.toc = None;
+        self.links = None;
+        for h in self.hits.iter_mut().flatten() {
+            h.page = None;
+        }
     }
 
     fn save_position(&self) {
@@ -1508,8 +1540,7 @@ impl ReaderScreen {
         log::info!("reader: note saved ({} chars)", note.chars().count());
         self.add_highlight(Some(note));
         self.close_overlay();
-        self.rerender = true;
-        self.mark_change = true;
+        self.marks_changed();
     }
 
     /// Feeds the keys typed on the search (or note) keyboard into the field.
@@ -1690,12 +1721,7 @@ impl ReaderScreen {
             doc.set_current_page(self.page);
             doc.set_layout(&layout)?;
             self.page = doc.current_page();
-            // Page numbers known for the old layout are wrong now.
-            self.toc = None;
-            self.links = None;
-            for h in self.hits.iter_mut().flatten() {
-                h.page = None;
-            }
+            self.forget_page_numbers();
             self.rerender = true;
             self.dirty = Some(class);
             self.turned = true;
@@ -1841,16 +1867,14 @@ impl ReaderScreen {
             "sel-highlight" => {
                 self.add_highlight(None);
                 self.close_overlay();
-                self.rerender = true;
-                self.mark_change = true;
+                self.marks_changed();
             }
             "sel-unhighlight" => {
                 if let Some(sel) = self.sel.clone() {
                     self.remove_highlight(&sel.start, &sel.end);
                 }
                 self.close_overlay();
-                self.rerender = true;
-                self.mark_change = true;
+                self.marks_changed();
             }
             _ if a.starts_with(PCARD) => self.plugin_card_action(&a[PCARD.len()..], cx),
             "sel-note" => {
@@ -1878,8 +1902,7 @@ impl ReaderScreen {
                 self.mark_page_toggle();
                 self.close_overlay();
                 // The page shows (or loses) its dog-ear.
-                self.rerender = true;
-                self.mark_change = true;
+                self.marks_changed();
             }
             _ => log::info!("reader: '{a}' is not available yet"),
         }
@@ -1957,9 +1980,8 @@ impl ReaderScreen {
     /// page (dog-ear). Returns true when the page is bookmarked afterwards.
     pub fn toggle_bookmark(&mut self) -> bool {
         let marked = self.mark_page_toggle();
-        self.rerender = true;
-        self.mark_change = true;
-        self.dirty = Some(self.dirty.map_or(RefreshClass::Gl16, |c| c.max(RefreshClass::Gl16)));
+        self.marks_changed();
+        self.raise_dirty(RefreshClass::Gl16);
         marked
     }
 
@@ -2003,7 +2025,7 @@ impl ReaderScreen {
         publish_bars(Some(self.status_bars_hidden));
         log::info!("reader: status bars {}", if self.status_bars_hidden { "hidden" } else { "shown" });
         self.rerender = true;
-        self.dirty = Some(self.dirty.map_or(RefreshClass::Gl16, |c| c.max(RefreshClass::Gl16)));
+        self.raise_dirty(RefreshClass::Gl16);
     }
 
     /// Zooms a fixed-layout page in (`steps` > 0) or out ([`Document::zoom_step`]): the
@@ -2019,12 +2041,8 @@ impl ReaderScreen {
         };
         self.page = doc.current_page();
         log::info!("reader: zoom {steps:+} -> x{zoom}, now screen {}", self.page + 1);
-        self.toc = None;
-        self.links = None;
+        self.forget_page_numbers();
         self.session_hl.clear();
-        for h in self.hits.iter_mut().flatten() {
-            h.page = None;
-        }
         self.rerender = true;
         self.dirty = Some(RefreshClass::Gl16);
         true
@@ -2401,7 +2419,7 @@ impl ReaderScreen {
             // Full-screen panels leave ghosts: REAGL now, and ghost debt makes a later
             // page turn flash sooner (instead of a GC16 flash on every close).
             let c = cx.refresh.class_for(Change::FullOverlayClose);
-            self.dirty = Some(self.dirty.map_or(c, |d| d.max(c)));
+            self.raise_dirty(c);
         }
         if self.dirty.is_none() && self.overlay.is_none() && !self.rerender && self.error.is_none() && self.counting_done() {
             // Pagination finished after the bars were drawn (a font size change): only
@@ -2581,11 +2599,7 @@ impl ReaderScreen {
             if let (Some(area), Some(buf)) = (selection::bounds(&all), self.page_buf.as_ref()) {
                 let area = area.intersect(&cx.canvas.bounds());
                 if buf.size() == cx.canvas.size() && !area.is_empty() {
-                    let w = cx.canvas.width;
-                    for y in area.y..area.bottom() {
-                        let i = y as usize * w + area.x as usize;
-                        cx.canvas.pixels[i..i + area.w as usize].copy_from_slice(&buf.pixels[i..i + area.w as usize]);
-                    }
+                    copy_rect(cx.canvas, buf, area);
                     selection::invert(cx.canvas, &new);
                     cx.screen.update(cx.canvas, area, RefreshClass::Du)?;
                 }
@@ -2634,13 +2648,9 @@ impl ReaderScreen {
         let class = if self.overlay.is_some() { RefreshClass::Gl16 } else { cx.refresh.class_for(Change::OverlayClose) };
         let Some(buf) = self.page_buf.as_ref() else { return Vec::new() };
         let bounds = cx.canvas.bounds();
-        let w = cx.canvas.width;
         let mut out = Vec::new();
         for r in rects.iter().map(|r| r.intersect(&bounds)).filter(|r| !r.is_empty()) {
-            for y in r.y..r.bottom() {
-                let i = y as usize * w + r.x as usize;
-                cx.canvas.pixels[i..i + r.w as usize].copy_from_slice(&buf.pixels[i..i + r.w as usize]);
-            }
+            copy_rect(cx.canvas, buf, r);
             out.push(Damage { rect: r, class });
         }
         log::debug!("reader: overlay rects restored from the page buffer: {}", crate::app::describe_updates(&out));

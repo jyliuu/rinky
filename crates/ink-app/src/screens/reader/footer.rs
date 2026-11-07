@@ -964,13 +964,9 @@ impl ReaderScreen {
             cx.canvas.fill_rect(r.x, r.y, r.w as i32, r.h as i32, 0xFF);
         }
         draw_bars(cx.canvas, cx.fonts, &layout, bars, &info, part);
-        let w = cx.canvas.width;
         if let Some(buf) = self.page_buf.as_mut() {
             for r in &rows {
-                for y in r.y..r.bottom() {
-                    let i = y as usize * w + r.x as usize;
-                    buf.pixels[i..i + r.w as usize].copy_from_slice(&cx.canvas.pixels[i..i + r.w as usize]);
-                }
+                super::copy_rect(buf, cx.canvas, *r);
             }
         }
         Some(rows)
