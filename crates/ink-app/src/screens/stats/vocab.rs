@@ -11,6 +11,7 @@ use ink_stats::{VocabDb, VocabWord};
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::theme::space;
+use ink_ui::dialog::wrap_lines;
 use ink_ui::{Damage, PaintCx, ProgressBar, UiEvent, Widget};
 use std::path::PathBuf;
 
@@ -329,7 +330,7 @@ impl VocabScreen {
         p.canvas.fill_rect(x, y, iw as i32, t.rule_px, t.light);
         y += space(4);
         if let Some(d) = &card.definition {
-            for line in wrap(p, d, t.body.px, iw as f32).into_iter().take(6) {
+            for line in wrap_lines(p, d, t.body.px, t.body.style, iw as f32).into_iter().take(6) {
                 p.text_left(Rect::new(x, y, iw, 56), &line, t.body.px, t.body.style, t.fg);
                 y += 56;
             }
@@ -337,7 +338,7 @@ impl VocabScreen {
         }
         let ctx = context_line(card);
         if !ctx.is_empty() {
-            for line in wrap(p, &ctx, t.label.px, iw as f32).into_iter().take(4) {
+            for line in wrap_lines(p, &ctx, t.label.px, Style::Italic, iw as f32).into_iter().take(4) {
                 p.text_left(Rect::new(x, y, iw, 52), &line, t.label.px, Style::Italic, t.muted);
                 y += 52;
             }
@@ -351,24 +352,6 @@ impl VocabScreen {
         }
         hint(p, "Tap the card to turn it back");
     }
-}
-
-/// Greedy word wrap of `text` to lines at most `max` pixels wide.
-fn wrap(p: &mut PaintCx, text: &str, px: f32, max: f32) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut cur = String::new();
-    for word in text.split_whitespace() {
-        let cand = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-        if !cur.is_empty() && p.text_width(Style::Regular, px, &cand) > max {
-            lines.push(std::mem::replace(&mut cur, word.to_string()));
-        } else {
-            cur = cand;
-        }
-    }
-    if !cur.is_empty() {
-        lines.push(cur);
-    }
-    lines
 }
 
 impl AppScreen for VocabScreen {
