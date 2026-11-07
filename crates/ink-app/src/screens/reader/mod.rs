@@ -183,37 +183,13 @@ pub fn open_book(
     w: u32,
     h: u32,
 ) -> anyhow::Result<Box<dyn Document>> {
-    let t = Instant::now();
-    let mut doc = ink_doc::open_with(providers, path)?;
-    let t_parse = t.elapsed();
-    doc.set_layout(&layout_for(settings, w, h))?;
-    log::info!(
-        "'{}': {} pages (parse {:?}, layout {:?})",
-        doc.metadata().title,
-        doc.page_count().pages,
-        t_parse,
-        t.elapsed() - t_parse
-    );
-    if doc.page_count().pages == 0 {
-        anyhow::bail!("book produced no pages");
-    }
-    Ok(doc)
+    open_traced(providers, path, &layout_for(settings, w, h), None, None, None, &mut crate::perf::OpenTrace::start())
 }
 
 /// Opens `path` with the first matching provider, enables the page-map cache in
-/// `cache` (when given, keyed by the book's partial MD5) and lays it out with `layout`.
-pub fn open_with_layout(
-    providers: &[&dyn ink_doc::Provider],
-    path: &Path,
-    layout: &LayoutSettings,
-    cache: Option<&Path>,
-) -> anyhow::Result<Box<dyn Document>> {
-    let mut trace = crate::perf::OpenTrace::start();
-    open_traced(providers, path, layout, cache, None, None, &mut trace)
-}
-
-/// [`open_with_layout`] with the steps recorded in `trace`: provider open (zip,
-/// container, spine), page-map cache id, layout of the first page. `md5` is the book's
+/// `cache` (when given, keyed by the book's partial MD5) and lays it out with `layout`,
+/// with the steps recorded in `trace`: provider open (zip, container, spine), page-map
+/// cache id, layout of the first page. `md5` is the book's
 /// partial MD5 when the caller has it already; `at` is the position to open at (laid
 /// out first, see [`Document::open_at`]).
 pub fn open_traced(
@@ -297,36 +273,6 @@ pub fn wrap_text(fonts: &mut Fonts, text: &str, px: f32, max_w: f32, max_lines: 
         }
     }
     lines
-}
-
-/// Where a tap on the page lands (no overlay open).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Zone {
-    /// Previous page (left third).
-    Prev,
-    /// Next page (right third, and the middle third above and below the menu zone).
-    Next,
-    /// Open the menu (middle of the page, or the top band).
-    Menu,
-}
-
-/// The tap zone of `pos` on a `w` x `h` screen.
-///
-/// - top band (top tenth), the whole width: menu (no hidden exit corner);
-/// - middle third across and middle three fifths down: menu;
-/// - otherwise left third: previous page, the rest: next page.
-pub fn zone(pos: Point, w: i32, h: i32) -> Zone {
-    if pos.y < h / 10 {
-        return Zone::Menu;
-    }
-    if pos.x >= w / 3 && pos.x < w * 2 / 3 && pos.y >= h / 5 && pos.y < h * 4 / 5 {
-        return Zone::Menu;
-    }
-    if pos.x < w / 3 {
-        Zone::Prev
-    } else {
-        Zone::Next
-    }
 }
 
 /// Reading progress 0..=1 of `page`: Kindle locations when the format has them (stable
@@ -1199,18 +1145,12 @@ impl ReaderScreen {
         }
     }
 
-    /// True when a long press on a word selects it (`gestures.long_press` is
-    /// `dictionary` or `select`).
-    fn long_press_selects(cx: &AppCtx) -> bool {
-        matches!(cx.settings.gestures.action("long_press"), "dictionary" | "select")
-    }
-
     /// Selection by touch, by whole words: the first hold on text selects the word under
     /// the finger; moving the finger extends the selection word by word (never by
     /// characters); the lift opens the selection card, or, when the finger stayed on the
     /// one word and `gestures.long_press` is `dictionary`, looks the word up at once
     /// with the dictionary plugin's selection action. Returns true when the event was
-    /// used.
+    /// used. Called only when a long press selects ([`actions::long_press_selects`]).
     fn select_touch(&mut self, t: &ink_ui::Touch, cx: &mut AppCtx) -> bool {
         use ink_ui::TouchKind;
         if t.slot != 0 {
@@ -1218,7 +1158,7 @@ impl ReaderScreen {
         }
         let page = self.page;
         match (t.kind, self.selecting) {
-            (TouchKind::Hold, None) if self.sel.is_none() && Self::long_press_selects(cx) => {
+            (TouchKind::Hold, None) if self.sel.is_none() => {
                 let Some(doc) = self.doc.as_deref_mut() else { return false };
                 // A hold away from any text (blank space, margins) is not a selection.
                 const NEAR: i32 = 30;
@@ -1817,14 +1757,6 @@ impl ReaderScreen {
                     self.navigate_to_page(n.saturating_sub(1));
                 }
             }
-            "goto" => {
-                let info = self.goto_info(0);
-                self.open_overlay(goto::build(&info, cx.screen.size()), cx);
-            }
-            _ if a.starts_with("gtab:") => {
-                let info = self.goto_info(a[5..].parse().unwrap_or(0));
-                self.open_overlay(goto::build(&info, cx.screen.size()), cx);
-            }
             _ if a.starts_with("toc:") => {
                 let pos = a[4..].parse::<usize>().ok().and_then(|i| self.toc().get(i).map(|e| e.position.clone()));
                 if let Some(pos) = pos {
@@ -1932,10 +1864,7 @@ impl ReaderScreen {
                 self.rerender = true;
                 self.mark_change = true;
             }
-            _ => {
-                log::info!("reader: '{a}' is not available yet");
-                let _ = cx;
-            }
+            _ => log::info!("reader: '{a}' is not available yet"),
         }
         Ok(Transition::None)
     }

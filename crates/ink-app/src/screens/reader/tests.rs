@@ -187,19 +187,6 @@ impl Drop for Harness {
 }
 
 #[test]
-fn zones() {
-    let (w, h) = (1272, 1696);
-    // No hidden exit corner: the top band opens the menu.
-    assert_eq!(zone(Point::new(1200, 60), w, h), Zone::Menu);
-    assert_eq!(zone(Point::new(400, 60), w, h), Zone::Menu);
-    assert_eq!(zone(Point::new(636, 848), w, h), Zone::Menu);
-    // The tap the e2e scripts and tests use for "next page".
-    assert_eq!(zone(Point::new(1000, 900), w, h), Zone::Next);
-    assert_eq!(zone(Point::new(100, 900), w, h), Zone::Prev);
-    assert_eq!(zone(Point::new(636, 1600), w, h), Zone::Next);
-}
-
-#[test]
 fn edge_slides_set_the_light_and_bottom_corners_toggle_it_without_repaints() {
     let mut h = Harness::new("light-gestures", "juliet.epub");
     let light = crate::screens::settings::fakes::install(&mut h.dev);

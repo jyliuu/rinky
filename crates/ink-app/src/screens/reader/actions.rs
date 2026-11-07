@@ -366,6 +366,8 @@ mod tests {
         assert_eq!(r(tap(100, 900)), ("tap_left", "prev_page"));
         assert_eq!(r(tap(1000, 900)), ("tap_right", "next_page"));
         assert_eq!(r(tap(636, 848)), ("tap_center", "menu"));
+        // The top band opens the menu across the whole width.
+        assert_eq!(r(tap(400, 60)), ("tap_center", "menu"));
         assert_eq!(r(tap(50, 50)), ("tap_top_left", "bookmark"));
         // Unused corners fall back to their zone: no hidden exit top right.
         assert_eq!(r(tap(1250, 40)), ("tap_center", "menu"));
