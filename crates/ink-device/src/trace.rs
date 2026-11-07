@@ -145,7 +145,6 @@ pub fn file_stamp() -> String {
     format!("{y:04}{mo:02}{d:02}-{:02}{:02}{:02}", day / 3600, day / 60 % 60, day % 60)
 }
 
-
 /// Free and total bytes of the file system holding `path` (statvfs).
 #[cfg(unix)]
 pub fn free_space(path: &std::path::Path) -> Option<(u64, u64)> {
