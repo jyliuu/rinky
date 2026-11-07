@@ -501,7 +501,7 @@ pub trait Provider {
     /// True when this provider handles `path` (by extension by default).
     fn can_open(&self, path: &Path) -> bool {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
-        self.extensions().iter().any(|ext| name.ends_with(&format!(".{ext}")))
+        self.extensions().iter().any(|ext| name.strip_suffix(ext).is_some_and(|stem| stem.ends_with('.')))
     }
 
     /// Opens `path`.

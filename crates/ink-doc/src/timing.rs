@@ -41,14 +41,7 @@ pub fn clear() {
 
 /// Formats steps as `name 12.3 ms, name 4.0 ms`.
 pub fn format(steps: &[(&'static str, Duration)]) -> String {
-    let mut out = String::new();
-    for (i, (n, d)) in steps.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(&format!("{n} {:.1} ms", d.as_secs_f64() * 1000.0));
-    }
-    out
+    steps.iter().map(|(n, d)| format!("{n} {:.1} ms", d.as_secs_f64() * 1000.0)).collect::<Vec<_>>().join(", ")
 }
 
 #[cfg(test)]
