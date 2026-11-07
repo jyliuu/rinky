@@ -223,9 +223,11 @@ The watchdog polls once a second. If the launcher disappears it stops rinky and 
 the framework; if rinky disappears and the launcher does not finish within 15 s, it
 starts the framework itself.
 
-`rinky-ctl.sh restart` (used by `scripts/deploy.sh` and the in-app update) writes
-`/tmp/rinky/restart` and stops only rinky; the launcher sees the file, undoes the
-journal and starts the new binary without bringing the framework back.
+A restart without the framework works through a file: `rinky-ctl.sh restart` (used
+by `scripts/deploy.sh`) and the in-app update (`update::request_restart`) write
+`/tmp/rinky/restart` and end rinky. The launcher sees the file, undoes the journal
+and starts the installed binary again without bringing the framework back. A launcher
+announces that it can do this with `/tmp/rinky/restart-capable`.
 
 Runtime files are in `/tmp/rinky` (`lock`, `launcher.pid`, `rinky.pid`, `done`,
 `restore`, `quieted`). Logs are `/mnt/us/rinky/rinky.log` and `watchdog.log`.
