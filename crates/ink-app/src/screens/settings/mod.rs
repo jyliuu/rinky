@@ -1037,6 +1037,12 @@ impl SettingsScreen {
         self.set_status_class(text, RefreshClass::Gl16);
     }
 
+    /// Builds the page again (the next paint) with `text` in the status line.
+    fn rebuild_with(&mut self, text: impl Into<String>) {
+        self.status_text = text.into();
+        self.rebuild = Some(RefreshClass::Gl16);
+    }
+
     fn set_status_class(&mut self, text: impl Into<String>, class: RefreshClass) {
         self.status_text = text.into();
         self.log_status();
@@ -1662,8 +1668,7 @@ impl SettingsScreen {
         self.last_action = Some(a.to_string());
         if let Some(text) = fonts::action(a, cx) {
             // aa: the Fonts page's own actions.
-            self.status_text = text;
-            self.rebuild = Some(RefreshClass::Gl16);
+            self.rebuild_with(text);
             return Ok(Transition::None);
         }
         if let Some(text) = quick_light::apply(a, cx.services.light) {
@@ -1727,20 +1732,18 @@ impl SettingsScreen {
                 let Ok(m) = arg.parse::<u32>() else { return Ok(Transition::None) };
                 edit_settings(cx, |s| s.device.sleep_minutes = m);
                 let r = cx.services.power.set_auto_sleep(auto_sleep(m));
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("Sleep: {}", sleep_name(m).to_lowercase()),
                     Err(e) => format!("Saved; the device says: {e}"),
-                };
+                });
             }
             "saver" => {
                 edit_settings(cx, |s| set_screensaver_setting(s, arg));
                 let r = cx.services.power.set_screensaver(crate::sleep_cover::screensaver(arg, cx.paths));
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("Screensaver: {}", screensaver_name(arg)),
                     Err(e) => format!("Saved; the device says: {e}"),
-                };
+                });
             }
             "wifi" | "airplane" => {
                 let on = arg == "on";
@@ -1749,11 +1752,10 @@ impl SettingsScreen {
                 if self.page == Page::Wifi {
                     self.networks = cx.services.wifi.scan_list().unwrap_or_default();
                 }
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => String::new(),
                     Err(e) => format!("{verb}: {e}"),
-                };
+                });
             }
             "scan" => {
                 self.say_now("Scanning…", cx)?;
@@ -1792,8 +1794,7 @@ impl SettingsScreen {
                 edit_settings(cx, |s| s.device.rotation = r % 4);
                 // The app applies the rotation after this event; the canvas size change
                 // lays the page out again (on_resize). Same size: rebuild for the check.
-                self.status_text = format!("Orientation: {}", rotation_name(Rotation::ALL[(r % 4) as usize]).to_lowercase());
-                self.rebuild = Some(RefreshClass::Gl16);
+                self.rebuild_with(format!("Orientation: {}", rotation_name(Rotation::ALL[(r % 4) as usize]).to_lowercase()));
             }
             "night" => {
                 let on = arg == "on";
@@ -1808,34 +1809,28 @@ impl SettingsScreen {
                 edit_settings(cx, |s| set_page_wave(s, on));
                 self.set_status(if on { "Page turn wave on" } else { "Page turn wave off" });
             }
-            "font-px" | "spacing" | "margin" => {
+            "font-px" | "spacing" | "margin" | "pspace" | "indent" | "weight" => {
                 let Ok(v) = arg.parse::<f32>() else { return Ok(Transition::None) };
-                edit_settings(cx, |s| match verb {
-                    "font-px" => s.reader.font_px = v,
-                    "spacing" => s.reader.line_spacing = v,
-                    _ => s.reader.margin_x = v,
+                edit_settings(cx, |s| {
+                    let r = &mut s.reader;
+                    match verb {
+                        "font-px" => r.font_px = v,
+                        "spacing" => r.line_spacing = v,
+                        "margin" => r.margin_x = v,
+                        "pspace" => r.paragraph_spacing = v.clamp(0.0, 3.0),
+                        "indent" => r.paragraph_indent = if v < 0.0 { INDENT_BOOK } else { v.min(6.0) },
+                        _ => r.font_weight = (v.max(0.0) as u8).min(WEIGHT_MAX),
+                    }
                 });
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match verb {
+                self.rebuild_with(match verb {
                     "font-px" => format!("Default text size {v} px"),
                     "spacing" => format!("Default line spacing {v:.1}"),
-                    _ => format!("Default side margins {v} px"),
-                };
-            }
-            "pspace" | "indent" | "weight" => {
-                let Ok(v) = arg.parse::<f32>() else { return Ok(Transition::None) };
-                edit_settings(cx, |s| match verb {
-                    "pspace" => s.reader.paragraph_spacing = v.clamp(0.0, 3.0),
-                    "indent" => s.reader.paragraph_indent = if v < 0.0 { INDENT_BOOK } else { v.min(6.0) },
-                    _ => s.reader.font_weight = (v.max(0.0) as u8).min(WEIGHT_MAX),
-                });
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match verb {
+                    "margin" => format!("Default side margins {v} px"),
                     "pspace" => format!("Default paragraph spacing {v} em"),
                     "indent" if v < 0.0 => "Default indent: the book's own".to_string(),
                     "indent" => format!("Default first-line indent {v} em"),
                     _ => format!("Default text weight {}", WEIGHTS.iter().find(|(l, _)| *l as f32 == v).map_or("", |w| w.1).to_lowercase()),
-                };
+                });
             }
             "hyph" | "publisher" => {
                 let on = arg == "on";
@@ -1878,8 +1873,7 @@ impl SettingsScreen {
                     dirs.push(dir.clone());
                 } else if on == "off" {
                     if dirs.len() <= 1 {
-                        self.status_text = "At least one folder must stay on".into();
-                        self.rebuild = Some(RefreshClass::Gl16);
+                        self.rebuild_with("At least one folder must stay on");
                         return Ok(Transition::None);
                     }
                     dirs.retain(|d| *d != dir);
@@ -1913,14 +1907,12 @@ impl SettingsScreen {
                     return Ok(Transition::None);
                 }
                 edit_settings(cx, |s| s.language = arg.to_string());
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = format!("Language: {}", language_name(arg));
+                self.rebuild_with(format!("Language: {}", language_name(arg)));
             }
             "refresh" => {
                 let Ok(n) = arg.parse::<u32>() else { return Ok(Transition::None) };
                 edit_settings(cx, |s| s.reader.flash_every = n);
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = format!("Full refresh: {}; used from the next start", refresh_name(n).to_lowercase());
+                self.rebuild_with(format!("Full refresh: {}; used from the next start", refresh_name(n).to_lowercase()));
             }
             "ntp" => {
                 self.say_now("Asking the time server…", cx)?;
@@ -1952,11 +1944,10 @@ impl SettingsScreen {
                 let Some((name, on)) = arg.rsplit_once(':') else { return Ok(Transition::None) };
                 let on = on == "on";
                 let r = plugin_host::set_user_enabled(cx.paths, name, on);
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("{name} turned {}; restart rinky to apply", if on { "on" } else { "off" }),
                     Err(e) => format!("Cannot change {name}: {e}"),
-                };
+                });
             }
             _ => {}
         }
