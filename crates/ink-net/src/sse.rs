@@ -427,11 +427,12 @@ impl<'a> EventSource<'a> {
                             Ok(Some(ev)) => {
                                 // This connection works: the reconnect budget starts over.
                                 attempts = 0;
-                                self.last_event_id = ev.id.clone();
+                                let stop = on_event(&ev).is_break();
                                 if let Some(ms) = ev.retry {
                                     self.retry = Duration::from_millis(ms);
                                 }
-                                if on_event(&ev).is_break() {
+                                self.last_event_id = ev.id;
+                                if stop {
                                     return Ok(());
                                 }
                             }
