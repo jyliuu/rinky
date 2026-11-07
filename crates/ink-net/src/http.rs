@@ -218,7 +218,11 @@ impl Response {
 
     /// Reads the whole body (at most `limit` bytes; `usize::MAX` means no practical limit).
     pub fn bytes(mut self, limit: usize) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
+        // A stated length within the limit sizes the buffer once; growing it by doubling
+        // holds the old and the new copy at each step (up to 3x the body at the peak). A
+        // lying length costs at most one 16 MiB reservation.
+        let hint = self.content_length().filter(|&n| n <= limit as u64).map_or(0, |n| n.min(16 << 20) as usize);
+        let mut out = Vec::with_capacity(hint);
         // One byte more than the limit tells "exactly at the limit" from "too large".
         (&mut self.body).take((limit as u64).saturating_add(1)).read_to_end(&mut out).map_err(NetError::from_read)?;
         if out.len() > limit {
