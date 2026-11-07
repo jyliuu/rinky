@@ -397,13 +397,10 @@ impl Download {
             let resp = client.send(req)?;
             let mut append = false;
             let total;
+            let content_range = resp.header("content-range").and_then(parse_content_range);
             match resp.status {
                 206 if have > 0 => {
-                    let (start, t) = resp
-                        .header("content-range")
-                        .and_then(parse_content_range)
-                        .and_then(|(s, t)| Some((s?, t)))
-                        .ok_or_else(|| NetError::Format("206 without a valid Content-Range".into()))?;
+                    let (start, t) = content_range.and_then(|(s, t)| Some((s?, t))).ok_or_else(|| NetError::Format("206 without a valid Content-Range".into()))?;
                     if start != have {
                         log::warn!("download: asked for bytes {have}-, server sent from {start}; starting over");
                         if restarted {
@@ -416,7 +413,7 @@ impl Download {
                     total = t.or(meta.total);
                 }
                 416 if have > 0 => {
-                    let t = resp.header("content-range").and_then(parse_content_range).and_then(|(_, t)| t).or(meta.total);
+                    let t = content_range.and_then(|(_, t)| t).or(meta.total);
                     if t == Some(have) {
                         drop(resp);
                         log::info!("download: {} already complete ({have} bytes)", part.display());
@@ -428,6 +425,14 @@ impl Download {
                     restarted = true;
                     continue;
                 }
+                // A part of the file to a request without Range (a broken server or
+                // cache): its Content-Length is the part's, so the length to reach is the
+                // Content-Range total. A short body then fails below and keeps the .part
+                // for a resume, instead of being renamed as the whole book.
+                206 => match content_range {
+                    Some((Some(0), Some(t))) => total = Some(t),
+                    _ => return Err(NetError::Format(format!("206 to a request without Range (Content-Range {:?})", resp.header("content-range").unwrap_or("")))),
+                },
                 200..=299 => {
                     total = resp.content_length();
                 }

@@ -144,13 +144,13 @@ fn opds_balanced_deep_markup_stays_fast() {
 // Downloads.
 
 #[test]
-#[ignore = "verifier: a 206 to a GET without Range is renamed as the whole book (Content-Range total ignored)"]
 fn download_206_without_a_range_request_is_not_renamed_short() {
     // A broken server or cache answers a plain GET with `206` and the first 1000 bytes of
     // a 5000-byte book (`Content-Range: bytes 0-999/5000`, `Content-Length: 1000`). The
-    // 206 is only handled as a partial answer when a `.part` exists; otherwise it takes
-    // the 2xx branch, which looks only at `Content-Length`, so 1000 bytes count as the
-    // whole file and are renamed to `dest`.
+    // 206 was only handled as a partial answer when a `.part` existed; otherwise it took
+    // the 2xx branch, which looked only at `Content-Length`, so 1000 bytes counted as the
+    // whole file and were renamed to `dest`. Now the Content-Range total is the length to
+    // reach: the run fails and keeps the 1000 bytes for a resume.
     let data = Arc::new(file_bytes(5000));
     let d2 = data.clone();
     let (base, _) = raw_server(move |w, _head, _| {
@@ -166,6 +166,7 @@ fn download_206_without_a_range_request_is_not_renamed_short() {
         "a 206 for bytes 0-999 of 5000 was renamed into place as a {on_disk:?}-byte file; run returned {:?}",
         r.map(|o| (o.bytes, o.resumed_from))
     );
+    assert_eq!(std::fs::metadata(part_path(&dest)).map(|m| m.len()).ok(), Some(1000), ".part kept for a resume");
 }
 
 #[test]
