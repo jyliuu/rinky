@@ -276,11 +276,6 @@ impl BookChats {
         self.chats.len() != n
     }
 
-    /// `(label, id)` for a menu, newest first.
-    pub fn list(&self) -> Vec<(String, String)> {
-        self.chats.iter().rev().map(|c| (format!("{} ({} messages)", c.title, c.messages.len()), c.id.clone())).collect()
-    }
-
     /// Totals over all chats.
     pub fn totals(&self) -> Totals {
         let mut t = Totals::default();
@@ -669,8 +664,8 @@ mod tests {
         b.save(&path).unwrap();
         let mut back = BookChats::load(&path, "abcd").unwrap();
         assert_eq!(back, b);
-        assert_eq!(back.list()[0], ("Who is Tybalt? (0 messages)".to_string(), two.clone()));
-        assert!(back.list()[1].0.ends_with("… (1 messages)"));
+        assert_eq!(back.chats[1].title, "Who is Tybalt?");
+        assert!(back.chats[0].title.ends_with('…') && back.chats[0].title.chars().count() == 60, "long titles are cut");
         assert_eq!(back.totals().total_tokens, 3);
         assert!(back.delete(&one) && !back.delete(&one));
         let three = back.create("again");
