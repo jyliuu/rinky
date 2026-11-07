@@ -222,18 +222,16 @@ impl Conv {
 /// Converts one definition of type `kind` (`h` HTML, `x` XDXF, `g` Pango) to Markdown,
 /// with the dictionary's `style`.
 pub fn to_markdown(kind: char, raw: &str, style: &Style) -> String {
-    let mut author = style.0.clone();
-    let body = if kind == 'h' {
-        raw.to_string()
+    let (author, html) = if kind == 'h' {
+        (style.0.clone(), format!("<html><body>{raw}</body></html>"))
     } else {
+        static XDXF: std::sync::OnceLock<Style> = std::sync::OnceLock::new();
         // XDXF's `tr` is a transcription, which HTML parsing would take for a table row.
-        let mut rules = RuleSet::default();
-        rules.add_sheet(&css::parse_stylesheet(XDXF_CSS), Origin::Author);
-        author = Arc::new(rules);
-        raw.replace("<tr>", "<span>").replace("</tr>", "</span>")
+        let body = raw.replace("<tr>", "<span>").replace("</tr>", "</span>");
+        (XDXF.get_or_init(|| Style::parse(XDXF_CSS)).0.clone(), format!("<html><body>{body}</body></html>"))
     };
     let cx = cascade(author);
-    let dom = ink_html::parse::parse_chapter(&format!("<html><body>{body}</body></html>"), &mut Classify(&cx));
+    let dom = ink_html::parse::parse_chapter(&html, &mut Classify(&cx));
     let mut c = Conv::default();
     if dom.body != ink_html::dom::NONE {
         c.element(&dom, &cx, dom.body, &ComputedStyle::root(16.0));
