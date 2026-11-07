@@ -129,24 +129,13 @@ impl Canvas {
     /// Darkens pixels with a glyph coverage mask (black ink on the existing background).
     /// `mask` is `w * h` coverage values, 255 = full ink.
     pub fn draw_mask(&mut self, x: i32, y: i32, w: usize, h: usize, mask: &[u8]) {
-        let d = self.drawable();
-        for my in 0..h {
-            let py = y + my as i32;
-            if py < d.y || py >= d.bottom() {
-                continue;
-            }
-            let row = py as usize * self.width;
-            for mx in 0..w {
-                let px = x + mx as i32;
-                if px < d.x || px >= d.right() {
-                    continue;
-                }
-                let a = mask[my * w + mx] as u32;
-                if a == 0 {
-                    continue;
-                }
-                let dst = &mut self.pixels[row + px as usize];
-                *dst = (*dst as u32 * (255 - a) / 255) as u8;
+        let r = self.drawable().intersect(&Rect::new(x, y, w as u32, h as u32));
+        let (mx, n) = ((r.x - x) as usize, r.w as usize);
+        for py in r.y..r.bottom() {
+            let m = (py - y) as usize * w + mx;
+            let d = py as usize * self.width + r.x as usize;
+            for (dst, &a) in self.pixels[d..d + n].iter_mut().zip(&mask[m..m + n]) {
+                *dst = (*dst as u32 * (255 - a as u32) / 255) as u8;
             }
         }
     }
@@ -390,6 +379,24 @@ mod tests {
         assert_eq!(c.get(0, 0), Some(0));
         assert_eq!(c.get(1, 1), Some(0));
         assert_eq!(c.get(2, 2), Some(255));
+        // Every offset in and around a clipped canvas: the same pixels as darkening
+        // each covered pixel on its own.
+        let mask: Vec<u8> = (0..5 * 3).map(|i| (i * 40 % 256) as u8).collect();
+        for clip in [None, Some(Rect::new(1, 2, 4, 3))] {
+            for (x, y) in (-6..9).flat_map(|x| (-4..8).map(move |y| (x, y))) {
+                let mut got = Canvas::from_pixels(6, 5, (0..30).map(|i| 200 - i as u8).collect());
+                let mut want = got.clone();
+                got.set_clip(clip);
+                got.draw_mask(x, y, 5, 3, &mask);
+                for (i, a) in mask.iter().enumerate() {
+                    let (px, py) = (x + (i % 5) as i32, y + (i / 5) as i32);
+                    if let Some(v) = want.get(px, py).filter(|_| clip.is_none_or(|c| c.contains(crate::Point::new(px, py)))) {
+                        want.pixels[py as usize * 6 + px as usize] = (v as u32 * (255 - *a as u32) / 255) as u8;
+                    }
+                }
+                assert_eq!(got.pixels, want.pixels, "mask at {x},{y} clip {clip:?}");
+            }
+        }
     }
 
     #[test]
@@ -422,3 +429,4 @@ mod tests {
         assert_eq!(a.get(0, 0), Some(0));
     }
 }
+
