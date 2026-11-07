@@ -189,7 +189,8 @@ impl std::fmt::Debug for Book {
 /// tolerance for mismatched end tags, same depth limit), but only element names, the
 /// child order and the wanted `id`/`name` values are kept: no text, no other
 /// attributes. Names are interned, so a 100 000-element chapter allocates a few
-/// hundred small strings instead of one per element, text node and attribute.
+/// hundred small strings instead of one per element, text node and attribute. The walk
+/// then descends only into elements with a wanted id below them.
 fn id_paths(xhtml: &str, wanted: &HashSet<&str>) -> HashMap<String, Vec<Step>> {
     let mut out = HashMap::new();
     if wanted.is_empty() {
@@ -200,7 +201,7 @@ fn id_paths(xhtml: &str, wanted: &HashSet<&str>) -> HashMap<String, Vec<Step>> {
     let body = t.find(root, t.body_name);
     if let Some(body) = body {
         let mut path = Vec::new();
-        t.walk(body, &mut path, wanted, &mut out);
+        t.walk(body, &mut path, &mut out);
     }
     out
 }
@@ -213,6 +214,8 @@ struct SkelNode {
     children: Vec<u32>,
     /// The first `id` / `name` attribute (local name), when its value is wanted.
     ids: [Option<String>; 2],
+    /// An element below this one has a wanted id.
+    wanted_below: bool,
 }
 
 /// The element structure of an XHTML source, as [`xml::parse`] would nest it.
@@ -229,7 +232,7 @@ impl Skeleton {
         use quick_xml::events::Event;
         let mut r = quick_xml::Reader::from_str(src);
         r.config_mut().check_end_names = false;
-        let mut nodes = vec![SkelNode { name: u32::MAX, children: Vec::new(), ids: [None, None] }];
+        let mut nodes = vec![SkelNode { name: u32::MAX, children: Vec::new(), ids: [None, None], wanted_below: false }];
         let mut stack: Vec<u32> = vec![0];
         let mut skipped = 0usize;
         // Local name as `xml::qname_parts` takes it: after the first `:`.
@@ -245,7 +248,7 @@ impl Skeleton {
             ids: HashMap<String, u32>,
         }
         let mut nm = Names { list: Vec::new(), ids: HashMap::new() };
-        fn add(e: &quick_xml::events::BytesStart, nodes: &mut Vec<SkelNode>, parent: u32, nm: &mut Names, wanted: &HashSet<&str>) -> u32 {
+        fn add(e: &quick_xml::events::BytesStart, nodes: &mut Vec<SkelNode>, stack: &[u32], nm: &mut Names, wanted: &HashSet<&str>) -> u32 {
             let q = e.name();
             let l = local(q.as_ref());
             let name = match nm.ids.get(l.as_ref()) {
@@ -268,17 +271,26 @@ impl Skeleton {
                 if std::mem::replace(&mut seen[k], true) {
                     continue; // `Element::attr` takes the first one
                 }
+                // Copied only when wanted (some books give every paragraph an id).
                 let v = match a.unescape_value_with(xml::html_entity) {
-                    Ok(v) => v.into_owned(),
-                    Err(_) => String::from_utf8_lossy(&a.value).into_owned(),
+                    Ok(v) => v,
+                    Err(_) => String::from_utf8_lossy(&a.value),
                 };
-                if wanted.contains(v.as_str()) {
-                    ids[k] = Some(v);
+                if wanted.contains(v.as_ref()) {
+                    ids[k] = Some(v.into_owned());
                 }
             }
             let id = nodes.len() as u32;
-            nodes.push(SkelNode { name, children: Vec::new(), ids });
-            nodes[parent as usize].children.push(id);
+            if ids.iter().any(Option::is_some) {
+                // The open elements are this one's ancestors.
+                for &a in stack.iter().rev() {
+                    if std::mem::replace(&mut nodes[a as usize].wanted_below, true) {
+                        break;
+                    }
+                }
+            }
+            nodes.push(SkelNode { name, children: Vec::new(), ids, wanted_below: false });
+            nodes[*stack.last().expect("document") as usize].children.push(id);
             id
         }
         loop {
@@ -297,12 +309,12 @@ impl Skeleton {
                     if stack.len() > xml::MAX_DEPTH {
                         skipped += 1;
                     } else {
-                        let id = add(&e, &mut nodes, *stack.last().expect("document"), &mut nm, wanted);
+                        let id = add(&e, &mut nodes, &stack, &mut nm, wanted);
                         stack.push(id);
                     }
                 }
                 Event::Empty(e) => {
-                    add(&e, &mut nodes, *stack.last().expect("document"), &mut nm, wanted);
+                    add(&e, &mut nodes, &stack, &mut nm, wanted);
                 }
                 Event::End(e) => {
                     if skipped > 0 {
@@ -334,7 +346,9 @@ impl Skeleton {
         self.nodes[n as usize].children.iter().find_map(|&c| self.find(c, name))
     }
 
-    fn walk(&self, el: u32, path: &mut Vec<Step>, wanted: &HashSet<&str>, out: &mut HashMap<String, Vec<Step>>) {
+    /// Records the element path of every wanted id below `el`; `path` holds the steps
+    /// down to `el` as (interned name, index).
+    fn walk(&self, el: u32, path: &mut Vec<(u32, Option<u32>)>, out: &mut HashMap<String, Vec<Step>>) {
         let kids = &self.nodes[el as usize].children;
         // Siblings per name, counted once (a chapter body can have 50 000 paragraphs).
         let mut totals: HashMap<u32, u32> = HashMap::new();
@@ -346,15 +360,20 @@ impl Skeleton {
             let node = &self.nodes[k as usize];
             let n = seen.entry(node.name).or_insert(0);
             *n += 1;
-            let index = *n;
-            let total = totals[&node.name];
-            path.push(Step { name: self.names[node.name as usize].clone(), index: (total > 1).then_some(index) });
+            let has_id = node.ids.iter().any(Option::is_some);
+            if !has_id && !node.wanted_below {
+                continue;
+            }
+            path.push((node.name, (totals[&node.name] > 1).then_some(*n)));
             for id in node.ids.iter().flatten() {
-                if wanted.contains(id.as_str()) && !out.contains_key(id) {
-                    out.insert(id.clone(), path.clone());
+                if !out.contains_key(id) {
+                    let steps = path.iter().map(|&(name, index)| Step { name: self.names[name as usize].clone(), index }).collect();
+                    out.insert(id.clone(), steps);
                 }
             }
-            self.walk(k, path, wanted, out);
+            if node.wanted_below {
+                self.walk(k, path, out);
+            }
             path.pop();
         }
     }
