@@ -715,38 +715,12 @@ mod wired {
     use super::super::overlay::OverlayKind;
     use super::super::tests::Harness;
     use super::*;
-    use crate::app::providers;
     use ink_device::{InputEvent, Timestamp, TouchContact, TouchFrame, TouchPhase};
 
-    /// Runs action `a` as the wired reader does; returns the transition.
+    /// Runs action `a` as the reader does (`menu_action` first, then the rest of
+    /// `ReaderScreen::action`); returns the transition.
     fn act(h: &mut Harness, a: &str) -> Transition {
-        let p = providers();
-        let mut cx = AppCtx {
-            canvas: &mut h.canvas,
-            screen: h.dev.screen.as_mut(),
-            fonts: &mut h.fonts,
-            theme: &h.theme,
-            refresh: &mut h.refresh,
-            plugins: &mut h.plugins,
-            settings: &h.settings,
-            paths: &h.paths,
-            providers: &p,
-            services: crate::router::Services {
-                info: &h.dev.info,
-                light: h.dev.light.as_mut(),
-                battery: h.dev.battery.as_mut(),
-                power: h.dev.power.as_mut(),
-                wifi: h.dev.wifi.as_mut(),
-                usb: h.dev.usb.as_mut(),
-                clock: h.dev.clock.as_mut(),
-            },
-            settings_update: &mut h.settings_update,
-        };
-        h.reader.actions.push(a.to_string());
-        let t = match h.reader.menu_action(a, &mut cx).unwrap() {
-            Some(t) => t,
-            None => h.reader.action(a, &mut cx).unwrap(),
-        };
+        let t = h.with_cx(|r, cx| r.action(a, cx).unwrap());
         h.paint();
         t
     }
