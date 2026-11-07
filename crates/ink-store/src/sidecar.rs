@@ -469,11 +469,7 @@ fn has_sibling_with_same_sdr(book: &Path) -> bool {
     let Ok(rd) = std::fs::read_dir(dir) else { return true };
     rd.flatten().any(|e| {
         let n = e.file_name();
-        let is_book = split_name(&n).1.is_some_and(|ext| {
-            let ext = ext.to_string_lossy().to_ascii_lowercase();
-            crate::library::BOOK_EXTENSIONS.contains(&ext.as_str())
-        });
-        n != name && is_book && sidecar_dir(&dir.join(&n)) == sdr
+        n != name && crate::library::is_book_name(Path::new(&n)) && sidecar_dir(&dir.join(&n)) == sdr
     })
 }
 
