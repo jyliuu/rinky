@@ -182,24 +182,24 @@ struct PartMeta {
     total: Option<u64>,
 }
 
-/// `<dest>.part`.
-pub fn part_path(dest: &Path) -> PathBuf {
+fn with_suffix(dest: &Path, suffix: &str) -> PathBuf {
     let mut s = dest.as_os_str().to_owned();
-    s.push(".part");
+    s.push(suffix);
     PathBuf::from(s)
 }
 
+/// `<dest>.part`.
+pub fn part_path(dest: &Path) -> PathBuf {
+    with_suffix(dest, ".part")
+}
+
 fn meta_path(dest: &Path) -> PathBuf {
-    let mut s = dest.as_os_str().to_owned();
-    s.push(".part.json");
-    PathBuf::from(s)
+    with_suffix(dest, ".part.json")
 }
 
 /// `<dest>.part.lock`.
 pub fn lock_path(dest: &Path) -> PathBuf {
-    let mut s = dest.as_os_str().to_owned();
-    s.push(".part.lock");
-    PathBuf::from(s)
+    with_suffix(dest, ".part.lock")
 }
 
 /// `bytes A-B/T` -> `(Some(A), Some(T))`; `T` may be `*` (`None`); `bytes */T`, the form
@@ -371,14 +371,17 @@ impl Download {
         let part = part_path(&self.dest);
         let mut restarted = false;
         loop {
-            // What is on disk?
-            let meta = if self.resume { self.load_meta() } else { None };
-            let mut have = if meta.is_some() { std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0) } else { 0 };
-            if meta.is_none() || restarted {
-                self.discard_partial();
-                have = 0;
-            }
-            let meta = if have > 0 { meta.unwrap_or_default() } else { PartMeta::default() };
+            // What is on disk? A .part counts only with metadata for this URL, and not
+            // after the server refused to resume it.
+            let meta = (self.resume && !restarted).then(|| self.load_meta()).flatten();
+            let have = match meta {
+                Some(_) => self.partial_bytes(),
+                None => {
+                    self.discard_partial();
+                    0
+                }
+            };
+            let meta = meta.filter(|_| have > 0).unwrap_or_default();
 
             let mut req = Request::get(&self.url).read_timeout(self.read_timeout).set_header("Accept-Encoding", "identity");
             for (k, v) in &self.headers {
@@ -452,10 +455,12 @@ impl Download {
             let mut received = resumed_from;
             let mut body = resp.body;
             let mut buf = vec![0u8; 64 * 1024];
-            let mut progress = DownloadProgress { received, total, resumed_from };
-            if let Some(cb) = hooks.on_progress.as_mut() {
-                cb(&progress);
-            }
+            let mut report = |received| {
+                if let Some(cb) = hooks.on_progress.as_mut() {
+                    cb(&DownloadProgress { received, total, resumed_from });
+                }
+            };
+            report(received);
             let copy: Result<()> = loop {
                 if let Err(e) = hooks.cancel.check() {
                     break Err(e);
@@ -476,10 +481,7 @@ impl Download {
                     }
                 }
                 guard.tick();
-                progress.received = received;
-                if let Some(cb) = hooks.on_progress.as_mut() {
-                    cb(&progress);
-                }
+                report(received);
             };
             file.flush()?;
             file.sync_all()?;
