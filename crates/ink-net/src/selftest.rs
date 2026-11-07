@@ -378,7 +378,7 @@ impl NetSelftest<'_> {
 
         // OPDS.
         let dir = self.scratch.clone();
-        let root = url("/opds/root.xml");
+        let (root, opds2) = (url("/opds/root.xml"), url("/opds2/catalog.json"));
         push("net.opds", Some(Box::new(move || {
             let c = OpdsClient::new(h);
             let feed = c.fetch(&root).map_err(e2s)?;
@@ -399,7 +399,7 @@ impl NetSelftest<'_> {
             let listed: Vec<String> = std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
             ensure(listed.contains(&name), || format!("'{name}' not in the listing {listed:?}"))?;
             let _ = std::fs::remove_file(&out.path);
-            let f2 = c.fetch(&url_join(&root, "/opds2/catalog.json")).map_err(e2s)?;
+            let f2 = c.fetch(&opds2).map_err(e2s)?;
             ensure(f2.version == OpdsVersion::Json2 && f2.entries.len() == 3, || format!("opds2 {f2:?}"))?;
             Ok(format!("navigation -> 2 acquisition pages (4 books) -> OpenSearch 'moby dick' (2 hits) -> downloaded '{name}' ({size} bytes, SHA-256 ok, name listed back intact); OPDS 2 feed with {} entries", f2.entries.len()))
         })), None);
@@ -431,13 +431,6 @@ impl NetSelftest<'_> {
         })), None);
         let _ = std::fs::remove_dir(&self.scratch);
         out
-    }
-}
-
-fn url_join(any_url_on_server: &str, path: &str) -> String {
-    match crate::url::origin(any_url_on_server) {
-        Some(_) => crate::url::resolve(any_url_on_server, path),
-        None => path.to_string(),
     }
 }
 
