@@ -115,24 +115,26 @@ fn saved_chapter(path: &Path) -> Option<String> {
 
 /// The hero book: the one being read, else the newest unread book that opens, else
 /// the newest unread one, else the most recently opened one. `true` when it is being read.
-pub(crate) fn hero_book(lib: &super::Library) -> Option<(BookEntry, bool)> {
+/// `new`: [`want_to_read`].
+pub(crate) fn hero_book<'a>(lib: &'a super::Library, new: &[&'a BookEntry]) -> Option<(&'a BookEntry, bool)> {
     if let Some(b) = lib.current() {
-        return Some((b.clone(), true));
+        return Some((b, true));
     }
-    let new = want_to_read(lib);
     new.iter()
         .find(|b| !b.unsupported)
         .or(new.first())
-        .cloned()
-        .or_else(|| lib.index.recent(1).first().map(|b| (*b).clone()))
-        .or_else(|| lib.index.books.first().cloned())
+        .copied()
+        .or_else(|| lib.index.recent(1).first().copied())
+        .or_else(|| lib.index.books.first())
         .map(|b| (b, false))
 }
 
-/// Books never opened, newest first.
-pub(crate) fn want_to_read(lib: &super::Library) -> Vec<BookEntry> {
-    let mut v: Vec<BookEntry> = lib.index.books.iter().filter(|b| b.last_opened.is_none() && b.status == ReadingStatus::New).cloned().collect();
-    v.sort_by(|a, b| b.added.cmp(&a.added).then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())));
+/// Books never opened, newest first (then by title). A first scan adds every book at
+/// the same second, so the title decides most comparisons: it is lowercased once per
+/// book, not twice per comparison.
+pub(crate) fn want_to_read(lib: &super::Library) -> Vec<&BookEntry> {
+    let mut v: Vec<&BookEntry> = lib.index.books.iter().filter(|b| b.last_opened.is_none() && b.status == ReadingStatus::New).collect();
+    v.sort_by_cached_key(|b| (std::cmp::Reverse(b.added), b.title.to_lowercase()));
     v
 }
 
@@ -166,10 +168,12 @@ impl LibraryScreen {
             self.draw_home_empty(p, w, h);
             return;
         }
-        let hero = hero_book(lib);
-        let hero_path = hero.as_ref().map(|(b, _)| b.path.clone());
-        let recent: Vec<BookEntry> = lib.index.recent(SHELF_COLS + 1).into_iter().filter(|b| Some(&b.path) != hero_path.as_ref()).take(SHELF_COLS).cloned().collect();
-        let new: Vec<BookEntry> = want_to_read(lib).into_iter().filter(|b| Some(&b.path) != hero_path.as_ref()).take(SHELF_COLS * MAX_ROWS).collect();
+        // Only the books on the page are cloned (the drawing needs `&mut self`).
+        let new = want_to_read(lib);
+        let hero = hero_book(lib, &new).map(|(b, reading)| (b.clone(), reading));
+        let other = |b: &&BookEntry| Some(&b.path) != hero.as_ref().map(|(h, _)| &h.path);
+        let recent: Vec<BookEntry> = lib.index.recent(SHELF_COLS + 1).into_iter().filter(other).take(SHELF_COLS).cloned().collect();
+        let new: Vec<BookEntry> = new.into_iter().filter(other).take(SHELF_COLS * MAX_ROWS).cloned().collect();
         let bottom = h - TAB_H - space(1);
         let mut y = TOP;
         if let Some((b, reading)) = hero {
@@ -380,6 +384,35 @@ mod tests {
         assert_eq!(secs_per_page(Some(&thin), &all), Some(3600.0 / 40.0));
         assert_eq!(secs_per_page(None, &[]), None);
         assert_eq!(secs_per_page(None, &[totals("z", 0, 0)]), None);
+    }
+
+    #[test]
+    fn want_to_read_is_newest_first_then_by_title_and_the_hero_opens() {
+        let root = std::env::temp_dir().join(format!("ink-home-order-{}", std::process::id()));
+        let mut lib = super::super::Library::open(&ink_store::Paths { root: root.clone() }, &[]);
+        let book = |title: &str, added: u64, unsupported: bool, opened: Option<u64>| BookEntry {
+            path: PathBuf::from(format!("/b/{title}.epub")),
+            title: title.into(),
+            added,
+            unsupported,
+            last_opened: opened,
+            ..Default::default()
+        };
+        lib.index.books = vec![
+            book("beta", 1, false, None),
+            book("Alpha", 1, false, None),
+            book("locked", 2, true, None),
+            book("opened", 3, false, Some(9)),
+        ];
+        let new = want_to_read(&lib);
+        assert_eq!(new.iter().map(|b| b.title.as_str()).collect::<Vec<_>>(), ["locked", "Alpha", "beta"]);
+        // The most recently opened book that is not finished is being read: the hero.
+        assert_eq!(hero_book(&lib, &new).map(|(b, r)| (b.title.as_str(), r)), Some(("opened", true)));
+        lib.index.books.pop();
+        let new = want_to_read(&lib);
+        // The newest unread book that opens, not the locked one.
+        assert_eq!(hero_book(&lib, &new).map(|(b, r)| (b.title.as_str(), r)), Some(("Alpha", false)));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
