@@ -104,11 +104,13 @@ The [user guide](docs/user-guide.md) covers everything else, including troublesh
 rustup target add armv7-unknown-linux-musleabihf
 brew install zig            # or your package manager; zig 0.17
 cargo install cargo-zigbuild
-scripts/package.sh          # → out/package/rinky-<version>-kindle{hf.tar.gz,.zip}
+scripts/package.sh          # → out/package/rinky-<version>-{kindlehf.tar.gz,kindle.zip,kobo.tar.gz,kobo.zip}
 ```
 
-The result is a static ARMv7 binary plus the launcher, watchdog and KUAL menu. Try the
-reader on your computer without a Kindle:
+Each package holds the same static ARMv7 binary, plus the launcher and menu entry for
+its e-reader. The Kindle package also has the watchdog and the SSH server, which
+`scripts/build-dropbear.sh` builds on the first run (it needs curl, patch and make).
+Try the reader on your computer without an e-reader:
 
 ```sh
 cargo run --release -p ink-app -- sim path/to/books/   # simulator window
