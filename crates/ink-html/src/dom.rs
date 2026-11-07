@@ -356,30 +356,25 @@ pub fn split_raw_text(raw: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut rest = raw;
     loop {
-        // Byte offset of the 8192nd char, if there are that many.
-        let Some((cut, _)) = rest.char_indices().nth(TEXT_SPLIT) else {
+        // Byte offset of the 8192nd char, if there are that many (never in 8192 bytes).
+        let cut = if rest.len() > TEXT_SPLIT { rest.char_indices().nth(TEXT_SPLIT).map(|(i, _)| i) } else { None };
+        let Some(cut) = cut else {
             if !rest.is_empty() {
                 out.push(rest);
             }
             break;
         };
-        let window = &rest[..cut];
-        let chars: Vec<(usize, char)> = window.char_indices().collect();
-        let mut split = cut;
-        for k in (0..chars.len()).rev() {
-            let (i, ch) = chars[k];
-            if ch == ' ' {
-                split = i + 1;
-                break;
-            }
-            if ch == '\r' || ch == '\n' {
-                let next = chars.get(k + 1).map(|c| c.1).unwrap_or('\0');
-                if (ch == '\r' && next != '\n') || (ch == '\n' && next != '\r') {
-                    split = i + 1;
-                    break;
-                }
-            }
-        }
+        // After the last space, or the last line break that is not half of a CR LF pair.
+        let w = &rest.as_bytes()[..cut];
+        let split = (0..cut)
+            .rev()
+            .find(|&i| match w[i] {
+                b' ' => true,
+                b'\r' => w.get(i + 1) != Some(&b'\n'),
+                b'\n' => w.get(i + 1) != Some(&b'\r'),
+                _ => false,
+            })
+            .map_or(cut, |i| i + 1);
         out.push(&rest[..split]);
         rest = &rest[split..];
     }
@@ -430,106 +425,98 @@ pub fn named_entity(name: &str) -> Option<(char, Option<char>)> {
 
 /// crengine's `PreProcessXmlString`: decodes entities and handles whitespace.
 /// `decode` is false for text that is already decoded (html5ever).
+///
+/// Works on bytes: every char it treats specially is ASCII, and other chars are copied
+/// in runs.
 pub fn preprocess(raw: &str, pre: bool, decode: bool) -> String {
+    let b = raw.as_bytes();
     let mut out = String::with_capacity(raw.len());
-    let chars: Vec<char> = raw.chars().collect();
+    // Spaces in a row so far, and the last byte handled (only compared with `\n`).
     let mut nsp = 0usize;
+    let mut last = 0u8;
     let mut i = 0;
-    let n = chars.len();
-    let mut lch = '\0';
-    while i < n {
-        let ch = chars[i];
-        if pre {
-            if ch == '\r' {
-                let first = i == 0;
-                if (first || lch != '\n') && (i == n - 1 || chars[i + 1] != '\n') {
-                    out.push('\n');
-                    lch = '\n';
-                }
-                i += 1;
-                continue;
-            } else if ch == '\n' {
+    while i < b.len() {
+        let c = b[i];
+        if pre && c == b'\r' {
+            // A lone CR is a line break; CR LF and LF CR give one.
+            if (i == 0 || last != b'\n') && b.get(i + 1) != Some(&b'\n') {
                 out.push('\n');
-                lch = ch;
-                i += 1;
+                last = b'\n';
+            }
+            i += 1;
+            continue;
+        }
+        if pre && c == b'\n' {
+            out.push('\n');
+            last = c;
+            i += 1;
+            continue;
+        }
+        let c = if !pre && matches!(c, b'\r' | b'\n' | b'\t') { b' ' } else { c };
+        if c == b'&' && decode {
+            if let Some((len, term)) = decode_entity(&raw[i..], &mut out) {
+                nsp = 0;
+                last = term;
+                i += len;
                 continue;
             }
+            // Not an entity: the `&` is text.
         }
-        let ch = if !pre && matches!(ch, '\r' | '\n' | '\t') { ' ' } else { ch };
-        if ch == '&' && decode {
-            // Entity.
-            if i + 1 < n && chars[i + 1] == '#' {
-                let mut j = i + 2;
-                let hex = j < n && (chars[j] == 'x' || chars[j] == 'X');
-                if hex {
-                    j += 1;
-                }
-                let start = j;
-                let mut code: u32 = 0;
-                while j < n && (if hex { chars[j].is_ascii_hexdigit() } else { chars[j].is_ascii_digit() }) {
-                    code = code.saturating_mul(if hex { 16 } else { 10 }).saturating_add(chars[j].to_digit(16).unwrap());
-                    j += 1;
-                }
-                if j > start && j < n && chars[j] == ';' {
-                    if code != 0 {
-                        if let Some(c) = char::from_u32(codeconvert(code)) {
-                            out.push(c);
-                        }
-                    }
-                    nsp = 0;
-                    lch = ';';
-                    i = j + 1;
-                    continue;
-                }
-                // Not terminated: crengine drops back to normal text.
-                out.push('&');
-                lch = '&';
-                nsp = 0;
-                i += 1;
-                continue;
-            } else if i + 1 < n && chars[i + 1].is_ascii_alphabetic() {
-                let mut k = 0;
-                while k < 31 && i + 1 + k < n && chars[i + 1 + k] != ';' && chars[i + 1 + k] != ' ' {
-                    k += 1;
-                }
-                let term = chars.get(i + 1 + k).copied();
-                let name: String = chars[i + 1..i + 1 + k].iter().collect();
-                if matches!(term, Some(';') | Some(' ')) {
-                    if let Some((a, b)) = named_entity(&name) {
-                        out.push(a);
-                        if let Some(b) = b {
-                            out.push(b);
-                        }
-                        nsp = 0;
-                        lch = term.unwrap();
-                        i = i + 2 + k;
-                        continue;
-                    }
-                }
-                out.push('&');
-                lch = '&';
-                nsp = 0;
-                i += 1;
-                continue;
-            }
-        }
-        if ch == ' ' {
+        if c == b' ' {
             if pre || nsp == 0 {
                 out.push(' ');
             }
             nsp += 1;
-        } else {
-            out.push(ch);
-            nsp = 0;
+            last = c;
+            i += 1;
+            continue;
         }
-        lch = ch;
+        // A run of ordinary chars.
+        let start = i;
         i += 1;
+        while i < b.len() && !matches!(b[i], b'&' | b'\r' | b'\n' | b'\t' | b' ') {
+            i += 1;
+        }
+        out.push_str(&raw[start..i]);
+        nsp = 0;
+        last = b[i - 1];
     }
     if pre {
         expand_tabs(&out)
     } else {
         out
     }
+}
+
+/// Decodes the entity at the start of `s` (which starts with `&`) into `out`, as
+/// crengine does: `&#N;` and `&#xN;` (code 0 or invalid: nothing), or a named entity of
+/// at most 31 chars ended by `;` or a space. Returns the bytes used and the last one.
+fn decode_entity(s: &str, out: &mut String) -> Option<(usize, u8)> {
+    let b = s.as_bytes();
+    if b.get(1) == Some(&b'#') {
+        let hex = matches!(b.get(2), Some(b'x' | b'X'));
+        let start = 2 + hex as usize;
+        let radix = if hex { 16 } else { 10 };
+        let digits = b[start..].iter().take_while(|&&c| (c as char).is_digit(radix)).count();
+        let end = start + digits;
+        if digits == 0 || b.get(end) != Some(&b';') {
+            return None;
+        }
+        let code = b[start..end].iter().fold(0u32, |n, &c| n.saturating_mul(radix).saturating_add((c as char).to_digit(radix).unwrap_or(0)));
+        if code != 0 {
+            out.extend(char::from_u32(codeconvert(code)));
+        }
+        return Some((end + 1, b';'));
+    }
+    if !b.get(1).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let k = b[1..].iter().take(31).take_while(|&&c| c != b';' && c != b' ').count();
+    let term = *b.get(1 + k).filter(|&&t| t == b';' || t == b' ')?;
+    let (a, second) = named_entity(s.get(1..1 + k)?)?;
+    out.push(a);
+    out.extend(second);
+    Some((2 + k, term))
 }
 
 /// crengine's `ExpandTabs` (column counting restarts at 1 after a newline).
@@ -1012,6 +999,10 @@ mod tests {
         assert_eq!(preprocess("x\n\ty", true, true), "x\n       y");
         assert_eq!(preprocess("\ty", true, true), "        y");
         assert_eq!(preprocess("a &amp; b", false, false), "a &amp; b");
+        // Code 0 gives nothing, unterminated or empty references stay text, a name of
+        // more than 31 chars is not looked up; a CR right after a line break is dropped.
+        assert_eq!(preprocess("a&#0;b &#12 &#x; &; &nbspx", false, true), "ab &#12 &#x; &; &nbspx");
+        assert_eq!(preprocess("&abcdefghijklmnopqrstuvwxyzabcdef; é&amp;\r\rz", true, true), "&abcdefghijklmnopqrstuvwxyzabcdef; é&\nz");
     }
 
     #[test]
