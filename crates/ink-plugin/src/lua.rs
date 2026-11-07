@@ -930,6 +930,17 @@ fn pos_arg(cx: &mut Cx, a: &Args, i: usize) -> mlua::Result<Result<Position>> {
     })
 }
 
+/// A Lua sequence with one table per item, filled by `row`.
+fn rows<T>(lua: &Lua, items: &[T], row: impl Fn(&Table, &T) -> mlua::Result<()>) -> mlua::Result<MultiValue> {
+    let t = lua.create_table_with_capacity(items.len(), 0)?;
+    for (i, item) in items.iter().enumerate() {
+        let r = lua.create_table()?;
+        row(&r, item)?;
+        t.raw_set(i + 1, r)?;
+    }
+    one(t, lua)
+}
+
 fn metadata_table(lua: &Lua, m: &Metadata) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("title", m.title.as_str())?;
@@ -1094,16 +1105,12 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
         "doc.toc" => {
             let r = host(cx, name)?.document().map(|d| d.toc());
             soft(lua, r, |lua, toc| {
-                let t = lua.create_table()?;
-                for (i, e) in toc.iter().enumerate() {
-                    let row = lua.create_table()?;
+                rows(lua, &toc, |row, e| {
                     row.set("title", e.title.as_str())?;
                     row.set("level", e.level)?;
                     row.set("position", e.position.to_string())?;
-                    row.set("page", e.page.map(|p| p + 1))?;
-                    t.raw_set(i + 1, row)?;
-                }
-                one(t, lua)
+                    row.set("page", e.page.map(|p| p + 1))
+                })
             })
         }
         "doc.search" => {
@@ -1111,17 +1118,13 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
             let limit = a.opt_int(1)?.unwrap_or(20).clamp(1, 500) as usize;
             let r = host(cx, name)?.document().and_then(|d| d.search(&q, limit));
             soft(lua, r, |lua, hits| {
-                let t = lua.create_table()?;
-                for (i, h) in hits.iter().enumerate() {
-                    let row = lua.create_table()?;
+                rows(lua, &hits, |row, h| {
                     row.set("position", h.position.to_string())?;
                     row.set("page", h.page.map(|p| p + 1))?;
                     row.set("excerpt", h.excerpt.as_str())?;
                     row.set("match_start", h.matched.start + 1)?;
-                    row.set("match_end", h.matched.end)?;
-                    t.raw_set(i + 1, row)?;
-                }
-                one(t, lua)
+                    row.set("match_end", h.matched.end)
+                })
             })
         }
         "doc.read_around" => {
@@ -1138,24 +1141,20 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
                 Err(e) => Err(e),
             };
             soft(lua, r, |lua, links| {
-                let t = lua.create_table()?;
-                for (i, l) in links.iter().enumerate() {
-                    let row = lua.create_table()?;
+                rows(lua, &links, |row, l| {
                     row.set("text", l.text.as_str())?;
                     row.set("footnote", l.footnote)?;
                     match &l.target {
                         LinkTarget::Internal(p) => {
                             row.set("internal", true)?;
-                            row.set("position", p.to_string())?;
+                            row.set("position", p.to_string())
                         }
                         LinkTarget::External(u) => {
                             row.set("internal", false)?;
-                            row.set("url", u.as_str())?;
+                            row.set("url", u.as_str())
                         }
                     }
-                    t.raw_set(i + 1, row)?;
-                }
-                one(t, lua)
+                })
             })
         }
         "doc.current_position" => {
