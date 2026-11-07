@@ -138,13 +138,21 @@ impl PluginManifest {
 
     /// True when `url`'s host is allowed by [`PluginManifest::hosts`] (any host when empty).
     pub fn allows_url(&self, url: &str) -> bool {
-        let Some(host) = url_host(url) else { return false };
-        self.hosts.is_empty()
-            || self.hosts.iter().any(|h| {
-                let h = h.to_ascii_lowercase();
-                host == h || host.ends_with(&format!(".{h}"))
-            })
+        hosts_allow(&self.hosts, url)
     }
+}
+
+/// True when `url`'s host is in `hosts` (an entry also allows its subdomains; any host
+/// when `hosts` is empty). Not an http(s) URL: false.
+pub fn hosts_allow(hosts: &[String], url: &str) -> bool {
+    let Some(host) = url_host(url) else { return false };
+    let host = host.as_bytes();
+    hosts.is_empty()
+        || hosts.iter().map(|h| h.as_bytes()).any(|h| match host.len().checked_sub(h.len()) {
+            Some(0) => host.eq_ignore_ascii_case(h),
+            Some(dot) => host[dot - 1] == b'.' && host[dot..].eq_ignore_ascii_case(h),
+            None => false,
+        })
 }
 
 /// True for a plugin name: non-empty, `[a-z0-9_-]`, at most 64 characters.
