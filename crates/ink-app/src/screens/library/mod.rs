@@ -538,7 +538,7 @@ impl LibraryScreen {
                 self.redraw();
             }
             Hit::SetStatus(p, i) => {
-                if let (Some(st), Some(lib)) = (details::status_at(i), self.lib.as_mut()) {
+                if let (Some(st), Some(lib)) = (STATUSES.get(i).copied(), self.lib.as_mut()) {
                     lib.set_status(&p, st);
                 }
                 self.redraw();

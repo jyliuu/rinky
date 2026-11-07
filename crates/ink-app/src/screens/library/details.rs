@@ -2,10 +2,10 @@
 //! facts; under it Read / Continue as the filled button, the reading status as chips
 //! and the book's collections as chips.
 
-use super::browse::{badge_w, book_state, chip_w, paint_badge, paint_chip, percent_text, Badge};
+use super::browse::{authors_text, badge_w, book_state, chip_w, paint_badge, paint_chip, percent_text, Badge};
 use super::model::status_label;
-use super::view::{human_size, HEADER_H, MARGIN, TAB_H};
-use super::{Hit, LibraryScreen, STATUSES};
+use super::view::{HEADER_H, MARGIN, TAB_H};
+use super::{files, Hit, LibraryScreen, STATUSES};
 use ink_device::Rect;
 use ink_store::{BookEntry, ReadingStatus};
 use ink_text::Style;
@@ -48,8 +48,7 @@ impl LibraryScreen {
             p.text_left(Rect::new(tx, y, tw, lh as u32), l, t.heading.px, t.heading.style, t.fg);
             y += lh;
         }
-        let authors = if b.authors.is_empty() { "Unknown author".to_string() } else { b.authors.join(", ") };
-        p.text_left(Rect::new(tx, y + 4, tw, 56), &authors, t.body.px, Style::Regular, t.muted);
+        p.text_left(Rect::new(tx, y + 4, tw, 56), &authors_text(&b), t.body.px, Style::Regular, t.muted);
         y += 64;
         if let Some(s) = &b.series {
             let text = match b.series_index {
@@ -90,7 +89,7 @@ impl LibraryScreen {
             ProgressBar::new(value).with_label(percent_text(value)).with_caption(caption).paint(p, Rect::new(tx - 4, y, tw + 4, 96));
             y += 96 + space(2);
         }
-        let mut facts: Vec<String> = vec![format!("{} · {}", b.format.to_uppercase(), human_size(b.size))];
+        let mut facts: Vec<String> = vec![format!("{} · {}", b.format.to_uppercase(), files::size_text(b.size))];
         if let Some(n) = b.pages {
             facts.push(format!("{n} pages"));
         }
@@ -187,9 +186,4 @@ impl LibraryScreen {
             p.text_left(Rect::new(MARGIN, y + i as i32 * 40, cw, 40), l, t.caption.px * 0.9, Style::Regular, t.muted);
         }
     }
-}
-
-/// Status of index `i` in the details chips.
-pub fn status_at(i: usize) -> Option<ReadingStatus> {
-    STATUSES.get(i).copied()
 }

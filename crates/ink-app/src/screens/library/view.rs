@@ -185,12 +185,3 @@ impl LibraryScreen {
         }
     }
 }
-
-/// `1.2 MB`, `340 KB`.
-pub fn human_size(n: u64) -> String {
-    if n >= 1 << 20 {
-        format!("{:.1} MB", n as f64 / (1u64 << 20) as f64)
-    } else {
-        format!("{} KB", n.div_ceil(1024))
-    }
-}
