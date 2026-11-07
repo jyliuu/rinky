@@ -12,6 +12,7 @@
 //!   `== Heading ==`.
 
 use ink_net::url::encode_component;
+pub use ink_plugin::kit::{cut_at, md_escape};
 use ink_plugin::serde_json::{json, Map, Value};
 use std::path::Path;
 
@@ -74,21 +75,6 @@ pub fn clean_query(sel: &str) -> String {
         matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '«' | '»' | '(' | ')' | '[' | ']' | '{' | '}' | '.' | ',' | ';' | ':' | '!' | '?' | '…' | '*' | '—' | '–' | '-')
     });
     t.chars().take(120).collect::<String>().trim().to_string()
-}
-
-/// Cuts `text` at `max` characters on a word boundary with an ellipsis.
-pub fn cut_at(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut body: String = text.chars().take(max).collect();
-    if let Some(sp) = body.rfind(' ').filter(|n| *n > max / 2) {
-        body.truncate(sp);
-    }
-    let keep = body.trim_end_matches([' ', ',', ';', ':']).len();
-    body.truncate(keep);
-    body.push('…');
-    body
 }
 
 /// A page summary.
@@ -202,23 +188,6 @@ pub fn strip_html(s: &str) -> String {
     }
     res.push_str(rest);
     res.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Escapes Markdown punctuation so article text shows as written.
-pub fn md_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        if matches!(c, '\\' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '|' | '-' | '+' | '!') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    if let Some(dot) = out.find(". ") {
-        if dot > 0 && out[..dot].chars().all(|c| c.is_ascii_digit()) {
-            out.insert(dot, '\\');
-        }
-    }
-    out
 }
 
 /// `== Heading ==` as `(level, text)`; level 1 is `==`.

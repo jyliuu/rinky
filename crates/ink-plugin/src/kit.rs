@@ -1,8 +1,9 @@
-//! Small helpers the compiled-in plugins share: typed reads of plugin settings and
-//! menus built from owned labels.
+//! Small helpers the compiled-in plugins share: typed reads of plugin settings, menus
+//! built from owned labels, and text for the Markdown viewer and cards.
 //!
-//! They are inherent methods of [`HostCtx`] and go through its checked accessors, so a
-//! plugin without the `storage` permission reads every setting as unset.
+//! The setting and menu helpers are inherent methods of [`HostCtx`] and go through its
+//! checked accessors, so a plugin without the `storage` permission reads every setting
+//! as unset.
 
 use crate::host::{HostCtx, UiRequest};
 use crate::Result;
@@ -43,8 +44,43 @@ impl HostCtx<'_> {
     }
 }
 
+/// Escapes Markdown punctuation so text (a definition, an article) shows as written in
+/// the text viewer; a leading `1. ` does not become a numbered list.
+pub fn md_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(c, '\\' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '|' | '-' | '+' | '!') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    if let Some(dot) = out.find(". ") {
+        if dot > 0 && out[..dot].chars().all(|c| c.is_ascii_digit()) {
+            out.insert(dot, '\\');
+        }
+    }
+    out
+}
+
+/// `text` cut at `max` characters on a word boundary (when one is in the second half),
+/// without trailing separators, with an ellipsis; `text` itself when it is short enough.
+pub fn cut_at(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut body: String = text.chars().take(max).collect();
+    if let Some(sp) = body.rfind(' ').filter(|n| *n > max / 2) {
+        body.truncate(sp);
+    }
+    let keep = body.trim_end_matches([' ', '•', ',', ';', ':']).len();
+    body.truncate(keep);
+    body.push('…');
+    body
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{cut_at, md_escape};
     use crate::{HostCtx, MemoryStorage, Permission, PluginError, UiQueue, UiRequest};
     use serde_json::json;
 
@@ -70,5 +106,16 @@ mod tests {
         let mut cx = HostCtx::new(&mut ui, &mut st, &[]);
         assert_eq!((cx.setting("on"), cx.setting_bool("on", false)), (None, false));
         assert!(matches!(cx.menu(5, "V", [("a", "a")]), Err(PluginError::Permission(_))));
+    }
+
+    #[test]
+    fn markdown_escape_and_cut() {
+        assert_eq!(md_escape("a*b_[c]"), "a\\*b\\_\\[c\\]");
+        assert_eq!(md_escape("1. first"), "1\\. first");
+        assert_eq!(md_escape("x. y"), "x. y");
+        assert_eq!(cut_at("short", 10), "short");
+        assert_eq!(cut_at("one two three four", 12), "one two…");
+        assert_eq!(cut_at("one two, • three", 10), "one two…");
+        assert_eq!(cut_at("abcdefghijkl", 5), "abcde…");
     }
 }

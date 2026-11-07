@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 
 use ink_dict::{Dictionary, Hit, Library, LookupResult};
+use ink_plugin::kit::{cut_at, md_escape};
 use ink_plugin::{HostCtx, Permission, Plugin, PluginManifest, Registrar, Result};
 use ink_store::vocab::{Lookup, VocabDb};
 
@@ -124,24 +125,6 @@ fn root_of(data_dir: &Path) -> PathBuf {
     PathBuf::from("/mnt/us/rinky")
 }
 
-/// Escapes Markdown punctuation so definition text shows as typed.
-fn md_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        if matches!(c, '\\' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '|' | '-' | '+' | '!') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    // "1. " at the start would become a numbered list.
-    if let Some(dot) = out.find(". ") {
-        if dot > 0 && out[..dot].chars().all(|c| c.is_ascii_digit()) {
-            out.insert(dot, '\\');
-        }
-    }
-    out
-}
-
 /// Parts-of-speech words that open an entry or a new sense.
 const POS: &[&str] = &[
     "noun", "verb", "adjective", "adverb", "pronoun", "preposition", "conjunction", "interjection", "exclamation", "determiner", "abbreviation",
@@ -212,20 +195,6 @@ pub fn parse_entry(hit: &Hit) -> Entry {
 /// Cuts `text` at [`POPUP_CHARS`] on a word boundary with an ellipsis.
 fn cut(text: &str) -> String {
     cut_at(text, POPUP_CHARS)
-}
-
-/// Cuts `text` at `max` characters on a word boundary with an ellipsis.
-fn cut_at(text: &str, max: usize) -> String {
-    let mut body: String = text.chars().take(max).collect();
-    if text.chars().count() > max {
-        if let Some(sp) = body.rfind(' ').filter(|n| *n > max / 2) {
-            body.truncate(sp);
-        }
-        let keep = body.trim_end_matches([' ', '•', ',', ';', ':']).len();
-        body.truncate(keep);
-        body.push('…');
-    }
-    body
 }
 
 /// Footer of the "no definition" card: how many dictionaries were searched.

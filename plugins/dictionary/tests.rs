@@ -178,8 +178,6 @@ fn popup_cut_and_markdown_escape() {
     let e = parse_entry(&noad);
     assert_eq!((e.pron.as_deref(), e.pos.as_deref(), e.sense.as_str()), (Some("ˈmjuːtɪni"), Some("noun (plural mutinies)"), "an open rebellion"));
     assert_eq!(popup_body(&noad, 0), "_/ˈmjuːtɪni/ · noun (plural mutinies)_\nan open rebellion\n— D");
-    assert_eq!(md_escape("a*b_[c]"), "a\\*b\\_\\[c\\]");
-    assert_eq!(md_escape("1. first"), "1\\. first");
     assert_eq!(root_of(std::path::Path::new("/x/home/plugins/dictionary/data")), std::path::PathBuf::from("/x/home"));
     assert_eq!(root_of(std::path::Path::new("/tmp/other")), std::path::PathBuf::from("/mnt/us/rinky"));
 }

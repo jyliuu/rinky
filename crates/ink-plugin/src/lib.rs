@@ -25,7 +25,7 @@
 #![warn(missing_docs)]
 
 pub mod host;
-mod kit;
+pub mod kit;
 pub mod lua;
 pub mod manifest;
 pub mod markdown;
