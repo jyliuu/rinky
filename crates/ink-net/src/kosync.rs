@@ -225,12 +225,14 @@ impl<'a> KoSyncClient<'a> {
         let status = resp.status;
         let mime = resp.mime();
         let text = resp.text(1 << 20)?;
+        // A hotel or train Wi-Fi login page answers 200 (or 401) to everything. A sync
+        // server never sends HTML: counting the page as success, or as the server
+        // refusing the account, would drop queued pushes.
+        let html = mime == "text/html" || text.trim_start().starts_with('<');
+        if html && (status == 401 || ok.contains(&status)) {
+            return Err(NetError::Format(format!("status {status} with an HTML page, not a sync server answer (captive portal?)")));
+        }
         if ok.contains(&status) {
-            // A hotel or train Wi-Fi login page answers 200 to everything. A sync server
-            // never sends HTML; counting it as success would drop queued pushes.
-            if mime == "text/html" || text.trim_start().starts_with('<') {
-                return Err(NetError::Format(format!("status {status} with an HTML page, not a sync server answer (captive portal?)")));
-            }
             return Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null));
         }
         Err(crate::http::status_error(status, &text))

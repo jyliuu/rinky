@@ -422,13 +422,13 @@ impl HttpClient for Portal401 {
 }
 
 #[test]
-#[ignore = "verifier: a 401 HTML page (portal/proxy, not the sync server) makes SyncQueue::drain drop every queued push"]
 fn kosync_queue_survives_a_401_html_page_from_a_portal() {
     // The cycle-1 fix stops a 2xx HTML page from counting as success, "so SyncQueue keeps
-    // the entry". The same portal answering 401 gives NetError::Unauthorized, and drain()
-    // clears the whole queue: weeks of unsynced progress from every book are lost without
-    // the sync server ever being reached. KOReader's KOSyncQueue:drain keeps the remaining
-    // items on any failure (it clears only on logout).
+    // the entry". The same portal answering 401 gave NetError::Unauthorized, and drain()
+    // cleared the whole queue: weeks of unsynced progress from every book were lost
+    // without the sync server ever being reached. A 401 HTML page is now a format error
+    // too. KOReader's KOSyncQueue:drain keeps the remaining items on any failure (it
+    // clears only on logout).
     let c = KoSyncClient::new(&Portal401, KoSyncAccount::new("http://192.0.2.10:7200", "u", "p"));
     let mut q = SyncQueue::default();
     for (i, doc) in ["a", "b", "c"].iter().enumerate() {
@@ -438,7 +438,7 @@ fn kosync_queue_survives_a_401_html_page_from_a_portal() {
         );
     }
     let r = c.push(&q.items[0].progress);
-    eprintln!("push through the portal: {r:?}");
+    assert!(matches!(&r, Err(NetError::Format(m)) if m.contains("captive portal")), "{r:?}");
     assert_eq!(q.drain(&c), 0);
     assert_eq!(q.items.len(), 3, "a 401 login page from a portal dropped the queued pushes");
 }
