@@ -95,6 +95,15 @@ rm -rf /mnt/us/.rinky-pkg /mnt/us/rinky-<version>-kindlehf.tar.gz
 This also adds a **rinky** entry to the Kindle library (when the drive has a
 `documents` folder), so you can start rinky without KUAL.
 
+The installer (`rinky/install.sh`, in both packages) checks the package files against
+their checksums first. It refuses to run while rinky runs, and one install or update
+runs at a time (*"another install or update is running"*). It installs all files or
+none: each file is first copied next to the old one, and the old files are replaced
+only when every copy worked. If the e-reader is full it stops with *"cannot write ...
+(no space left?); nothing was changed"* and the installed version stays as it was, so
+it needs room for one more copy of the package. Installing over an older version keeps
+your settings, notes and plugins.
+
 ### Start
 
 Open KUAL and choose *rinky > Start rinky*, or over SSH
