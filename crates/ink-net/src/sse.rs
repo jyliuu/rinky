@@ -145,47 +145,44 @@ impl SseParser {
     /// Feeds bytes; returns the events completed by them. After an overflow
     /// ([`SseParser::overflowed`]) it returns only the events completed before it, and
     /// nothing on later calls.
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<SseEvent> {
+    pub fn feed(&mut self, mut bytes: &[u8]) -> Vec<SseEvent> {
         let mut out = Vec::new();
-        if self.overflow {
-            return out;
-        }
-        for &b in bytes {
-            if self.skip_lf {
-                self.skip_lf = false;
-                if b == b'\n' {
-                    continue;
-                }
+        while !self.overflow && !bytes.is_empty() {
+            // The LF of a CR LF pair, possibly at the start of the next chunk.
+            if std::mem::take(&mut self.skip_lf) && bytes[0] == b'\n' {
+                bytes = &bytes[1..];
+                continue;
             }
-            match b {
-                b'\r' | b'\n' => {
-                    self.skip_lf = b == b'\r';
-                    let mut raw = std::mem::take(&mut self.buf);
-                    if self.first_line {
-                        self.first_line = false;
-                        if raw.starts_with(b"\xEF\xBB\xBF") {
-                            raw.drain(..3);
-                        }
-                    }
-                    let line = String::from_utf8_lossy(&raw).into_owned();
-                    if let Some(ev) = self.line(&line) {
-                        out.push(ev);
-                    }
-                    if self.held() > self.max_event_bytes {
-                        self.stop_overflowed();
-                        return out;
-                    }
-                }
-                _ => {
-                    self.buf.push(b);
-                    if self.held() > self.max_event_bytes {
-                        self.stop_overflowed();
-                        return out;
-                    }
-                }
+            let end = bytes.iter().position(|&b| b == b'\r' || b == b'\n');
+            let text = &bytes[..end.unwrap_or(bytes.len())];
+            if self.held() + text.len() > self.max_event_bytes {
+                self.stop_overflowed();
+                break;
+            }
+            self.buf.extend_from_slice(text);
+            let Some(end) = end else { break };
+            self.skip_lf = bytes[end] == b'\r';
+            bytes = &bytes[end + 1..];
+            self.end_line(&mut out);
+            if self.held() > self.max_event_bytes {
+                self.stop_overflowed();
             }
         }
         out
+    }
+
+    /// Handles the line collected in `buf`.
+    fn end_line(&mut self, out: &mut Vec<SseEvent>) {
+        let mut raw = std::mem::take(&mut self.buf);
+        let bom = std::mem::take(&mut self.first_line) && raw.starts_with(b"\xEF\xBB\xBF");
+        if let Some(ev) = self.line(&String::from_utf8_lossy(&raw[if bom { 3 } else { 0 }..])) {
+            out.push(ev);
+        }
+        // Keep a small line buffer for the next line; give a big one back.
+        if raw.capacity() <= 64 << 10 {
+            raw.clear();
+            self.buf = raw;
+        }
     }
 
     /// Ends the stream. A trailing event without a blank line is discarded, as the
