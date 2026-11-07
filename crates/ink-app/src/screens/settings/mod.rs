@@ -1033,6 +1033,13 @@ impl SettingsScreen {
         self.rebuild = Some(RefreshClass::Gl16);
     }
 
+    /// [`Self::go`] with the status line kept (the result of what led there).
+    fn go_keep_status(&mut self, page: Page, cx: &mut AppCtx) {
+        let text = std::mem::take(&mut self.status_text);
+        self.go(page, cx);
+        self.status_text = text;
+    }
+
     fn set_status(&mut self, text: impl Into<String>) {
         self.set_status_class(text, RefreshClass::Gl16);
     }
@@ -1776,15 +1783,11 @@ impl SettingsScreen {
                 if n.secured && !n.known {
                     self.go(Page::Join(n.essid), cx);
                 } else if self.connect(&n.essid, None, cx)? {
-                    let text = std::mem::take(&mut self.status_text);
-                    self.go(Page::Wifi, cx);
-                    self.status_text = text;
+                    self.go_keep_status(Page::Wifi, cx);
                 } else if n.secured {
                     // The saved password may be wrong (a failed join keeps the profile):
                     // ask for it again instead of retrying the saved one forever.
-                    let text = std::mem::take(&mut self.status_text);
-                    self.go(Page::Join(n.essid), cx);
-                    self.status_text = text;
+                    self.go_keep_status(Page::Join(n.essid), cx);
                 }
             }
             "join" => self.join(cx)?,
@@ -1978,9 +1981,7 @@ impl SettingsScreen {
             return Ok(());
         }
         if self.connect(&essid, Some(&password), cx)? {
-            let text = std::mem::take(&mut self.status_text);
-            self.go(Page::Wifi, cx);
-            self.status_text = text;
+            self.go_keep_status(Page::Wifi, cx);
         }
         Ok(())
     }
