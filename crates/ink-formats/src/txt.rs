@@ -41,12 +41,12 @@ enum Mode {
 /// `\r\n`/`\r` to `\n`, form feeds to blank lines (a copy only when needed, made in one
 /// pass: a book can be tens of MB).
 fn normalise(text: &str) -> Cow<'_, str> {
-    if !text.contains(['\r', '\u{c}']) {
+    if !text.bytes().any(|b| b == b'\r' || b == 0x0C) {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len() + 64);
     let mut rest = text;
-    while let Some(i) = rest.find(['\r', '\u{c}']) {
+    while let Some(i) = rest.bytes().position(|b| b == b'\r' || b == 0x0C) {
         out.push_str(&rest[..i]);
         let after = &rest[i + 1..];
         rest = if rest.as_bytes()[i] == b'\r' {
@@ -181,11 +181,13 @@ fn heading_level(line: &str) -> Option<u8> {
     if chars == 0 || chars > 80 {
         return None;
     }
-    let lower = t.to_lowercase();
-    let first: String = lower.split_whitespace().next().unwrap_or("").to_string();
+    // Only the first two words are compared, so only they are lower-cased.
+    let first_raw = t.split_whitespace().next().unwrap_or("");
+    let rest = t[first_raw.len()..].trim();
+    let first = first_raw.to_lowercase();
     let first_bare = first.trim_end_matches(|c: char| ".:,;".contains(c));
-    let rest = lower[first.len()..].trim();
-    let rest_first = rest.split_whitespace().next().unwrap_or("").trim_end_matches(|c: char| ".:,;—-".contains(c));
+    let rest_lower = rest.split_whitespace().next().unwrap_or("").to_lowercase();
+    let rest_first = rest_lower.trim_end_matches(|c: char| ".:,;—-".contains(c));
     let numberish = |w: &str| {
         !w.is_empty()
             && (w.chars().all(|c| c.is_ascii_digit()) || is_roman(w) || NUMBER_WORDS.contains(&w) || w.chars().count() == 1)
@@ -230,9 +232,10 @@ fn blocks_of(groups: &[Vec<&str>], mode: Mode, allow_caps: bool) -> Vec<Block> {
         // A heading line, optionally followed by up to two subtitle lines that are not
         // headings themselves.
         let short = g.len() <= 3 && g.iter().all(|l| l.trim().chars().count() <= 80);
-        let heading = if short && g[1..].iter().all(|l| heading_level(l).is_none()) {
+        let heading = if short {
             match heading_level(g[0]) {
-                Some(level) => Some(level),
+                // The subtitle lines are looked at only for a heading line (rare).
+                Some(level) => Some(level).filter(|_| g[1..].iter().all(|l| heading_level(l).is_none())),
                 None if allow_caps && mode == Mode::Blank && g.len() == 1 && is_all_caps_title(g[0]) => Some(1),
                 None => None,
             }
