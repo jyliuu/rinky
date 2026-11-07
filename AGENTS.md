@@ -78,6 +78,7 @@ scripts/clippy-arm.sh                                    # clippy for the ARM ta
 scripts/golden-update.sh out/evidence/<key>/golden-diff  # regenerate goldens + diff images
 cargo zigbuild --profile deploy --target armv7-unknown-linux-musleabihf -p ink-app   # Kindle binary, quick (--release: fat LTO, ~1.5 min more)
 scripts/package.sh --allow-dirty --profile deploy --out OUT  # Kindle + Kobo packages, quick build (CI uses the fat-LTO release profile)
+scripts/release.sh check X.Y.Z                           # Cargo.toml and CHANGELOG.md agree on a release
 ```
 
 - The slow tests (`#[ignore = "slow: ..."]`) run before a release with the exact
@@ -133,7 +134,8 @@ scripts/package.sh --allow-dirty --profile deploy --out OUT  # Kindle + Kobo pac
   commit subject) under the topmost unreleased heading (`## [Unreleased]` or
   `## [X.Y.Z] - Unreleased`), in Added / Changed / Fixed. Several commits may share
   one entry. Update `docs/user-guide.md` when behaviour described there changes.
-- Never bump the version in a feature commit; only the "Release X.Y.Z" commit does.
+- Never bump the version in a feature commit; only the "Release X.Y.Z" commit made by
+  `scripts/release.sh X.Y.Z` does (version, `Cargo.lock`, dated changelog heading).
 - PR body: one bold heading per commit with its short hash and a few lines or bullets,
   then `**Checks:**` (what ran) and `**Not tested on a device:**` (what only real
   hardware can show). PR #19 is a good example.
