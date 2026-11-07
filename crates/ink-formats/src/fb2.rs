@@ -200,7 +200,7 @@ fn units_of<'a>(body: &'a Element) -> Vec<Unit<'a>> {
 
 struct Conv<'a> {
     /// Element id -> chapter file.
-    ids: &'a HashMap<String, String>,
+    chapters: &'a Chapters,
     images: &'a HashMap<String, (String, Vec<u8>)>,
     out: String,
     /// Note bodies render their sections as footnotes.
@@ -299,13 +299,7 @@ impl Conv<'_> {
 
     fn link(&mut self, el: &Element, depth: u8) {
         let href = el.attr("href").unwrap_or("");
-        let target = match href.strip_prefix('#') {
-            Some(id) => match self.ids.get(id) {
-                Some(file) => format!("{file}#{id}"),
-                None => href.to_string(),
-            },
-            None => href.to_string(),
-        };
+        let target = self.chapters.href(href);
         let note = el.attr("type") == Some("note");
         self.out.push_str(&format!("<a href=\"{}\"", escape_attr(&target)));
         if note {
@@ -388,25 +382,75 @@ impl Conv<'_> {
     }
 }
 
-/// Gives every section an id (`fb2-s<N>`) so TOC entries can point at it.
-fn assign_ids(el: &mut Element, n: &mut usize) {
+/// Gives every `section` without an id the id `<prefix>-s<N>`, so TOC entries can
+/// point at it (FB2 and FB3).
+pub(crate) fn assign_section_ids(el: &mut Element, prefix: &str, n: &mut usize) {
     if el.name == "section" && el.attr("id").is_none() {
         *n += 1;
-        el.attrs.push(xml::Attr { local: "id".into(), qname: "id".into(), value: format!("fb2-s{n}") });
+        el.attrs.push(xml::Attr { local: "id".into(), qname: "id".into(), value: format!("{prefix}-s{n}") });
     }
     for c in &mut el.children {
         if let Node::Element(e) = c {
-            assign_ids(e, n);
+            assign_section_ids(e, prefix, n);
         }
     }
 }
 
-fn collect_ids(el: &Element, file: &str, out: &mut HashMap<String, String>) {
-    if let Some(id) = el.attr("id") {
-        out.entry(id.to_string()).or_insert_with(|| file.to_string());
+/// The chapter files of a converted FictionBook (`<prefix>-001.xhtml`, ...) and the
+/// chapter that holds each element id (FB2 and FB3).
+pub(crate) struct Chapters {
+    prefix: &'static str,
+    ids: HashMap<String, usize>,
+}
+
+impl Chapters {
+    pub(crate) fn new(prefix: &'static str) -> Self {
+        Chapters { prefix, ids: HashMap::new() }
     }
-    for e in el.elements() {
-        collect_ids(e, file, out);
+
+    /// File name of chapter `i` (0-based).
+    pub(crate) fn path(&self, i: usize) -> String {
+        format!("{}-{:03}.xhtml", self.prefix, i + 1)
+    }
+
+    /// Records `id` as being in chapter `i` (the first chapter that has it wins).
+    pub(crate) fn add_id(&mut self, id: &str, i: usize) {
+        if !self.ids.contains_key(id) {
+            self.ids.insert(id.to_string(), i);
+        }
+    }
+
+    /// Records the ids of `el` and of everything below it as being in chapter `i`.
+    pub(crate) fn add(&mut self, el: &Element, i: usize) {
+        if let Some(id) = el.attr("id") {
+            self.add_id(id, i);
+        }
+        for e in el.elements() {
+            self.add(e, i);
+        }
+    }
+
+    /// `href` with a `#id` reference pointed at the chapter file that holds the id.
+    pub(crate) fn href(&self, href: &str) -> String {
+        match href.strip_prefix('#').and_then(|id| Some((*self.ids.get(id)?, id))) {
+            Some((i, id)) => format!("{}#{id}", self.path(i)),
+            None => href.to_string(),
+        }
+    }
+
+    /// TOC nodes for the sections below `el` whose id is in a chapter; sections without a
+    /// title (`title_of`) pass their children up.
+    pub(crate) fn section_toc(&self, el: &Element, title_of: fn(&Element) -> Option<String>) -> Vec<TocNode> {
+        let mut out = Vec::new();
+        for s in el.children_named("section") {
+            let children = self.section_toc(s, title_of);
+            let id = s.attr("id").unwrap_or("");
+            match (title_of(s), self.ids.get(id)) {
+                (Some(title), Some(&ch)) => out.push(TocNode { title, target: Some(Target::id(ch, id)), children }),
+                _ => out.extend(children),
+            }
+        }
+        out
     }
 }
 
@@ -417,21 +461,8 @@ fn section_title(el: &Element) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// TOC nodes for the sections below `el` (sections without titles pass their children up).
-fn section_toc(el: &Element, chapter_of: &dyn Fn(&str) -> Option<usize>) -> Vec<TocNode> {
-    let mut out = Vec::new();
-    for s in el.children_named("section") {
-        let children = section_toc(s, chapter_of);
-        let id = s.attr("id").unwrap_or("");
-        match (section_title(s), chapter_of(id)) {
-            (Some(title), Some(ch)) => out.push(TocNode { title, target: Some(Target::id(ch, id)), children }),
-            _ => out.extend(children),
-        }
-    }
-    out
-}
-
-fn chapter_html(title: &str, body: &str) -> String {
+/// A converted chapter page: XHTML with the FB2 stylesheet (FB2 and FB3).
+pub(crate) fn chapter_html(title: &str, body: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>{}</title><link rel=\"stylesheet\" type=\"text/css\" href=\"fb2.css\"/></head><body>{}</body></html>",
         escape_text(title),
@@ -443,7 +474,7 @@ fn chapter_html(title: &str, body: &str) -> String {
 pub fn convert(mut root: Element) -> Result<Book> {
     let mut info = info_of(&root);
     let mut n = 0;
-    assign_ids(&mut root, &mut n);
+    assign_section_ids(&mut root, "fb2", &mut n);
     let images = binaries(&root, None);
     let bodies: Vec<&Element> = root.children_named("body").collect();
     let main = bodies.iter().copied().find(|b| is_main_body(b)).or(bodies.first().copied()).ok_or_else(|| DocError::Format("FB2 has no <body>".into()))?;
@@ -453,24 +484,23 @@ pub fn convert(mut root: Element) -> Result<Book> {
             units.push(Unit::Body(b));
         }
     }
-    let file = |i: usize| format!("fb2-{:03}.xhtml", i + 1);
-    let mut ids = HashMap::new();
+    let mut files = Chapters::new("fb2");
     for (i, u) in units.iter().enumerate() {
         match u {
             Unit::Header(parent, els, _) => {
                 if parent.name == "section" {
                     if let Some(id) = parent.attr("id") {
-                        ids.entry(id.to_string()).or_insert_with(|| file(i));
+                        files.add_id(id, i);
                     }
                 }
-                els.iter().for_each(|e| collect_ids(e, &file(i), &mut ids))
+                els.iter().for_each(|e| files.add(e, i))
             }
-            Unit::Section(e, _) | Unit::Body(e) => collect_ids(e, &file(i), &mut ids),
+            Unit::Section(e, _) | Unit::Body(e) => files.add(e, i),
         }
     }
     let mut chapters = Vec::with_capacity(units.len());
     for u in &units {
-        let mut c = Conv { ids: &ids, images: &images, out: String::new(), in_notes: false, inline: false };
+        let mut c = Conv { chapters: &files, images: &images, out: String::new(), in_notes: false, inline: false };
         let title = match u {
             Unit::Header(parent, els, level) => {
                 let section = parent.name == "section";
@@ -509,11 +539,10 @@ pub fn convert(mut root: Element) -> Result<Book> {
                 b.child("title").map(|t| t.text_collapsed()).unwrap_or_else(|| b.attr("name").unwrap_or("").to_string())
             }
         };
-        chapters.push(HtmlChapter { path: file(chapters.len()), html: chapter_html(&title, &c.out) });
+        chapters.push(HtmlChapter { path: files.path(chapters.len()), html: chapter_html(&title, &c.out) });
     }
     // TOC: section titles of the main body (nested), then the titles of extra bodies.
-    let chapter_of = |id: &str| ids.get(id).and_then(|f| f.trim_start_matches("fb2-").trim_end_matches(".xhtml").parse::<usize>().ok()).map(|n| n - 1);
-    let mut toc = section_toc(main, &chapter_of);
+    let mut toc = files.section_toc(main, section_title);
     for (i, u) in units.iter().enumerate() {
         if let Unit::Body(b) = u {
             let title = b.child("title").map(|t| t.text_collapsed()).filter(|t| !t.is_empty());
