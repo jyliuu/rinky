@@ -1235,7 +1235,9 @@ impl Document for HtmlDocument {
         let mut fonts = self.fonts.borrow_mut();
         fonts.set_embolden(self.layout.embolden);
         let mut img = |src: &str, w: u32, h: u32| -> Option<Arc<image::GrayImage>> {
-            images.borrow_mut().get((src.to_string(), w, h), || {
+            // An inline SVG is named by its node, which is only unique in its chapter.
+            let key = if src.starts_with("#svg:") { format!("{src}@{c}") } else { src.to_string() };
+            images.borrow_mut().get((key, w, h), || {
                 if let Some(node) = src.strip_prefix("#svg:") {
                     let node: u32 = node.parse().ok()?;
                     let ch = book.chapter(c);
@@ -2016,6 +2018,36 @@ mod tests {
             HtmlChapter { path: "b.xhtml".into(), html: html("<p>The end.</p>") },
         ];
         HtmlDocument::new(Metadata::default(), chapters, Box::new(ink_doc::MemoryLoader::default())).unwrap()
+    }
+
+    /// Two chapters whose inline `<svg>` wrappers have the same node id and size but show
+    /// different images: each page draws its own image.
+    #[test]
+    fn inline_svg_images_of_two_chapters_are_not_mixed_up() {
+        let png = |v: u8| {
+            let mut c = std::io::Cursor::new(Vec::new());
+            image::GrayImage::from_pixel(8, 8, image::Luma([v])).write_to(&mut c, image::ImageFormat::Png).unwrap();
+            c.into_inner()
+        };
+        let mut res = ink_doc::MemoryLoader::default();
+        res.0.insert("black.png".into(), png(0));
+        res.0.insert("white.png".into(), png(255));
+        let page = |img: &str| {
+            format!(
+                "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:xlink='http://www.w3.org/1999/xlink'><body><svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 8 8'><image width='8' height='8' xlink:href='{img}'/></svg></body></html>"
+            )
+        };
+        let chapters = vec![HtmlChapter { path: "a.xhtml".into(), html: page("black.png") }, HtmlChapter { path: "b.xhtml".into(), html: page("white.png") }];
+        let mut doc = HtmlDocument::new(Metadata::default(), chapters, Box::new(res)).unwrap();
+        doc.set_layout(&LayoutSettings::for_screen(600, 800)).unwrap();
+        let mut c = Canvas::new(600, 800);
+        let mut dark = |p: usize| {
+            doc.render_page(p, &mut c).unwrap();
+            c.pixels.iter().filter(|&&v| v < 128).count()
+        };
+        let (black, white) = (dark(0), dark(1));
+        assert!(black > 1000, "the black image is drawn: {black} dark pixels");
+        assert!(white < black / 10, "the white image is drawn: {white} dark pixels");
     }
 
     #[test]
