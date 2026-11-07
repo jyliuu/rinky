@@ -78,18 +78,12 @@ struct Hit {
     locator: String,
 }
 
-#[derive(Clone, Debug)]
-struct LinkRef {
-    internal: bool,
-    locator: Option<String>,
-    page: Option<usize>,
-}
-
 /// Tool state for one agent run (hit and link ids refer to it).
 #[derive(Debug, Default)]
 pub struct BookTools {
     hits: HashMap<String, Hit>,
-    links: HashMap<String, LinkRef>,
+    /// Locators of the internal links listed (external links get no id).
+    links: HashMap<String, String>,
     next_link: usize,
 }
 
@@ -179,11 +173,8 @@ impl BookTools {
         if link_id.is_some() && link.is_none() {
             return err("Unknown link_id. Call list_links again.");
         }
-        if link.as_ref().is_some_and(|l| !l.internal) {
-            return err("External links cannot be read as book locations.");
-        }
-        let locator = args.get("locator").and_then(Value::as_str).map(str::to_string).or_else(|| link.as_ref().and_then(|l| l.locator.clone())).or_else(|| hit.as_ref().map(|h| h.locator.clone()));
-        let page = arg_usize(args, "page").or_else(|| link.as_ref().and_then(|l| l.page)).or_else(|| hit.as_ref().and_then(|h| h.page));
+        let locator = args.get("locator").and_then(Value::as_str).map(str::to_string).or_else(|| link.clone()).or_else(|| hit.as_ref().map(|h| h.locator.clone()));
+        let page = arg_usize(args, "page").or_else(|| hit.as_ref().and_then(|h| h.page));
         let before = arg_usize(args, "before_pages").unwrap_or(1).min(2);
         let after = arg_usize(args, "after_pages").unwrap_or(1).min(2);
         let total = doc.page_count().unwrap_or(0);
@@ -263,7 +254,7 @@ impl BookTools {
                         self.next_link += 1;
                         let id = format!("l{}", self.next_link);
                         let loc = utf8_prefix(&p.to_string(), MAX_LINK_TARGET_CHARS);
-                        self.links.insert(id.clone(), LinkRef { internal: true, locator: Some(p.to_string()), page: None });
+                        self.links.insert(id.clone(), p.to_string());
                         links.push(json!({"id": id, "kind": "internal", "label": label, "footnote": l.footnote, "target_locator": loc}));
                     }
                 }
@@ -299,7 +290,7 @@ fn current_position(doc: &mut dyn DocumentAccess) -> Value {
 }
 
 /// One line describing a call for the AGENT ACTION block (`search_book: "Verona"`).
-pub fn describe(name: &str, args: &Value) -> String {
+pub fn describe(args: &Value) -> String {
     let mut parts = Vec::new();
     for k in ["query", "hit_id", "link_id", "page", "locator"] {
         if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
@@ -314,7 +305,6 @@ pub fn describe(name: &str, args: &Value) -> String {
         let q: Vec<String> = qs.iter().filter_map(Value::as_str).map(|s| format!("\"{}\"", utf8_prefix(s, 40))).collect();
         parts.push(format!("queries {}", q.join(", ")));
     }
-    let _ = name;
     parts.join(", ")
 }
 
@@ -389,6 +379,6 @@ mod tests {
         let c = t.execute(&mut book, "current_position", &json!({}));
         assert_eq!((c["page"].as_u64(), c["pages"].as_u64()), (Some(3), Some(200)));
         assert!((c["progress"].as_f64().unwrap() - 0.015).abs() < 1e-9);
-        assert_eq!(describe("search_book", &json!({"query": "Verona"})), "query \"Verona\"");
+        assert_eq!(describe(&json!({"query": "Verona"})), "query \"Verona\"");
     }
 }

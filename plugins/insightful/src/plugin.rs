@@ -461,7 +461,7 @@ impl InsightfulPlugin {
             .collect();
         r.msgs.push(Msg::Assistant { text: reply.text.unwrap_or_default(), tool_calls: calls.clone(), state: reply.provider_state });
         for c in &calls {
-            let detail = tools::describe(&c.name, &c.arguments);
+            let detail = tools::describe(&c.arguments);
             let line = |verb: &str| if detail.is_empty() { format!("{verb} `{}`", c.name) } else { format!("{verb} `{}` — {detail}", c.name) };
             r.live.actions.push(line("Calling"));
             let result: Value = match cx.doc.as_deref_mut() {
