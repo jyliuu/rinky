@@ -356,6 +356,55 @@ struct Line {
     first: bool,
 }
 
+/// A paragraph (or one chunk of a giant paragraph) being broken into lines: its display
+/// text, the source of each char, the byte offset of each char and its segments.
+struct Para<'p> {
+    text: &'p str,
+    src: &'p [CharSrc],
+    char_at: Vec<usize>,
+    segs: &'p [Seg],
+}
+
+impl<'p> Para<'p> {
+    fn new(text: &'p str, src: &'p [CharSrc], segs: &'p [Seg]) -> Self {
+        Para { text, src, char_at: text.char_indices().map(|(b, _)| b).collect(), segs }
+    }
+
+    /// Index of the char at byte `b` (or of the first char after it).
+    fn char_index(&self, b: usize) -> usize {
+        self.char_at.partition_point(|&x| x < b)
+    }
+
+    /// Byte offset of char `i` (the text length past the end).
+    fn byte(&self, i: usize) -> usize {
+        self.char_at.get(i).copied().unwrap_or(self.text.len())
+    }
+
+    /// The segment of the char at byte `b`.
+    fn seg_at(&self, b: usize) -> &'p Seg {
+        &self.segs[self.src[self.char_index(b)].seg as usize]
+    }
+
+    /// The bytes `start..end` cut into runs of one segment: (segment, start, end).
+    fn runs(&self, start: usize, end: usize) -> impl Iterator<Item = (u32, usize, usize)> + '_ {
+        let stop = self.char_index(end);
+        let mut i = self.char_index(start);
+        std::iter::from_fn(move || {
+            if i >= stop {
+                return None;
+            }
+            let seg = self.src[i].seg;
+            let mut j = i + 1;
+            while j < stop && self.src[j].seg == seg {
+                j += 1;
+            }
+            let run = (seg, self.char_at[i], self.byte(j).min(end));
+            i = j;
+            Some(run)
+        })
+    }
+}
+
 /// Layout state of a chapter flow.
 pub struct Flow<'a, 'e> {
     env: &'a mut Env<'e>,
@@ -1063,62 +1112,21 @@ impl<'a, 'e> Flow<'a, 'e> {
         wdt
     }
 
-    /// Splits a byte range into same-segment pieces with widths.
-    fn pieces(&mut self, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], start: usize, end: usize) -> Vec<Piece> {
-        let mut out: Vec<Piece> = Vec::new();
-        if start >= end {
-            return out;
+    /// Width of one run of [`Para::runs`].
+    fn run_width(&mut self, p: &Para, (seg, start, end): (u32, usize, usize)) -> f32 {
+        let seg = &p.segs[seg as usize];
+        match &seg.kind {
+            SegKind::Image { w, .. } => *w,
+            SegKind::Break => 0.0,
+            SegKind::Text => self.range_width(&p.text[start..end], seg),
         }
-        let ci0 = char_at.partition_point(|&b| b < start);
-        let ci1 = char_at.partition_point(|&b| b < end);
-        let mut i = ci0;
-        while i < ci1 {
-            let seg = src[i].seg;
-            let mut j = i + 1;
-            while j < ci1 && src[j].seg == seg {
-                j += 1;
-            }
-            let bs = char_at[i];
-            let be = if j < char_at.len() { char_at[j] } else { text.len() };
-            let be = be.min(end);
-            let width = match &segs[seg as usize].kind {
-                SegKind::Image { w, .. } => *w,
-                SegKind::Break => 0.0,
-                SegKind::Text => {
-                    let s = &text[bs..be];
-                    self.range_width(s, &segs[seg as usize])
-                }
-            };
-            out.push(Piece { seg, start: bs, end: be, width });
-            i = j;
-        }
-        out
     }
 
-    /// The summed width of [`Self::pieces`] of a byte range, without building the list.
-    fn pieces_width(&mut self, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], start: usize, end: usize) -> f32 {
-        if start >= end {
-            return 0.0;
-        }
-        let ci0 = char_at.partition_point(|&b| b < start);
-        let ci1 = char_at.partition_point(|&b| b < end);
+    /// Width of the bytes `start..end` of a paragraph.
+    fn width(&mut self, p: &Para, start: usize, end: usize) -> f32 {
         let mut total = 0.0;
-        let mut i = ci0;
-        while i < ci1 {
-            let seg = src[i].seg;
-            let mut j = i + 1;
-            while j < ci1 && src[j].seg == seg {
-                j += 1;
-            }
-            let bs = char_at[i];
-            let be = if j < char_at.len() { char_at[j] } else { text.len() };
-            let be = be.min(end);
-            total += match &segs[seg as usize].kind {
-                SegKind::Image { w, .. } => *w,
-                SegKind::Break => 0.0,
-                SegKind::Text => self.range_width(&text[bs..be], &segs[seg as usize]),
-            };
-            i = j;
+        for r in p.runs(start, end) {
+            total += self.run_width(p, r);
         }
         total
     }
@@ -1194,7 +1202,7 @@ impl<'a, 'e> Flow<'a, 'e> {
     fn lay_lines(&mut self, owner: NodeId, text: &str, src: &[CharSrc], segs: &[Seg], x: f32, w: f32) {
         let ost = self.st(owner);
         let keep_spaces = ost.white_space.keeps_spaces();
-        let char_at: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+        let para = Para::new(text, src, segs);
         // Break opportunities.
         let wraps = ost.white_space.wraps() || keep_spaces;
         let mut ops: Vec<(usize, Break)> = break_opportunities(text).into_iter().filter(|(b, k)| wraps || *k == Break::Mandatory || *b == text.len()).collect();
@@ -1216,9 +1224,9 @@ impl<'a, 'e> Flow<'a, 'e> {
             let forced = kind == Break::Mandatory && b < text.len() || seg_text.ends_with('\n');
             let trimmed = if keep_spaces { seg_text.trim_end_matches('\n') } else { seg_text.trim_end_matches([' ', '\n']) };
             let end = prev + trimmed.len();
-            let width = self.pieces_width(text, src, &char_at, segs, prev, end);
+            let width = self.width(&para, prev, end);
             let space = if end < b && !keep_spaces {
-                let sp_seg = src[char_at.partition_point(|&x| x < end).min(src.len() - 1)].seg as usize;
+                let sp_seg = src[para.char_index(end).min(src.len() - 1)].seg as usize;
                 let n_sp = text[end..b].chars().filter(|&c| c == ' ').count();
                 if n_sp > 0 {
                     self.range_width(" ", &segs[sp_seg])
@@ -1248,7 +1256,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             if wraps && cur.is_empty() && need > avail + 0.01 && bx.width > 0.0 {
                 // Alone at the start of a line and still too wide (a long URL or word):
                 // hyphenate or cut it.
-                if let Some((a, b)) = self.split_box(text, src, &char_at, segs, &bx, avail, hyph_ok).or_else(|| self.cut_box(text, src, &char_at, segs, &bx, avail)) {
+                if let Some((a, b)) = self.split_box(&para, &bx, avail, hyph_ok).or_else(|| self.cut_box(&para, &bx, avail)) {
                     lines.push(Line { boxes: vec![a], forced: false, first: first_line });
                     queue.push_front(b);
                     continue;
@@ -1266,7 +1274,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             }
             // Does not fit: try to hyphenate it into the remaining space.
             let remaining = avail - cur_w - gap;
-            if let Some((a, b)) = self.split_box(text, src, &char_at, segs, &bx, remaining, hyph_ok) {
+            if let Some((a, b)) = self.split_box(&para, &bx, remaining, hyph_ok) {
                 cur.push(a);
                 lines.push(Line { boxes: std::mem::take(&mut cur), forced: false, first: first_line });
                 cur_w = 0.0;
@@ -1285,19 +1293,18 @@ impl<'a, 'e> Flow<'a, 'e> {
         let n_lines = lines.len();
         for (li, line) in lines.into_iter().enumerate() {
             let last = li + 1 == n_lines;
-            self.place_line(owner, text, src, &char_at, segs, line, x, w, indent, last);
+            self.place_line(owner, &para, line, x, w, indent, last);
         }
     }
 
     /// Splits a box at a hyphenation point (soft hyphen or dictionary) so the first part
     /// plus a hyphen fits `avail`.
-    #[allow(clippy::too_many_arguments)]
-    fn split_box(&mut self, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], bx: &WordBox, avail: f32, dict: bool) -> Option<(WordBox, WordBox)> {
+    fn split_box(&mut self, p: &Para, bx: &WordBox, avail: f32, dict: bool) -> Option<(WordBox, WordBox)> {
         if avail <= 0.0 {
             return None;
         }
-        let word = &text[bx.start..bx.end];
-        let first_seg = &segs[src[char_at.partition_point(|&b| b < bx.start)].seg as usize];
+        let word = &p.text[bx.start..bx.end];
+        let first_seg = p.seg_at(bx.start);
         if !matches!(first_seg.kind, SegKind::Text) {
             return None;
         }
@@ -1326,9 +1333,9 @@ impl<'a, 'e> Flow<'a, 'e> {
             // from the start, so the search is linear.
             let mut best = None;
             let (mut acc, mut prev) = (0.0f32, bx.start);
-            for &p in &points {
-                let cut = bx.start + p;
-                acc += self.pieces_width(text, src, char_at, segs, prev, cut);
+            for &pt in &points {
+                let cut = bx.start + pt;
+                acc += self.width(p, prev, cut);
                 prev = cut;
                 if acc + hyph_w > avail {
                     break;
@@ -1340,14 +1347,13 @@ impl<'a, 'e> Flow<'a, 'e> {
             let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: (bx.width - wdt).max(0.0), space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
             return Some((a, b));
         }
-        for &p in points.iter().rev() {
-            let cut = bx.start + p;
-            let pieces = self.pieces(text, src, char_at, segs, bx.start, cut);
-            let wdt: f32 = pieces.iter().map(|p| p.width).sum();
+        for &pt in points.iter().rev() {
+            let cut = bx.start + pt;
+            let wdt = self.width(p, bx.start, cut);
             if wdt + hyph_w <= avail {
-                let rest = self.pieces(text, src, char_at, segs, cut, bx.end);
+                let rest = self.width(p, cut, bx.end);
                 let a = WordBox { start: bx.start, end: cut, end_ws: cut, width: wdt + hyph_w, space: 0.0, forced: false, hyphen: true };
-                let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: rest.iter().map(|p| p.width).sum(), space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
+                let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: rest, space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
                 return Some((a, b));
             }
         }
@@ -1355,11 +1361,10 @@ impl<'a, 'e> Flow<'a, 'e> {
     }
 
     /// Cuts a box that cannot fit a line at all (long URLs) at the last char that fits.
-    #[allow(clippy::too_many_arguments)]
-    fn cut_box(&mut self, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], bx: &WordBox, avail: f32) -> Option<(WordBox, WordBox)> {
+    fn cut_box(&mut self, p: &Para, bx: &WordBox, avail: f32) -> Option<(WordBox, WordBox)> {
         let mut cut = None;
-        for (i, _) in text[bx.start..bx.end].char_indices().skip(1) {
-            let wdt: f32 = self.pieces_width(text, src, char_at, segs, bx.start, bx.start + i);
+        for (i, _) in p.text[bx.start..bx.end].char_indices().skip(1) {
+            let wdt = self.width(p, bx.start, bx.start + i);
             if wdt > avail {
                 break;
             }
@@ -1369,7 +1374,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         // The rest's width: measured when short, else the box width minus the cut part
         // (measuring the rest of a giant word at every line was quadratic).
         let rest: f32 = if bx.end - c <= LONG_BOX_BYTES {
-            self.pieces_width(text, src, char_at, segs, c, bx.end)
+            self.width(p, c, bx.end)
         } else {
             (bx.width - wdt).max(0.0)
         };
@@ -1381,7 +1386,8 @@ impl<'a, 'e> Flow<'a, 'e> {
 
     /// Positions one line, emits its draw items and its slice.
     #[allow(clippy::too_many_arguments)]
-    fn place_line(&mut self, owner: NodeId, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], line: Line, x: f32, w: f32, indent: f32, last: bool) {
+    fn place_line(&mut self, owner: NodeId, p: &Para, line: Line, x: f32, w: f32, indent: f32, last: bool) {
+        let (text, src, segs) = (p.text, p.src, p.segs);
         let ost = self.st(owner);
         // Vertical metrics: the block's strut plus every piece.
         let strut_face = self.face(ost);
@@ -1401,8 +1407,8 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut pen = 0.0f32;
         let mut spaces = 0usize;
         for (bi, b) in line.boxes.iter().enumerate() {
-            let pieces = self.pieces(text, src, char_at, segs, b.start, b.end);
-            for pc in pieces {
+            for run in p.runs(b.start, b.end) {
+                let pc = Piece { seg: run.0, start: run.1, end: run.2, width: self.run_width(p, run) };
                 let seg = &segs[pc.seg as usize];
                 let st = self.st(seg.style);
                 let mut img = None;
@@ -1549,7 +1555,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             let px_x = x0 + off + add;
             let seg = &segs[pc.seg as usize];
             let st = self.st(seg.style);
-            let ci = char_at.partition_point(|&b| b < pc.start);
+            let ci = p.char_index(pc.start);
             match &seg.kind {
                 SegKind::Image { .. } => {
                     let (s, iw, ih) = pl.img.clone().unwrap();
@@ -1572,7 +1578,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                         shown.push('-');
                     }
                     let dom_start = src[ci].dom;
-                    let ce = char_at.partition_point(|&b| b < pc.end);
+                    let ce = p.char_index(pc.end);
                     let dom_end = if ce < src.len() && src[ce].seg == pc.seg { src[ce].dom } else { src[ce - 1].dom + 1 };
                     key.get_or_insert((self.dom.node(seg.node).order, dom_start));
                     let face = self.face(st);
