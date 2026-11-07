@@ -286,18 +286,19 @@ impl Canvas {
         let info = reader.next_frame(&mut buf).map_err(std::io::Error::other)?;
         let (w, h) = (info.width as usize, info.height as usize);
         let channels = info.color_type.samples();
-        let mut out = Canvas::new(w, h);
-        for i in 0..w * h {
-            let px = &buf[i * channels..(i + 1) * channels];
-            out.pixels[i] = match channels {
-                1 => px[0],
-                2 => composite(px[0], px[1]),
-                3 => ((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8,
-                _ => composite(((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8, px[3]),
-            };
-        }
-        Ok(out)
+        let px = buf.chunks_exact(channels).take(w * h);
+        let pixels = match channels {
+            1 => px.map(|p| p[0]).collect(),
+            2 => px.map(|p| composite(p[0], p[1])).collect(),
+            3 => px.map(rgb_gray).collect(),
+            _ => px.map(|p| composite(rgb_gray(p), p[3])).collect(),
+        };
+        Ok(Canvas::from_pixels(w, h, pixels))
     }
+}
+
+fn rgb_gray(p: &[u8]) -> u8 {
+    ((p[0] as u32 + p[1] as u32 + p[2] as u32) / 3) as u8
 }
 
 fn composite(gray: u8, alpha: u8) -> u8 {
@@ -318,6 +319,25 @@ mod tests {
         let path = dir.join("c.png");
         c.save_png(&path).unwrap();
         assert_eq!(Canvas::load_png(&path).unwrap(), c);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn color_and_alpha_pngs_become_gray_on_white() {
+        let dir = crate::sysfs::test_dir("canvas-color");
+        let path = dir.join("c.png");
+        let cases: [(png::ColorType, &[u8], [u8; 2]); 3] = [
+            (png::ColorType::GrayscaleAlpha, &[0, 255, 0, 0], [0, 255]),
+            (png::ColorType::Rgb, &[30, 60, 90, 255, 0, 0], [60, 85]),
+            (png::ColorType::Rgba, &[30, 60, 90, 255, 0, 0, 0, 128], [60, 127]),
+        ];
+        for (color, data, want) in cases {
+            let mut enc = png::Encoder::new(BufWriter::new(File::create(&path).unwrap()), 2, 1);
+            enc.set_color(color);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(data).unwrap();
+            assert_eq!(Canvas::load_png(&path).unwrap().pixels, want, "{color:?}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
