@@ -28,15 +28,15 @@
 //!
 //! The app opens it on every screen: on [`is_trigger`] it pushes
 //! [`crate::router::Route::QuickLight`] ([`ControlCenterScreen`], route kind and screen
-//! name `quicklight`). The older [`QuickLight`] widget (two sliders) stays for the
-//! settings page; its actions go to [`apply`].
+//! name `quicklight`). [`QuickLight`] reads the two light sliders for the panel and the
+//! settings page; their actions go to [`apply`].
 
 use super::advanced;
 use super::popup::{self, Anchor, PopupCatcher, SettingsPopup};
 use crate::router::{AppCtx, Route, Services, Transition};
 use ink_device::clock::DateTime;
 use ink_device::light::{AmberMode, AmberSchedule, AmberScheduler, DayTime};
-use ink_device::{Clock, Light, Point, Rect, RefreshClass, Rotation, Size};
+use ink_device::{Clock, Light, Rect, RefreshClass, Rotation, Size};
 use ink_store::prefs::{label, CONTROL_BUTTONS};
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
@@ -104,7 +104,7 @@ pub fn apply(action: &str, light: &mut dyn Light) -> Option<String> {
     })
 }
 
-/// The panel.
+/// The light sliders of the device.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuickLight {
     /// Brightness slider; `None` when the device has no frontlight.
@@ -114,7 +114,7 @@ pub struct QuickLight {
 }
 
 impl QuickLight {
-    /// A panel showing the light's current levels.
+    /// Sliders at the light's current levels.
     pub fn read(light: &dyn Light) -> Self {
         let slider = |label: &str, range: (u32, u32), v: ink_device::Result<u32>, action: &str| {
             v.ok().map(|v| Slider::new(label, range.0 as f32, range.1 as f32, 1.0, v as f32, action))
@@ -128,84 +128,6 @@ impl QuickLight {
     /// Same as [`QuickLight::read`] for the services of a screen context.
     pub fn from_services(s: &Services) -> Self {
         QuickLight::read(&*s.light)
-    }
-
-    /// Where the panel goes on a screen of `size`: the top of the screen.
-    pub fn frame(size: Size) -> Rect {
-        Rect::new(0, 0, size.w, 640.min(size.h))
-    }
-
-    /// (title, brightness, warmth, done button) inside the panel `b`.
-    pub fn parts(b: Rect) -> (Rect, Rect, Rect, Rect) {
-        let x = b.x + 48;
-        let w = b.w.saturating_sub(96);
-        let title = Rect::new(x, b.y + 24, w, 80);
-        let bright = Rect::new(x, b.y + 110, w, 200);
-        let warm = Rect::new(x, b.y + 320, w, 200);
-        let done = Rect::new(b.right() - 48 - 260, b.bottom() - 110, 260, 90);
-        (title, bright, warm, done)
-    }
-}
-
-impl Widget for QuickLight {
-    fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let (fg, bg) = (cx.theme.fg, cx.theme.bg);
-        fill_round_rect(cx.canvas, b, 0.0, bg);
-        // The bottom edge separates the panel from the page under it.
-        let edge = Rect::new(b.x, b.bottom() - 6, b.w, 6);
-        fill_round_rect(cx.canvas, edge, 0.0, fg);
-        let (title, bright, warm, done) = QuickLight::parts(b);
-        let px = cx.theme.font_px;
-        cx.text_left(title, "Light", px * 1.1, Style::Bold, fg);
-        match &mut self.brightness {
-            Some(s) => s.paint(cx, bright),
-            None => cx.text_left(bright, "Frontlight not available", px, Style::Regular, cx.theme.muted),
-        }
-        match &mut self.warmth {
-            Some(s) => s.paint(cx, warm),
-            None => cx.text_left(warm, "Warm light not available", px, Style::Regular, cx.theme.muted),
-        }
-        stroke_round_rect(cx.canvas, done, cx.theme.radius, cx.theme.border_px as f32, fg);
-        cx.text_centered(done, "Done", px, Style::Regular, fg);
-    }
-
-    fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        let (_, bright, warm, done) = QuickLight::parts(b);
-        let pos: Option<Point> = match ev {
-            UiEvent::Gesture(g) => ink_ui::widget::gesture_pos(g),
-            UiEvent::Touch(t) => Some(t.pos),
-            _ => None,
-        };
-        if let (UiEvent::Gesture(Gesture::Tap { .. }), Some(p)) = (ev, pos) {
-            if done.contains(p) {
-                return EventResult::Action(CLOSE.into());
-            }
-        }
-        // Touch moves and lifts go to the slider that took the touch-down, wherever they are.
-        let touch_follow = matches!(ev, UiEvent::Touch(t) if t.kind != ink_ui::TouchKind::Down);
-        for (slider, r) in [(&mut self.brightness, bright), (&mut self.warmth, warm)] {
-            let Some(s) = slider else { continue };
-            if touch_follow || pos.is_some_and(|p| r.contains(p)) {
-                match s.event(ev, r) {
-                    EventResult::Ignored => {}
-                    other => return other,
-                }
-            }
-        }
-        // The panel is modal: everything else on it is consumed.
-        match ev {
-            UiEvent::Gesture(_) | UiEvent::Touch(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
-        }
-    }
-
-    fn refresh_class(&self) -> RefreshClass {
-        let dragging = [&self.brightness, &self.warmth].iter().any(|s| s.as_ref().is_some_and(|s| s.refresh_class() == RefreshClass::Du));
-        if dragging {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
     }
 }
 
@@ -1928,6 +1850,7 @@ impl crate::router::AppScreen for ControlCenterScreen {
 mod tests {
     use super::*;
     use crate::screens::settings::fakes::Fake;
+    use ink_device::Point;
 
     #[test]
     fn trigger_needs_a_swipe_down_from_the_top_edge() {
