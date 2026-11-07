@@ -229,12 +229,12 @@ pub fn run_request_until(client: &dyn HttpClient, req: Request, mode: StreamMode
     }
     let mut buf = vec![0u8; 8192];
     let mut total = 0usize;
-    let mut body = Vec::new();
     let mut sse = SseParser::new();
     let limit = match mode {
         StreamMode::Whole { limit } => limit,
         _ => STREAM_LIMIT,
     };
+    let mut body = Vec::with_capacity(if matches!(mode, StreamMode::Whole { .. }) { resp.capacity_for(limit) } else { 0 });
     loop {
         if cancelled() {
             return;

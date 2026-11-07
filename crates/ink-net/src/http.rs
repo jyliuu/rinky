@@ -211,6 +211,14 @@ impl Response {
         self.header("content-length").and_then(|v| v.trim().parse().ok())
     }
 
+    /// The buffer size to start with for reading the whole body under `limit`: the stated
+    /// `Content-Length` when it is within the limit, else 0. Growing a buffer by doubling
+    /// holds the old and the new copy at each step (up to 3x the body at the peak); a
+    /// lying length costs at most one 16 MiB reservation.
+    pub fn capacity_for(&self, limit: usize) -> usize {
+        self.content_length().filter(|&n| n <= limit as u64).map_or(0, |n| n.min(16 << 20) as usize)
+    }
+
     /// The MIME type without parameters, lowercase (`application/atom+xml`).
     pub fn mime(&self) -> String {
         self.header("content-type").map(|v| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase()).unwrap_or_default()
@@ -218,11 +226,7 @@ impl Response {
 
     /// Reads the whole body (at most `limit` bytes; `usize::MAX` means no practical limit).
     pub fn bytes(mut self, limit: usize) -> Result<Vec<u8>> {
-        // A stated length within the limit sizes the buffer once; growing it by doubling
-        // holds the old and the new copy at each step (up to 3x the body at the peak). A
-        // lying length costs at most one 16 MiB reservation.
-        let hint = self.content_length().filter(|&n| n <= limit as u64).map_or(0, |n| n.min(16 << 20) as usize);
-        let mut out = Vec::with_capacity(hint);
+        let mut out = Vec::with_capacity(self.capacity_for(limit));
         // One byte more than the limit tells "exactly at the limit" from "too large".
         (&mut self.body).take((limit as u64).saturating_add(1)).read_to_end(&mut out).map_err(NetError::from_read)?;
         if out.len() > limit {
@@ -624,6 +628,7 @@ mod tests {
         let resp = c.send(Request::get(s.url("/files/10"))).unwrap();
         assert_eq!(resp.content_length(), Some(10));
         assert_eq!(resp.header("ETag"), Some("\"f10\""));
+        assert_eq!((resp.capacity_for(100), resp.capacity_for(4)), (10, 0), "a stated length sizes the buffer only within the limit");
         assert!(matches!(resp.bytes(4), Err(NetError::TooLarge(4))));
         let resp = c.send(Request::head(s.url("/files/10"))).unwrap();
         assert_eq!(resp.content_length(), Some(10));
