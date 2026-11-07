@@ -889,10 +889,15 @@ impl SliderPanel {
         }
         s.set(i, v);
         drop(s);
+        self.mark(k);
+        true
+    }
+
+    /// Row `k` is drawn again at the next paint.
+    fn mark(&mut self, k: usize) {
         if !self.changed.contains(&k) {
             self.changed.push(k);
         }
-        true
     }
 
     fn paint_row(&self, cx: &mut PaintCx, k: usize, row: Rect) {
@@ -1036,9 +1041,7 @@ impl Widget for SliderPanel {
                             let spec = SLIDERS[self.which[k]];
                             self.drag = Some((k, self.shown.borrow().get(self.which[k])));
                             self.set(k, Self::value_at(&spec, track, t.pos));
-                            if !self.changed.contains(&k) {
-                                self.changed.push(k);
-                            }
+                            self.mark(k);
                             return EventResult::Handled;
                         }
                     }
@@ -1059,7 +1062,7 @@ impl Widget for SliderPanel {
                     Some((k, _)) => {
                         let (_, _, track, _) = Self::parts(rows[k]);
                         self.set(k, Self::value_at(&SLIDERS[self.which[k]], track, t.pos));
-                        self.changed.push(k);
+                        self.mark(k);
                         self.settle = true;
                         log::info!("aa: {} drag ended, last panel paint {:?}", SLIDERS[self.which[k]].label, self.last_paint);
                         self.report(k)
@@ -1533,5 +1536,25 @@ mod tests {
                 assert!(back.right() < size.w as i32 / 2 - 220 && back.h >= 96, "{back:?} clear of the title");
             }
         }
+    }
+
+    /// A drag on a slider reports the preview and the dragged row as damage, each once,
+    /// also on the lift that moved the value again.
+    #[test]
+    fn a_slider_drag_reports_its_row_once() {
+        let l = LayoutSettings::for_screen(1272, 1696);
+        let shown = Rc::new(RefCell::new(Shown::new(&l, &AaExtras::default())));
+        let mut p = SliderPanel::new(vec![1, 2], &shown, 1272);
+        let b = Rect::new(0, 0, 1200, SliderPanel::height(2, PREVIEW_H));
+        let (preview, rows) = SliderPanel::areas(b, 2);
+        let (_, _, track, _) = SliderPanel::parts(rows[1]);
+        let y = track.y + track.h as i32 / 2;
+        let touch = |kind, x: i32| UiEvent::Touch(ink_ui::Touch { slot: 0, kind, pos: Point::new(x, y), start: Point::new(track.x + 10, y), held: Duration::ZERO, moved: true });
+        p.event(&touch(TouchKind::Down, track.x + 10), b);
+        assert_eq!(p.damage(b), Some(vec![preview, rows[1]]));
+        p.event(&touch(TouchKind::Move, track.x + track.w as i32 / 3), b);
+        p.event(&touch(TouchKind::Up, track.x + track.w as i32 / 2), b);
+        assert_eq!(p.damage(b), Some(vec![preview, rows[1]]));
+        assert_eq!(p.damage(b), None);
     }
 }
