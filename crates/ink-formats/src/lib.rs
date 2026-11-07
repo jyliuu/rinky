@@ -189,32 +189,6 @@ pub(crate) fn title_from(path: &Path) -> String {
     path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
 }
 
-/// Opens an HTML/XHTML file as a one-chapter book (markup repaired, see [`html`]).
-pub fn open_html(path: &Path) -> Result<HtmlDocument> {
-    html::load(path)?.into_html_document()
-}
-
-/// Converts plain text to XHTML: blank lines separate paragraphs (the phase 0 helper;
-/// [`txt`] does detection and chapters).
-pub fn txt_to_xhtml(text: &str) -> String {
-    let mut out = String::from("<html><body>");
-    for para in text.replace("\r\n", "\n").split("\n\n") {
-        let p = para.trim();
-        if !p.is_empty() {
-            out.push_str("<p>");
-            xml::push_text(&mut out, p);
-            out.push_str("</p>");
-        }
-    }
-    out.push_str("</body></html>");
-    out
-}
-
-/// Opens a text file with encoding detection and chapter guessing.
-pub fn open_txt(path: &Path) -> Result<HtmlDocument> {
-    txt::open(path)?.into_html_document()
-}
-
 fn unknown(path: &Path) -> DocError {
     DocError::Unsupported(format!("unknown format: {}", path.display()))
 }
@@ -342,7 +316,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let t = dir.join("note.txt");
         std::fs::write(&t, "First <para>.\r\n\r\nSecond & last.\n").unwrap();
-        let mut d = open_txt(&t).unwrap();
+        let mut d = open(&t).unwrap();
         assert_eq!(d.metadata().title, "note");
         let start = ink_doc::Position::Flow(ink_doc::FlowAnchor::default());
         assert!(d.read_around(&start, 100).unwrap().contains("Second & last."));
@@ -351,6 +325,5 @@ mod tests {
         let d = FormatsProvider.open(&h).unwrap();
         assert_eq!(d.toc().len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
-        assert!(txt_to_xhtml("a<b").contains("a&lt;b"));
     }
 }

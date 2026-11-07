@@ -667,16 +667,6 @@ impl BookDocument {
     pub fn html(&self) -> &HtmlDocument {
         &self.doc
     }
-
-    /// The engine document, mutable.
-    pub fn html_mut(&mut self) -> &mut HtmlDocument {
-        &mut self.doc
-    }
-
-    /// Unwraps the engine document.
-    pub fn into_html(self) -> HtmlDocument {
-        self.doc
-    }
 }
 
 impl std::ops::Deref for BookDocument {

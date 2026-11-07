@@ -281,24 +281,6 @@ pub fn text_of_max(node: &Handle, max: usize) -> String {
     s
 }
 
-/// The value of attribute `name` of an element node.
-pub fn attr_of(node: &Handle, name: &str) -> Option<String> {
-    match &node.data {
-        NodeData::Element { attrs, .. } => {
-            attrs.borrow().iter().find(|a| &*a.name.local == name).map(|a| a.value.to_string())
-        }
-        _ => None,
-    }
-}
-
-/// Local name of an element node.
-pub fn name_of(node: &Handle) -> Option<String> {
-    match &node.data {
-        NodeData::Element { name, .. } => Some(name.local.to_string()),
-        _ => None,
-    }
-}
-
 fn attr_name(a: &html5ever::Attribute) -> Option<String> {
     let local = a.name.local.to_string();
     let name = match a.name.prefix.as_ref().map(|p| p.to_string()) {
