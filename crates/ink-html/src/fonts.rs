@@ -62,6 +62,9 @@ struct Family {
     src: Src,
     /// Faces by [`face_index`]: `None` not parsed yet, `Some(None)` not usable.
     faces: [Option<Option<Fonts>>; 4],
+    /// Per face index, the lowest index with the same font data (shared data is parsed
+    /// once, into that slot).
+    canon: [usize; 4],
     /// Faces may come from the [`prewarm_faces`] pool (the foreground book only, so the
     /// paginator threads never take the faces parsed for the first page).
     use_pool: bool,
@@ -74,7 +77,11 @@ fn face_index(bold: bool, italic: bool) -> usize {
 
 impl Family {
     fn new(src: Src) -> Self {
-        Family { src, faces: [None, None, None, None], use_pool: false }
+        let mut f = Family { src, faces: [None, None, None, None], canon: [0, 1, 2, 3], use_pool: false };
+        let data = |i: usize| f.bytes(i).map(<[u8]>::as_ptr);
+        let canon = std::array::from_fn(|i| (0..i).find(|&j| data(j) == data(i)).unwrap_or(i));
+        f.canon = canon;
+        f
     }
 
     /// The font data of face `idx` when it lives for the whole program (embedded or
@@ -105,46 +112,21 @@ impl Family {
     /// face uses the regular one, a missing bold italic the bold one; a book family
     /// without a regular face uses its bold or italic face as the regular one.
     fn bytes(&self, idx: usize) -> Option<&[u8]> {
-        match &self.src {
-            Src::Serif => Some(match idx {
-                0 => embedded_font_bytes(Style::Regular),
-                1 => embedded_font_bytes(Style::Bold),
-                2 => embedded_font_bytes(Style::Italic),
-                _ => BOLD_ITALIC,
-            }),
-            Src::Mono => Some(MONO),
-            Src::Bytes(b) => {
-                let reg = b.regular.as_ref().or(b.bold.as_ref()).or(b.italic.as_ref());
-                let bold = b.bold.as_ref().or(reg);
-                let pick = match idx {
-                    0 => reg,
-                    1 => bold,
-                    2 => b.italic.as_ref().or(reg),
-                    _ => b.bold_italic.as_ref().or(bold),
-                };
-                pick.map(|a| a.as_slice())
-            }
-            Src::Mapped(f) => {
-                let bold = f[1].or(f[0]);
-                match idx {
-                    0 => f[0],
-                    1 => bold,
-                    2 => f[2].or(f[0]),
-                    _ => f[3].or(bold),
-                }
-            }
-        }
-    }
-
-    /// The lowest face index with the same font data as `idx` (shared data is parsed once).
-    fn canonical(&self, idx: usize) -> usize {
-        let p = self.bytes(idx).map(<[u8]>::as_ptr);
-        (0..idx).find(|&j| self.bytes(j).map(<[u8]>::as_ptr) == p).unwrap_or(idx)
+        let Src::Bytes(b) = &self.src else { return self.static_bytes(idx) };
+        let reg = b.regular.as_ref().or(b.bold.as_ref()).or(b.italic.as_ref());
+        let bold = b.bold.as_ref().or(reg);
+        let pick = match idx {
+            0 => reg,
+            1 => bold,
+            2 => b.italic.as_ref().or(reg),
+            _ => b.bold_italic.as_ref().or(bold),
+        };
+        pick.map(|a| a.as_slice())
     }
 
     /// Parses face `idx` if needed; true when it is usable.
     fn ensure_face(&mut self, idx: usize) -> bool {
-        let c = self.canonical(idx);
+        let c = self.canon[idx];
         if self.faces[c].is_none() {
             let t = std::time::Instant::now();
             let pooled = if self.use_pool { self.static_bytes(c).and_then(pool::take) } else { None };
@@ -179,7 +161,7 @@ impl Family {
             2 => &[2, 0],
             _ => &[0],
         };
-        chain.iter().find(|&&i| self.ensure_face(i)).map(|&i| self.canonical(i))
+        chain.iter().find(|&&i| self.ensure_face(i)).map(|&i| self.canon[i])
     }
 }
 
@@ -194,6 +176,18 @@ pub struct FamilyBytes {
     pub italic: Option<Arc<Vec<u8>>>,
     /// Bold italic face.
     pub bold_italic: Option<Arc<Vec<u8>>>,
+}
+
+impl FamilyBytes {
+    /// The face for a style.
+    fn slot(&mut self, bold: bool, italic: bool) -> &mut Option<Arc<Vec<u8>>> {
+        match (bold, italic) {
+            (false, false) => &mut self.regular,
+            (true, false) => &mut self.bold,
+            (false, true) => &mut self.italic,
+            (true, true) => &mut self.bold_italic,
+        }
+    }
 }
 
 /// Word widths of one (face, size bits), keyed by the word.
@@ -261,15 +255,7 @@ impl FontSources {
                     &mut self.families.last_mut().unwrap().1
                 }
             };
-            let slot = match (r.bold, r.italic) {
-                (false, false) => &mut fam.regular,
-                (true, false) => &mut fam.bold,
-                (false, true) => &mut fam.italic,
-                (true, true) => &mut fam.bold_italic,
-            };
-            if slot.is_none() {
-                *slot = Some(bytes);
-            }
+            fam.slot(r.bold, r.italic).get_or_insert(bytes);
         }
     }
 
@@ -297,14 +283,9 @@ impl FontSources {
             if !(bold || italic || plain) {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&f.path) else { continue };
-            let slot = match (bold, italic) {
-                (false, false) => &mut fam.regular,
-                (true, false) => &mut fam.bold,
-                (false, true) => &mut fam.italic,
-                (true, true) => &mut fam.bold_italic,
-            };
+            let slot = fam.slot(bold, italic);
             if slot.is_none() {
+                let Ok(bytes) = std::fs::read(&f.path) else { continue };
                 *slot = Some(Arc::new(bytes));
             }
         }
@@ -391,7 +372,7 @@ pub fn prewarm_faces(name: Option<&str>) {
         let fam = &fb.families[fb.family(&names) as usize];
         let mut want: Vec<&'static [u8]> = Vec::new();
         for idx in 0..3 {
-            if let Some(b) = fam.static_bytes(fam.canonical(idx)) {
+            if let Some(b) = fam.static_bytes(fam.canon[idx]) {
                 if !want.iter().any(|w| pool::key(w) == pool::key(b)) {
                     want.push(b);
                 }
