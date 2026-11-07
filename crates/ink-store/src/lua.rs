@@ -131,13 +131,26 @@ impl Table {
 
     /// Number of entries (keys counted once).
     pub fn len(&self) -> usize {
-        let mut n = 0;
-        for (i, (k, _)) in self.entries.iter().enumerate() {
-            if !self.entries[i + 1..].iter().any(|(k2, _)| k2 == k) {
-                n += 1;
-            }
+        /// A key that can be hashed: number keys are never NaN or integers (those are
+        /// [`Key::Int`]), so equal bits mean equal keys.
+        #[derive(PartialEq, Eq, Hash)]
+        enum K<'a> {
+            Int(i64),
+            Num(u64),
+            Str(&'a str),
+            Bool(bool),
         }
-        n
+        let keys: std::collections::HashSet<K> = self
+            .entries
+            .iter()
+            .map(|(k, _)| match k {
+                Key::Int(i) => K::Int(*i),
+                Key::Num(n) => K::Num(n.to_bits()),
+                Key::Str(s) => K::Str(s),
+                Key::Bool(b) => K::Bool(*b),
+            })
+            .collect();
+        keys.len()
     }
 
     /// True if the table has no entries.
@@ -864,6 +877,9 @@ mod tests {
         assert_eq!(v.get_index(3), Some(&Value::Bool(true)));
         assert_eq!(v.get_index(4), Some(&Value::Str("fourth".into())));
         assert_eq!(v.seq().len(), 4);
+        // Keys counted once: a, b, 1..=4, 2.5, false, nested.
+        assert_eq!((v.entries.len(), v.len()), (10, 9));
+        assert_eq!(t(r#"{ [1.5] = 1, [1.5] = 2, x = 1, ["x"] = 2, [true] = 1, [true] = 2 }"#).len(), 3);
         assert!(v.get("gone").is_none());
         assert!(v.entries.iter().any(|(k, _)| *k == Key::Num(2.5)));
         assert!(v.entries.iter().any(|(k, _)| *k == Key::Bool(false)));
