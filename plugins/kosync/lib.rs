@@ -72,10 +72,11 @@ impl HttpClient for Capture {
     }
 }
 
-fn build(account: &KoSyncAccount, f: impl FnOnce(&KoSyncClient<'_>)) -> Option<Request> {
+/// The request `call` makes on a [`KoSyncClient`] for `account` (its answer is ignored).
+fn build<R>(account: &KoSyncAccount, call: impl FnOnce(&KoSyncClient<'_>) -> R) -> Result<Request> {
     let cap = Capture::default();
-    f(&KoSyncClient::new(&cap, account.clone()));
-    cap.0.into_inner()
+    call(&KoSyncClient::new(&cap, account.clone()));
+    cap.0.into_inner().ok_or_else(|| failed("no request"))
 }
 
 /// Checks an answer like [`KoSyncClient`] does: expected status, no HTML page (captive
@@ -198,9 +199,10 @@ impl KoSyncPlugin {
         Ok((name, id))
     }
 
-    fn start(&mut self, cx: &mut HostCtx, req: Request, call: Call) -> Result<u32> {
+    fn start(&mut self, cx: &mut HostCtx, req: Request, call: Call) -> Result<()> {
         log::info!("kosync: {} {} ({call:?})", req.method.as_str(), req.url);
-        self.inflight.start(cx, req, StreamMode::Whole { limit: 1 << 20 }, call)
+        self.inflight.start(cx, req, StreamMode::Whole { limit: 1 << 20 }, call)?;
+        Ok(())
     }
 
     fn queue_path(cx: &mut HostCtx) -> Result<std::path::PathBuf> {
@@ -217,6 +219,19 @@ impl KoSyncPlugin {
         f(&mut q);
         q.save(&p).map_err(failed)?;
         Ok(q.items.len())
+    }
+
+    /// Reads the reader's position into the open book (the change time moves when it
+    /// changed). False when the position cannot be read.
+    fn note_position(&mut self, cx: &mut HostCtx) -> bool {
+        let Some((progress, pct)) = Self::read_position(cx) else { return false };
+        let now = self.now();
+        if let Some(b) = self.book.as_mut().filter(|b| b.progress != progress) {
+            b.progress = progress;
+            b.percentage = pct;
+            b.changed_at = now;
+        }
+        true
     }
 
     /// Reads the open book's position from the document.
@@ -252,12 +267,8 @@ impl KoSyncPlugin {
         if queue_first {
             Self::with_queue(cx, |q| q.push(p.clone(), now))?;
         }
-        let req = build(&account, |c| {
-            let _ = c.push(&p);
-        })
-        .ok_or_else(|| failed("no request"))?;
-        self.start(cx, req, Call::Push { progress: p, manual })?;
-        Ok(())
+        let req = build(&account, |c| c.push(&p))?;
+        self.start(cx, req, Call::Push { progress: p, manual })
     }
 
     fn pull_now(&mut self, cx: &mut HostCtx, manual: bool) -> Result<()> {
@@ -268,12 +279,8 @@ impl KoSyncPlugin {
             return Ok(());
         };
         let Some(doc) = self.book.as_ref().map(|b| b.id.clone()).filter(|d| !d.is_empty()) else { return Ok(()) };
-        let req = build(&account, |c| {
-            let _ = c.pull(&doc);
-        })
-        .ok_or_else(|| failed("no request"))?;
-        self.start(cx, req, Call::Pull { doc, manual })?;
-        Ok(())
+        let req = build(&account, |c| c.pull(&doc))?;
+        self.start(cx, req, Call::Pull { doc, manual })
     }
 
     /// Sends the first queued push (the rest follow one by one as each succeeds).
@@ -286,13 +293,9 @@ impl KoSyncPlugin {
         // Positions of the open book still waiting go out with the next push instead.
         let open = self.book.as_ref().map(|b| b.id.clone()).unwrap_or_default();
         let Some(first) = q.items.iter().find(|i| i.progress.document != open).map(|i| i.progress.clone()) else { return Ok(()) };
-        let req = build(&account, |c| {
-            let _ = c.push(&first);
-        })
-        .ok_or_else(|| failed("no request"))?;
+        let req = build(&account, |c| c.push(&first))?;
         self.draining = true;
-        self.start(cx, req, Call::Drain { progress: first })?;
-        Ok(())
+        self.start(cx, req, Call::Drain { progress: first })
     }
 
     /// Drops every queued push of `doc`: called after a push or pull of it succeeded,
@@ -343,17 +346,13 @@ impl KoSyncPlugin {
                     cx.ui()?.toast("Set the user name and the password first");
                     return self.show_menu(cx);
                 };
-                let (req, call) = if pick == "login" {
-                    (build(&account, |c| {
-                        let _ = c.authorize();
-                    }), Call::Auth)
+                let (req, call, toast) = if pick == "login" {
+                    (build(&account, |c| c.authorize())?, Call::Auth, "Logging in...")
                 } else {
-                    (build(&account, |c| {
-                        let _ = c.register();
-                    }), Call::Register)
+                    (build(&account, |c| c.register())?, Call::Register, "Registering...")
                 };
-                self.start(cx, req.ok_or_else(|| failed("no request"))?, call)?;
-                cx.ui()?.toast(if pick == "login" { "Logging in..." } else { "Registering..." });
+                self.start(cx, req, call)?;
+                cx.ui()?.toast(toast);
             }
             "auto" => {
                 let on = !Self::auto_sync(cx);
@@ -524,14 +523,11 @@ impl Plugin for KoSyncPlugin {
     }
 
     fn on_page_change(&mut self, cx: &mut HostCtx, _page: usize) -> Result<()> {
-        let now = self.now();
-        let Some((progress, pct)) = Self::read_position(cx) else { return Ok(()) };
-        let Some(b) = self.book.as_mut() else { return Ok(()) };
-        if b.progress != progress {
-            b.progress = progress;
-            b.percentage = pct;
-            b.changed_at = now;
+        if !self.note_position(cx) {
+            return Ok(());
         }
+        let now = self.now();
+        let Some(b) = self.book.as_ref() else { return Ok(()) };
         let due = b.pulled && self.offer.is_none() && b.synced.as_deref() != Some(b.progress.as_str()) && now.saturating_sub(self.last_push_at) >= PUSH_EVERY;
         if due && Self::auto_sync(cx) && self.inflight.jobs().all(|c| !matches!(c, Call::Push { .. })) {
             self.push_now(cx, false, false)?;
@@ -555,16 +551,7 @@ impl Plugin for KoSyncPlugin {
     }
 
     fn on_close(&mut self, cx: &mut HostCtx) -> Result<()> {
-        if let Some((progress, pct)) = Self::read_position(cx) {
-            let now = self.now();
-            if let Some(b) = self.book.as_mut() {
-                if b.progress != progress {
-                    b.progress = progress;
-                    b.percentage = pct;
-                    b.changed_at = now;
-                }
-            }
-        }
+        self.note_position(cx);
         // Closed while the jump question was open: the user did not choose, so the
         // newer remote position stays on the server.
         let due = self.offer.is_none() && self.book.as_ref().is_some_and(|b| b.synced.as_deref() != Some(b.progress.as_str()));
@@ -586,16 +573,7 @@ impl Plugin for KoSyncPlugin {
                 if self.book.is_none() {
                     return Ok(());
                 }
-                if let Some((progress, pct)) = Self::read_position(cx) {
-                    let now = self.now();
-                    if let Some(b) = self.book.as_mut() {
-                        if b.progress != progress {
-                            b.progress = progress;
-                            b.percentage = pct;
-                            b.changed_at = now;
-                        }
-                    }
-                }
+                self.note_position(cx);
                 self.pull_now(cx, true)
             }
             _ => Ok(()),
@@ -627,8 +605,9 @@ impl Plugin for KoSyncPlugin {
                         }
                     } else if Self::auto_sync(cx) {
                         // Keep this device's position: it becomes the newest.
+                        let now = self.now();
                         if let Some(b) = self.book.as_mut() {
-                            b.changed_at = (self.clock)();
+                            b.changed_at = now;
                         }
                         self.push_now(cx, false, false)?;
                     }
