@@ -224,6 +224,42 @@ fn part_index(off: f32, len: f32, n: usize) -> usize {
     }
 }
 
+/// Scale that fits a `rw` x `rh` region into a `w` x `h` screen.
+fn fit_scale(fit: Fit, w: f32, h: f32, rw: f32, rh: f32) -> f32 {
+    match fit {
+        Fit::Page => (w / rw).min(h / rh),
+        Fit::Width => w / rw,
+    }
+}
+
+/// Page space to screen: rotate by `rot`, scale, and put the top-left corner of `rr`
+/// (the region already rotated) at `(left, top)`.
+fn place(rot: &Matrix, rr: &FRect, scale: f32, left: f32, top: f32) -> Matrix {
+    rot.then(&Matrix::scale(scale)).then(&Matrix::translate(left - rr.x0 * scale, top - rr.y0 * scale))
+}
+
+/// The screen pixels that `region` covers under `ctm`, inside `screen`.
+fn clip_of(ctm: &Matrix, region: &FRect, screen: &FRect) -> Rect {
+    ctm.map_rect(region).intersect(screen).to_rect().intersect(&screen.to_rect())
+}
+
+impl Setup {
+    /// Screen `view` of a tile plan as (page, column, row, tile across), or `None` for
+    /// spreads and screens past the end.
+    fn tile(&self, view: usize) -> Option<(usize, usize, usize, usize)> {
+        let Plan::Tiles { cols, nx, ny } = self.plan else {
+            return None;
+        };
+        let per = cols * nx * ny;
+        let page = view / per;
+        if page >= self.pages {
+            return None;
+        }
+        let (col, rem) = (view % per / (nx * ny), view % per % (nx * ny));
+        Some((page, col, rem / nx, rem % nx))
+    }
+}
+
 impl Inner {
     fn bound(&mut self, page: usize) -> FRect {
         if let Some(b) = self.bounds.get(&page) {
@@ -306,14 +342,7 @@ impl Inner {
         let Plan::Tiles { cols, nx, ny } = s.plan else {
             return None;
         };
-        let per = cols * nx * ny;
-        let page = view / per;
-        if page >= s.pages {
-            return None;
-        }
-        let t = view % per;
-        let (col, rem) = (t / (nx * ny), t % (nx * ny));
-        let (row, xi) = (rem / nx, rem % nx);
+        let (page, col, row, xi) = s.tile(view)?;
         let region = self.tile_region(s, page, cols, col);
         let rot = Matrix::rotate(s.opts.rotate as i32);
         let rr = rot.map_rect(&region);
@@ -368,29 +397,17 @@ impl Inner {
         let mut out = Vec::new();
         match s.plan {
             Plan::Tiles { cols, nx, ny } => {
-                let per = cols * nx * ny;
-                let page = view / per;
-                if page >= s.pages {
-                    return out;
-                }
-                let t = view % per;
-                let col = t / (nx * ny);
-                let rem = t % (nx * ny);
-                let (row, xi) = (rem / nx, rem % nx);
+                let Some((page, col, row, xi)) = s.tile(view) else { return out };
                 let region = self.tile_region(s, page, cols, col);
                 let rr = rot.map_rect(&region);
                 let (rw, rh) = (rr.w().max(1.0), rr.h().max(1.0));
-                let base = match s.opts.fit {
-                    Fit::Page => (s.w / rw).min(s.h / rh),
-                    Fit::Width => s.w / rw,
-                };
+                let base = fit_scale(s.opts.fit, s.w, s.h, rw, rh);
                 let scale = (base * s.opts.zoom).min(nx as f32 * s.w / rw).min(ny as f32 * s.h / rh);
                 let (cw, ch) = (rw * scale, rh * scale);
                 let left = if cw <= s.w + 0.5 || nx < 2 { (s.w - cw) / 2.0 } else { -(xi as f32) * (cw - s.w) / (nx - 1) as f32 };
                 let top = if ch <= s.h + 0.5 || ny < 2 { (s.h - ch) / 2.0 } else { -(row as f32) * (ch - s.h) / (ny - 1) as f32 };
-                let ctm = rot.then(&Matrix::scale(scale)).then(&Matrix::translate(left - rr.x0 * scale, top - rr.y0 * scale));
-                let clip = ctm.map_rect(&region).intersect(&screen).to_rect().intersect(&FRect::to_rect(&screen));
-                out.push(Piece { page, ctm, clip, region });
+                let ctm = place(&rot, &rr, scale, left, top);
+                out.push(Piece { page, ctm, clip: clip_of(&ctm, &region, &screen), region });
             }
             Plan::Spread { cover_alone, rtl } => {
                 let pages = spread_pages(view, s.pages, cover_alone);
@@ -411,10 +428,8 @@ impl Inner {
                     } else {
                         s.w / 2.0 - cw
                     };
-                    let top = (s.h - ch) / 2.0;
-                    let ctm = rot.then(&Matrix::scale(scale)).then(&Matrix::translate(left - rr.x0 * scale, top - rr.y0 * scale));
-                    let clip = ctm.map_rect(&region).intersect(&screen).to_rect().intersect(&FRect::to_rect(&screen));
-                    out.push(Piece { page, ctm, clip, region });
+                    let ctm = place(&rot, &rr, scale, left, (s.h - ch) / 2.0);
+                    out.push(Piece { page, ctm, clip: clip_of(&ctm, &region, &screen), region });
                 }
             }
         }
@@ -672,11 +687,7 @@ impl MupdfDocument {
                     for r in g.regions.iter().take(cols) {
                         let rr = rot.map_rect(r);
                         let (rw, rh) = (rr.w().max(1.0), rr.h().max(1.0));
-                        let base = match self.opts.fit {
-                            Fit::Page => (w / rw).min(h / rh),
-                            Fit::Width => w / rw,
-                        };
-                        let s = base * self.opts.zoom;
+                        let s = fit_scale(self.opts.fit, w, h, rw, rh) * self.opts.zoom;
                         fx = fx.max(rw * s / w);
                         fy = fy.max(rh * s / h);
                     }
@@ -934,7 +945,7 @@ impl MupdfDocument {
         let rot = Matrix::rotate(spec.rotate as i32);
         let z = spec.zoom.clamp(FREE_ZOOM_RANGE.0, FREE_ZOOM_RANGE.1);
         let rr = rot.map_rect(&region);
-        let ctm = rot.then(&Matrix::scale(z)).then(&Matrix::translate(-rr.x0 * z - zx, -rr.y0 * z - zy));
+        let ctm = place(&rot, &rr, z, -zx, -zy);
         let (w, h) = (canvas.width, canvas.height);
         let canvas_rect = Rect::new(0, 0, w.min(i32::MAX as usize) as u32, h.min(i32::MAX as usize) as u32);
         let clip = ctm.map_rect(&region).intersect(&FRect::new(0.0, 0.0, w as f32, h as f32)).to_rect().intersect(&canvas_rect);
