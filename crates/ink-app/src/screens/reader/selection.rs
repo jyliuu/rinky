@@ -110,17 +110,15 @@ fn scan_line(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect,
     let y = from.y + from.h as i32 / 2;
     let mut out: Vec<(char, Rect)> = Vec::new();
     let mut cur = from;
+    // `r` is the character right after (before) `cur` on the line, with no gap between.
+    let adjacent = |r: Rect, cur: Rect| r.y == from.y && if forward { r.right() > cur.right() && r.x <= cur.right() + 2 } else { r.x < cur.x && r.right() >= cur.x - 2 };
     while out.len() < 64 {
         let mut x = if forward { cur.right() } else { cur.x - 1 };
         let mut next = None;
         while if forward { x <= cur.right() + SCAN_PX } else { x >= (cur.x - SCAN_PX).max(0) } {
             match probe(Point::new(x, y)) {
                 Some((_, r)) if r == cur => x += if forward { SCAN_STEP } else { -SCAN_STEP },
-                Some((t, r)) if r.y == from.y && forward && r.right() > cur.right() && r.x <= cur.right() + 2 => {
-                    next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
-                    break;
-                }
-                Some((t, r)) if r.y == from.y && !forward && r.x < cur.x && r.right() >= cur.x - 2 => {
+                Some((t, r)) if adjacent(r, cur) => {
                     next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
                     break;
                 }
