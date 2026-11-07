@@ -84,7 +84,7 @@ impl TextRun {
     /// Pen x at byte offset `byte` of the text (start of the cluster containing it), for
     /// cursors and selections. The end of the text gives the run width.
     pub fn x_at(&self, byte: usize) -> f32 {
-        self.glyphs.iter().filter(|g| g.cluster >= byte).map(|g| g.x).fold(None, |m: Option<f32>, x| Some(m.map_or(x, |m| m.min(x)))).unwrap_or(self.width)
+        self.glyphs.iter().filter(|g| g.cluster >= byte).map(|g| g.x).reduce(f32::min).unwrap_or(self.width)
     }
 }
 
@@ -219,35 +219,31 @@ fn needs_glyph(c: char) -> bool {
     !(c.is_whitespace() || c.is_control() || matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}'))
 }
 
-fn parse(bytes: &[u8]) -> Result<Font, TextError> {
-    Font::from_bytes(bytes, FontSettings::default()).map_err(|e| TextError::Font(e.to_string()))
+/// The `fontdue` faces `[regular, bold, italic]`.
+fn parse_all(faces: [&[u8]; 3]) -> Result<[Font; 3], TextError> {
+    let parse = |bytes: &[u8]| Font::from_bytes(bytes, FontSettings::default()).map_err(|e| TextError::Font(e.to_string()));
+    Ok([parse(faces[0])?, parse(faces[1])?, parse(faces[2])?])
 }
 
 impl Fonts {
     /// The embedded Noto Serif faces.
     pub fn load() -> Self {
-        let load = |b: &[u8]| parse(b).expect("embedded font");
-        let face = |b: &'static [u8]| FaceData::from_static(b, 0).expect("embedded font");
-        Fonts::from_parts([load(REGULAR), load(BOLD), load(ITALIC)], [face(REGULAR), face(BOLD), face(ITALIC)])
+        Fonts::from_static([REGULAR, BOLD, ITALIC]).expect("embedded fonts")
     }
 
     /// Faces from TTF/OTF bytes: `[regular, bold, italic]`. The bytes are copied and kept
     /// for the rest of the program (the shaped path needs them).
     pub fn from_bytes(faces: [&[u8]; 3]) -> Result<Self, TextError> {
-        let fonts = [parse(faces[0])?, parse(faces[1])?, parse(faces[2])?];
-        let data = [
-            FaceData::from_vec(faces[0].to_vec(), 0)?,
-            FaceData::from_vec(faces[1].to_vec(), 0)?,
-            FaceData::from_vec(faces[2].to_vec(), 0)?,
-        ];
+        let fonts = parse_all(faces)?;
+        let data = faces.iter().map(|f| FaceData::from_vec(f.to_vec(), 0)).collect::<Result<_, _>>()?;
         Ok(Fonts::from_parts(fonts, data))
     }
 
     /// Faces from bytes that live for the whole program (embedded or memory-mapped with
     /// [`crate::face::map_file`]): `[regular, bold, italic]`. Nothing is copied.
     pub fn from_static(faces: [&'static [u8]; 3]) -> Result<Self, TextError> {
-        let fonts = [parse(faces[0])?, parse(faces[1])?, parse(faces[2])?];
-        let data = [FaceData::from_static(faces[0], 0)?, FaceData::from_static(faces[1], 0)?, FaceData::from_static(faces[2], 0)?];
+        let fonts = parse_all(faces)?;
+        let data = faces.iter().map(|f| FaceData::from_static(f, 0)).collect::<Result<_, _>>()?;
         Ok(Fonts::from_parts(fonts, data))
     }
 
@@ -258,12 +254,12 @@ impl Fonts {
         Fonts::from_bytes([&r, &b, &i])
     }
 
-    fn from_parts(fonts: [Font; 3], faces: [FaceData; 3]) -> Self {
+    fn from_parts(fonts: [Font; 3], faces: Vec<FaceData>) -> Self {
         Fonts {
             fonts,
             advance: HashMap::new(),
             glyphs: HashMap::new(),
-            faces: faces.into_iter().collect(),
+            faces,
             fallback_for: HashMap::new(),
             own: Vec::new(),
             shaped: GlyphCache::new(GLYPH_CACHE_BYTES),
@@ -495,12 +491,18 @@ impl Fonts {
         if let Some(found) = self.fallback_for.get(&c) {
             return found.unwrap_or(main);
         }
-        // A face rustybuzz cannot parse would drop the text; skip it.
-        let found = (3..self.faces.len())
-            .find(|i| !self.own.contains(&(*i as FaceId)) && self.faces[*i].has_char(c) && self.faces[*i].shaper().is_some())
-            .map(|i| i as FaceId);
+        let found = self.first_fallback(|f| f.has_char(c));
         self.fallback_for.insert(c, found);
         found.unwrap_or(main)
+    }
+
+    /// The first fallback face for which `covers` holds. Faces added with
+    /// [`Fonts::add_face`] are not fallbacks, and a face `rustybuzz` cannot parse would
+    /// drop the text, so both are skipped.
+    fn first_fallback(&self, covers: impl Fn(&FaceData) -> bool) -> Option<FaceId> {
+        (3..self.faces.len())
+            .find(|i| !self.own.contains(&(*i as FaceId)) && covers(&self.faces[*i]) && self.faces[*i].shaper().is_some())
+            .map(|i| i as FaceId)
     }
 
     /// The face that shows grapheme cluster `g` (a base char plus combining marks, e.g.
@@ -515,14 +517,11 @@ impl Fonts {
         if chars.as_str().is_empty() {
             return face;
         }
-        let faces = &self.faces;
-        let covers = |i: usize| g.chars().filter(|c| needs_glyph(*c)).all(|c| faces[i].has_char(c));
-        if covers(face as usize) {
+        let covers = |f: &FaceData| g.chars().filter(|c| needs_glyph(*c)).all(|c| f.has_char(c));
+        if covers(&self.faces[face as usize]) {
             return face;
         }
-        (3..faces.len())
-            .find(|i| !self.own.contains(&(*i as FaceId)) && covers(*i) && faces[*i].shaper().is_some())
-            .map_or(face, |i| i as FaceId)
+        self.first_fallback(covers).unwrap_or(face)
     }
 
     // ---- Shaped path ----
