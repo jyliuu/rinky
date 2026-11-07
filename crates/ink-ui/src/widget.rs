@@ -114,20 +114,30 @@ impl<'a> PaintCx<'a> {
     /// cut with "…" when wider than `r`; inside the [`PaintCx::clip`].
     pub fn text_centered(&mut self, r: Rect, text: &str, px: f32, style: Style, value: u8) {
         let run = self.fit_run(text, px, style, r.w as f32);
-        let (asc, desc) = self.fonts.vmetrics(style, px);
+        self.put_centered(r, &run, style, value);
+    }
+
+    /// Draws `run` (in `style`) centred in `r`, inside the [`PaintCx::clip`].
+    fn put_centered(&mut self, r: Rect, run: &ink_text::TextRun, style: Style, value: u8) {
         let x = r.x as f32 + (r.w as f32 - run.width) / 2.0;
-        let baseline = r.y as f32 + (r.h as f32 - (asc - desc)) / 2.0 + asc;
-        self.put_run(&run, x, baseline, value, None);
+        let baseline = self.baseline_in(r, run.px, style);
+        self.put_run(run, x, baseline, value, None);
     }
 
     /// `text` shaped, or its [`PaintCx::ellipsize`]d form when wider than `max`.
     fn fit_run(&mut self, text: &str, px: f32, style: Style, max: f32) -> ink_text::TextRun {
         let run = self.fonts.shape(style, px, text);
+        self.fit(run, text, style, max)
+    }
+
+    /// `run` (`text` shaped in `style`), or the shaped [`PaintCx::ellipsize`]d text when
+    /// `run` is wider than `max`.
+    fn fit(&mut self, run: ink_text::TextRun, text: &str, style: Style, max: f32) -> ink_text::TextRun {
         if run.width <= max {
             return run;
         }
-        let cut = self.ellipsize(text, px, style, max);
-        self.fonts.shape(style, px, &cut)
+        let cut = self.cut_to_fit(text, run.px, style, max);
+        self.fonts.shape(style, run.px, &cut)
     }
 
     /// Like [`PaintCx::draw_text_end`], but also nothing is drawn outside `clip` (for
@@ -171,10 +181,15 @@ impl<'a> PaintCx<'a> {
     /// a few shapings of prefixes about as long as the result (a 2000-char text cut to
     /// one line shapes about 12 short prefixes, not 2000 ever shorter copies).
     pub fn ellipsize(&mut self, text: &str, px: f32, style: Style, max: f32) -> String {
-        use unicode_segmentation::UnicodeSegmentation;
         if self.fonts.shaped_width(style, px, text) <= max {
             return text.to_string();
         }
+        self.cut_to_fit(text, px, style, max)
+    }
+
+    /// [`PaintCx::ellipsize`] of a `text` known to be wider than `max`.
+    fn cut_to_fit(&mut self, text: &str, px: f32, style: Style, max: f32) -> String {
+        use unicode_segmentation::UnicodeSegmentation;
         // Candidate cuts: ends of the proper prefixes, shortest first.
         let ends: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).filter(|i| *i > 0).collect();
         let cand = |k: usize| format!("{}…", text[..ends[k]].trim_end());
@@ -831,9 +846,12 @@ pub fn paint_button(cx: &mut PaintCx, b: Rect, label: &str, icon: Option<Icon>, 
     }
     let style = if kind == ButtonKind::Outlined { t.label.style } else { Style::Bold };
     let px = t.label.px;
+    // The caption is shaped once: it gives the width the button needs, and it is what
+    // is drawn unless it has to be cut.
+    let caption = cx.fonts.shape(style, px, label);
     // Keep the caption off the round ends: at least `space(2)` (less on small buttons)
     // between the caption and the outline; a caption that does not fit is ellipsized.
-    let need = cx.text_width(style, px, label) + if icon.is_some() { px * 1.5 } else { 0.0 };
+    let need = caption.width + if icon.is_some() { px * 1.5 } else { 0.0 };
     let min_pad = (rad * 0.5).clamp(4.0, crate::theme::space(2) as f32);
     let pad = ((b.w as f32 - need) / 2.0).clamp(min_pad, (rad * 0.5).max(min_pad));
     let inner = Rect::new(b.x + pad as i32, b.y, b.w.saturating_sub(2 * pad as u32), b.h);
@@ -847,18 +865,17 @@ pub fn paint_button(cx: &mut PaintCx, b: Rect, label: &str, icon: Option<Icon>, 
             let side = ((px * 1.1) as u32).min(b.h * 4 / 5).min(b.w);
             let gap = px * 0.4;
             let room = (inner.w as f32 - side as f32 - gap).max(0.0);
-            let label = cx.ellipsize(label, px, style, room);
-            let tw = cx.text_width(style, px, &label);
-            let total = side as f32 + gap + tw;
+            let run = cx.fit(caption, label, style, room);
+            let total = side as f32 + gap + run.width;
             let x0 = (b.x as f32 + (b.w as f32 - total) / 2.0).max(inner.x as f32);
             let ir = Rect::new(x0 as i32, b.y + (b.h as i32 - side as i32) / 2, side, side);
             icon.draw(cx.canvas, ir, ink);
             let baseline = cx.baseline_in(b, px, style);
-            cx.draw_text_clipped(style, px, x0 + side as f32 + gap, baseline, &label, ink, b);
+            cx.put_run(&run, x0 + side as f32 + gap, baseline, ink, Some(b));
         }
         (None, _) => {
-            let label = cx.ellipsize(label, px, style, inner.w as f32);
-            cx.text_centered(inner, &label, px, style, ink)
+            let run = cx.fit(caption, label, style, inner.w as f32);
+            cx.put_centered(inner, &run, style, ink)
         }
     }
 }
