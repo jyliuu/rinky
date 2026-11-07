@@ -136,13 +136,20 @@ impl Accumulator {
     }
 
     fn finish(self) -> Vec<u8> {
-        let mut acc = 0.0f32;
-        let mut out = Vec::with_capacity(self.w * self.h);
-        for a in &self.a[..self.w * self.h] {
-            acc += a;
-            out.push((acc.abs().min(1.0) * 255.0 + 0.5) as u8);
-        }
-        out
+        // The running sum is one long chain of dependent float additions. Most cells
+        // hold 0 (inside or outside a shape); adding 0 leaves the sum and its coverage
+        // as they are, so those cells repeat the last value without waiting for an add.
+        let (mut acc, mut v) = (0.0f32, 0u8);
+        self.a[..self.w * self.h]
+            .iter()
+            .map(|&a| {
+                if a != 0.0 {
+                    acc += a;
+                    v = (acc.abs().min(1.0) * 255.0 + 0.5) as u8;
+                }
+                v
+            })
+            .collect()
     }
 }
 
@@ -389,6 +396,34 @@ mod tests {
         assert_eq!(m[5 * 10 + 5], 0, "hole");
         assert_eq!(m.iter().filter(|v| **v == 255).count(), 100 - 16);
         assert!(fill_contours(0, 5, &[]).is_empty());
+    }
+
+    /// `finish` skips the zero cells; the result is the plain running sum's, bit for bit.
+    #[test]
+    fn finish_matches_the_plain_running_sum() {
+        let plain = |a: &Accumulator| {
+            let mut acc = 0.0f32;
+            a.a[..a.w * a.h].iter().map(|v| {
+                acc += v;
+                (acc.abs().min(1.0) * 255.0 + 0.5) as u8
+            }).collect::<Vec<u8>>()
+        };
+        let mut seed = 11u32;
+        let mut rnd = move |m: f32| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 * m
+        };
+        for n in 3..40 {
+            let mut a = Accumulator::new(37, 23);
+            // A random polygon, self-intersecting and partly off the bitmap.
+            let pts: Vec<(f32, f32)> = (0..n).map(|_| (rnd(50.0) - 6.0, rnd(34.0) - 5.0)).collect();
+            for i in 0..n {
+                let (p, q) = (pts[i], pts[(i + 1) % n]);
+                a.line(p.0, p.1, q.0, q.1);
+            }
+            let want = plain(&a);
+            assert_eq!(a.finish(), want, "polygon of {n} points");
+        }
     }
 
     #[test]
