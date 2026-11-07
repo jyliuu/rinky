@@ -685,12 +685,9 @@ impl LibraryScreen {
     /// The scroll position of the current view: (items, items per screen, screen).
     /// `None` for views that do not scroll.
     fn scroll_state(&self, size: Size) -> Option<(usize, usize, usize)> {
-        let (w, h) = (size.w as i32, size.h as i32);
+        let h = size.h as i32;
         match self.view {
-            View::Books => {
-                let (_, total, page) = self.page_books(w, h);
-                Some((total, self.per_page(w, h).max(1), page))
-            }
+            View::Books => Some((self.lib.as_ref().map_or(0, |l| l.query(&self.query).len()), self.per_page(h).max(1), self.page)),
             View::Files => Some((self.files_rows(), Self::files_per_page(h), self.files_page)),
             View::Collections => Some((self.lib.as_ref().map_or(0, |l| l.index.collections.len()), Self::coll_per_page(h), self.coll_page)),
             _ => None,
@@ -700,7 +697,12 @@ impl LibraryScreen {
     /// Shows screen `page` of the current view (clamped); only the scrolling region is
     /// repainted. False when the view does not scroll or is there already.
     fn scroll_to(&mut self, page: usize, size: Size) -> bool {
-        let Some((total, per, now)) = self.scroll_state(size) else { return false };
+        self.scroll_state(size).is_some_and(|state| self.scroll_from(state, page))
+    }
+
+    /// [`Self::scroll_to`] from the view's [`Self::scroll_state`] (the library view's
+    /// query runs once per step).
+    fn scroll_from(&mut self, (total, per, now): (usize, usize, usize), page: usize) -> bool {
         let last = ScrollBar::pages_of(total, per) - 1;
         let (page, now) = (page.min(last), now.min(last));
         if page == now {
@@ -719,9 +721,9 @@ impl LibraryScreen {
 
     /// Moves the current view by `step` screens.
     fn turn(&mut self, step: i64, size: Size) {
-        let Some((total, per, now)) = self.scroll_state(size) else { return };
+        let Some(state @ (total, per, now)) = self.scroll_state(size) else { return };
         let now = now.min(ScrollBar::pages_of(total, per) - 1);
-        self.scroll_to((now as i64 + step).max(0) as usize, size);
+        self.scroll_from(state, (now as i64 + step).max(0) as usize);
     }
 
     /// Touches on the scroll bar: a press there takes the touch; moving shows the

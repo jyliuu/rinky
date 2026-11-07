@@ -7,7 +7,7 @@
 
 use super::model::sort_label;
 use super::view::{MARGIN, TAB_H, TOOLBAR_H};
-use super::{files, Hit, LibraryScreen, Overlay, StatusFilter, View, ViewMode};
+use super::{files, Hit, LibraryScreen, Overlay, StatusFilter, ViewMode};
 use ink_device::Rect;
 use ink_store::{BookEntry, ReadingStatus};
 use ink_text::Style;
@@ -182,7 +182,8 @@ impl LibraryScreen {
     /// overflow menu (no exit: only Settings has "Exit to Kindle") as icon buttons.
     /// While the search keyboard is
     /// open: the field (painted by the overlay) and a filled "Done".
-    pub(super) fn draw_app_bar(&mut self, p: &mut PaintCx, w: i32, title: &str, back: bool) {
+    /// `count`: the books the library view lists (`None` on the other views).
+    pub(super) fn draw_app_bar(&mut self, p: &mut PaintCx, w: i32, title: &str, back: bool, count: Option<usize>) {
         let bar = Rect::new(0, 0, w as u32, super::view::HEADER_H as u32);
         let searching = matches!(self.overlay, Some(Overlay::Input { search: true, .. }));
         if searching {
@@ -193,7 +194,7 @@ impl LibraryScreen {
             p.canvas.fill_rect(0, bar.bottom() - t.rule_px, w, t.rule_px, t.fg);
             return;
         }
-        let books = self.view == View::Books;
+        let books = count.is_some();
         let mut ab = AppBar::new("");
         if back {
             ab = ab.with_back();
@@ -223,8 +224,7 @@ impl LibraryScreen {
         let shown = p.ellipsize(title, role.px, role.style, max_title);
         let tw = p.text_width(role.style, role.px, &shown).ceil() as i32;
         ab.title = shown;
-        if books {
-            let n = self.lib.as_ref().map_or(0, |l| l.query(&self.query).len());
+        if let Some(n) = count {
             ab = ab.with_subtitle(format!("{n} book{}", if n == 1 { "" } else { "s" }));
         }
         ab.paint(p, bar);
@@ -335,9 +335,10 @@ impl LibraryScreen {
     }
 
     /// The library view: chips, then rows or the cover grid, then the pager.
-    pub(super) fn draw_books(&mut self, p: &mut PaintCx, w: i32, h: i32) {
+    /// `shelf`: [`LibraryScreen::page_books`].
+    pub(super) fn draw_books(&mut self, p: &mut PaintCx, w: i32, h: i32, shelf: (Vec<BookEntry>, usize, usize)) {
         self.draw_filter_chips(p, w);
-        let (books, total, page) = self.page_books(w, h);
+        let (books, total, page) = shelf;
         let (top, bottom) = Self::content_span(h);
         let rw = Self::rows_w(w, h);
         if books.is_empty() {
@@ -361,7 +362,7 @@ impl LibraryScreen {
                 }
             }
         }
-        let per = self.per_page(w, h);
+        let per = self.per_page(h);
         self.draw_scroll_bar(p, w, h, total, per, page);
     }
 
