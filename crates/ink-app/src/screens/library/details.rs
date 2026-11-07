@@ -11,7 +11,8 @@ use ink_store::{BookEntry, ReadingStatus};
 use ink_text::Style;
 use ink_ui::draw::stroke_round_rect;
 use ink_ui::theme::space;
-use ink_ui::{paint_button, ButtonKind, Icon, PaintCx, ProgressBar, Widget};
+use crate::screens::common::pill;
+use ink_ui::{Icon, PaintCx, ProgressBar, Widget};
 use std::path::Path;
 
 /// Height of the details card.
@@ -126,17 +127,17 @@ impl LibraryScreen {
         let n_side = if self.plugin_actions.is_empty() { 1 } else { 2 };
         let main_w = cw as i32 - n_side * (side + space(2));
         let read = Rect::new(MARGIN, y, main_w as u32, bh);
-        paint_button(p, read, read_label(&b), Some(Icon::Book), ButtonKind::Filled, true, false);
+        pill(p, read, read_label(&b), Some(Icon::Book), true);
         self.hits.push((read, Hit::Read(b.path.clone())));
         let mut x = read.right() + space(2);
         if !self.plugin_actions.is_empty() {
             let r = Rect::new(x, y, side as u32, bh);
-            paint_button(p, r, "Plugins", Some(Icon::More), ButtonKind::Outlined, true, false);
+            pill(p, r, "Plugins", Some(Icon::More), false);
             self.hits.push((r, Hit::PluginMenu(b.path.clone())));
             x = r.right() + space(2);
         }
         let del = Rect::new(x, y, side as u32, bh);
-        paint_button(p, del, "Delete", Some(Icon::Trash), ButtonKind::Outlined, true, false);
+        pill(p, del, "Delete", Some(Icon::Trash), false);
         self.hits.push((del, Hit::Delete(b.path.clone())));
         y += bh as i32 + space(4);
 

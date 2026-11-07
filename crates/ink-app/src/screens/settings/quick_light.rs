@@ -33,6 +33,7 @@
 
 use super::{advanced, current_settings, edit_settings};
 use super::popup::{self, Anchor, PopupCatcher, SettingsPopup};
+use crate::screens::common::paint_cx;
 use crate::router::{AppCtx, Route, Services, Transition};
 use ink_device::clock::DateTime;
 use ink_device::light::{AmberMode, AmberSchedule, AmberScheduler, DayTime};
@@ -1309,7 +1310,7 @@ impl ControlCenterScreen {
     /// Shows `text` in the status line at once (before a call that blocks).
     fn say_now(&mut self, text: &str, cx: &mut AppCtx) {
         self.set_status(text);
-        for d in self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme }) {
+        for d in self.tree.paint(&mut paint_cx(cx)) {
             if let Err(e) = cx.show(d.rect, d.class) {
                 log::warn!("control center: show: {e}");
             }
@@ -1818,7 +1819,7 @@ impl crate::router::AppScreen for ControlCenterScreen {
         if let Some(name) = self.picker.as_ref().filter(|p| matches!(p.rows, PickerRows::Plugin { .. })).map(|p| p.name.clone()) {
             self.take_plugin_menus(&name, cx);
         }
-        let damage = self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme });
+        let damage = self.tree.paint(&mut paint_cx(cx));
         if std::mem::take(&mut self.flash_all) {
             return Ok(vec![Damage { rect: cx.canvas.bounds(), class: RefreshClass::Gc16 }]);
         }

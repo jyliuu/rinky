@@ -38,11 +38,12 @@ mod view;
 pub use model::{ImportResult, Library, Query, StatusFilter};
 
 use crate::router::{AppCtx, AppScreen, Route, ScreenRegistry, Transition};
+use crate::screens::common::paint_cx;
 use crate::screens::settings::worker::{self, Job, Poll, Reporter};
 use ink_device::{Key, PowerEvent, Rect, RefreshClass, Size};
 use ink_store::koreader::KoreaderDirs;
 use ink_store::ReadingStatus;
-use ink_ui::{Damage, Dialog, EventResult, Gesture, KeyAction, Keyboard, Menu, PaintCx, ScrollBar, TextInput, UiEvent, Widget};
+use ink_ui::{Damage, Dialog, EventResult, Gesture, KeyAction, Keyboard, Menu, ScrollBar, TextInput, UiEvent, Widget};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -1254,11 +1255,9 @@ impl LibraryScreen {
                 Some(h) => self.act(h, false, size),
                 None => Transition::None,
             },
-            UiEvent::Gesture(g @ Gesture::Swipe { .. }) => {
+            UiEvent::Gesture(Gesture::Swipe { .. }) => {
                 // Up (or left) shows the next screen, down (or right) the previous one.
-                let (dx, dy) = g.delta();
-                let d = if dx.abs() > dy.abs() { dx } else { dy };
-                self.turn(if d < 0 { 1 } else { -1 }, size);
+                self.turn(crate::screens::common::swipe_step(ev).unwrap_or(0).into(), size);
                 Transition::None
             }
             _ => Transition::None,
@@ -1314,7 +1313,7 @@ impl LibraryScreen {
             // the rows and the scroll bar are sent to the panel.
             self.bar_dirty = false;
             self.last_paint = Instant::now();
-            let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+            let mut p = paint_cx(cx);
             self.draw(&mut p);
             let s = cx.screen.size();
             let r = Self::scroll_region(s.w as i32, s.h as i32);
@@ -1322,7 +1321,7 @@ impl LibraryScreen {
         }
         if std::mem::take(&mut self.bar_dirty) {
             if let (Some(g), Some(d)) = (self.bar, self.bar_drag) {
-                let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+                let mut p = paint_cx(cx);
                 let track = ScrollBar::track(g.region);
                 ScrollBar::paged(g.bar.total, g.per, d.page).paint_drag(&mut p, track);
                 return Ok(vec![Damage { rect: track, class: RefreshClass::Du }]);
@@ -1343,7 +1342,7 @@ impl LibraryScreen {
                 }
                 _ => None,
             };
-            let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+            let mut p = paint_cx(cx);
             self.draw(&mut p);
             let bounds = cx.canvas.bounds();
             if let Some(keys) = keys {
@@ -1354,14 +1353,14 @@ impl LibraryScreen {
             return Ok(vec![Damage { rect: bounds, class }]);
         }
         if std::mem::take(&mut self.busy_dirty) && self.job.is_some() {
-            let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+            let mut p = paint_cx(cx);
             let r = self.draw_busy_line(&mut p);
             return Ok(vec![Damage { rect: r, class: RefreshClass::Du }]);
         }
         if std::mem::take(&mut self.keyboard_dirty) {
             let size = cx.screen.size();
             if let Some(Overlay::Input { search, input, keyboard, .. }) = self.overlay.as_mut() {
-                let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+                let mut p = paint_cx(cx);
                 let kb = keyboard_rect(size);
                 p.canvas.fill_rect(kb.x, kb.y, kb.w as i32, kb.h as i32, p.theme.bg);
                 keyboard.paint(&mut p, kb);

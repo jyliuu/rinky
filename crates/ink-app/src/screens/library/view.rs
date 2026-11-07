@@ -6,7 +6,8 @@ use ink_device::Rect;
 use ink_store::BookEntry;
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
-use ink_ui::{paint_button, ButtonKind, PaintCx, Widget};
+use crate::screens::common::pill;
+use ink_ui::{PaintCx, Widget};
 
 /// Header height (title, back, actions): the shared app bar's height, so its rule sits
 /// where the other screens' rules do.
@@ -21,12 +22,6 @@ pub const MARGIN: i32 = 32;
 pub const GRID_COLS: i32 = 3;
 /// Grid rows.
 pub const GRID_ROWS: i32 = 3;
-
-/// Draws a pill button (`ink_ui::paint_button`); `primary` makes it filled.
-pub fn button(p: &mut PaintCx, r: Rect, label: &str, primary: bool) {
-    let kind = if primary { ButtonKind::Filled } else { ButtonKind::Outlined };
-    paint_button(p, r, label, None, kind, true, false);
-}
 
 impl LibraryScreen {
     /// Paints everything into `p.canvas`.
@@ -112,15 +107,15 @@ impl LibraryScreen {
         }
         y += 30;
         let r = Rect::new(MARGIN, y, (w - 2 * MARGIN) as u32, 104);
-        button(p, r, "Import from KOReader", true);
+        pill(p, r, "Import from KOReader", None, true);
         self.hits.push((r, Hit::Import));
         y += 130;
         let half = ((w - 2 * MARGIN - 30) / 2) as u32;
         let r = Rect::new(MARGIN, y, half, 104);
-        button(p, r, "Rescan library", false);
+        pill(p, r, "Rescan library", None, false);
         self.hits.push((r, Hit::Rescan));
         let r = Rect::new(MARGIN + half as i32 + 30, y, half, 104);
-        button(p, r, "Browse files", false);
+        pill(p, r, "Browse files", None, false);
         self.hits.push((r, Hit::Browse));
         y += 140;
         if let Some(lib) = self.lib.as_ref() {
@@ -176,8 +171,8 @@ impl LibraryScreen {
                     let fg = p.theme.fg;
                     p.text_left(Rect::new(panel.x + 24, panel.y + 10, panel.w - 48, 60), title, p.theme.font_px, Style::Bold, fg);
                     let (cancel, ok) = super::name_buttons(size);
-                    button(p, cancel, "Cancel", false);
-                    button(p, ok, "OK", true);
+                    pill(p, cancel, "Cancel", None, false);
+                    pill(p, ok, "OK", None, true);
                 }
                 p.canvas.fill_rect(field.x, field.y, field.w as i32, field.h as i32, p.theme.bg);
                 input.paint(p, field);

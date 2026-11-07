@@ -20,7 +20,8 @@ use ink_store::{BookEntry, BookState, ReadingStatus};
 use ink_text::Style;
 use ink_ui::draw::stroke_round_rect;
 use ink_ui::theme::space;
-use ink_ui::{paint_button, paint_cover, ButtonKind, Cover, Icon, NavBar, NavItem, PaintCx, ProgressBar, Widget};
+use crate::screens::common::pill;
+use ink_ui::{paint_cover, Cover, Icon, NavBar, NavItem, PaintCx, ProgressBar, Widget};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -245,7 +246,7 @@ impl LibraryScreen {
         if !reading && !b.unsupported {
             // The card is the target; the button says what a tap does.
             let bw = 380.min(tw as i32);
-            paint_button(p, Rect::new(x, y + space(2), bw as u32, t.control_h()), if b.status == ReadingStatus::New { "Start reading" } else { "Open book" }, Some(Icon::Book), ButtonKind::Filled, true, false);
+            pill(p, Rect::new(x, y + space(2), bw as u32, t.control_h()), if b.status == ReadingStatus::New { "Start reading" } else { "Open book" }, Some(Icon::Book), true);
         }
         if reading {
             if let Some(c) = self.home.chapter.clone() {
@@ -336,7 +337,7 @@ impl LibraryScreen {
         y += space(4);
         let bw = 360;
         let b = Rect::new((w - bw) / 2, y.min(h - TAB_H - 140), bw as u32, t.control_h());
-        paint_button(p, b, "Look again", Some(Icon::Sync), ButtonKind::Outlined, true, false);
+        pill(p, b, "Look again", Some(Icon::Sync), false);
         self.hits.push((b, Hit::Rescan));
     }
 

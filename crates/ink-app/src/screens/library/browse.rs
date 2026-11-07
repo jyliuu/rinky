@@ -1,7 +1,7 @@
 //! Painting of the browse views (library list and grid, collections, file browser) and
 //! the app bar of every view. The browse views show a screenful of rows at a time with
 //! a [`ScrollBar`] on the right (no pager footer). Built from the ink-ui design system:
-//! `AppBar`, chips, `ProgressBar`, `paint_cover`, `paint_button` and the palette tokens.
+//! `AppBar`, chips, `ProgressBar`, `paint_cover`, buttons and the palette tokens.
 //!
 //! Rows, cells and covers here are separate from the Home tab's helpers in `view.rs`.
 
@@ -13,7 +13,8 @@ use ink_store::{BookEntry, ReadingStatus};
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::theme::space;
-use ink_ui::{paint_button, paint_cover, AppBar, BarAction, ButtonKind, Cover, Icon, PaintCx, ProgressBar, ScrollBar, Widget};
+use crate::screens::common::pill;
+use ink_ui::{paint_cover, AppBar, BarAction, Cover, Icon, PaintCx, ProgressBar, ScrollBar, Widget};
 
 /// Height of a list row with a cover thumbnail.
 pub const LIST_ROW_H: i32 = 164;
@@ -189,7 +190,7 @@ impl LibraryScreen {
         if searching {
             let t = p.theme.clone();
             let done = Rect::new(w - MARGIN - 200, (bar.h as i32 - 104) / 2, 200, 104);
-            paint_button(p, done, "Done", None, ButtonKind::Filled, true, false);
+            pill(p, done, "Done", None, true);
             self.hits.push((done, Hit::Back));
             p.canvas.fill_rect(0, bar.bottom() - t.rule_px, w, t.rule_px, t.fg);
             return;
@@ -254,7 +255,7 @@ impl LibraryScreen {
             } else {
                 // No room (long collection name): the field shrinks to its icon.
                 let r = Rect::new(right - 96, (bar.h as i32 - 96) / 2, 96, 96);
-                paint_button(p, r, "", Some(Icon::Search), ButtonKind::Outlined, true, false);
+                pill(p, r, "", Some(Icon::Search), false);
                 self.hits.push((r, Hit::Search));
             }
         }
@@ -440,7 +441,7 @@ impl LibraryScreen {
         let t = p.theme.clone();
         let bh = t.control_h();
         let r = Rect::new(MARGIN, super::view::HEADER_H + (TOOLBAR_H - bh as i32) / 2, 420, bh);
-        paint_button(p, r, "New collection", Some(Icon::Plus), ButtonKind::Outlined, true, false);
+        pill(p, r, "New collection", Some(Icon::Plus), false);
         self.hits.push((r, Hit::NewCollection));
         let (top, _) = Self::content_span(h);
         let per = Self::coll_per_page(h);

@@ -196,6 +196,7 @@ fn module_rows(section: &str, s: &Settings) -> Vec<Row> {
         .collect()
 }
 
+use crate::screens::common::paint_cx;
 use crate::router::{AppCtx, AppScreen, ScreenRegistry, Transition};
 use crate::plugin_host::{self, hooks, PluginEntry};
 use crate::update;
@@ -206,7 +207,7 @@ use ink_ui::bars::APP_BAR_H;
 use ink_ui::input::InputResult;
 use ink_ui::theme::space;
 use ink_ui::{
-    AppBar, BarAction, Button, Card, CardKind, Damage, Dialog, EventResult, Icon, KeyAction, Keyboard, Label, PaintCx,
+    AppBar, BarAction, Button, Card, CardKind, Damage, Dialog, EventResult, Icon, KeyAction, Keyboard, Label,
     Scrim, TextBlock, TextInput, UiEvent, WidgetId, WidgetTree,
 };
 use ink_plugin::UiRequest;
@@ -1057,7 +1058,7 @@ impl SettingsScreen {
     /// Shows a status line at once (before a call that blocks).
     fn say_now(&mut self, text: &str, cx: &mut AppCtx) -> anyhow::Result<()> {
         self.set_status(text);
-        for d in self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme }) {
+        for d in self.tree.paint(&mut paint_cx(cx)) {
             cx.show(d.rect, d.class)?;
         }
         Ok(())
@@ -2168,7 +2169,7 @@ impl AppScreen for SettingsScreen {
             self.build(cx, class);
             self.built = Some(key);
         }
-        let damage = self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme });
+        let damage = self.tree.paint(&mut paint_cx(cx));
         let damage = match before {
             Some(old) => ink_ui::refresh::changed_bands(&old, cx.canvas, damage),
             None => damage,

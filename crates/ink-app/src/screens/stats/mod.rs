@@ -18,13 +18,14 @@ pub mod vocab;
 mod tests;
 
 use crate::router::{AppCtx, AppScreen, Route, ScreenRegistry, Transition};
-use ink_device::{Key, Point, Rect, RefreshClass, Size};
+use crate::screens::common::{paint_cx, pill, swipe_step, tap_pos};
+use ink_device::{Key, Rect, RefreshClass, Size};
 use ink_stats::report::{self, format_duration, Day, Overview};
 use ink_text::Style;
 use ink_ui::bars::APP_BAR_H;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::theme::space;
-use ink_ui::{paint_button, AppBar, BarAction, ButtonKind, Damage, Gesture, Icon, PaintCx, ProgressBar, Segmented, UiEvent, Widget};
+use ink_ui::{AppBar, BarAction, Damage, Icon, PaintCx, ProgressBar, Segmented, UiEvent, Widget};
 
 /// Registers both screens.
 pub fn register(reg: &mut ScreenRegistry) {
@@ -54,14 +55,9 @@ pub(crate) fn now_and_offset(cx: &AppCtx) -> (u64, i64) {
     (now, offset)
 }
 
-/// A pill button (design system); `primary` is filled.
-pub(crate) fn button(p: &mut PaintCx, r: Rect, label: &str, primary: bool) {
-    paint_button(p, r, label, None, if primary { ButtonKind::Filled } else { ButtonKind::Outlined }, true, false);
-}
-
 /// A round outlined icon button.
-pub(crate) fn icon_button(p: &mut PaintCx, r: Rect, icon: Icon) {
-    paint_button(p, r, "", Some(icon), ButtonKind::Outlined, true, false);
+fn icon_button(p: &mut PaintCx, r: Rect, icon: Icon) {
+    pill(p, r, "", Some(icon), false);
 }
 
 /// The ink-ui app bar with a back button, a title and an optional text action; records
@@ -98,26 +94,6 @@ pub(crate) fn pager<H: Clone>(p: &mut PaintCx, page: usize, pages: usize, extra:
     let label = format!("Page {} of {pages}{extra}", page + 1);
     let (cap, muted) = (p.theme.caption, p.theme.muted);
     p.text_centered(Rect::new(pr.right() + space(2), y, (nr.x - pr.right() - space(4)) as u32, PAGER_H as u32), &label, cap.px, cap.style, muted);
-}
-
-/// The position of a tap or long press.
-pub(crate) fn tap_pos(ev: &UiEvent) -> Option<Point> {
-    match ev {
-        UiEvent::Gesture(Gesture::Tap { pos } | Gesture::LongPress { pos, .. }) => Some(*pos),
-        _ => None,
-    }
-}
-
-/// +1 for a swipe left or up (next), -1 for right or down.
-pub(crate) fn swipe_step(ev: &UiEvent) -> Option<i32> {
-    match ev {
-        UiEvent::Gesture(g @ Gesture::Swipe { .. }) => {
-            let (dx, dy) = g.delta();
-            let d = if dx.abs() > dy.abs() { dx } else { dy };
-            Some(if d < 0 { 1 } else { -1 })
-        }
-        _ => None,
-    }
 }
 
 /// Calendar fill for a day's reading: `(fill, text)` palette values, `None` under a
@@ -517,7 +493,7 @@ impl AppScreen for StatsScreen {
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {
         let Some(class) = self.dirty.take() else { return Ok(Vec::new()) };
-        let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+        let mut p = paint_cx(cx);
         self.draw(&mut p);
         Ok(vec![Damage { rect: cx.canvas.bounds(), class }])
     }

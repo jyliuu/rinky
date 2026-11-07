@@ -3,7 +3,8 @@
 //! shows the word large; a tap on it flips it to the meaning and the context (only the
 //! card is refreshed).
 
-use super::{button, header, now_and_offset, pager, swipe_step, tap_pos, HEADER_H, MARGIN, PAGER_H};
+use super::{header, now_and_offset, pager, HEADER_H, MARGIN, PAGER_H};
+use crate::screens::common::{paint_cx, pill, swipe_step, tap_pos};
 use crate::router::{AppCtx, AppScreen, Transition};
 use ink_device::{Key, Rect, RefreshClass, Size};
 use ink_stats::{VocabDb, VocabWord};
@@ -282,7 +283,7 @@ impl VocabScreen {
             let msg = format!("{} words reviewed. The next ones are due later.", round.total);
             p.text_centered(Rect::new(MARGIN, y + 120, tw, 60), &msg, t.label.px, t.label.style, t.muted);
             let r = Rect::new(w / 2 - 220, y + 240, 440, 104);
-            button(p, r, "Back to the list", true);
+            pill(p, r, "Back to the list", None, true);
             self.hits.push((r, Hit::Back));
             return;
         };
@@ -290,8 +291,8 @@ impl VocabScreen {
         self.paint_card(p, cr, card, round.shown);
         self.hits.push((cr, Hit::Show));
         let (no, yes) = answer_rects(w, h);
-        button(p, no, "Don't know", false);
-        button(p, yes, "Know", true);
+        pill(p, no, "Don't know", None, false);
+        pill(p, yes, "Know", None, true);
         self.hits.push((no, Hit::Know(false)));
         self.hits.push((yes, Hit::Know(true)));
     }
@@ -417,7 +418,7 @@ impl AppScreen for VocabScreen {
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {
         let Some(class) = self.dirty.take() else { return Ok(Vec::new()) };
-        let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+        let mut p = paint_cx(cx);
         self.draw(&mut p);
         let rect = self.dirty_rect.take().unwrap_or_else(|| cx.canvas.bounds());
         Ok(vec![Damage { rect, class }])
