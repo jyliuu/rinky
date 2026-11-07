@@ -158,7 +158,7 @@ Dev-dependencies only: ink-html -> ink-formats, ink-store; ink-formats -> ink-st
 
 `Fonts` (three embedded Noto Serif faces; `advance`, `text_width`, `vmetrics`, `glyph`,
 `draw_text`), `Style::{Regular, Bold, Italic}`,
-`linebreak::{break_opportunities, greedy}`, `Hyphenator` + `NoHyphenation`,
+`linebreak::break_opportunities`, `Hyphenator` + `NoHyphenation`,
 `registry::scan_font_dirs`. Golden pages depend on `Fonts`' exact math.
 Wave A (`ui`): shaped text (`Fonts::shape`, `draw_run`, `draw_run_clipped`, fallback faces
 via `Fonts::load_fallbacks(&registry::KINDLE_FONT_DIRS)`), `Style::BoldItalic`,

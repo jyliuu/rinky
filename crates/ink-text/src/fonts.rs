@@ -85,20 +85,6 @@ impl TextRun {
     pub fn x_at(&self, byte: usize) -> f32 {
         self.glyphs.iter().filter(|g| g.cluster >= byte).map(|g| g.x).fold(None, |m: Option<f32>, x| Some(m.map_or(x, |m| m.min(x)))).unwrap_or(self.width)
     }
-
-    /// Byte offset of the cluster boundary nearest to pen x `x`.
-    pub fn byte_at(&self, x: f32, text_len: usize) -> usize {
-        let mut best = (f32::MAX, text_len);
-        let mut clusters: Vec<(usize, f32)> = self.glyphs.iter().map(|g| (g.cluster, g.x)).collect();
-        clusters.push((text_len, self.width));
-        for (c, gx) in clusters {
-            let d = (gx - x).abs();
-            if d < best.0 {
-                best = (d, c);
-            }
-        }
-        best.1
-    }
 }
 
 /// Options for [`Fonts::shape_with`].
@@ -698,12 +684,6 @@ impl Fonts {
         }
         x + run.width
     }
-
-    /// Shapes and draws `text`; returns the pen position after it.
-    pub fn draw_shaped(&mut self, canvas: &mut Canvas, style: Style, px: f32, x: f32, baseline: f32, text: &str) -> f32 {
-        let run = self.shape(style, px, text);
-        self.draw_run(canvas, &run, x, baseline)
-    }
 }
 
 /// Blends `value` into the canvas with the mask's coverage.
@@ -946,7 +926,8 @@ mod tests {
         f.set_cache_budget(20_000);
         let mut c = Canvas::new(1200, 100);
         for px in [30.0, 31.0, 32.0, 33.0, 34.0] {
-            f.draw_shaped(&mut c, Style::Regular, px, 0.0, 80.0, "The quick brown fox jumps over the lazy dog");
+            let run = f.shape(Style::Regular, px, "The quick brown fox jumps over the lazy dog");
+            f.draw_run(&mut c, &run, 0.0, 80.0);
         }
         assert!(f.cached_bytes() <= 20_000, "{}", f.cached_bytes());
         assert!(f.cached_glyphs() > 0);
@@ -959,9 +940,6 @@ mod tests {
         assert_eq!(run.x_at(0), 0.0);
         assert!(run.x_at(1) > 0.0 && run.x_at(2) > run.x_at(1));
         assert_eq!(run.x_at(3), run.width);
-        assert_eq!(run.byte_at(run.width + 50.0, 3), 3);
-        assert_eq!(run.byte_at(-5.0, 3), 0);
-        assert_eq!(run.byte_at(run.x_at(2) + 1.0, 3), 2);
     }
 
     #[test]

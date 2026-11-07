@@ -6,7 +6,7 @@
 //!
 //! - the prototype path (`text_width`, `draw_text`): char by char with `fontdue` and pair
 //!   kerning. Golden pages depend on its exact math; it never changes silently.
-//! - the shaped path (`shape`, `draw_run`, `draw_shaped`): `rustybuzz` shaping (kerning,
+//! - the shaped path (`shape`, `draw_run`, `draw_run_clipped`): `rustybuzz` shaping (kerning,
 //!   ligatures, marks), fallback faces for characters the main face lacks (CJK,
 //!   symbols), synthetic bold and italic, and a bounded glyph cache.
 //!
@@ -45,16 +45,6 @@ pub enum Style {
 }
 
 impl Style {
-    /// The style with the given weight and slant.
-    pub fn from_flags(bold: bool, italic: bool) -> Style {
-        match (bold, italic) {
-            (false, false) => Style::Regular,
-            (true, false) => Style::Bold,
-            (false, true) => Style::Italic,
-            (true, true) => Style::BoldItalic,
-        }
-    }
-
     /// Bold or bold italic.
     pub fn is_bold(self) -> bool {
         matches!(self, Style::Bold | Style::BoldItalic)
@@ -99,10 +89,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn style_flags_round_trip() {
-        for s in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
-            assert_eq!(Style::from_flags(s.is_bold(), s.is_italic()), s);
-        }
+    fn style_flags() {
+        let flags = |s: Style| (s.is_bold(), s.is_italic());
+        assert_eq!(flags(Style::Regular), (false, false));
+        assert_eq!(flags(Style::Bold), (true, false));
+        assert_eq!(flags(Style::Italic), (false, true));
+        assert_eq!(flags(Style::BoldItalic), (true, true));
     }
 
     #[test]
