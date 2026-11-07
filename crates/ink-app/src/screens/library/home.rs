@@ -205,7 +205,7 @@ impl LibraryScreen {
     /// The cover of `b` for `paint_cover`, scaled from the thumbnail cache to `w` x `h`.
     fn cover_of(&mut self, b: &BookEntry, w: u32, h: u32) -> Cover {
         match b.cover.as_deref().and_then(|c| self.covers.get(c, w, h)) {
-            Some(img) => Cover::image(b.title.clone(), Arc::new(img.clone())),
+            Some(img) => Cover::image(b.title.clone(), Arc::clone(img)),
             None => Cover::placeholder(b.title.clone()),
         }
     }
