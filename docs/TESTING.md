@@ -153,6 +153,40 @@ integrator): `[profile.dev.package."*"] opt-level = 1`, or `[profile.dev.package
 inflate and font rasterising in tests several times faster, at the cost of a longer
 first build of those dependencies.
 
+## Flaky and needlessly slow tests (branch overnight/flaky)
+
+Rules the fixes below follow; keep to them in new tests:
+
+- A test reads only files it wrote itself or files under `testdata/` and `tests/`; never
+  a file of the source checkout that a branch switch can rewrite (`Cargo.toml`).
+- A test that starts `rinky sim` or `rinky demo` sets `TMPDIR` to its own directory:
+  the binary keeps its state in `$TMPDIR/rinky-sim`, shared otherwise with other test
+  runs on the machine and with your own sim sessions.
+- No wall-clock bound that a busy machine can exceed when the code under test is right.
+  Check what the bound stands for: a log line, a counter, a per-thread count.
+- A "concurrent" event that must land inside a bounded wait (ink-store's 127 ms settle
+  wait) runs from a hook at that wait (`on_settle_wait` in test builds), not from a
+  thread that sleeps first.
+
+Fixed: ink-doc `tests::loaders` (read the crate's `Cargo.toml`), ink-store
+`load_waits_for_a_save_in_progress` and `verifier2_settings_load_or_recover_waits_...`
+(both failed in the same `cargo test --workspace` run on a loaded machine), the time
+bounds in ink-store's no-wait check and ink-app `signal_flush`, and the shared sim state
+of `verify_cli` and `signal_flush`.
+
+Faster, same checks: the headless screen's per-frame coverage check compares rows as
+slices (it was half of the ink-app screen tests' time in debug builds); the two
+hold-menu tests in `screens.rs` and the quick-light long-press test run their
+independent real-time app runs at once; the streamed-chat test pushes 5 batches instead
+of 25. Inside `cargo test --workspace` (warm build, load average 20-40 from other
+agents both times): ink-app lib 32-69 s before, 25-27 s after; `screens` 11.5 s before,
+4.3-4.5 s after; the whole command 130-171 s before (5 runs), 90-120 s after (3 runs).
+
+Still slow: `update::tests::verifier_two_concurrent_updates_leave_one_consistent_version`
+(15-18 s: 24 rounds of two 1 MB installs against a one-connection mock server) and
+`settings::tests::without_device_services_every_page_opens` (about 11 s: 21 pages in a
+debug build).
+
 ## Emulator end-to-end tests (tests/e2e)
 
 76 scenario scripts (`tests/e2e/*.sh`, plus 2 `*.sh.disabled`), run on the emulator
