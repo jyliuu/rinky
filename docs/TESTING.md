@@ -10,7 +10,7 @@ installs on a device.
 | --- | --- |
 | While working on one crate | `cargo test -p <crate>` and `cargo clippy -p <crate> --all-targets -- -D warnings` |
 | Before every commit | `scripts/test-fast.sh` and `cargo clippy --workspace --all-targets -- -D warnings` |
-| You changed how pages, the reader footer or settings rows look | the golden tests (part of `test-fast.sh`); regenerate only on purpose, see [Golden images](#golden-images) |
+| You changed how pages, the reader footer or settings rows look | `cargo test -p ink-html --test golden` for pages (not in `test-fast.sh`); the footer and settings goldens run in `test-fast.sh`. Regenerate only on purpose, see [Golden images](#golden-images) |
 | You changed C dependencies, `unsafe` code or anything `cfg(target_os = "linux")` | `scripts/clippy-arm.sh` (clippy for the ARM target) |
 | Before a merge | `cargo test --workspace` (also runs the attack, hostile-input and fixture suites) |
 | You changed the launcher, sleep, input or anything the device does | the emulator scenarios for that area, see [Emulator scenarios](#emulator-scenarios) |
@@ -24,9 +24,10 @@ cache; see `crates/ink-mupdf/build.rs`).
 
 `scripts/test-fast.sh` is the daily run: the unit tests of every crate (`--lib`), then
 the integration tests of ink-app (every screen driven headless, the golden images, the
-CLI). It skips the heavier integration suites of the library crates
-(`crates/*/tests/verify_*.rs`, `fixtures.rs` and the like). Extra arguments go to the
-unit-test step: `scripts/test-fast.sh -p ink-ui`. `TEST_THREADS` sets the test threads
+CLI). It skips every integration suite of the library crates, the page goldens of
+ink-html among them, and the heavier ones (`crates/*/tests/verify_*.rs`, `fixtures.rs`
+and the like). With arguments it runs only the unit-test step, with those arguments
+added: `scripts/test-fast.sh -p ink-ui`. `TEST_THREADS` sets the test threads
 (default 4).
 
 `cargo test --workspace` runs every test that is not `#[ignore]`, including those
@@ -44,7 +45,9 @@ cargo test -p ink-html --test verify_hostile    # hostile HTML: deep nesting, hu
 
 ### Ignored tests
 
-`#[ignore]` carries a reason, and the reason says what the test is:
+An `#[ignore]` carries a reason that says what the test is (two by-hand tests have a
+bare `#[ignore]` and say how to run them in their doc comment:
+`ui_font_render_png` in ink-app and `internet_gutenberg_over_webpki_roots` in ink-net):
 
 | Reason starts with | Meaning | Run it |
 | --- | --- | --- |
