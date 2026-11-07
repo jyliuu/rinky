@@ -474,21 +474,40 @@ impl<'a> Resolver<'a> {
     }
 }
 
-fn flatten(nodes: &[TocNode], level: u8, r: &Resolver, out: &mut Vec<TocEntry>) {
-    flatten_with(nodes, level, &mut |t| r.position(t), out);
+/// Every TOC target (depth first), then every page-list target: the order of
+/// [`assemble`] and of a resolved-TOC cache file.
+fn all_targets<'a>(toc: &'a [TocNode], page_list: &'a [PageTarget]) -> Vec<&'a Target> {
+    fn walk<'a>(nodes: &'a [TocNode], out: &mut Vec<&'a Target>) {
+        for n in nodes {
+            out.extend(&n.target);
+            walk(&n.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(toc, &mut out);
+    out.extend(page_list.iter().map(|p| &p.target));
+    out
 }
 
-/// The flattened TOC with the position of each target from `pos` (called in the order
-/// of [`collect_targets`]).
-fn flatten_with(nodes: &[TocNode], level: u8, pos: &mut dyn FnMut(&Target) -> Position, out: &mut Vec<TocEntry>) {
-    for n in nodes {
-        let mut child_level = level;
-        if let Some(t) = &n.target {
-            out.push(TocEntry { title: n.title.clone(), level, position: pos(t), page: None });
-            child_level = level.saturating_add(1);
+/// The flattened TOC (levels from 0) and the page labels, given the position of each
+/// target of [`all_targets`] in order.
+fn assemble(toc: &[TocNode], page_list: &[PageTarget], positions: Vec<Position>) -> ResolvedToc {
+    fn flatten(nodes: &[TocNode], level: u8, next: &mut dyn FnMut() -> Position, out: &mut Vec<TocEntry>) {
+        for n in nodes {
+            let mut child_level = level;
+            if n.target.is_some() {
+                out.push(TocEntry { title: n.title.clone(), level, position: next(), page: None });
+                child_level = level.saturating_add(1);
+            }
+            flatten(&n.children, child_level, next, out);
         }
-        flatten_with(&n.children, child_level, pos, out);
     }
+    let mut it = positions.into_iter();
+    let mut next = || it.next().unwrap_or_else(|| Position::XPointer(XPointer::fragment_start(1)));
+    let mut entries = Vec::new();
+    flatten(toc, 0, &mut next, &mut entries);
+    let labels = page_list.iter().map(|p| (p.label.clone(), next())).collect();
+    (entries, labels)
 }
 
 /// First line of a resolved-TOC cache file.
@@ -538,26 +557,12 @@ fn write_toc_file(path: &std::path::Path, hash: u64, positions: &[Position]) -> 
     std::fs::rename(&tmp, path)
 }
 
-fn collect_targets<'a>(nodes: &'a [TocNode], out: &mut Vec<&'a Target>) {
-    for n in nodes {
-        if let Some(t) = &n.target {
-            out.push(t);
-        }
-        collect_targets(&n.children, out);
-    }
-}
-
 impl Book {
     /// The flattened TOC (levels from 0) and page labels as xpointer positions.
     pub fn positions(&self) -> (Vec<TocEntry>, Vec<(String, Position)>) {
-        let mut targets = Vec::new();
-        collect_targets(&self.toc, &mut targets);
-        targets.extend(self.page_list.iter().map(|p| &p.target));
-        let r = Resolver::new(&self.chapters, targets);
-        let mut toc = Vec::new();
-        flatten(&self.toc, 0, &r, &mut toc);
-        let labels = self.page_list.iter().map(|p| (p.label.clone(), r.position(&p.target))).collect();
-        (toc, labels)
+        let targets = all_targets(&self.toc, &self.page_list);
+        let r = Resolver::new(&self.chapters, targets.iter().copied());
+        assemble(&self.toc, &self.page_list, targets.iter().map(|t| r.position(t)).collect())
     }
 
     /// Builds the engine document (without the book's TOC; see [`Book::into_document`]).
@@ -585,7 +590,7 @@ impl Book {
     }
 }
 
-/// The resolved table of contents and the link targets it was resolved from.
+/// The flattened table of contents and the page labels, with xpointer positions.
 type ResolvedToc = (Vec<TocEntry>, Vec<(String, Position)>);
 
 /// [`HtmlDocument`] plus the book's own TOC (NCX/nav, FB2 sections, MOBI NCX), page list
@@ -613,15 +618,13 @@ pub struct BookDocument {
 
 impl BookDocument {
     /// The resolved TOC and page labels (resolved now when needed).
-    fn resolved(&self) -> &(Vec<TocEntry>, Vec<(String, Position)>) {
+    fn resolved(&self) -> &ResolvedToc {
         self.resolved.get_or_init(|| self.resolve())
     }
 
-    fn resolve(&self) -> (Vec<TocEntry>, Vec<(String, Position)>) {
+    fn resolve(&self) -> ResolvedToc {
         let t = std::time::Instant::now();
-        let mut targets = Vec::new();
-        collect_targets(&self.nodes, &mut targets);
-        targets.extend(self.page_list.iter().map(|p| &p.target));
+        let targets = all_targets(&self.nodes, &self.page_list);
         if targets.is_empty() {
             return (Vec::new(), Vec::new());
         }
@@ -642,12 +645,9 @@ impl BookDocument {
                 p
             }
         };
-        let mut it = positions.into_iter();
-        let mut toc = Vec::new();
-        flatten_with(&self.nodes, 0, &mut |_| it.next().unwrap_or_else(|| Position::XPointer(XPointer::fragment_start(1))), &mut toc);
-        let labels = self.page_list.iter().map(|p| (p.label.clone(), it.next().unwrap_or_else(|| Position::XPointer(XPointer::fragment_start(1))))).collect();
+        let resolved = assemble(&self.nodes, &self.page_list, positions);
         ink_doc::timing::step(if from_file { "toc cache read" } else { "toc resolve" }, t);
-        (toc, labels)
+        resolved
     }
 }
 
