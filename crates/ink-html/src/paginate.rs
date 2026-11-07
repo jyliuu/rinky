@@ -13,13 +13,15 @@
 //!   claimed by one thread in the shared map ([`Claim`]), so no chapter is laid out twice
 //!   and the foreground waits for a chapter a worker is doing instead of repeating it.
 
-use crate::book::Book;
+use crate::book::{Book, ChapterDom};
 use crate::layout::{compute_styles, ChapterLayout, Env, Flow, Params};
+use crate::style::ComputedStyle;
+use ink_doc::timing::step;
 use md5::{Digest, Md5};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Bump when layout results change (invalidates cached page maps). The golden test
 /// `page_maps_match_engine_version` fails when page breaks change without a bump.
@@ -248,8 +250,10 @@ pub fn start_full_layout(book: Arc<Book>, params: Params, fonts: crate::fonts::F
         }
     }
     let sh = shared.clone();
+    // The guard moves into the thread; a thread that cannot start drops it at once.
+    let done = Done(shared);
     let spawned = std::thread::Builder::new().name("ink-html-layout".into()).stack_size(16 << 20).spawn(move || {
-        let _done = Done(sh.clone());
+        let _done = done;
         lower_priority();
         if sh.cancel.load(Ordering::Relaxed) {
             return;
@@ -274,7 +278,6 @@ pub fn start_full_layout(book: Arc<Book>, params: Params, fonts: crate::fonts::F
     });
     if let Err(e) = spawned {
         log::warn!("ink-html: cannot start the layout thread: {e}");
-        shared.full.lock().unwrap().running = false;
     }
 }
 
@@ -293,17 +296,21 @@ pub fn chapter_text_bytes(dom: &crate::dom::Dom) -> u64 {
     n
 }
 
-/// Lays out chapter `i` and returns its layout (no pages).
-/// Records `chapter parse`, `chapter style` and `chapter layout` in [`ink_doc::timing`].
-pub fn layout_chapter(book: &Book, i: usize, params: &Params, env: &mut Env) -> ChapterLayout {
-    use ink_doc::timing::step;
-    let t = std::time::Instant::now();
+/// Chapter `i` parsed and styled, and when that was done. Records `chapter parse` and
+/// `chapter style` in [`ink_doc::timing`].
+fn styled_chapter(book: &Book, i: usize, params: &Params) -> (Arc<ChapterDom>, Vec<Option<Box<ComputedStyle>>>, Instant) {
+    let t = Instant::now();
     let ch = book.chapter(i);
     let t = step("chapter parse", t);
     let styles = compute_styles(book, &ch, params);
-    let t = step("chapter style", t);
-    let path = &book.chapters[i].path;
-    let lay = Flow::layout(env, params, &ch.dom, &styles, path, book.meta.language.clone());
+    (ch, styles, step("chapter style", t))
+}
+
+/// Lays out chapter `i` and returns its layout (no pages).
+/// Records `chapter parse`, `chapter style` and `chapter layout` in [`ink_doc::timing`].
+pub fn layout_chapter(book: &Book, i: usize, params: &Params, env: &mut Env) -> ChapterLayout {
+    let (ch, styles, t) = styled_chapter(book, i, params);
+    let lay = Flow::layout(env, params, &ch.dom, &styles, &book.chapters[i].path, book.meta.language.clone());
     step("chapter layout", t);
     lay
 }
@@ -337,12 +344,7 @@ pub fn prefix_pages(lay: &ChapterLayout, complete: bool, page_h: f32) -> Vec<Pag
 /// not reach far enough (a giant paragraph, a tall table), the chapter is laid out whole.
 /// Records the same [`ink_doc::timing`] steps as [`layout_chapter`].
 pub fn layout_chapter_until(book: &Book, i: usize, params: &Params, env: &mut Env, key: (u32, u32), pages_after: usize) -> (ChapterLayout, Vec<PageSpan>, bool) {
-    use ink_doc::timing::step;
-    let t = std::time::Instant::now();
-    let ch = book.chapter(i);
-    let t = step("chapter parse", t);
-    let styles = compute_styles(book, &ch, params);
-    let t = step("chapter style", t);
+    let (ch, styles, t) = styled_chapter(book, i, params);
     let path = &book.chapters[i].path;
     let extra = (pages_after as f32 + PREFIX_MARGIN_PAGES + 2.0) * params.content_h;
     let stop = crate::layout::StopAt::new(key, extra);
@@ -570,35 +572,24 @@ impl Worker {
         let mut handles = Vec::with_capacity(threads);
         for t in 0..threads {
             let (book, params, fonts, sh, interest) = (book.clone(), params.clone(), fonts.clone(), shared.clone(), interest.clone());
-            // Every thread gets the path: whichever ends last writes the file.
-            let cache = cache.clone();
-            let n = book.chapters.len();
-            // The last thread to end writes the cache (when the map is complete), marks
-            // the map complete and logs the total time.
-            let last: Box<dyn FnOnce(&Shared) + Send> = Box::new(move |sh: &Shared| finish_map(sh, cache, n, started));
+            // Every thread gets the path: whichever ends last writes the file (when the
+            // map is complete), marks the map complete and logs the total time.
+            let (cache, n) = (cache.clone(), book.chapters.len());
+            let last: LastWork = Box::new(move |sh: &Shared| finish_map(sh, cache, n, started));
+            // The guard moves into the thread; a thread that cannot start drops it at
+            // once, so the running count never waits for it.
+            let guard = RunGuard { shared: sh.clone(), last: Some(last) };
             let spawned = std::thread::Builder::new()
                 .name(format!("ink-html-paginate-{t}"))
                 .stack_size(16 << 20)
                 .spawn(move || {
-                    let _guard = RunGuard { shared: sh.clone(), last: Some(last) };
+                    let _guard = guard;
                     lower_priority();
                     paginate_claimed(&book, &params, &fonts, &sh, &interest);
                 });
             match spawned {
                 Ok(h) => handles.push(h),
-                Err(e) => {
-                    // Fewer threads: the running count must not wait for this one.
-                    log::warn!("ink-html: cannot start paginator thread {t}: {e}");
-                    let done = {
-                        let mut m = shared.map.lock().unwrap();
-                        m.running = m.running.saturating_sub(1);
-                        m.running == 0
-                    };
-                    if done && handles.is_empty() {
-                        shared.map.lock().unwrap().finished = true;
-                        shared.changed.notify_all();
-                    }
-                }
+                Err(e) => log::warn!("ink-html: cannot start paginator thread {t}: {e}"),
             }
         }
         Worker { shared, handles }
