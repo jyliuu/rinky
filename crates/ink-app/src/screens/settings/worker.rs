@@ -36,8 +36,8 @@ impl<T> Reporter<T> {
 /// What [`Job::poll`] found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Poll<T> {
-    /// Still running; `true` when the progress line changed.
-    Running(bool),
+    /// Still running ([`Job::status`] says how far).
+    Running,
     /// Finished with this value.
     Done(T),
     /// The thread ended without a result (it panicked).
@@ -82,18 +82,16 @@ impl<T: Send + 'static> Job<T> {
         let label = label.into();
         let (tx, rx) = mpsc::channel();
         log::info!("job start: {label}");
-        if inline() {
+        let run = move || {
             let r = Reporter { tx };
             let v = work(&r);
             let _ = r.tx.send(Msg::Done(v));
+        };
+        if inline() {
+            run();
         } else {
             let name = format!("job {}", label.chars().take(20).collect::<String>());
-            let spawned = std::thread::Builder::new().name(name).spawn(move || {
-                let r = Reporter { tx };
-                let v = work(&r);
-                let _ = r.tx.send(Msg::Done(v));
-            });
-            if let Err(e) = spawned {
+            if let Err(e) = std::thread::Builder::new().name(name).spawn(run) {
                 log::warn!("job {label}: cannot start a thread: {e}");
             }
         }
@@ -104,18 +102,14 @@ impl<T: Send + 'static> Job<T> {
 impl<T> Job<T> {
     /// Takes the messages that arrived. Returns the result once.
     pub fn poll(&mut self) -> Poll<T> {
-        let mut changed = false;
         loop {
             match self.rx.try_recv() {
-                Ok(Msg::Progress(p)) => {
-                    changed |= p != self.progress;
-                    self.progress = p;
-                }
+                Ok(Msg::Progress(p)) => self.progress = p,
                 Ok(Msg::Done(v)) => {
                     log::info!("job done: {} after {} ms", self.label, self.started.elapsed().as_millis());
                     return Poll::Done(v);
                 }
-                Err(TryRecvError::Empty) => return Poll::Running(changed),
+                Err(TryRecvError::Empty) => return Poll::Running,
                 Err(TryRecvError::Disconnected) => {
                     log::warn!("job lost: {}", self.label);
                     return Poll::Lost;
@@ -129,7 +123,7 @@ impl<T> Job<T> {
         let end = Instant::now() + limit;
         loop {
             match self.poll() {
-                Poll::Running(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(5)),
+                Poll::Running if Instant::now() < end => std::thread::sleep(Duration::from_millis(5)),
                 p => return p,
             }
         }
@@ -176,7 +170,7 @@ mod tests {
         // The thread waits for `go`: the job is running and shows its progress.
         let start = Instant::now();
         while job.progress().is_empty() && start.elapsed() < Duration::from_secs(5) {
-            assert!(matches!(job.poll(), Poll::Running(_)));
+            assert!(matches!(job.poll(), Poll::Running));
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(job.status(), "Counting… step 1");

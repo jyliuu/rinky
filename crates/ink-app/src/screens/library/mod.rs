@@ -642,7 +642,7 @@ impl LibraryScreen {
     pub(crate) fn poll_job(&mut self) {
         let Some(job) = self.job.as_mut() else { return };
         match job.poll() {
-            Poll::Running(_) => {
+            Poll::Running => {
                 let text = job.status();
                 if text != self.busy_text {
                     self.busy_text = text;

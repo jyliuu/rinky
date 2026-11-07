@@ -2009,7 +2009,7 @@ impl SettingsScreen {
     fn poll_job(&mut self) {
         let Some(job) = self.job.as_mut() else { return };
         match job.poll() {
-            Poll::Running(_) => {
+            Poll::Running => {
                 let text = job.status();
                 if text != self.status_text {
                     // Not logged: the elapsed seconds change every second.
