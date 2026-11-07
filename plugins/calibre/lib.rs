@@ -253,7 +253,7 @@ impl CalibrePlugin {
     }
 
     fn setting(cx: &mut HostCtx, key: &str) -> String {
-        cx.storage().ok().and_then(|s| s.get(key)).and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+        cx.setting_str(key).unwrap_or_default()
     }
 
     fn books_dir(cx: &mut HostCtx) -> PathBuf {
@@ -262,7 +262,7 @@ impl CalibrePlugin {
     }
 
     fn config(cx: &mut HostCtx) -> Result<Config> {
-        let idle = cx.storage().ok().and_then(|s| s.get("idle_minutes")).and_then(|v| v.as_u64()).unwrap_or(DEFAULT_IDLE_MINUTES).max(1);
+        let idle = cx.setting_u64("idle_minutes").unwrap_or(DEFAULT_IDLE_MINUTES).max(1);
         Ok(Config {
             books_dir: Self::books_dir(cx),
             password: Self::setting(cx, "password"),
@@ -331,9 +331,7 @@ impl CalibrePlugin {
             items.push(("Remove the password".into(), "nopassword".into()));
         }
         items.push((format!("Books folder\t{}", dir.display()), "dir".into()));
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), a.as_str())).collect();
-        cx.ui()?.menu(MENU, "Calibre wireless", &items);
-        Ok(())
+        cx.menu(MENU, "Calibre wireless", items)
     }
 
     fn handle(&mut self, cx: &mut HostCtx, m: Msg) -> Result<()> {

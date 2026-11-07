@@ -182,13 +182,11 @@ impl WikipediaPlugin {
     // ---- settings ----
 
     fn language(cx: &mut HostCtx) -> String {
-        let v = cx.storage().ok().and_then(|s| s.get("language"));
-        v.as_ref().and_then(|v| v.as_str()).map(|s| s.trim().to_lowercase()).filter(|s| api::valid_lang(s)).unwrap_or_else(|| DEFAULT_LANG.to_string())
+        cx.setting_str("language").map(|s| s.trim().to_lowercase()).filter(|s| api::valid_lang(s)).unwrap_or_else(|| DEFAULT_LANG.to_string())
     }
 
     fn extra_languages(cx: &mut HostCtx) -> Vec<String> {
-        let v = cx.storage().ok().and_then(|s| s.get("languages"));
-        let raw: Vec<String> = match v {
+        let raw: Vec<String> = match cx.setting("languages") {
             Some(ink_plugin::serde_json::Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
             Some(ink_plugin::serde_json::Value::String(s)) => s.split([',', ' ']).map(str::to_string).collect(),
             _ => Vec::new(),
@@ -395,11 +393,8 @@ impl WikipediaPlugin {
                         let Some(s) = self.session.as_mut() else { return Ok(()) };
                         s.hits = hits.iter().map(|(t, _)| t.clone()).collect();
                         s.hits_lang = lang;
-                        let items: Vec<(String, String)> = hits.iter().enumerate().map(|(i, (t, _))| (t.clone(), format!("h{i}"))).collect();
-                        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
                         let title = format!("No page “{}”. Did you mean", api::cut_at(&query, 24));
-                        cx.ui()?.menu(ID_HITS, &title, &refs);
-                        Ok(())
+                        cx.menu(ID_HITS, &title, hits.into_iter().enumerate().map(|(i, (t, _))| (t, format!("h{i}"))))
                     }
                     Ok(_) => {
                         let Some(s) = self.session.as_mut() else { return Ok(()) };
@@ -433,7 +428,7 @@ impl WikipediaPlugin {
     }
 
     fn save_article(&mut self, cx: &mut HostCtx, lang: &str, sum: &Summary, text: &str, url: &str) -> Result<()> {
-        let dir = cx.storage().ok().and_then(|s| s.get("save_dir")).and_then(|v| v.as_str().map(PathBuf::from)).unwrap_or_else(|| PathBuf::from(DEFAULT_SAVE_DIR));
+        let dir = PathBuf::from(cx.setting_str("save_dir").unwrap_or_else(|| DEFAULT_SAVE_DIR.into()));
         let name = api::file_name(&sum.title, lang);
         let html = api::article_html(lang, &sum.title, sum.description.as_deref(), text, url);
         match write_new(&dir, &name, html.as_bytes()) {
@@ -488,9 +483,7 @@ impl WikipediaPlugin {
         if !extra.is_empty() {
             items.push(("Remove extra languages".to_string(), "clear"));
         }
-        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), *b)).collect();
-        cx.ui()?.menu(ID_SET, "Wikipedia", &refs);
-        Ok(())
+        cx.menu(ID_SET, "Wikipedia", items)
     }
 
     fn set_language(&mut self, cx: &mut HostCtx, text: &str) -> Result<()> {

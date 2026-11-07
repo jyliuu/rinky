@@ -174,12 +174,13 @@ impl KoSyncPlugin {
         (self.clock)()
     }
 
+    /// A text setting; `None` when unset or empty.
     fn setting(cx: &mut HostCtx, key: &str) -> Option<String> {
-        cx.storage().ok()?.get(key).and_then(|v| v.as_str().map(str::to_string)).filter(|s| !s.is_empty())
+        cx.setting_str(key).filter(|s| !s.is_empty())
     }
 
     fn auto_sync(cx: &mut HostCtx) -> bool {
-        cx.storage().ok().and_then(|s| s.get("auto_sync")).and_then(|v| v.as_bool()).unwrap_or(true)
+        cx.setting_bool("auto_sync", true)
     }
 
     /// The account, when user and password are set.
@@ -331,9 +332,7 @@ impl KoSyncPlugin {
             (format!("Automatic sync\t{}", if auto { "on" } else { "off" }), "auto"),
             ("Log out".to_string(), "logout"),
         ];
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), *a)).collect();
-        cx.ui()?.menu(MENU, "Progress sync (KOSync)", &items);
-        Ok(())
+        cx.menu(MENU, "Progress sync (KOSync)", items)
     }
 
     fn menu_pick(&mut self, cx: &mut HostCtx, pick: &str) -> Result<()> {

@@ -151,7 +151,7 @@ impl OpdsPlugin {
 
     /// The saved catalogs.
     pub fn catalogs(cx: &mut HostCtx) -> Vec<Catalog> {
-        let Some(Value::Array(list)) = cx.storage().ok().and_then(|s| s.get("catalogs")) else { return Vec::new() };
+        let Some(Value::Array(list)) = cx.setting("catalogs") else { return Vec::new() };
         let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
         list.iter()
             .filter_map(|v| {
@@ -181,7 +181,7 @@ impl OpdsPlugin {
     }
 
     fn download_dir(cx: &mut HostCtx) -> PathBuf {
-        cx.storage().ok().and_then(|s| s.get("download_dir")).and_then(|v| v.as_str().map(PathBuf::from)).unwrap_or_else(|| PathBuf::from(DEFAULT_DIR))
+        PathBuf::from(cx.setting_str("download_dir").unwrap_or_else(|| DEFAULT_DIR.into()))
     }
 
     fn show_catalogs(&mut self, cx: &mut HostCtx) -> Result<()> {
@@ -191,9 +191,7 @@ impl OpdsPlugin {
         if !list.is_empty() {
             items.push(("Remove a catalog".into(), "remove".into()));
         }
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), a.as_str())).collect();
-        cx.ui()?.menu(CATALOGS, "OPDS catalogs", &items);
-        Ok(())
+        cx.menu(CATALOGS, "OPDS catalogs", items)
     }
 
     fn request(&self, url: &str, accept: &str) -> Request {
@@ -232,9 +230,7 @@ impl OpdsPlugin {
             items.push(("Next page >".into(), "next".into()));
         }
         let title = if feed.title.is_empty() { "Catalog".to_string() } else { feed.title.clone() };
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), a.as_str())).collect();
-        cx.ui()?.menu(FEED, &title, &items);
-        Ok(())
+        cx.menu(FEED, &title, items)
     }
 
     fn show_book(&mut self, cx: &mut HostCtx) -> Result<()> {
@@ -254,9 +250,7 @@ impl OpdsPlugin {
             [] => e.title.clone(),
             a => format!("{} - {}", e.title, a.join(", ")),
         };
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), a.as_str())).collect();
-        cx.ui()?.menu(BOOK, &title, &items);
-        Ok(())
+        cx.menu(BOOK, &title, items)
     }
 
     fn download(&mut self, cx: &mut HostCtx, j: usize) -> Result<()> {
@@ -429,10 +423,7 @@ impl Plugin for OpdsPlugin {
                 }
                 "remove" => {
                     let list = Self::catalogs(cx);
-                    let items: Vec<(String, String)> = list.iter().enumerate().map(|(i, c)| (c.title.clone(), format!("r{i}"))).collect();
-                    let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), a.as_str())).collect();
-                    cx.ui()?.menu(REMOVE, "Remove which catalog?", &items);
-                    Ok(())
+                    cx.menu(REMOVE, "Remove which catalog?", list.into_iter().enumerate().map(|(i, c)| (c.title, format!("r{i}"))))
                 }
                 c => {
                     let Some(i) = c.strip_prefix('c').and_then(|n| n.parse::<usize>().ok()) else { return Ok(()) };

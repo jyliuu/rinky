@@ -496,15 +496,15 @@ impl DictionaryPlugin {
     }
 
     /// A list of names from storage.
-    fn names(cx: &mut HostCtx, key: &str) -> Result<Vec<String>> {
-        let v = cx.storage()?.get(key);
-        Ok(v.as_ref().and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()).unwrap_or_default())
+    fn names(cx: &mut HostCtx, key: &str) -> Vec<String> {
+        let v = cx.setting(key);
+        v.as_ref().and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()).unwrap_or_default()
     }
 
     /// Puts the open dictionaries in the stored order (unknown ones after, in folder
     /// order) and moves the turned-off ones out of the lookup.
     fn arrange(&mut self, cx: &mut HostCtx) -> Result<()> {
-        let (order, off) = (Self::names(cx, KEY_ORDER)?, Self::names(cx, KEY_OFF)?);
+        let (order, off) = (Self::names(cx, KEY_ORDER), Self::names(cx, KEY_OFF));
         let Some(lib) = self.lib.as_mut() else { return Ok(()) };
         let mut all: Vec<Dictionary> = lib.dicts.drain(..).chain(self.off.drain(..)).collect();
         all.sort_by_key(|d| order.iter().position(|n| *n == d.name).unwrap_or(usize::MAX));
@@ -527,11 +527,8 @@ impl DictionaryPlugin {
             cx.ui()?.dialog(0, "Dictionaries", &body, &[("OK", "ok")]);
             return Ok(());
         }
-        let items: Vec<(String, String)> =
-            self.order.iter().enumerate().map(|(i, (name, title, on))| (format!("{}. {title}\t{}", i + 1, if *on { "on" } else { "off" }), name.clone())).collect();
-        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        cx.ui()?.menu(ID_DICTS, "Dictionaries", &refs);
-        Ok(())
+        let items = self.order.iter().enumerate().map(|(i, (name, title, on))| (format!("{}. {title}\t{}", i + 1, if *on { "on" } else { "off" }), name.as_str()));
+        cx.menu(ID_DICTS, "Dictionaries", items)
     }
 
     /// The menu of one dictionary: on/off and its place in the order.
@@ -551,8 +548,7 @@ impl DictionaryPlugin {
         items.push(("< Dictionaries", "back"));
         self.editing = Some(name.to_string());
         let title = format!("{title} · {} of {}", i + 1, self.order.len());
-        cx.ui()?.menu(ID_DICT, &title, &items);
-        Ok(())
+        cx.menu(ID_DICT, &title, items)
     }
 
     /// Applies a choice from [`Self::show_dict`], saves the order and shows the list again.
@@ -611,7 +607,7 @@ impl DictionaryPlugin {
             self.record(cx, &r, book)?;
         }
         let book = from_book;
-        let auto_add = cx.storage()?.get("auto_add").and_then(|v| v.as_bool()).unwrap_or(false);
+        let auto_add = cx.setting_bool("auto_add", false);
         let Some((title, body)) = popup_page(&r, 0) else {
             self.last = None;
             let body = format!("No definition found for “{}”.\n— {}", r.query, searched(ndicts));
@@ -670,8 +666,7 @@ impl DictionaryPlugin {
     }
 
     fn record(&mut self, cx: &mut HostCtx, r: &LookupResult, book: BookRef) -> Result<()> {
-        let on = cx.storage()?.get("record").and_then(|v| v.as_bool()).unwrap_or(true);
-        if !on {
+        if !cx.setting_bool("record", true) {
             return Ok(());
         }
         let path = Self::setting_path(cx, "vocab_db", "vocabulary.sqlite3")?;

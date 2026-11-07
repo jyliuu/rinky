@@ -448,11 +448,7 @@ impl SshPlugin {
     }
 
     fn port(cx: &mut HostCtx) -> u16 {
-        cx.storage().ok().and_then(|s| s.get("port")).and_then(|v| v.as_u64()).and_then(|p| u16::try_from(p).ok()).filter(|&p| p > 0).unwrap_or(DEFAULT_PORT)
-    }
-
-    fn flag(cx: &mut HostCtx, key: &str) -> bool {
-        cx.storage().ok().and_then(|s| s.get(key)).and_then(|v| v.as_bool()).unwrap_or(false)
+        cx.setting_u64("port").and_then(|p| u16::try_from(p).ok()).filter(|&p| p > 0).unwrap_or(DEFAULT_PORT)
     }
 
     /// Stores a setting; a failed write is a toast, not an error.
@@ -485,7 +481,7 @@ impl SshPlugin {
             return;
         }
         let port = Self::port(cx);
-        let no_password = Self::flag(cx, "no_password");
+        let no_password = cx.setting_bool("no_password", false);
         self.failure = None;
         if !self.paths.dropbear.is_file() {
             return self.fail(cx, "Not installed", format!("The SSH server is not installed ({} is missing)", self.paths.dropbear.display()));
@@ -636,7 +632,7 @@ impl SshPlugin {
     /// After a port or password setting changed: restarts a running server.
     fn restart_if_running(&mut self, cx: &mut HostCtx, why: &str) {
         let Some(s) = &self.server else { return };
-        if s.port == Self::port(cx) && s.no_password == Self::flag(cx, "no_password") {
+        if s.port == Self::port(cx) && s.no_password == cx.setting_bool("no_password", false) {
             return;
         }
         log::info!("ssh: {why}; restarting");
@@ -682,8 +678,8 @@ impl SshPlugin {
 
     fn show_menu(&mut self, cx: &mut HostCtx) -> Result<()> {
         let port = Self::port(cx);
-        let no_password = Self::flag(cx, "no_password");
-        let autostart = Self::flag(cx, "autostart");
+        let no_password = cx.setting_bool("no_password", false);
+        let autostart = cx.setting_bool("autostart", false);
         let status = self.status_text();
         self.menu_status = Some(status.clone());
         let mut items: Vec<(String, &str)> = vec![(status, "status")];
@@ -699,9 +695,7 @@ impl SshPlugin {
         items.push((format!("Login without password\t{}", on_off(no_password)), "no_password"));
         items.push((format!("Start when rinky starts\t{}", on_off(autostart)), "autostart"));
         items.push(("How to log in".into(), "help"));
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), *a)).collect();
-        cx.ui()?.menu(MENU, "SSH server", &items);
-        Ok(())
+        cx.menu(MENU, "SSH server", items)
     }
 
     /// While the settings menu is open, shows a changed status in its first row.
@@ -844,7 +838,7 @@ impl Plugin for SshPlugin {
                     cx.ui()?.input(IN_PORT, "SSH port (1-65535)", &port.to_string());
                     Ok(())
                 }
-                "no_password" if Self::flag(cx, "no_password") => {
+                "no_password" if cx.setting_bool("no_password", false) => {
                     Self::set(cx, "no_password", json!(false));
                     self.restart_if_running(cx, "Login without password is off");
                     self.show_menu(cx)
@@ -859,7 +853,7 @@ impl Plugin for SshPlugin {
                     Ok(())
                 }
                 "autostart" => {
-                    let on = !Self::flag(cx, "autostart");
+                    let on = !cx.setting_bool("autostart", false);
                     Self::set(cx, "autostart", json!(on));
                     self.show_menu(cx)
                 }
@@ -922,11 +916,11 @@ impl Plugin for SshPlugin {
 
     fn on_tick(&mut self, cx: &mut HostCtx) -> Result<()> {
         if std::mem::take(&mut self.autostart_pending) {
-            let resume = Self::flag(cx, RESUME);
+            let resume = cx.setting_bool(RESUME, false);
             if resume {
                 Self::set(cx, RESUME, Value::Null);
             }
-            if (resume || Self::flag(cx, "autostart")) && self.server.is_none() {
+            if (resume || cx.setting_bool("autostart", false)) && self.server.is_none() {
                 log::info!("ssh: {}", if resume { "resuming after a restart" } else { "autostart" });
                 self.start(cx);
             }

@@ -317,7 +317,7 @@ impl InsightfulPlugin {
     fn begin_run(&mut self, cx: &mut HostCtx) -> Result<()> {
         self.error = None;
         self.retry_blocked = false;
-        let override_id = cx.storage().ok().and_then(|s| s.get("provider")).and_then(|v| v.as_str().map(str::to_string));
+        let override_id = cx.setting_str("provider");
         let Some(profile) = self.config.as_ref().and_then(|c| c.resolve(override_id.as_deref())) else {
             self.error = Some(format!("Insightful is not configured: no provider has an API key ({}).", config::CONFIG_FILE));
             return self.show(cx);
@@ -529,7 +529,7 @@ impl InsightfulPlugin {
     }
 
     fn new_chat_default(cx: &mut HostCtx) -> bool {
-        cx.storage().ok().and_then(|s| s.get(NEW_CHAT_DEFAULT)).and_then(|v| v.as_bool()).unwrap_or(false)
+        cx.setting_bool(NEW_CHAT_DEFAULT, false)
     }
 
     /// A highlighted action (`openFromHighlight`): a quick action (`Some(id)`) or Ask AI…
@@ -745,8 +745,7 @@ impl InsightfulPlugin {
     fn provider_menu(&mut self, cx: &mut HostCtx) -> Result<()> {
         self.ensure_config(cx)?;
         let c = self.config.as_ref().expect("config");
-        let current = cx.storage()?.get("provider").and_then(|v| v.as_str().map(str::to_string));
-        let chosen = c.resolve(current.as_deref()).map(|p| p.kind);
+        let chosen = c.resolve(cx.setting_str("provider").as_deref()).map(|p| p.kind);
         let items: Vec<(String, String)> = c
             .available()
             .into_iter()
@@ -760,15 +759,13 @@ impl InsightfulPlugin {
             cx.ui()?.dialog(0, "Insightful", &format!("No provider has an API key. Add one to {} in the plugin's data folder.", config::CONFIG_FILE), &[("OK", "ok")]);
             return Ok(());
         }
-        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        cx.ui()?.menu(MENU_PROVIDER, "Insightful provider", &refs);
-        Ok(())
+        cx.menu(MENU_PROVIDER, "Insightful provider", items)
     }
 
     /// The profile a chat would use now (the provider chosen in the menu, resolved).
     fn current_profile(&mut self, cx: &mut HostCtx) -> Result<Option<Profile>> {
         self.ensure_config(cx)?;
-        let chosen = cx.storage()?.get("provider").and_then(|v| v.as_str().map(str::to_string));
+        let chosen = cx.setting_str("provider");
         Ok(self.config.as_ref().expect("config").resolve(chosen.as_deref()))
     }
 
@@ -785,10 +782,7 @@ impl InsightfulPlugin {
     /// Settings: `Provider <id>` and `Model <model>`.
     fn settings_menu(&mut self, cx: &mut HostCtx) -> Result<()> {
         let Some(p) = self.current_profile(cx)? else { return Self::no_provider(cx) };
-        let items = [(format!("Provider\t{}", p.kind.id()), "provider"), (format!("Model\t{}", p.model), "model")];
-        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), *b)).collect();
-        cx.ui()?.menu(MENU_SETTINGS, "Insightful settings", &refs);
-        Ok(())
+        cx.menu(MENU_SETTINGS, "Insightful settings", [(format!("Provider\t{}", p.kind.id()), "provider"), (format!("Model\t{}", p.model), "model")])
     }
 
     /// Model menu for the current provider: list, search, enter an id, back to default.
@@ -807,9 +801,7 @@ impl InsightfulPlugin {
             items.push((format!("Use default ({default})"), "default"));
         }
         self.model_provider = Some(id.to_string());
-        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), *b)).collect();
-        cx.ui()?.menu(MENU_MODEL, &format!("{id} model: {}", p.model), &refs);
-        Ok(())
+        cx.menu(MENU_MODEL, &format!("{id} model: {}", p.model), items)
     }
 
     /// The profile of the provider in the model menu.
@@ -876,7 +868,6 @@ impl InsightfulPlugin {
             };
             return Self::model_error(cx, &m);
         }
-        let items: Vec<(String, String)> = ids.into_iter().map(|id| (if id == current { format!("✓ {id}") } else { id.clone() }, id)).collect();
         let mut title = match &f.query {
             Some(q) => format!("{} models matching \"{q}\"", f.provider),
             None => format!("{} models", f.provider),
@@ -885,9 +876,7 @@ impl InsightfulPlugin {
             title.push_str(&format!(" (first {})", models::LIMIT));
         }
         self.model_provider = Some(f.provider);
-        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        cx.ui()?.menu(MENU_MODELS, &title, &refs);
-        Ok(())
+        cx.menu(MENU_MODELS, &title, ids.into_iter().map(|id| (if id == current { format!("✓ {id}") } else { id.clone() }, id)))
     }
 
     /// Saves `model` (`None`: the profile's model) for `provider` in `insightful.toml`.
