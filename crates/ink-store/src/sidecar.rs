@@ -606,9 +606,7 @@ impl BookState {
 /// The prototype's position file `BOOK.epub.rinky` (`chapter block word`), as a
 /// `flow:` position string.
 pub fn legacy_position(book: &Path) -> Option<String> {
-    let mut p = book.as_os_str().to_owned();
-    p.push(".rinky");
-    let text = std::fs::read_to_string(PathBuf::from(p)).ok()?;
+    let text = std::fs::read_to_string(crate::with_suffix(book, ".rinky")).ok()?;
     let v: Vec<u32> = text.split_whitespace().filter_map(|t| t.parse().ok()).collect();
     match v[..] {
         [chapter, block, word] => Some(format!("flow:{chapter}.{block}.{word}")),

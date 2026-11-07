@@ -26,7 +26,7 @@ pub use sqlite::{
 
 use crate::lua::{self, Table, Value};
 use crate::sidecar::{BookState, Bookmark, Highlight, Quad, ReadingStatus};
-use crate::{os_bytes, os_from_bytes, Result, StoreError};
+use crate::{os_bytes, os_from_bytes, with_suffix, Result, StoreError};
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -326,12 +326,6 @@ pub fn sidecar_filename(book: &Path) -> OsString {
 /// `<book without suffix>.sdr/metadata.<suffix>.lua`.
 pub fn metadata_path(book: &Path) -> PathBuf {
     koreader_sidecar_dir(book).join(sidecar_filename(book))
-}
-
-fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
-    let mut s = p.as_os_str().to_owned();
-    s.push(suffix);
-    PathBuf::from(s)
 }
 
 /// Every place KOReader may keep metadata for `book`, in KOReader's priority order.

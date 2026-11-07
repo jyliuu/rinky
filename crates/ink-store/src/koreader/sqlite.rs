@@ -127,12 +127,6 @@ impl Drop for Snapshot {
     }
 }
 
-fn sibling(p: &Path, suffix: &str) -> PathBuf {
-    let mut s = p.as_os_str().to_owned();
-    s.push(suffix);
-    PathBuf::from(s)
-}
-
 /// Copies `db` (and its `-wal` / `-journal`) into a new directory under `scratch`
 /// (default: the system temp dir).
 fn snapshot(db: &Path, scratch: Option<&Path>) -> Result<Snapshot> {
@@ -147,9 +141,9 @@ fn snapshot(db: &Path, scratch: Option<&Path>) -> Result<Snapshot> {
     let snap = Snapshot { db: dir.join("copy.sqlite3"), dir };
     std::fs::copy(db, &snap.db)?;
     for suffix in ["-wal", "-journal"] {
-        let src = sibling(db, suffix);
+        let src = crate::with_suffix(db, suffix);
         if src.is_file() {
-            std::fs::copy(&src, sibling(&snap.db, suffix))?;
+            std::fs::copy(&src, crate::with_suffix(&snap.db, suffix))?;
         }
     }
     Ok(snap)
@@ -478,7 +472,7 @@ pub fn write_sample_databases(dir: &Path, old_schema: bool, wal: bool) -> Result
     let vocab = dir.join("vocabulary_builder.sqlite3");
     for p in [&stats, &vocab] {
         for suffix in ["", "-wal", "-shm", "-journal"] {
-            let _ = std::fs::remove_file(sibling(p, suffix));
+            let _ = std::fs::remove_file(crate::with_suffix(p, suffix));
         }
     }
     // In WAL mode keep every row in the `-wal` file (no automatic checkpoint, none on
@@ -569,7 +563,7 @@ mod tests {
     fn wal_databases_are_read_completely_and_left_alone() {
         let tmp = TempDir::new("ko-wal");
         let (db, vocab) = write_sample_databases(&tmp.path().join("ko"), false, true).unwrap();
-        assert!(sibling(&db, "-wal").exists(), "the sample keeps its data in the WAL");
+        assert!(crate::with_suffix(&db, "-wal").exists(), "the sample keeps its data in the WAL");
         let mut header = [0u8; 20];
         use std::io::Read;
         std::fs::File::open(&db).unwrap().read_exact(&mut header).unwrap();

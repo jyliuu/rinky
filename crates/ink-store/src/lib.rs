@@ -185,11 +185,16 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// `path` with `suffix` appended to its file name (`a.json` + `.old` = `a.json.old`).
+pub(crate) fn with_suffix(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
 /// The backup of a state file: `<path>.old` (KOReader's convention).
 pub fn backup_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".old");
-    PathBuf::from(s)
+    with_suffix(path, ".old")
 }
 
 /// A backup is refreshed at most this often, to limit flash writes.
@@ -325,9 +330,7 @@ pub fn load_recovering<T>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Res
 /// one if the rename failed.
 pub fn set_aside(file: &Path) -> PathBuf {
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut s = file.as_os_str().to_owned();
-    s.push(format!(".corrupt-{}-{n}", now_secs()));
-    let dest = PathBuf::from(s);
+    let dest = with_suffix(file, format!(".corrupt-{}-{n}", now_secs()));
     match std::fs::rename(file, &dest) {
         Ok(()) => dest,
         Err(_) => file.to_path_buf(),
@@ -348,13 +351,9 @@ pub fn set_aside_database(path: &Path) -> Option<PathBuf> {
     if moved == path {
         return None;
     }
-    let mut journal = path.as_os_str().to_owned();
-    journal.push("-journal");
-    let journal = PathBuf::from(journal);
+    let journal = with_suffix(path, "-journal");
     if journal.exists() {
-        let mut dest = moved.as_os_str().to_owned();
-        dest.push("-journal");
-        let _ = std::fs::rename(&journal, PathBuf::from(dest));
+        let _ = std::fs::rename(&journal, with_suffix(&moved, "-journal"));
     }
     Some(moved)
 }
@@ -597,12 +596,6 @@ mod tests {
         serde_json::from_slice::<serde_json::Value>(b).map_err(|e| e.to_string())
     }
 
-    fn with_name(p: &Path, suffix: &str) -> PathBuf {
-        let mut s = p.as_os_str().to_owned();
-        s.push(suffix);
-        PathBuf::from(s)
-    }
-
     /// The file renamed over is missing (fuse.fsp during a rename, or a crash in that
     /// moment): a complete temporary copy newer than the backup is used, a partial or
     /// older one is not, and another file's temporary copy never is.
@@ -617,7 +610,7 @@ mod tests {
         // Someone else's files with similar names are never taken.
         std::fs::write(dir.path().join("state.json2.tmp.1.0"), b"{\"v\":20}").unwrap();
         std::fs::write(dir.path().join("other.json.tmp.1.0"), b"{\"v\":30}").unwrap();
-        let tmp = with_name(&f, ".tmp.4242.7");
+        let tmp = with_suffix(&f, ".tmp.4242.7");
         std::fs::write(&tmp, b"{\"v\":3}").unwrap();
         let r = load_recovering(&f, parse_json).unwrap();
         assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Temp, Some(3)));
@@ -632,7 +625,7 @@ mod tests {
         let r = load_recovering(&f, parse_json).unwrap();
         assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Backup, Some(1)));
         // The next save removes left-overs older than STALE_TEMP_AGE, not young ones.
-        let young = with_name(&f, ".tmp.4243.0");
+        let young = with_suffix(&f, ".tmp.4243.0");
         std::fs::write(&young, b"{").unwrap();
         save_with_backup(&f, b"{\"v\":4}", valid).unwrap();
         assert!(!tmp.exists() && young.exists());
@@ -649,7 +642,7 @@ mod tests {
         save_with_backup(&f, b"{\"v\":1}", valid).unwrap();
         save_with_backup(&f, b"{\"v\":2}", valid).unwrap();
         // The moment inside a rename on fuse.fsp: no file, its temporary file present.
-        let tmp = with_name(&f, ".tmp.4242.0");
+        let tmp = with_suffix(&f, ".tmp.4242.0");
         std::fs::rename(&f, &tmp).unwrap();
         std::fs::write(&tmp, b"{\"v\":").unwrap(); // still being written: not usable
         let before = load_waits();
