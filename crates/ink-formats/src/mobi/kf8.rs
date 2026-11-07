@@ -14,7 +14,7 @@ use super::header::{decode, MobiHeader};
 use super::mobi6::{ncx, nest};
 use super::{base32, index, Converted, Mobi, Resources};
 use crate::book::Target;
-use crate::util::be32;
+use crate::util::{be32, find_bytes as find};
 use crate::xhtml::{self, NoRewrite};
 use crate::xml;
 use ink_doc::{DocError, Result};
@@ -105,13 +105,6 @@ pub fn tables(m: &Mobi, h: &MobiHeader) -> (Vec<Skeleton>, Vec<Fragment>) {
         })
         .collect();
     (skels, frags)
-}
-
-fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || from > hay.len() || hay.len() < needle.len() {
-        return None;
-    }
-    (from..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
 fn rfind(hay: &[u8], b: u8) -> Option<usize> {

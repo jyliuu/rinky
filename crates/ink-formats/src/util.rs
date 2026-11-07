@@ -121,6 +121,35 @@ pub fn be32(b: &[u8], off: usize) -> Option<u32> {
     Some(u32::from_be_bytes(b.get(off..off.checked_add(4)?)?.try_into().ok()?))
 }
 
+/// First position at or after `from` where `needle` occurs in `hay` (`None` for an
+/// empty needle).
+pub fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    find_with(hay, needle, from, false)
+}
+
+/// [`find_bytes`] with ASCII letters compared case-insensitively.
+pub fn find_bytes_ci(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    find_with(hay, needle, from, true)
+}
+
+/// Scans for the needle's first byte (a tight loop the compiler vectorises), then
+/// compares the rest there.
+fn find_with(hay: &[u8], needle: &[u8], from: usize, ci: bool) -> Option<usize> {
+    let (&first, rest) = needle.split_first()?;
+    let last = hay.len().checked_sub(needle.len())?;
+    let (a, b) = if ci { (first.to_ascii_lowercase(), first.to_ascii_uppercase()) } else { (first, first) };
+    let mut i = from;
+    while i <= last {
+        let p = i + hay[i..=last].iter().position(|&c| c == a || c == b)?;
+        let tail = &hay[p + 1..p + needle.len()];
+        if if ci { tail.eq_ignore_ascii_case(rest) } else { tail == rest } {
+            return Some(p);
+        }
+        i = p + 1;
+    }
+    None
+}
+
 /// Media type of an image or font from its first bytes.
 pub fn sniff_media_type(b: &[u8]) -> Option<&'static str> {
     Some(if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -202,5 +231,20 @@ mod tests {
         assert_eq!(extension_for("image/png"), "png");
         assert_eq!(be32(&[0, 0, 1, 2], 0), Some(258));
         assert_eq!(be16(&[1], 0), None);
+    }
+
+    #[test]
+    fn byte_search() {
+        let hay = b"<a FilePos=1><b filepos=22>";
+        assert_eq!(find_bytes(hay, b"filepos=", 0), Some(16));
+        assert_eq!(find_bytes_ci(hay, b"filepos=", 0), Some(3));
+        assert_eq!(find_bytes_ci(hay, b"FILEPOS=", 4), Some(16));
+        assert_eq!(find_bytes(hay, b"<", 1), Some(13));
+        assert_eq!(find_bytes(hay, b">", hay.len() - 1), Some(hay.len() - 1));
+        assert_eq!(find_bytes(hay, b">", hay.len()), None);
+        assert_eq!(find_bytes(hay, b">", usize::MAX), None);
+        assert_eq!(find_bytes(hay, b"", 0), None);
+        assert_eq!(find_bytes(b"ab", b"abc", 0), None);
+        assert_eq!(find_bytes(b"aab", b"ab", 0), Some(1));
     }
 }
