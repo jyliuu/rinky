@@ -44,7 +44,7 @@ use std::thread::JoinHandle;
 
 use ink_dict::{Dictionary, Hit, Library, LookupResult};
 use ink_plugin::kit::{cut_at, md_escape};
-use ink_plugin::{HostCtx, Permission, Plugin, PluginManifest, Registrar, Result};
+use ink_plugin::{DocumentAccess, HostCtx, Permission, Plugin, PluginManifest, Registrar, Result};
 use ink_store::vocab::{Lookup, VocabDb};
 
 /// Plugin name.
@@ -79,6 +79,13 @@ struct BookRef {
     md5: Option<String>,
     title: Option<String>,
     context: Option<String>,
+}
+
+impl BookRef {
+    /// The open book, with the text around the lookup.
+    fn of(doc: &dyn DocumentAccess, context: Option<String>) -> BookRef {
+        BookRef { md5: doc.book_id(), title: Some(doc.metadata().title).filter(|t| !t.is_empty()), context }
+    }
 }
 
 /// The dictionary plugin.
@@ -117,12 +124,7 @@ const POPUP_BUTTONS: [(&str, &str); 3] = [("Close", "close"), ("Add to vocabular
 
 /// The rinky home for a plugin data folder `<root>/plugins/dictionary/data`.
 fn root_of(data_dir: &Path) -> PathBuf {
-    if data_dir.ends_with(Path::new("plugins").join(NAME).join("data")) {
-        if let Some(r) = data_dir.ancestors().nth(3) {
-            return r.to_path_buf();
-        }
-    }
-    PathBuf::from("/mnt/us/rinky")
+    ink_stats::root_from_data_dir(data_dir).unwrap_or_else(|| PathBuf::from("/mnt/us/rinky"))
 }
 
 /// Parts-of-speech words that open an entry or a new sense.
@@ -610,6 +612,15 @@ impl DictionaryPlugin {
         Ok(())
     }
 
+    /// The full view of the last lookup on dictionary page `tab` (see
+    /// [`full_markdown_tab`]); nothing without a lookup.
+    fn full_view(&self, cx: &mut HostCtx, tab: usize) -> Result<()> {
+        if let Some(l) = &self.last {
+            cx.ui()?.view_markdown(ID_VIEW, &l.word.word, &format!(":::emphasis\n{}", full_markdown_tab(&l.result, tab)));
+        }
+        Ok(())
+    }
+
     /// Writes the last popup's word to the vocabulary list (worker thread); `toast`
     /// confirms it.
     fn add_word(&mut self, cx: &mut HostCtx, toast: bool) -> Result<()> {
@@ -669,7 +680,8 @@ impl Plugin for DictionaryPlugin {
                     cx.ui()?.toast("Select a word to look up");
                     return Ok(());
                 };
-                let snap = BookRef { md5: doc.book_id(), title: Some(doc.metadata().title).filter(|t| !t.is_empty()), context: doc.read_around(&sel.start, 200).ok().map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")) };
+                let context = doc.read_around(&sel.start, 200).ok().map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "));
+                let snap = BookRef::of(doc, context);
                 self.lookup(cx, &sel.text, Some(snap))
             }
             ACTION_TYPE => {
@@ -685,21 +697,13 @@ impl Plugin for DictionaryPlugin {
         match (id, result) {
             (ID_POPUP, "next") => self.turn_card(cx, 1)?,
             (ID_POPUP, "prev") => self.turn_card(cx, -1)?,
-            (ID_POPUP, "full") => {
-                if let Some(l) = &self.last {
-                    let title = l.word.word.clone();
-                    // The full view opens on the dictionary the card shows.
-                    let md = format!(":::emphasis\n{}", full_markdown_tab(&l.result, l.shown));
-                    cx.ui()?.view_markdown(ID_VIEW, &title, &md);
-                }
-            }
+            // The full view opens on the dictionary the card shows.
+            (ID_POPUP, "full") => self.full_view(cx, self.last.as_ref().map_or(0, |l| l.shown))?,
             (ID_POPUP, "add") => self.add_word(cx, true)?,
-            (ID_VIEW, tab) if tab.starts_with("dict:") => {
-                // A dictionary tab: the open viewer takes the new text.
-                if let (Some(l), Ok(i)) = (&self.last, tab["dict:".len()..].parse::<usize>()) {
-                    let title = l.word.word.clone();
-                    let md = format!(":::emphasis\n{}", full_markdown_tab(&l.result, i));
-                    cx.ui()?.view_markdown(ID_VIEW, &title, &md);
+            // A dictionary tab: the open viewer takes the new text.
+            (ID_VIEW, tab) => {
+                if let Some(i) = tab.strip_prefix("dict:").and_then(|i| i.parse().ok()) {
+                    self.full_view(cx, i)?;
                 }
             }
             (ID_DICTS, name) if !name.is_empty() && name != "closed" => self.show_dict(cx, name)?,
@@ -711,7 +715,7 @@ impl Plugin for DictionaryPlugin {
             }
             (ID_INPUT, text) if !text.trim().is_empty() => {
                 // A typed word is recorded with the open book, if any.
-                let snap = cx.document().ok().map(|d| BookRef { md5: d.book_id(), title: Some(d.metadata().title).filter(|t| !t.is_empty()), context: None });
+                let snap = cx.document().ok().map(|d| BookRef::of(d, None));
                 self.lookup(cx, text, snap)?;
             }
             _ => {}
