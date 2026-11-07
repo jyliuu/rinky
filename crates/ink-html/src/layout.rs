@@ -206,15 +206,13 @@ pub fn compute_styles(book: &Book, ch: &crate::book::ChapterDom, p: &Params) -> 
     if dom.body == NONE {
         return out;
     }
-    let mut stack = vec![(dom.body, root)];
+    // (element, parent): a parent's style is computed before its children's.
+    let mut stack = vec![(dom.body, NONE)];
     while let Some((id, parent)) = stack.pop() {
-        let mut st = cascade.compute(ElemRef { dom, id }, &parent);
+        let parent_style = if parent == NONE { &root } else { out[parent as usize].as_deref().expect("parent styled first") };
+        let mut st = cascade.compute(ElemRef { dom, id }, parent_style);
         apply_user(&mut st, s, dom.name(id));
-        for &c in dom.node(id).children.iter().rev() {
-            if dom.element(c).is_some() {
-                stack.push((c, st.clone()));
-            }
-        }
+        stack.extend(dom.node(id).children.iter().rev().filter(|&&c| dom.element(c).is_some()).map(|&c| (c, id)));
         out[id as usize] = Some(Box::new(st));
     }
     out
