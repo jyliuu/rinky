@@ -449,7 +449,8 @@ pub struct Flow<'a, 'e> {
     force_break: bool,
     keep_next: bool,
     first_line_pending: bool,
-    marker: Option<(String, NodeId, f32)>,
+    /// The list marker the next line starts with, and whether it hangs outside.
+    marker: Option<(String, bool)>,
     /// True while laying out a table cell (no page-break handling inside).
     in_cell: bool,
     /// Elements whose subtree contains block-level descendants (for inline elements).
@@ -775,7 +776,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             n = self.list_numbers[&parent].get(&id).copied().unwrap_or(1);
         }
         let text = marker_text(st.list_style, n);
-        self.marker = Some((text, id, if st.list_inside { 0.0 } else { 1.0 }));
+        self.marker = Some((text, !st.list_inside));
     }
 
     /// Children of a block container: inline runs become paragraphs.
@@ -1418,13 +1419,8 @@ impl<'a, 'e> Flow<'a, 'e> {
         let half = (lh - (sa - sd)) / 2.0;
         let mut asc = sa + half;
         let mut desc = lh - asc;
-        struct Placed {
-            piece: Piece,
-            shift: f32,
-            hyphen: bool,
-            img: Option<(String, f32, f32)>,
-        }
-        let mut placed: Vec<(Placed, f32)> = Vec::new(); // (piece, x offset)
+        // (piece, x offset, a hyphen is drawn after it)
+        let mut placed: Vec<(Piece, f32, bool)> = Vec::new();
         let n_boxes = line.boxes.len();
         let mut pen = 0.0f32;
         let mut spaces = 0usize;
@@ -1433,21 +1429,15 @@ impl<'a, 'e> Flow<'a, 'e> {
                 let pc = Piece { seg: run.0, start: run.1, end: run.2, width: self.run_width(p, run) };
                 let seg = &segs[pc.seg as usize];
                 let st = self.st(seg.style);
-                let mut img = None;
                 let shift = seg.shift;
-                match &seg.kind {
-                    SegKind::Image { src, w, h } => {
-                        let a = match st.vertical_align {
-                            VAlign::Middle => h / 2.0 + sa * 0.3,
-                            VAlign::Top => sa,
-                            _ => *h,
-                        };
+                match seg.kind {
+                    SegKind::Image { h, .. } => {
+                        let a = image_ascent(st.vertical_align, h, sa);
                         let shift = if matches!(st.vertical_align, VAlign::Middle | VAlign::Top) { 0.0 } else { shift };
                         asc = asc.max(a + shift);
                         desc = desc.max(h - a - shift);
-                        img = Some((src.clone(), *w, *h));
                     }
-                    &SegKind::Text { face, px } => {
+                    SegKind::Text { face, px } => {
                         let (a, d) = self.env.fonts.vmetrics(face, px);
                         let l = self.line_height(st);
                         let hl = (l - (a - d)) / 2.0;
@@ -1463,13 +1453,13 @@ impl<'a, 'e> Flow<'a, 'e> {
                     SegKind::Break => {}
                 }
                 let wdt = pc.width;
-                placed.push((Placed { piece: pc, shift, hyphen: false, img }, pen));
+                placed.push((pc, pen, false));
                 pen += wdt;
             }
             if b.hyphen && bi + 1 == n_boxes && !line.forced {
                 if let Some(last_p) = placed.last_mut() {
-                    last_p.0.hyphen = true;
-                    let seg = &segs[last_p.0.piece.seg as usize];
+                    last_p.2 = true;
+                    let seg = &segs[last_p.0.seg as usize];
                     let (face, px) = self.seg_face(seg);
                     pen += self.env.fonts.width(face, px, "-");
                 }
@@ -1501,13 +1491,13 @@ impl<'a, 'e> Flow<'a, 'e> {
         let bottom = top + asc + desc;
         let first_item = self.out.items.len();
         // Marker.
-        if let Some((m, _li, outside)) = self.marker.take() {
+        if let Some((m, outside)) = self.marker.take() {
             let st = ost;
             let face = FaceKey { family: self.env.fonts.family(&st.font_family), bold: false, italic: false };
             let shape = m.chars().next().filter(|&c| m.chars().count() == 1 && !self.env.fonts.has_glyph(face, c));
             let mw = if shape.is_some() { st.font_size * 0.3 } else { self.env.fonts.width(face, st.font_size, &m) };
             let gap = st.font_size * 0.4;
-            let mx = if outside > 0.0 { x - mw - gap } else { x0 };
+            let mx = if outside { x - mw - gap } else { x0 };
             if let Some(c) = shape {
                 // No glyph for ◦ or ▪: draw a square, hollow for circles.
                 let sz = mw;
@@ -1525,33 +1515,30 @@ impl<'a, 'e> Flow<'a, 'e> {
                         self.out.items.push(Draw::Rect(r));
                     }
                 }
-                if outside <= 0.0 {
-                    x0 += mw + gap;
-                }
             } else {
-            self.out.items.push(Draw::Text(TextRun {
-                x: mx,
-                baseline,
-                face,
-                px: st.font_size,
-                text: m,
-                width: mw,
-                node: NONE,
-                start: 0,
-                len: 0,
-                link: NO_LINK,
-                underline: false,
-                strike: false,
-                gray: 0,
-                letter_spacing: 0.0,
-                deco_w: mw,
-                line_top: top,
-                line_bottom: bottom,
-                hyphenated: false,
-            }));
-            if outside <= 0.0 {
-                x0 += mw + gap;
+                self.out.items.push(Draw::Text(TextRun {
+                    x: mx,
+                    baseline,
+                    face,
+                    px: st.font_size,
+                    text: m,
+                    width: mw,
+                    node: NONE,
+                    start: 0,
+                    len: 0,
+                    link: NO_LINK,
+                    underline: false,
+                    strike: false,
+                    gray: 0,
+                    letter_spacing: 0.0,
+                    deco_w: mw,
+                    line_top: top,
+                    line_bottom: bottom,
+                    hyphenated: false,
+                }));
             }
+            if !outside {
+                x0 += mw + gap;
             }
         }
         // Box ends (all but the last box's) for justification: a box with a space after
@@ -1560,8 +1547,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut gaps = line.boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
         let mut add = 0.0f32;
         let mut key: Option<(u32, u32)> = None;
-        for (pl, off) in placed {
-            let pc = &pl.piece;
+        for (pc, off, hyphen) in placed {
             // Extra space accumulated before this piece.
             while let Some((_, spaced)) = gaps.next_if(|&(e, _)| pc.start >= e) {
                 if spaced {
@@ -1573,15 +1559,9 @@ impl<'a, 'e> Flow<'a, 'e> {
             let st = self.st(seg.style);
             let ci = p.char_index(pc.start);
             match &seg.kind {
-                SegKind::Image { .. } => {
-                    let (s, iw, ih) = pl.img.clone().unwrap();
-                    let a = match st.vertical_align {
-                        VAlign::Middle => ih / 2.0 + sa * 0.3,
-                        VAlign::Top => sa,
-                        _ => ih,
-                    };
-                    let y = baseline - a - pl.shift;
-                    self.out.items.push(Draw::Image(ImageRun { x: px_x, y, w: iw, h: ih, src: s, node: seg.node, link: seg.link }));
+                SegKind::Image { src, w, h } => {
+                    let y = baseline - image_ascent(st.vertical_align, *h, sa) - seg.shift;
+                    self.out.items.push(Draw::Image(ImageRun { x: px_x, y, w: *w, h: *h, src: src.clone(), node: seg.node, link: seg.link }));
                     key.get_or_insert((self.dom.node(seg.node).order, 0));
                 }
                 SegKind::Break => {
@@ -1590,7 +1570,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 &SegKind::Text { face, px } => {
                     let raw = &text[pc.start..pc.end];
                     let mut shown: String = raw.chars().filter(|&c| c != SOFT_HYPHEN && c != '\n').collect();
-                    if pl.hyphen {
+                    if hyphen {
                         shown.push('-');
                     }
                     let dom_start = src[ci].dom;
@@ -1598,7 +1578,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                     let dom_end = if ce < src.len() && src[ce].seg == pc.seg { src[ce].dom } else { src[ce - 1].dom + 1 };
                     key.get_or_insert((self.dom.node(seg.node).order, dom_start));
                     let mut width = pc.width;
-                    if pl.hyphen {
+                    if hyphen {
                         width += self.env.fonts.width(face, px, "-");
                     }
                     if shown.trim().is_empty() && !st.white_space.keeps_spaces() {
@@ -1611,7 +1591,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                             if prev.node == seg.node
                                 && prev.face == face
                                 && prev.px == px
-                                && prev.baseline == baseline - pl.shift
+                                && prev.baseline == baseline - seg.shift
                                 && prev.link == seg.link
                                 && prev.gray == st.color
                                 && prev.underline == st.underline
@@ -1627,14 +1607,14 @@ impl<'a, 'e> Flow<'a, 'e> {
                                 prev.width = px_x + width - prev.x;
                                 prev.deco_w = prev.width;
                                 prev.len = dom_end.saturating_sub(prev.start);
-                                prev.hyphenated = pl.hyphen;
+                                prev.hyphenated = hyphen;
                                 continue;
                             }
                         }
                     }
                     self.out.items.push(Draw::Text(TextRun {
                         x: px_x,
-                        baseline: baseline - pl.shift,
+                        baseline: baseline - seg.shift,
                         face,
                         px,
                         text: shown,
@@ -1650,21 +1630,16 @@ impl<'a, 'e> Flow<'a, 'e> {
                         deco_w: width,
                         line_top: top,
                         line_bottom: bottom,
-                        hyphenated: pl.hyphen,
+                        hyphenated: hyphen,
                     }));
                 }
             }
         }
         // Underlines and strike-throughs continue over the spaces between runs.
-        let line_items: Vec<usize> = (first_item..self.out.items.len()).collect();
-        for w2 in line_items.windows(2) {
-            let (a, b) = (w2[0], w2[1]);
-            if let (Draw::Text(ta), Draw::Text(tb)) = (&self.out.items[a], &self.out.items[b]) {
+        for a in first_item..self.out.items.len().saturating_sub(1) {
+            if let [Draw::Text(ta), Draw::Text(tb)] = &mut self.out.items[a..a + 2] {
                 if (ta.underline && tb.underline || ta.strike && tb.strike) && ta.link == tb.link && tb.x > ta.x {
-                    let d = tb.x - ta.x;
-                    if let Draw::Text(ta) = &mut self.out.items[a] {
-                        ta.deco_w = d;
-                    }
+                    ta.deco_w = tb.x - ta.x;
                 }
             }
         }
@@ -1955,6 +1930,15 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         max = max.max(line);
         (min.min(w), max)
+    }
+}
+
+/// Height of an inline image above the baseline (`sa`: the line's strut ascent).
+fn image_ascent(va: VAlign, h: f32, sa: f32) -> f32 {
+    match va {
+        VAlign::Middle => h / 2.0 + sa * 0.3,
+        VAlign::Top => sa,
+        _ => h,
     }
 }
 
