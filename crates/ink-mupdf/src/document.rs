@@ -43,7 +43,7 @@ use crate::text::PageText;
 use crate::{Fit, FixedOptions, Spreads};
 use ink_device::{Canvas, Point, Rect};
 use ink_doc::{
-    DocError, DocKind, Document, Link, LinkTarget, LayoutSettings, Metadata, PageCount, PagePosition, Position, Quad,
+    DocError, DocKind, Document, Link, LinkTarget, LayoutSettings, Metadata, PageCount, PagePosition, Position,
     Result, SearchHit, Selection, TocEntry,
 };
 use std::cell::RefCell;
@@ -206,6 +206,17 @@ fn in_range(i: usize, n: usize) -> Result<()> {
     } else {
         Err(DocError::PageOutOfRange(i))
     }
+}
+
+/// A position on document page `page` covering the page-space rectangles `rects`.
+fn page_position<'a>(page: usize, rects: impl IntoIterator<Item = &'a FRect>) -> Position {
+    Position::Page(PagePosition { page: page as u32, quads: rects.into_iter().map(FRect::to_quad).collect() })
+}
+
+/// The position of a TOC or link target point: a zero-size quad, none for the top-left
+/// corner (the target is the whole page).
+fn target_position(page: usize, x: f32, y: f32) -> Position {
+    page_position(page, Some(&FRect::new(x, y, x, y)).filter(|_| x > 0.0 || y > 0.0))
 }
 
 /// Tiles needed along one axis for content `ratio` screens long (2 % slack), at most
@@ -1021,11 +1032,10 @@ impl Document for MupdfDocument {
             // The tile's cell: page_of maps its centre back to this very tile, also when
             // tiles overlap or a short page repeats the same view on several tiles.
             let (pg, cell) = self.tile_cell(page).ok_or(DocError::PageOutOfRange(page))?;
-            let quads = if cell.is_finite() && !cell.is_empty() { vec![cell.to_quad()] } else { Vec::new() };
-            return Ok(Position::Page(PagePosition { page: pg as u32, quads }));
+            return Ok(page_position(pg, Some(&cell).filter(|c| c.is_finite() && !c.is_empty())));
         }
         let first = *self.pages_of_screen(page).first().ok_or(DocError::PageOutOfRange(page))?;
-        Ok(Position::Page(PagePosition { page: first as u32, quads: Vec::new() }))
+        Ok(page_position(first, &[]))
     }
 
     fn page_of(&self, pos: &Position) -> Result<usize> {
@@ -1053,19 +1063,14 @@ impl Document for MupdfDocument {
             .iter()
             .filter_map(|o| {
                 let page = o.page?;
-                let quads = if o.y > 0.0 || o.x > 0.0 { vec![Quad { x0: o.x, y0: o.y, x1: o.x, y1: o.y }] } else { Vec::new() };
                 // In tile modes: the tile that shows the target point.
-                let screen = if quads.is_empty() || page >= self.pages {
-                    self.first_screen_of(page)
-                } else {
+                let screen = if (o.x > 0.0 || o.y > 0.0) && page < self.pages {
                     self.screen_showing(page, o.x, o.y)
+                } else {
+                    self.first_screen_of(page)
                 };
-                Some(TocEntry {
-                    title: o.title.clone(),
-                    level: o.level,
-                    page: Some(screen),
-                    position: Position::Page(PagePosition { page: page as u32, quads }),
-                })
+                let position = target_position(page, o.x, o.y);
+                Some(TocEntry { title: o.title.clone(), level: o.level, page: Some(screen), position })
             })
             .collect()
     }
@@ -1084,7 +1089,7 @@ impl Document for MupdfDocument {
                 let rects = text.rects(m.chars.clone());
                 let (cx, cy) = rects.first().map(|r| r.center()).unwrap_or((0.0, 0.0));
                 hits.push(SearchHit {
-                    position: Position::Page(PagePosition { page: page as u32, quads: rects.iter().map(FRect::to_quad).collect() }),
+                    position: page_position(page, &rects),
                     page: Some(self.screen_showing(page, cx, cy)),
                     excerpt: m.excerpt,
                     matched: m.matched,
@@ -1134,16 +1139,9 @@ impl Document for MupdfDocument {
                 let footnote = !label.is_empty()
                     && label.chars().count() <= 3
                     && label.chars().all(|c| c.is_ascii_digit() || "*\u{2020}\u{2021}\u{a7}".contains(c));
-                let target = if l.external {
-                    LinkTarget::External(l.uri.clone())
-                } else {
-                    match l.page {
-                        Some(tp) => LinkTarget::Internal(Position::Page(PagePosition {
-                            page: tp as u32,
-                            quads: if l.x > 0.0 || l.y > 0.0 { vec![Quad { x0: l.x, y0: l.y, x1: l.x, y1: l.y }] } else { Vec::new() },
-                        })),
-                        None => LinkTarget::External(l.uri.clone()),
-                    }
+                let target = match l.page {
+                    Some(tp) if !l.external => LinkTarget::Internal(target_position(tp, l.x, l.y)),
+                    _ => LinkTarget::External(l.uri.clone()),
                 };
                 let rect = piece.and_then(|pc| pc.screen_rect(&l.rect));
                 Link { text: label, target, rect, footnote }
@@ -1181,8 +1179,8 @@ impl Document for MupdfDocument {
         }
         let last = text.chars[range.end - 1].rect;
         let sel = Selection {
-            start: Position::Page(PagePosition { page: piece.page as u32, quads: rects.iter().map(FRect::to_quad).collect() }),
-            end: Position::Page(PagePosition { page: piece.page as u32, quads: vec![last.to_quad()] }),
+            start: page_position(piece.page, &rects),
+            end: page_position(piece.page, [&last]),
             text: text.text_of(range),
             page,
             rects: rects.iter().filter_map(|r| piece.screen_rect(r)).collect(),
