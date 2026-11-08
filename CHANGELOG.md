@@ -4,6 +4,18 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- The footnote popup shows only the note itself, as KOReader does: no "Footnote 57"
+  heading, and no leftover number, period or "back" link from the way the book prints
+  the note. A note of several paragraphs keeps its paragraphs, and a note that runs on
+  over paragraphs without a container of its own is shown whole.
+
+### Fixed
+- A footnote in an endnotes list (`<li>` items, as Pandoc and many publishers write
+  them) shows that one note, not the whole list.
+
 ## [0.6.0] - 2026-11-08
 
 ### Added

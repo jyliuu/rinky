@@ -449,24 +449,28 @@ pub fn note_excerpt(text: &str, max: usize) -> String {
 }
 
 /// Prepares a note for its popup: removes the reference's own number from the start of
-/// the text when the book repeats it there (`<a>12</a>` pointing at `12 The text`), and
-/// returns the popup title, `Footnote 12` (or `Note 12` for an endnote; without a number
-/// when neither the note nor the reference has one).
-pub fn note_popup_title(note: &mut ink_doc::Note, reference: &str) -> String {
-    let mark = ink_doc::note_mark(reference);
+/// the text when the book repeats it there (`<a>12</a>` pointing at `12 The text`). The
+/// popup shows the note's text alone, without a heading, as KOReader does: the number
+/// is the one just tapped.
+pub fn prepare_note(note: &mut ink_doc::Note, reference: &str) {
     if note.label.is_none() {
-        if let Some(m) = &mark {
-            note.strip_label(m);
+        if let Some(m) = ink_doc::note_mark(reference) {
+            note.strip_label(&m);
         }
     }
-    let kind = match note.kind {
-        ink_doc::NoteKind::Footnote => "Footnote",
-        ink_doc::NoteKind::Endnote => "Note",
-    };
-    match note.label.clone().or(mark) {
-        Some(l) => format!("{kind} {l}"),
-        None => kind.to_string(),
-    }
+}
+
+/// Height of a popup `width` wide on a screen `screen_h` high for `text` (`\n` between
+/// paragraphs) above a button row: the text's lines at about 17 px per character of the
+/// popup's 34 px text, between 240 px and 60 % of the screen.
+pub fn note_popup_height(text: &str, width: u32, screen_h: u32) -> u32 {
+    let per_line = ((width as usize).saturating_sub(56) / 17).max(10);
+    let paras: Vec<&str> = text.split('\n').collect();
+    let lines: usize = paras.iter().map(|p| p.chars().count().div_ceil(per_line).max(1)).sum();
+    // Padding above and below the text, 44 px a line, 14 px between paragraphs, then
+    // the button row (96 px and its margin).
+    let h = 40 + lines as u32 * 44 + (paras.len() as u32 - 1) * 14 + 40 + 108;
+    h.clamp(240, screen_h * 3 / 5)
 }
 
 /// The styled text of a note popup: at most `max` characters, cut at a word with "..."
@@ -488,7 +492,7 @@ pub fn note_spans(note: &ink_doc::Note, max: usize) -> Vec<(String, Style)> {
             continue;
         }
         let cut: String = s.text.chars().take(left).collect();
-        let cut = match cut.rsplit_once(' ') {
+        let cut = match cut.rsplit_once([' ', '\n']) {
             Some((a, _)) => a.to_string(),
             None if out.is_empty() => cut,
             None => String::new(),
@@ -1127,14 +1131,10 @@ impl ReaderScreen {
         let anchor = link.rect.unwrap_or_default();
         let popup = |title: String, text: String, spans: Vec<(String, Style)>, buttons: Vec<(String, String)>| {
             let mut o = Overlay::over_page(overlay::OverlayKind::Popup, size, "close");
-            // Height from the text length (about 17 px per character at the popup's
-            // 34 px text), between 320 px and 60 % of the screen.
             let pw = (size.w - 48).min(1100);
-            let per_line = ((pw as usize).saturating_sub(56) / 17).max(10);
-            let lines = text.chars().count().div_ceil(per_line) as u32 + 1;
-            // The title is a step larger than the text (ink_ui::Popup).
-            let ph = (134 + lines * 46 + 130).clamp(320, size.h * 3 / 5);
-            let psize = Size::new(pw, ph);
+            // A title (web links) takes about two lines.
+            let lines = if title.is_empty() { text.clone() } else { format!("{title}\n\n{text}") };
+            let psize = Size::new(pw, note_popup_height(&lines, pw, size.h));
             let frame = ink_ui::Popup::frame(anchor, psize, size);
             o.buttons.extend(buttons.iter().enumerate().map(|(i, (_, a))| {
                 // Same split as the popup's own button row.
@@ -1150,10 +1150,12 @@ impl ReaderScreen {
                 let note = if link.footnote { self.doc.as_deref_mut().and_then(|d| d.note(&target).ok().flatten()) } else { None };
                 match note {
                     Some(mut n) => {
-                        let title = note_popup_title(&mut n, &link.text);
+                        prepare_note(&mut n, &link.text);
                         self.note_target = Some(n.position.clone());
                         let buttons = vec![("Go to note".to_string(), "note-go".to_string()), ("Close".to_string(), "close".to_string())];
-                        let o = popup(title, note_excerpt(&n.text, 700), note_spans(&n, 700), buttons);
+                        let spans = note_spans(&n, 1000);
+                        let text = spans.iter().map(|(t, _)| t.as_str()).collect();
+                        let o = popup(String::new(), text, spans, buttons);
                         self.open_overlay(o, cx);
                     }
                     None => self.jump(&target, link.footnote),

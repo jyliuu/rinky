@@ -601,8 +601,9 @@ fn footnote_popup_internal_link_and_back() {
     // The FB2 note's number (its title) is the label, not part of the text.
     let ink_doc::LinkTarget::Internal(nt) = &l.target else { panic!() };
     let mut note = h.reader.doc.as_deref_mut().unwrap().note(nt).unwrap().unwrap();
-    assert!(note.text.starts_with("The first footnote"), "{:?}", note.text);
-    assert_eq!(note_popup_title(&mut note, &l.text), "Footnote 1");
+    prepare_note(&mut note, &l.text);
+    assert_eq!(note.text, "The first footnote.");
+    assert_eq!(note.label.as_deref(), Some("1"));
     h.reader.go_to_page(page);
     h.paint();
     let r = l.rect.unwrap();
@@ -645,29 +646,82 @@ fn excerpt() {
 }
 
 #[test]
-fn note_popup_title_and_spans() {
+fn note_popup_text_and_spans() {
     use ink_doc::{Note, NoteKind, NoteSpan};
     let pos = Position::Page(Default::default());
     let span = |t: &str, italic| NoteSpan { text: t.into(), bold: false, italic };
-    // The note has its own number: the title shows it, the text stays.
-    let mut n = Note { kind: NoteKind::Footnote, position: pos.clone(), text: "Text.".into(), label: Some("12".into()), spans: vec![span("Text.", false)] };
-    assert_eq!(note_popup_title(&mut n, "[12]"), "Footnote 12");
+    // The note has its own number (already taken off): the text stays.
+    let mut n = Note { kind: NoteKind::Footnote, position: pos.clone(), text: "12 Text.".into(), label: Some("12".into()), spans: vec![span("12 Text.", false)] };
+    prepare_note(&mut n, "[12]");
+    assert_eq!(n.text, "12 Text.");
     // A bare number repeated in the text: removed when it equals the reference.
     let mut n = Note { kind: NoteKind::Endnote, position: pos.clone(), text: "3 See ".into(), label: None, spans: vec![span("3 See ", false), span("Hamlet", true)] };
-    assert_eq!(note_popup_title(&mut n, "3"), "Note 3");
+    prepare_note(&mut n, "3");
     assert_eq!(n.text, "See Hamlet");
+    assert_eq!(n.label.as_deref(), Some("3"));
     assert_eq!(note_spans(&n, 700), [("See ".to_string(), Style::Regular), ("Hamlet".to_string(), Style::Italic)]);
-    // A number that differs from the reference stays; the title takes the reference's.
+    // A number that differs from the reference stays.
     let mut n = Note::plain(NoteKind::Footnote, pos.clone(), "1984 was a year.");
-    assert_eq!(note_popup_title(&mut n, "[4]"), "Footnote 4");
+    prepare_note(&mut n, "[4]");
     assert_eq!(n.text, "1984 was a year.");
-    // A reference that is no number (a word link): just "Footnote".
+    // A reference that is no number (a word link): nothing to take off.
     let mut n = Note::plain(NoteKind::Footnote, pos, "Text.");
-    assert_eq!(note_popup_title(&mut n, "see the appendix"), "Footnote");
-    // Long notes are cut at a word.
+    prepare_note(&mut n, "see the appendix");
+    assert_eq!(n.text, "Text.");
+    // Long notes are cut at a word, also at a paragraph break.
     n.spans = vec![span("one two ", false), span("three four", true)];
     assert_eq!(note_spans(&n, 14), [("one two ".to_string(), Style::Regular), ("three ...".to_string(), Style::Italic)]);
     assert_eq!(note_spans(&n, 9), [("one two ".to_string(), Style::Regular), (" ...".to_string(), Style::Italic)]);
+    n.spans = vec![span("one two\nthree", false)];
+    assert_eq!(note_spans(&n, 10), [("one two ...".to_string(), Style::Regular)]);
+}
+
+#[test]
+fn note_popup_height_follows_the_text() {
+    let short = note_popup_height("A short note.", 1100, 1696);
+    assert_eq!(short, 240, "the smallest popup");
+    // Each paragraph starts a line of its own.
+    let one = note_popup_height(&"word ".repeat(30), 1100, 1696);
+    let two = note_popup_height(&format!("{}\n{}", "word ".repeat(15), "word ".repeat(15)), 1100, 1696);
+    assert!(two > one, "{two} {one}");
+    assert_eq!(note_popup_height(&"word ".repeat(1000), 1100, 1696), 1696 * 3 / 5);
+}
+
+/// The note popup shows the note's text and nothing else: no "Footnote 57" heading, no
+/// number or period left over from the note as the book prints it, paragraphs kept.
+#[test]
+fn footnote_popup_shows_only_the_note() {
+    let html = r##"<html><head><title>Notes</title></head><body>
+        <p>A sentence with a note<a href="#fn57" id="ref57"><sup>57</sup></a> and a second one<a href="#fn58" id="ref58"><sup>58</sup></a>.</p>
+        <p>More of the chapter so the notes are further down.</p>
+        <p id="fn57"><a href="#ref57">57</a>. The text of note 57, which says something about <i>Hamlet</i>.</p>
+        <p id="fn58"><a href="#ref58">58</a>. The first paragraph of note 58.</p><p>Its second paragraph.</p>
+        </body></html>"##;
+    let mut h = Harness::generated("note-popup", "notes.html", html.as_bytes());
+    let popup_of = |h: &mut Harness| -> ink_ui::Popup {
+        let o = h.reader.overlay.as_mut().expect("an overlay");
+        (0..16).find_map(|i| o.tree.get_mut::<ink_ui::Popup>(ink_ui::WidgetId(i)).cloned()).expect("a popup")
+    };
+    let (page, l) = find_link(&mut h, 0, |l| l.footnote && l.text.trim() == "57");
+    h.reader.go_to_page(page);
+    h.paint();
+    h.tap(l.rect.unwrap());
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Popup), "{:?}", h.reader.actions());
+    let p = popup_of(&mut h);
+    assert_eq!(p.title, "");
+    let text: String = p.spans.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(text, "The text of note 57, which says something about Hamlet.");
+    assert_eq!(p.spans[1], ("Hamlet".to_string(), Style::Italic));
+    h.shot("01-note-57");
+    h.tap_button("close");
+    assert_eq!(h.kind(), None);
+    // A note of two paragraphs.
+    let (_, l) = find_link(&mut h, 0, |l| l.footnote && l.text.trim() == "58");
+    h.tap(l.rect.unwrap());
+    let p = popup_of(&mut h);
+    let text: String = p.spans.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(text, "The first paragraph of note 58.\nIts second paragraph.");
+    h.shot("02-note-58");
 }
 
 impl Harness {
