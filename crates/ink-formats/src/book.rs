@@ -786,6 +786,9 @@ impl Document for BookDocument {
     fn wait_paginated(&mut self, timeout: std::time::Duration) -> bool {
         self.doc.wait_paginated(timeout)
     }
+    fn set_read_ahead(&mut self, on: bool) {
+        self.doc.set_read_ahead(on)
+    }
     fn page_estimate(&self) -> Option<usize> {
         self.doc.page_estimate()
     }

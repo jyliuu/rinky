@@ -4,6 +4,12 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- A book opened for the first time shows its first page without waiting for the
+  pages after it to be counted.
+
 ## [0.5.3] - 2026-11-07
 
 ### Changed

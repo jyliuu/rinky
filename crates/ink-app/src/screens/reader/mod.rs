@@ -204,7 +204,9 @@ pub fn open_book(
     w: u32,
     h: u32,
 ) -> anyhow::Result<Box<dyn Document>> {
-    open_traced(providers, path, &layout_for(settings, w, h), None, None, None, &mut crate::perf::OpenTrace::start())
+    let mut doc = open_traced(providers, path, &layout_for(settings, w, h), None, None, None, &mut crate::perf::OpenTrace::start())?;
+    doc.set_read_ahead(true);
+    Ok(doc)
 }
 
 /// Opens `path` with the first matching provider, enables the page-map cache in
@@ -212,7 +214,9 @@ pub fn open_book(
 /// with the steps recorded in `trace`: provider open (zip, container, spine), page-map
 /// cache id, layout of the first page. `md5` is the book's
 /// partial MD5 when the caller has it already; `at` is the position to open at (laid
-/// out first, see [`Document::open_at`]).
+/// out first, see [`Document::open_at`]). The document comes back with its read-ahead
+/// off ([`Document::set_read_ahead`]): the first page does not wait for the pages after
+/// it; turn it on once that page is shown.
 pub fn open_traced(
     providers: &[&dyn ink_doc::Provider],
     path: &Path,
@@ -238,6 +242,7 @@ pub fn open_traced(
     trace.step("page cache id");
     doc.set_layout(layout)?;
     trace.step_with_engine("set_layout");
+    doc.set_read_ahead(false);
     let count = doc.page_count();
     log::info!(
         "'{}': {}{} pages (parse {:?}, layout {:?})",
@@ -2612,7 +2617,8 @@ impl ReaderScreen {
                 log::debug!("reader: page {} shown in 1 update ({class:?}, wave {wave:?})", self.page + 1);
             }
             self.finish_open_trace();
-            if std::mem::take(&mut self.plugins_pending) {
+            let first = std::mem::take(&mut self.plugins_pending);
+            if first {
                 if let Some(doc) = self.doc.as_deref_mut() {
                     let t = Instant::now();
                     cx.plugins.book_open(doc, &self.path);
@@ -2626,6 +2632,14 @@ impl ReaderScreen {
                 self.note_position();
                 if !std::mem::take(&mut self.turned) {
                     self.flush_position();
+                }
+            }
+            if first {
+                // The pages after this one: the next count (a page turn, the counting
+                // poll) lays them out or waits for the background pagination, not the
+                // frame that shows the first page.
+                if let Some(doc) = self.doc.as_deref_mut() {
+                    doc.set_read_ahead(true);
                 }
             }
             return Ok(shown);

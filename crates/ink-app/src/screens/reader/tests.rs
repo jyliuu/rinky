@@ -1677,6 +1677,25 @@ fn page_turns_carry_the_hardware_wave() {
     assert_eq!(h.probe.uncovered(), vec![]);
 }
 
+/// A book is opened with the read-ahead off (its first page does not wait for the
+/// pages after it) and the reader turns it on once that page is on the panel.
+#[test]
+fn read_ahead_is_turned_on_after_the_first_page() {
+    let mut h = Harness::open("read-ahead", "juliet.epub", true);
+    // What on_enter leaves after opening a book, with a probe document.
+    let probe = selection::tests::three_pages();
+    let ahead = probe.read_ahead.clone();
+    h.reader.doc = Some(Box::new(probe));
+    h.reader.plugins_pending = true;
+    h.reader.rerender = true;
+    h.reader.dirty = Some(RefreshClass::Gc16);
+    assert_eq!(ahead.get(), None);
+    h.paint();
+    assert_eq!(ahead.get(), Some(true), "turned on after the first page");
+    h.paint();
+    assert_eq!(ahead.get(), Some(true));
+}
+
 /// A document that cannot map a saved range to rectangles (fixed layouts): the
 /// highlights made this session are drawn from the rectangles kept for their page and
 /// layout, found under a tap, and forgotten when removed.
