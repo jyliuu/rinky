@@ -167,7 +167,9 @@ impl PageText {
     pub fn nearest(&self, x: f32, y: f32) -> Option<usize> {
         let mut lines: Vec<(u32, FRect)> = Vec::new();
         for ch in self.chars.iter().filter(|c| !c.rect.is_empty()) {
-            match lines.iter_mut().find(|(l, _)| *l == ch.line) {
+            // Each line id appears once in `lines`; in reading order it is nearly always the
+            // last one, so look from the end (linear instead of chars x lines).
+            match lines.iter_mut().rev().find(|(l, _)| *l == ch.line) {
                 Some((_, r)) => *r = r.union(&ch.rect),
                 None => lines.push((ch.line, ch.rect)),
             }
