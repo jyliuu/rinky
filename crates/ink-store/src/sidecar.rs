@@ -277,15 +277,29 @@ pub struct BookSettings {
     /// Flash every N page turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flash_every: Option<u32>,
-    /// Fixed layout: zoom mode (`page`, `width`, `height`, `content`) or a factor.
+    /// Fixed layout: zoom mode (`page`, `width`, `height`, `content`) or a factor. The
+    /// reader writes the fit, `page` or `width`, and ignores other values.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zoom: Option<String>,
     /// Fixed layout: margins cropped away (left, top, right, bottom) as page fractions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crop: Option<[f32; 4]>,
-    /// Fixed layout: contrast/gamma factor.
+    /// Fixed layout: white margins cropped automatically (detected on each page).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop_auto: Option<bool>,
+    /// Fixed layout: text columns read one after the other (1 = off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<u8>,
+    /// Fixed layout: contrast factor (1 = none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contrast: Option<f32>,
+    /// Fixed layout: two pages side by side, `auto` (comics in landscape), `always` or
+    /// `never`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spreads: Option<String>,
+    /// Fixed layout: pages run right to left (manga).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
     /// Reading progress in the bottom margin.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footer: Option<crate::settings::FooterStyle>,
@@ -414,7 +428,11 @@ pub(crate) const BOOK_SETTINGS_FIELDS: &[&str] = &[
     "flash_every",
     "zoom",
     "crop",
+    "crop_auto",
+    "columns",
     "contrast",
+    "spreads",
+    "rtl",
     "footer",
     "header",
 ];
@@ -705,7 +723,11 @@ mod tests {
             flash_every: Some(1),
             zoom: Some("page".into()),
             crop: Some([0.0; 4]),
+            crop_auto: Some(true),
+            columns: Some(2),
             contrast: Some(1.0),
+            spreads: Some("auto".into()),
+            rtl: Some(true),
             footer: Some(crate::settings::FooterStyle::Pages),
             header: Some(crate::settings::HeaderStyle::Chapter),
             extra: Map::new(),
@@ -775,7 +797,7 @@ mod tests {
         s.settings.font_px = Some(f32::INFINITY);
         s.settings.line_spacing = Some(1.2);
         s.settings.extra.insert("font_px".into(), serde_json::json!("big"));
-        s.settings.extra.insert("columns".into(), serde_json::json!(2));
+        s.settings.extra.insert("page_curl".into(), serde_json::json!(2));
         s.extra.insert("highlights".into(), serde_json::json!("not a list"));
         s.extra.insert("future".into(), serde_json::json!({"x": 1}));
         // A value as deep as serde_json reads back in the file stays; one level more goes.
@@ -789,7 +811,7 @@ mod tests {
         let back = r.state;
         assert_eq!(back.highlights[0].quads, [Quad { x0: 1.0, y0: 2.0, x1: 3.0, y1: 4.0 }]);
         assert_eq!((back.percent, back.settings.crop, back.settings.font_px, back.settings.line_spacing), (None, None, None, Some(1.2)));
-        assert_eq!(back.settings.extra.get("columns"), Some(&serde_json::json!(2)));
+        assert_eq!(back.settings.extra.get("page_curl"), Some(&serde_json::json!(2)));
         assert!(!back.settings.extra.contains_key("font_px"));
         assert_eq!(back.extra.get("future"), Some(&serde_json::json!({"x": 1})));
         assert!(!back.extra.contains_key("highlights"));
@@ -895,7 +917,7 @@ mod tests {
         assert!(!s.add_bookmark(Bookmark { position: "page:5".into(), ..Default::default() }));
         s.settings.font_px = Some(36.0);
         s.settings.crop = Some([0.05, 0.1, 0.05, 0.1]);
-        s.settings.extra.insert("columns".into(), serde_json::json!(2));
+        s.settings.extra.insert("page_curl".into(), serde_json::json!(2));
         s.plugin_set("insightful", "chats", serde_json::json!(["c1"]));
         s.plugin_set("stats", "seconds", serde_json::json!(5));
         s.plugin_set("stats", "seconds", Value::Null);
@@ -970,6 +992,35 @@ mod tests {
         assert_eq!(r.errors.len(), 2);
         let aside = std::fs::read_dir(sidecar_dir(&book)).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains(".corrupt-")).count();
         assert_eq!(aside, 3, "first corrupt file, then the empty file and the bad backup");
+    }
+
+    /// The fixed-layout view (fit, crop, columns, contrast, spreads, right to left)
+    /// survives a save, a file without it reads as unset, and an older file that kept
+    /// `columns` as an unknown key now reads it as the typed value.
+    #[test]
+    fn fixed_layout_view_round_trip() {
+        let dir = TempDir::new("sidecar-fixed");
+        let book = dir.path().join("scan.pdf");
+        let mut s = BookState::default();
+        let st = &mut s.settings;
+        (st.zoom, st.crop_auto, st.columns, st.contrast, st.spreads, st.rtl) =
+            (Some("width".into()), Some(true), Some(2), Some(1.5), Some("never".into()), Some(true));
+        s.save(&book).unwrap();
+        let back = BookState::load(&book).unwrap().settings;
+        assert_eq!(
+            (back.zoom.as_deref(), back.crop_auto, back.columns, back.contrast, back.spreads.as_deref(), back.rtl),
+            (Some("width"), Some(true), Some(2), Some(1.5), Some("never"), Some(true))
+        );
+        assert!(back.extra.is_empty(), "typed, not unknown keys: {:?}", back.extra);
+        let text = std::fs::read_to_string(sidecar_path(&book)).unwrap();
+        assert!(text.contains(r#""crop_auto": true"#) && text.contains(r#""rtl": true"#), "{text}");
+        // Unset values are not written at all (an EPUB's sidecar stays as it was).
+        BookState::default().save(&book).unwrap();
+        let text = std::fs::read_to_string(sidecar_path(&book)).unwrap();
+        assert!(!text.contains("columns") && !text.contains("spreads"), "{text}");
+        std::fs::write(sidecar_path(&book), r#"{"version":2,"settings":{"columns":2,"contrast":1.25}}"#).unwrap();
+        let old = BookState::load(&book).unwrap().settings;
+        assert_eq!((old.columns, old.contrast, old.rtl), (Some(2), Some(1.25), None));
     }
 
     #[test]
