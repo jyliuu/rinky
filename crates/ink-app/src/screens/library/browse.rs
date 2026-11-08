@@ -200,21 +200,21 @@ impl LibraryScreen {
         if back {
             ab = ab.with_back();
         }
+        let mut actions = Vec::new();
         if books {
-            let icon = if self.mode == ViewMode::List { Icon::Grid } else { Icon::ListView };
-            ab = ab.action(BarAction::icon(icon, "mode"));
+            actions.push((if self.mode == ViewMode::List { Icon::Grid } else { Icon::ListView }, "mode", Hit::ToggleMode));
         }
         // Stats and Settings icons only when the navigation bar does not already have
         // them (the overflow menu keeps both as labelled entries).
-        let in_nav = |id: &str| self.nav.iter().any(|n| n == id);
-        let (stats, gear) = (!in_nav("stats"), !in_nav("settings"));
-        if stats {
-            ab = ab.action(BarAction::icon(Icon::Chart, "stats"));
+        for (icon, id, hit) in [(Icon::Chart, "stats", Hit::Stats), (Icon::Settings, "settings", Hit::Settings)] {
+            if !self.nav.iter().any(|n| n == id) {
+                actions.push((icon, id, hit));
+            }
         }
-        if gear {
-            ab = ab.action(BarAction::icon(Icon::Settings, "settings"));
+        actions.push((Icon::More, "more", Hit::More));
+        for (icon, id, _) in &actions {
+            ab = ab.action(BarAction::icon(*icon, *id));
         }
-        ab = ab.action(BarAction::icon(Icon::More, "more"));
         let rects = ab.action_rects(bar);
         let right = rects.iter().filter(|r| r.w > 0).map(|r| r.x).min().unwrap_or(bar.right()) - space(2);
         let role = if back { p.theme.heading } else { p.theme.title };
@@ -232,18 +232,7 @@ impl LibraryScreen {
         if back {
             self.hits.push((AppBar::back_rect(bar), Hit::Back));
         }
-        let mut hits = Vec::new();
-        if books {
-            hits.push(Hit::ToggleMode);
-        }
-        if stats {
-            hits.push(Hit::Stats);
-        }
-        if gear {
-            hits.push(Hit::Settings);
-        }
-        hits.push(Hit::More);
-        for (r, h) in rects.into_iter().zip(hits) {
+        for (r, (.., h)) in rects.into_iter().zip(actions) {
             if r.w > 0 {
                 self.hits.push((r, h));
             }
