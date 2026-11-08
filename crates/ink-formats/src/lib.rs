@@ -230,7 +230,11 @@ pub fn open(path: &Path) -> Result<HtmlDocument> {
 
 /// Opens any supported format with the book's own TOC and page list.
 pub fn open_book(path: &Path) -> Result<BookDocument> {
-    load(path)?.into_document()
+    match format_and_zip(path) {
+        // EPUB: spine items are read when the engine first needs them.
+        (Some(Format::Epub), zip) => epub::open_book(path, zip),
+        _ => load(path)?.into_document(),
+    }
 }
 
 /// Metadata, identifiers, cover and DRM status of a book file, for the library. Works

@@ -8,21 +8,96 @@ use crate::css::{self, FontFaceRule, Stylesheet};
 use crate::dom::{Classifier, Dom, ElemRef, NodeId, SheetRef};
 use crate::style::{ua_rules, Cascade, Origin, RuleSet, StructStyle, StyleContext, WhiteSpace};
 use ink_doc::{resolve_href, Metadata, ResourceLoader};
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Reads spine item sources when they are first needed, from any thread, so a book
+/// opens without reading (inflating, decoding) every spine item first.
+pub trait SpineSource: Send + Sync {
+    /// The XHTML source of spine item `i` (empty when it cannot be read).
+    fn read(&self, i: usize) -> String;
+
+    /// A prefix of what [`SpineSource::read`] returns for item `i` that reaches past
+    /// its first `<body` tag, read without the rest of the item; `None` when that is
+    /// not possible (the whole item is read then).
+    fn read_head(&self, _i: usize) -> Option<String> {
+        None
+    }
+
+    /// The length [`SpineSource::read`] gives for item `i`, when it is known without
+    /// reading the item (the stored size of the file). Only estimates use it: pages
+    /// and Kindle locations of spine items nobody has read yet.
+    fn len_hint(&self, _i: usize) -> Option<usize> {
+        None
+    }
+}
+
+/// Where a spine item's source is read from: the source and the item's index.
+type Source = Option<(Arc<dyn SpineSource>, usize)>;
 
 /// One spine item.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ChapterSrc {
     /// Path inside the book.
     pub path: String,
     /// Directory of `path` (for resolving links), with a trailing `/` or empty.
     pub dir: String,
-    /// XHTML source.
-    pub html: String,
+    /// XHTML source, once read.
+    html: OnceLock<String>,
+    /// Where the source is read from, with the item's index (`None`: `html` was given).
+    source: Source,
     /// DocFragment number (1-based); `None` for spine entries crengine skips (an idref
     /// that is not in the manifest, passed by the EPUB loader with an empty path).
     pub fragment: Option<u32>,
+}
+
+impl std::fmt::Debug for ChapterSrc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChapterSrc")
+            .field("path", &self.path)
+            .field("read", &self.is_read())
+            .field("fragment", &self.fragment)
+            .finish()
+    }
+}
+
+impl ChapterSrc {
+    /// The XHTML source (read now when it has not been).
+    pub fn html(&self) -> &str {
+        self.html.get_or_init(|| self.source.as_ref().map(|(s, i)| s.read(*i)).unwrap_or_default())
+    }
+
+    /// True when the source has been read (or was given).
+    pub fn is_read(&self) -> bool {
+        self.html.get().is_some()
+    }
+
+    /// The length of the source in bytes: exact once it is read, else the source's
+    /// [`SpineSource::len_hint`] (an estimate), else read now.
+    pub fn src_len(&self) -> usize {
+        if let Some(h) = self.html.get() {
+            return h.len();
+        }
+        match self.source.as_ref().and_then(|(s, i)| s.len_hint(*i)) {
+            Some(n) => n,
+            None => self.html().len(),
+        }
+    }
+
+    /// The source up to its first `<body` tag at least: a prefix from
+    /// [`SpineSource::read_head`] while the item is not read (owned), else the whole
+    /// source (borrowed).
+    fn head(&self) -> Cow<'_, str> {
+        if !self.is_read() {
+            if let Some(head) = self.source.as_ref().and_then(|(s, i)| s.read_head(*i)) {
+                if find_ci(&head, 0, "<body").is_some() {
+                    return Cow::Owned(head);
+                }
+            }
+        }
+        Cow::Borrowed(self.html())
+    }
 }
 
 /// A parsed chapter: DOM plus the book rules that apply to it.
@@ -284,30 +359,87 @@ pub fn attr_in_tag(tag: &str, name: &str) -> Option<String> {
     None
 }
 
+/// What the head of a spine item gives [`Book::new`]: its linked stylesheets and its
+/// `<style>` blocks.
+struct HeadSheets {
+    links: Vec<String>,
+    styles: Vec<Stylesheet>,
+}
+
+impl HeadSheets {
+    /// The sheets of `ch`'s head, from a prefix of its source when that is enough.
+    fn of(ch: &ChapterSrc) -> Self {
+        let head = ch.head();
+        if let Some(styles) = head_styles(&head, matches!(head, Cow::Borrowed(_))) {
+            return HeadSheets { links: scan_head_links(&head), styles };
+        }
+        // A `<style>` the prefix does not close: the whole source.
+        let html = ch.html();
+        HeadSheets { links: scan_head_links(html), styles: head_styles(html, true).unwrap_or_default() }
+    }
+}
+
+/// The `<style>` blocks of the head of `html` (up to its first `<body`), parsed. A
+/// block not closed before `<body` runs to its `</style` after it, or to the end of the
+/// head without one. `None` when `html` is only a prefix of the source (`complete`
+/// false) and has no `</style` for such a block.
+fn head_styles(html: &str, complete: bool) -> Option<Vec<Stylesheet>> {
+    let head_end = head_end(html);
+    let lower = html[..head_end].to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(p) = lower.get(from..).and_then(|l| l.find("<style")) {
+        let s = from + p;
+        let Some(open_end) = lower[s..head_end].find('>').map(|e| s + e + 1) else { break };
+        let close = match find_ci(html, open_end, "</style") {
+            Some(c) => c,
+            None if complete => head_end,
+            None => return None,
+        };
+        out.push(css::parse_stylesheet(&html[open_end..close.min(html.len())]));
+        from = close;
+    }
+    Some(out)
+}
+
 impl Book {
     /// Builds the book data. Spine items with an empty path do not get a DocFragment
     /// number. Stylesheets linked from any chapter, their imports and their
     /// `@font-face` fonts are read through `loader` now.
     pub fn new(meta: Metadata, chapters: Vec<(String, String)>, loader: &dyn ResourceLoader) -> Self {
+        let chapters = chapters.into_iter().map(|(path, html)| (path, OnceLock::from(html), None)).collect();
+        Self::build(meta, chapters, loader)
+    }
+
+    /// [`Book::new`] for spine items at `paths` whose sources `source` reads when they
+    /// are first needed. Only the heads of the items are read now (for their
+    /// stylesheets), as far as `source` can read a head alone.
+    pub fn new_lazy(meta: Metadata, paths: Vec<String>, source: Arc<dyn SpineSource>, loader: &dyn ResourceLoader) -> Self {
+        let chapters = paths.into_iter().enumerate().map(|(i, path)| (path, OnceLock::new(), Some((source.clone(), i)))).collect();
+        Self::build(meta, chapters, loader)
+    }
+
+    fn build(meta: Metadata, chapters: Vec<(String, OnceLock<String>, Source)>, loader: &dyn ResourceLoader) -> Self {
         let mut fragment = 0;
         let chapters: Vec<ChapterSrc> = chapters
             .into_iter()
-            .map(|(path, html)| {
+            .map(|(path, html, source)| {
                 let frag = if path.is_empty() {
                     None
                 } else {
                     fragment += 1;
                     Some(fragment)
                 };
-                ChapterSrc { dir: dir_of(&path).to_string(), path, html, fragment: frag }
+                ChapterSrc { dir: dir_of(&path).to_string(), path, html, source, fragment: frag }
             })
             .collect();
         let mut sheets: HashMap<String, Arc<Stylesheet>> = HashMap::new();
         let mut fonts: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
         let mut todo: Vec<String> = Vec::new();
-        for ch in &chapters {
-            for href in scan_head_links(&ch.html) {
-                let p = resolve_href(&ch.dir, &href);
+        let heads: Vec<HeadSheets> = chapters.iter().map(HeadSheets::of).collect();
+        for (ch, head) in chapters.iter().zip(&heads) {
+            for href in &head.links {
+                let p = resolve_href(&ch.dir, href);
                 if !todo.contains(&p) {
                     todo.push(p);
                 }
@@ -316,20 +448,12 @@ impl Book {
         // `<style>` blocks may @import or declare fonts too: their @font-face rules with
         // the chapter's directory.
         let mut inline_faces = Vec::new();
-        for ch in &chapters {
-            let head_end = head_end(&ch.html);
-            let lower = ch.html[..head_end].to_ascii_lowercase();
-            let mut from = 0;
-            while let Some(p) = lower.get(from..).and_then(|l| l.find("<style")) {
-                let s = from + p;
-                let Some(open_end) = lower[s..head_end].find('>').map(|e| s + e + 1) else { break };
-                let close = find_ci(&ch.html, open_end, "</style").unwrap_or(head_end);
-                let sheet = css::parse_stylesheet(&ch.html[open_end..close.min(ch.html.len())]);
+        for (ch, head) in chapters.iter().zip(heads) {
+            for sheet in head.styles {
                 for imp in &sheet.imports {
                     todo.push(resolve_href(&ch.dir, imp));
                 }
                 inline_faces.extend(sheet.font_faces.into_iter().map(|ff| (ch.dir.clone(), ff)));
-                from = close;
             }
         }
         let mut seen = std::collections::HashSet::new();
@@ -465,7 +589,7 @@ impl Book {
     fn build_chapter(&self, i: usize) -> ChapterDom {
         let ch = &self.chapters[i];
         let mut cl = ChapterClassifier { book: self, dir: &ch.dir, cascade: None };
-        let dom = crate::parse::parse_chapter(&ch.html, &mut cl);
+        let dom = crate::parse::parse_chapter(ch.html(), &mut cl);
         let author = cl.cascade.map_or_else(|| self.author_rules(&ch.dir, &dom.sheets), |c| c.author);
         ChapterDom { dom, author }
     }
@@ -497,6 +621,50 @@ impl Classifier for ChapterClassifier<'_> {
 mod tests {
     use super::*;
     use ink_doc::MemoryLoader;
+
+    /// Spine items from memory that count whole reads; heads end at `<body`.
+    struct Counting(Vec<String>, std::sync::atomic::AtomicUsize);
+
+    impl SpineSource for Counting {
+        fn read(&self, i: usize) -> String {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0[i].clone()
+        }
+        fn read_head(&self, i: usize) -> Option<String> {
+            let end = self.0[i].to_ascii_lowercase().find("<body")? + 5;
+            Some(self.0[i][..end].to_string())
+        }
+        fn len_hint(&self, i: usize) -> Option<usize> {
+            Some(self.0[i].len())
+        }
+    }
+
+    #[test]
+    fn lazy_spine_reads_heads_only() {
+        let a = r#"<html><head><link rel="stylesheet" href="a.css"/><style>@import "b.css";</style></head><body><p>A</p></body></html>"#;
+        let b = r#"<html><head><style>@import "c.css";</head><body><p>B</p><style>x</style></body></html>"#;
+        let mut m = MemoryLoader::default();
+        for css in ["t/a.css", "t/b.css", "t/c.css"] {
+            m.0.insert(css.into(), b"p { margin: 0 }".to_vec());
+        }
+        let items = vec![(String::from("t/a.xhtml"), a.to_string()), (String::from("t/b.xhtml"), b.to_string())];
+        let eager = Book::new(Metadata::default(), items.clone(), &m);
+        let source = Arc::new(Counting(items.iter().map(|(_, h)| h.clone()).collect(), Default::default()));
+        let paths = items.into_iter().map(|(p, _)| p).collect();
+        let lazy = Book::new_lazy(Metadata::default(), paths, source.clone(), &m);
+        let keys = |b: &Book| {
+            let mut k: Vec<String> = b.sheets.keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&lazy), keys(&eager));
+        assert_eq!(keys(&lazy), ["t/a.css", "t/b.css", "t/c.css"]);
+        // The first item's head is enough; the second's `<style>` closes after `<body`.
+        assert!(!lazy.chapters[0].is_read() && lazy.chapters[1].is_read());
+        assert_eq!(source.1.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(lazy.chapters[0].src_len(), a.len());
+        assert_eq!(lazy.chapters[0].html(), a);
+    }
 
     #[test]
     fn head_scanning_and_sheet_loading() {

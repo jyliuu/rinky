@@ -570,15 +570,7 @@ impl Book {
         let info = self.info.clone();
         let doc = HtmlDocument::new(self.info.metadata, self.chapters, self.resources)?;
         ink_doc::timing::step("styles+fonts", t);
-        Ok(BookDocument {
-            doc,
-            info,
-            nodes: self.toc,
-            page_list: self.page_list,
-            resolved: std::cell::OnceCell::new(),
-            toc_file: None,
-            interest_set: false,
-        })
+        Ok(BookDocument::new(doc, info, self.toc, self.page_list))
     }
 }
 
@@ -609,6 +601,11 @@ pub struct BookDocument {
 }
 
 impl BookDocument {
+    /// The engine document `doc` with the book's `info`, TOC and page list.
+    pub(crate) fn new(doc: HtmlDocument, info: BookInfo, nodes: Vec<TocNode>, page_list: Vec<PageTarget>) -> Self {
+        BookDocument { doc, info, nodes, page_list, resolved: std::cell::OnceCell::new(), toc_file: None, interest_set: false }
+    }
+
     /// The resolved TOC and page labels (resolved now when needed).
     fn resolved(&self) -> &ResolvedToc {
         self.resolved.get_or_init(|| self.resolve())
@@ -627,7 +624,7 @@ impl BookDocument {
         let positions = match cached {
             Some(p) => p,
             None => {
-                let r = Resolver::from_sources(chapters.iter().map(|c| c.html.as_str()).collect(), targets.iter().copied());
+                let r = Resolver::from_sources(chapters.iter().map(|c| c.html()).collect(), targets.iter().copied());
                 let p: Vec<Position> = targets.iter().map(|t| r.position(t)).collect();
                 if let Some(f) = &self.toc_file {
                     if let Err(e) = write_toc_file(f, hash, &p) {

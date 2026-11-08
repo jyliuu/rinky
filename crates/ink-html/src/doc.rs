@@ -1,6 +1,6 @@
 //! [`HtmlDocument`]: the reflowable [`Document`].
 
-use crate::book::Book;
+use crate::book::{Book, SpineSource};
 use crate::fonts::{FontBook, FontSources};
 use crate::images::ImageCache;
 use crate::layout::{ChapterLayout, Draw, Env, Params, TextRun, NO_LINK};
@@ -112,6 +112,22 @@ impl HtmlDocument {
             return Err(DocError::Format("no readable chapters in spine".into()));
         }
         let book = Book::new(meta, chapters.into_iter().map(|c| (c.path, c.html)).collect(), resources.as_ref());
+        Ok(Self::from_book(book, resources))
+    }
+
+    /// [`HtmlDocument::new`] for spine items at `paths` that `source` reads when they
+    /// are first needed (the first page reads only its own spine item, the background
+    /// paginator the others). Fails when no spine item has content, which reads the
+    /// items in order up to the first one with content.
+    pub fn new_lazy(meta: Metadata, paths: Vec<String>, source: Arc<dyn SpineSource>, resources: Box<dyn ResourceLoader>) -> Result<Self> {
+        let book = Book::new_lazy(meta, paths, source, resources.as_ref());
+        if book.chapters.iter().all(|c| c.html().trim().is_empty()) {
+            return Err(DocError::Format("no readable chapters in spine".into()));
+        }
+        Ok(Self::from_book(book, resources))
+    }
+
+    fn from_book(book: Book, resources: Box<dyn ResourceLoader>) -> Self {
         let mut font_sources = FontSources { fallback_dirs: crate::fonts::font_dirs(None), ..Default::default() };
         font_sources.add_font_faces(&book.font_faces, &book.fonts);
         let fonts = RefCell::new(font_sources.build_foreground());
@@ -123,7 +139,7 @@ impl HtmlDocument {
             paths.entry(ch.path.clone()).or_insert(i);
             paths.entry(ink_doc::percent_decode(&ch.path)).or_insert(i);
         }
-        Ok(HtmlDocument {
+        HtmlDocument {
             book: Arc::new(book),
             resources,
             nav: Navigation::default(),
@@ -151,7 +167,7 @@ impl HtmlDocument {
             positions: RefCell::new(HashMap::new()),
             positions_dirty: Cell::new(false),
             interest: Arc::new(Vec::new()),
-        })
+        }
     }
 
     /// Sets the TOC and page list (from the EPUB navigation; see [`crate::nav`]).
@@ -168,7 +184,7 @@ impl HtmlDocument {
     /// Number of chapters with text (as the phase 0 engine counted them; `flow:`
     /// positions index these).
     pub fn chapter_count(&self) -> usize {
-        self.book.chapters.iter().filter(|c| !crate::v1::blocks::parse_xhtml(&c.html).is_empty()).count()
+        self.book.chapters.iter().filter(|c| !crate::v1::blocks::parse_xhtml(c.html()).is_empty()).count()
     }
 
     /// Path inside the book of spine item `i`.
@@ -217,7 +233,7 @@ impl HtmlDocument {
                 let mut seen = std::collections::HashSet::new();
                 let mut paths = Vec::new();
                 for ch in &self.book.chapters {
-                    for v in crate::book::scan_image_refs(&ch.html) {
+                    for v in crate::book::scan_image_refs(ch.html()) {
                         let p = ink_doc::resolve_href(&ch.dir, &v);
                         if seen.insert(p.clone()) {
                             paths.push(p);
@@ -413,7 +429,7 @@ impl HtmlDocument {
             if self.book.loader.is_none() {
                 // The thread cannot read images through this loader: sizes first.
                 let ch = &self.book.chapters[c];
-                for v in crate::book::scan_image_refs(&ch.html) {
+                for v in crate::book::scan_image_refs(ch.html()) {
                     self.fg_image_size(&ink_doc::resolve_href(&ch.dir, &v));
                 }
             }
@@ -546,7 +562,7 @@ impl HtmlDocument {
         let mut chapter = None;
         let mut blocks = Vec::new();
         for (i, ch) in self.book.chapters.iter().enumerate() {
-            let b = crate::v1::blocks::parse_xhtml(&ch.html);
+            let b = crate::v1::blocks::parse_xhtml(ch.html());
             if b.is_empty() {
                 continue;
             }
@@ -949,7 +965,7 @@ impl HtmlDocument {
         for c in &self.book.chapters {
             h.update(c.path.as_bytes());
             h.update([0]);
-            h.update(c.html.as_bytes());
+            h.update(c.html().as_bytes());
         }
         let id: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
         Some((base.join("cache/pagemaps"), format!("content{id}")))
@@ -1574,9 +1590,9 @@ impl Document for HtmlDocument {
             match c {
                 Some(p) => {
                     pages += p.keys.len();
-                    bytes += src.html.len();
+                    bytes += src.src_len();
                 }
-                None => unknown += src.html.len(),
+                None => unknown += src.src_len(),
             }
         }
         // About 2.5 KB of XHTML per page at the default size when nothing is known yet.
@@ -1694,14 +1710,14 @@ impl HtmlDocument {
                 for (c, ch) in m.chapters.iter().zip(&self.book.chapters) {
                     if let Some(c) = c {
                         text += c.text_bytes;
-                        src += ch.html.len() as u64;
+                        src += ch.src_len() as u64;
                     }
                 }
                 Some(if src > 0 { text as f64 / src as f64 } else { 0.6 })
             }
         };
         match ratio {
-            Some(r) => (self.book.chapters[i].html.len() as f64 * r) as u64,
+            Some(r) => (self.book.chapters[i].src_len() as f64 * r) as u64,
             None => paginate::chapter_text_bytes(&self.book.chapter(i).dom),
         }
     }

@@ -19,7 +19,7 @@
 //! - DRM: any other encryption (Adobe ADEPT, Apple FairPlay, Readium LCP, ...) is refused
 //!   with a message; metadata stays readable.
 
-use crate::book::{Book, BookInfo, Cover, Identifier, PageTarget, Target, TocNode};
+use crate::book::{Book, BookDocument, BookInfo, Cover, Identifier, PageTarget, Target, TocNode};
 use crate::util::{read_limited, sha1, sniff_media_type, MAX_COVER, MAX_ENTRY};
 use crate::xml::{self, collapse_ws, Element};
 use crate::Format;
@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use zip::ZipArchive;
 
 /// Font obfuscation key for one resource.
@@ -107,6 +108,51 @@ impl<R: Read + Seek> ZipLoader<R> {
         read_limited(entry, size, limit).map_err(|e| DocError::Format(format!("{path}: {e}")))
     }
 
+    /// The size `path` declares in the archive's central directory (uncompressed).
+    fn stored_size(&self, path: &str) -> Option<usize> {
+        let name = self.entry_name(path)?;
+        let zip = self.zip.borrow();
+        let size = zip.by_index_data(zip.index_for_name(&name)?).ok()?.size();
+        usize::try_from(size).ok()
+    }
+
+    /// The bytes of entry `path` up to the end of the first `needle` (ASCII, matched
+    /// ignoring case), inflating no more than that; `None` when the first `max` bytes
+    /// do not have it, or the entry is neither stored nor deflated. `inflate` (raw
+    /// deflate) is reset and reused: reading many heads allocates no inflater each.
+    fn read_until_ci(&self, path: &str, needle: &[u8], max: usize, inflate: &mut flate2::Decompress) -> Option<Vec<u8>> {
+        let name = self.entry_name(path)?;
+        let mut zip = self.zip.borrow_mut();
+        let index = zip.index_for_name(&name)?;
+        let mut raw = zip.by_index_raw(index).ok()?;
+        let deflated = match raw.compression() {
+            _ if raw.encrypted() => return None,
+            zip::CompressionMethod::Stored => false,
+            zip::CompressionMethod::Deflated => true,
+            _ => return None,
+        };
+        inflate.reset(false);
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            // At the end (n == 0) the inflater gives what it still holds.
+            let n = raw.read(&mut chunk).ok()?;
+            let from = buf.len().saturating_sub(needle.len() - 1);
+            if deflated {
+                inflate_into(inflate, &chunk[..n], &mut buf)?;
+            } else {
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            if let Some(p) = buf[from..].windows(needle.len()).position(|w| w.eq_ignore_ascii_case(needle)) {
+                buf.truncate(from + p + needle.len());
+                return Some(buf);
+            }
+            if n == 0 || buf.len() > max {
+                return None;
+            }
+        }
+    }
+
     /// Entry bytes (deobfuscated), at most `limit`.
     pub fn read_max(&self, path: &str, limit: u64) -> Result<Vec<u8>> {
         let mut bytes = self.read_raw_max(path, limit)?;
@@ -114,6 +160,22 @@ impl<R: Read + Seek> ZipLoader<R> {
             key.apply(&mut bytes);
         }
         Ok(bytes)
+    }
+}
+
+/// Inflates all of `input` onto `out`, and whatever output the inflater still holds.
+fn inflate_into(inflate: &mut flate2::Decompress, input: &[u8], out: &mut Vec<u8>) -> Option<()> {
+    let mut used = 0;
+    loop {
+        out.reserve(4096);
+        let (was_in, was_out) = (inflate.total_in(), inflate.total_out());
+        let status = inflate.decompress_vec(&input[used..], out, flate2::FlushDecompress::None).ok()?;
+        used += (inflate.total_in() - was_in) as usize;
+        let stuck = inflate.total_in() == was_in && inflate.total_out() == was_out;
+        let drained = used == input.len() && out.len() < out.capacity();
+        if status == flate2::Status::StreamEnd || stuck || drained {
+            return Some(());
+        }
     }
 }
 
@@ -714,6 +776,131 @@ pub fn read_toc<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> (Vec<To
     (toc, pages)
 }
 
+/// Opens an EPUB file with the book's own TOC and page list, as [`load`] and
+/// [`Book::into_document`] do, except that the spine items are read when the engine
+/// first needs them: the first page reads its own item (and the heads of the others,
+/// for their stylesheets), the background paginator the rest. DRM is refused.
+pub fn open_book(path: &Path, zip: Option<ZipArchive<File>>) -> Result<BookDocument> {
+    use ink_doc::timing::step;
+    let t = std::time::Instant::now();
+    let (loader, pkg, drm) = prepare(path, zip)?;
+    let t = step("zip+opf", t);
+    if let Some(scheme) = drm {
+        return Err(DocError::Unsupported(drm_message(&scheme)));
+    }
+    let mut info = info_of(&loader, &pkg, None);
+    info.cover = None;
+    let (toc, page_list) = read_toc(&loader, &pkg);
+    let t = step("toc+nav read", t);
+    let paths = spine_paths(&pkg);
+    let spine = Arc::new(LazySpine::new(path, loader, &paths));
+    let files = Box::new(SpineFiles(spine.clone()));
+    let doc = HtmlDocument::new_lazy(info.metadata.clone(), paths, spine, files)?;
+    step("styles+fonts", t);
+    Ok(BookDocument::new(doc, info, toc, page_list))
+}
+
+/// The path of every spine item (empty for an idref the manifest does not have).
+fn spine_paths(pkg: &Package) -> Vec<String> {
+    pkg.spine.iter().map(|idref| pkg.item_path(idref).unwrap_or_default()).collect()
+}
+
+/// The longest head [`LazySpine::read_head`] reads looking for `<body`.
+const MAX_HEAD: usize = 256 * 1024;
+
+/// Spine items of an EPUB read on demand, from any thread. Each reader takes an open
+/// handle on the file from a pool (opening another when all are in use), so the
+/// background paginator and the first page do not wait for each other.
+struct LazySpine {
+    file: std::path::PathBuf,
+    obfuscated: HashMap<String, Obfuscation>,
+    /// Path of each spine item (empty: not in the manifest).
+    paths: Vec<String>,
+    /// Stored (uncompressed) size of each spine item: 0 when it cannot be read.
+    sizes: Vec<usize>,
+    handles: Mutex<Vec<ZipLoader<File>>>,
+    /// The inflater [`ZipLoader::read_until_ci`] reuses for every head.
+    inflate: Mutex<flate2::Decompress>,
+}
+
+impl LazySpine {
+    /// The spine items at `paths` of `file`, whose archive `loader` has open.
+    fn new(file: &Path, loader: ZipLoader<File>, paths: &[String]) -> Self {
+        let sizes = paths.iter().map(|p| if p.is_empty() { 0 } else { loader.stored_size(p).unwrap_or(0) }).collect();
+        let obfuscated = loader.obfuscated.clone();
+        let (handles, inflate) = (Mutex::new(vec![loader]), Mutex::new(flate2::Decompress::new(false)));
+        LazySpine { file: file.to_path_buf(), obfuscated, paths: paths.to_vec(), sizes, handles, inflate }
+    }
+
+    /// Runs `f` with a handle on the file; `None` when no handle can be opened.
+    fn with_handle<T>(&self, f: impl FnOnce(&ZipLoader<File>) -> T) -> Option<T> {
+        let pooled = self.handles.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let loader = match pooled {
+            Some(l) => l,
+            None => match open_archive(&self.file) {
+                Ok(mut l) => {
+                    l.obfuscated = self.obfuscated.clone();
+                    l
+                }
+                Err(e) => {
+                    log::warn!("epub: another handle on {}: {e}", self.file.display());
+                    return None;
+                }
+            },
+        };
+        let out = f(&loader);
+        self.handles.lock().unwrap_or_else(|e| e.into_inner()).push(loader);
+        Some(out)
+    }
+}
+
+impl ink_html::book::SpineSource for LazySpine {
+    fn read(&self, i: usize) -> String {
+        let path = &self.paths[i];
+        if path.is_empty() {
+            return String::new();
+        }
+        self.with_handle(|l| l.read(path).map(chapter_text).unwrap_or_default()).unwrap_or_default()
+    }
+
+    /// The bytes up to the first `<body` (any case), decoded as [`chapter_text`] decodes
+    /// the whole item: only for UTF-8, where a prefix that ends at an ASCII byte decodes
+    /// to a prefix of the whole text. (An item nested deeper than the XML limit is
+    /// rewritten whole by [`chapter_text`]; its own head has the same stylesheets.)
+    fn read_head(&self, i: usize) -> Option<String> {
+        let path = &self.paths[i];
+        if path.is_empty() || self.obfuscated.contains_key(path) || self.sizes[i] as u64 > MAX_ENTRY {
+            return None;
+        }
+        let mut inflate = self.inflate.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = self.with_handle(|l| l.read_until_ci(path, b"<body", MAX_HEAD, &mut inflate))??;
+        let utf16 = bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]);
+        let declared = xml::declared_encoding(&bytes).and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()));
+        if utf16 || declared.is_some_and(|e| e != encoding_rs::UTF_8) {
+            return None;
+        }
+        Some(text_of(bytes))
+    }
+
+    fn len_hint(&self, i: usize) -> Option<usize> {
+        Some(self.sizes[i])
+    }
+}
+
+/// The book's resources (images, stylesheets, fonts) through the handles of a
+/// [`LazySpine`].
+struct SpineFiles(Arc<LazySpine>);
+
+impl ResourceLoader for SpineFiles {
+    fn read(&self, path: &str) -> Result<Vec<u8>> {
+        self.0.with_handle(|l| l.read(path)).unwrap_or_else(|| Err(DocError::NotFound(path.into())))
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.0.with_handle(|l| l.exists(path)).unwrap_or(false)
+    }
+}
+
 /// [`load`], plus the engine's navigation (TOC and page list hrefs) for [`open`] when
 /// `with_nav` is set.
 fn load_parts(path: &Path, zip: Option<ZipArchive<File>>, with_nav: bool) -> Result<(Book, Option<ink_html::Navigation>)> {
@@ -726,8 +913,7 @@ fn load_parts(path: &Path, zip: Option<ZipArchive<File>>, with_nav: bool) -> Res
     }
     let mut info = info_of(&loader, &pkg, None);
     info.cover = None;
-    let paths: Vec<String> = pkg.spine.iter().map(|idref| pkg.item_path(idref).unwrap_or_default()).collect();
-    let chapters = read_spine(path, &loader, paths);
+    let chapters = read_spine(path, &loader, spine_paths(&pkg));
     if chapters.iter().all(|c| c.html.is_empty()) {
         return Err(DocError::Format("no readable chapters in spine".into()));
     }
@@ -924,6 +1110,138 @@ mod tests {
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].path, "OEBPS/fonts/a b.otf");
         assert!(drm_message("Adobe ADEPT").contains("DRM"));
+    }
+
+    /// Writes an EPUB with `chapters` (path under `OEBPS/`, XHTML) and `files` (path
+    /// under `OEBPS/`, bytes) to `dir/name`. Entries named `stored*` are not compressed.
+    fn write_epub(dir: &Path, name: &str, chapters: &[(&str, String)], files: &[(&str, &[u8])]) -> std::path::PathBuf {
+        use std::io::Write;
+        std::fs::create_dir_all(dir).unwrap();
+        let f = dir.join(name);
+        let mut z = zip::ZipWriter::new(File::create(&f).unwrap());
+        let mut add = |path: &str, bytes: &[u8]| {
+            let stored = path.rsplit('/').next().is_some_and(|n| n.starts_with("stored"));
+            let method = if stored { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
+            z.start_file(path, zip::write::SimpleFileOptions::default().compression_method(method)).unwrap();
+            z.write_all(bytes).unwrap();
+        };
+        add("mimetype", b"application/epub+zip");
+        let container = r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#;
+        add("META-INF/container.xml", container.as_bytes());
+        let item = |(i, (p, _)): (usize, &(&str, String))| format!(r#"<item id="c{i}" href="{p}" media-type="application/xhtml+xml"/>"#);
+        let items: String = chapters.iter().enumerate().map(item).collect();
+        let spine: String = (0..chapters.len()).map(|i| format!(r#"<itemref idref="c{i}"/>"#)).collect();
+        let opf = format!(
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>T</dc:title></metadata><manifest>{items}</manifest><spine>{spine}</spine></package>"#
+        );
+        add("OEBPS/content.opf", opf.as_bytes());
+        for (p, html) in chapters {
+            add(&format!("OEBPS/{p}"), html.as_bytes());
+        }
+        for (p, bytes) in files {
+            add(&format!("OEBPS/{p}"), bytes);
+        }
+        z.finish().unwrap();
+        f
+    }
+
+    /// Page positions, Kindle locations, TOC and page labels of `doc` once paginated.
+    fn summary(doc: &mut BookDocument) -> Vec<String> {
+        use ink_doc::Document;
+        doc.set_layout(&ink_doc::LayoutSettings::for_screen(600, 800)).unwrap();
+        assert!(doc.wait_paginated(std::time::Duration::from_secs(120)));
+        let mut out = Vec::new();
+        for i in 0..doc.page_count().pages {
+            let p = doc.position_of_page(i).unwrap();
+            out.push(format!("page {i} {p} {:?}", doc.location(&p)));
+        }
+        out.extend(doc.toc().iter().map(|e| format!("toc {} {} {} {:?}", e.level, e.title, e.position, e.page)));
+        out.extend(doc.page_labels().iter().map(|(l, p)| format!("label {l} {p}")));
+        let book = doc.html().book();
+        let mut sheets: Vec<&String> = book.sheets.keys().collect();
+        sheets.sort();
+        out.push(format!("sheets {sheets:?} faces {} fonts {}", book.font_faces.len(), book.fonts.len()));
+        out
+    }
+
+    #[test]
+    fn lazy_open_matches_the_eager_open() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        for name in ["juliet.epub", "synthetic.epub", "formats/epub2-ncx.epub", "formats/epub3-nav.epub"] {
+            let path = root.join(name);
+            let mut lazy = open_book(&path, None).unwrap();
+            // Opening reads the first spine item with content and only the heads of the others
+            // (a missing item is "read" as empty).
+            let chapters = &lazy.html().book().chapters;
+            let first = chapters.iter().position(|c| !c.html().trim().is_empty()).unwrap();
+            assert!(chapters.iter().skip(first + 1).all(|c| !c.is_read() || c.html().is_empty()), "{name}: read before needed");
+            let mut eager = load(&path, None).unwrap().into_document().unwrap();
+            assert_eq!(summary(&mut lazy), summary(&mut eager), "{name}");
+        }
+    }
+
+    #[test]
+    fn spine_heads_are_prefixes_of_the_items() {
+        use ink_html::book::SpineSource;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        for name in ["juliet.epub", "synthetic.epub", "formats/epub2-ncx.epub", "formats/epub3-nav.epub"] {
+            let path = root.join(name);
+            let (loader, pkg, _) = prepare(&path, None).unwrap();
+            let paths = spine_paths(&pkg);
+            let spine = LazySpine::new(&path, loader, &paths);
+            for i in 0..paths.len() {
+                let whole = spine.read(i);
+                assert_eq!(spine.len_hint(i), Some(whole.len()), "{name} {i}");
+                if whole.is_empty() {
+                    continue; // not in the archive
+                }
+                let head = spine.read_head(i).unwrap_or_else(|| panic!("{name} {i}: no head"));
+                assert!(whole.starts_with(&head) && head.to_ascii_lowercase().ends_with("<body"), "{name} {i}: {head}");
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_heads_give_the_same_stylesheets() {
+        let dir = std::env::temp_dir().join(format!("ink-epub-heads-{}", std::process::id()));
+        let head = r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="a.css"/><style>@import "b.css"; @font-face { font-family: F; src: url(f.ttf) }</style></head>"#;
+        // Nested deeper than the XML limit: the whole item is rewritten, its head read as is.
+        let deep = format!("{}<body>{}x{}</body></html>", head.replace("a.css", "e.css"), "<div>".repeat(300), "</div>".repeat(300));
+        // A <style> that no </style> closes: the prefix is not enough.
+        let open_style = format!("{head}<style>@import \"c.css\";<BODY><p>x</p></BODY></html>");
+        let latin1 = r#"<?xml version="1.0" encoding="iso-8859-1"?><html><head><link rel="stylesheet" href="d.css"/></head><body><p>caf"#;
+        // Heads longer than one read: deflated and stored.
+        let metas: String = (0..400).map(|i| format!(r#"<meta name="m{i}" content="{}"/>"#, i * 7919 % 1000)).collect();
+        let long = format!("{}<body><p>Long</p></body></html>", head.replace("<head>", &format!("<head>{metas}")).replace("a.css", "g.css"));
+        let chapters = [
+            ("one.xhtml", format!("{head}<body><p>One</p></body></html>")),
+            ("deep.xhtml", deep),
+            ("open.xhtml", open_style),
+            ("latin1.xhtml", format!("{latin1}\u{e9}</p></body></html>")),
+            ("long.xhtml", long.clone()),
+            ("stored.xhtml", long.replace("g.css", "h.css")),
+        ];
+        let css: &[u8] = b"p { margin: 0 }";
+        let files = [("a.css", css), ("b.css", css), ("c.css", css), ("d.css", css), ("e.css", css), ("g.css", css), ("h.css", css), ("f.ttf", b"FONT")];
+        let path = write_epub(&dir, "heads.epub", &chapters, &files);
+        {
+            use ink_html::book::SpineSource;
+            let (loader, pkg, _) = prepare(&path, None).unwrap();
+            let spine = LazySpine::new(&path, loader, &spine_paths(&pkg));
+            // The deep item is rewritten whole, so its raw head is not a prefix of it; the
+            // latin1 one is read whole.
+            let heads = [Some(true), Some(false), Some(true), None, Some(true), Some(true)];
+            for (i, want) in heads.into_iter().enumerate() {
+                let head = spine.read_head(i);
+                assert_eq!(head.as_ref().map(|h| spine.read(i).starts_with(h.as_str())), want, "item {i}");
+            }
+        }
+        let mut lazy = open_book(&path, None).unwrap();
+        let mut eager = load(&path, None).unwrap().into_document().unwrap();
+        let (l, e) = (summary(&mut lazy), summary(&mut eager));
+        assert_eq!(l, e);
+        assert!(l.last().unwrap().contains(r#"["OEBPS/a.css", "OEBPS/b.css", "OEBPS/c.css", "OEBPS/d.css", "OEBPS/e.css", "OEBPS/g.css", "OEBPS/h.css"]"#), "{l:?}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

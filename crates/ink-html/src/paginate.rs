@@ -632,7 +632,7 @@ fn paginate_claimed(book: &Book, params: &Params, fonts: &crate::fonts::FontSour
         }
         sh.changed.notify_all();
         // Keep memory flat on big books: drop the DOMs only this thread parsed.
-        if !was_parsed && (n > 40 || book.chapters[i].html.len() > EVICT_BYTES) {
+        if !was_parsed && (n > 40 || book.chapters[i].src_len() > EVICT_BYTES) {
             book.evict_chapter(i);
         }
     }
