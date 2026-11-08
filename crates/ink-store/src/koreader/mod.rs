@@ -697,10 +697,14 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
             }
             // The bookmark KOReader made of such a highlight (`pos0` is set: checked above).
             let page_v = if paging { Value::Int(*page) } else { h.get("pos0").cloned().unwrap_or(Value::Nil) };
-            let copied = [("datetime", "datetime"), ("notes", "text"), ("pos0", "pos0"), ("pos1", "pos1"), ("chapter", "chapter")];
-            let fields = copied.map(|(to, from)| (to, h.get(from).cloned()));
-            let extra = [("highlighted", Some(Value::Bool(true))), ("page", Some(page_v))];
-            let bm = Table { entries: fields.into_iter().chain(extra).filter_map(|(k, v)| Some((lua::Key::Str(k.into()), v?))).collect() };
+            let mut bm = Table::default();
+            for (to, from) in [("datetime", "datetime"), ("notes", "text"), ("pos0", "pos0"), ("pos1", "pos1"), ("chapter", "chapter")] {
+                if let Some(v) = h.get(from) {
+                    bm.entries.push((lua::Key::Str(to.into()), v.clone()));
+                }
+            }
+            bm.entries.push((lua::Key::Str("highlighted".into()), Value::Bool(true)));
+            bm.entries.push((lua::Key::Str("page".into()), page_v));
             mark(&mut marked, &bm);
             items.push((Cow::Owned(bm), Some(h)));
         }
