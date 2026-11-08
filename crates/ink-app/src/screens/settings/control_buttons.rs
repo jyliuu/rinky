@@ -8,7 +8,7 @@ use super::advanced;
 use super::order;
 use super::quick_light;
 use super::rows::Row;
-use super::{current_settings, edit_settings, PageModule, Reply};
+use super::{current_settings, PageModule, Reply};
 use crate::plugin_entries;
 use crate::plugin_host::PluginHost;
 use crate::router::AppCtx;
@@ -52,22 +52,10 @@ impl PageModule for Page {
         if let Some(text) = advanced::settings_action(action, cx) {
             return Reply::rebuild(text);
         }
-        let Some((name, op)) = action.strip_prefix(PREFIX).and_then(|a| a.strip_prefix(':')).and_then(order::split) else {
-            return Reply::default();
-        };
-        let mut chosen = quick_light::buttons(current_settings(cx), cx.plugins);
+        let chosen = quick_light::buttons(current_settings(cx), cx.plugins);
         let extra = plugin_entries::control_choices(cx.plugins);
         let list = plugin_entries::merged(CONTROL_BUTTONS, &extra);
-        match order::apply(&mut chosen, &list, name, op, MIN, quick_light::MAX_BUTTONS) {
-            Ok(text) => {
-                log::info!("settings: control center buttons {name} {op} -> {chosen:?}");
-                edit_settings(cx, |s| s.ui.control_buttons = chosen);
-                Reply::rebuild(text)
-            }
-            Err(text) => {
-                log::info!("settings: control center buttons {name} {op} refused: {text}");
-                Reply { status: Some(text), ..Reply::default() }
-            }
-        }
+        let range = (MIN, quick_light::MAX_BUTTONS);
+        order::page_action(action, PREFIX, &list, chosen, range, cx, |s, v| s.ui.control_buttons = v).unwrap_or_default()
     }
 }

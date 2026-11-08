@@ -6,6 +6,9 @@
 //! keyboard layouts pages can use it too.
 
 use super::rows::{Row, Trail};
+use super::{edit_settings, Reply};
+use crate::router::AppCtx;
+use ink_store::Settings;
 use ink_ui::Icon;
 
 /// Rows for `list` with `chosen` on and in order. Row actions are `<prefix>:<name>`;
@@ -63,6 +66,24 @@ pub fn apply(chosen: &mut Vec<String>, list: &[(&str, &str)], name: &str, op: &s
 /// Splits a reported `<prefix>:<name>:<op>` action (prefix already removed: `<name>:<op>`).
 pub fn split(arg: &str) -> Option<(&str, &str)> {
     arg.rsplit_once(':')
+}
+
+/// A page module's reply to a reported `<prefix>:<name>:<op>` action: [`apply`] on
+/// `chosen` (between `min` and `max` of `list`), the new order saved with `store`; a
+/// refused change only says why. `None`: not an action of `prefix`.
+pub fn page_action(action: &str, prefix: &str, list: &[(&str, &str)], mut chosen: Vec<String>, (min, max): (usize, usize), cx: &mut AppCtx, store: impl FnOnce(&mut Settings, Vec<String>)) -> Option<Reply> {
+    let (name, op) = action.strip_prefix(prefix)?.strip_prefix(':').and_then(split)?;
+    Some(match apply(&mut chosen, list, name, op, min, max) {
+        Ok(text) => {
+            log::info!("settings: {prefix} {name} {op} -> {chosen:?}");
+            edit_settings(cx, |s| store(s, chosen));
+            Reply::rebuild(text)
+        }
+        Err(text) => {
+            log::info!("settings: {prefix} {name} {op} refused: {text}");
+            Reply { status: Some(text), ..Reply::default() }
+        }
+    })
 }
 
 #[cfg(test)]
