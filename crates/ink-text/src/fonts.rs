@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 static REGULAR: &[u8] = include_bytes!("../../../fonts/NotoSerif-Regular.ttf");
@@ -268,7 +269,7 @@ pub const GLYPH_CACHE_BYTES: usize = 8 << 20;
 
 /// A set of faces (main family plus fallbacks) with caches.
 pub struct Fonts {
-    fonts: [Font; 3],
+    fonts: [Arc<Font>; 3],
     /// Per main face: it has a legacy `kern` table, the only kerning `fontdue` reads.
     kern: [bool; 3],
     advance: FastMap<(Style, char, u32), f32>,
@@ -323,10 +324,14 @@ fn proto_glyph(font: &Font, style: Style, c: char, px: f32, extra: u32) -> Proto
     (metrics, b.coverage)
 }
 
-/// The `fontdue` faces `[regular, bold, italic]`.
-fn parse_all(faces: [&[u8]; 3]) -> Result<[Font; 3], TextError> {
-    let parse = |bytes: &[u8]| Font::from_bytes(bytes, FontSettings::default()).map_err(|e| TextError::Font(e.to_string()));
-    Ok([parse(faces[0])?, parse(faces[1])?, parse(faces[2])?])
+/// The `fontdue` faces `[regular, bold, italic]`. Bytes given for more than one slot (UI
+/// fonts without a bold or italic face) are parsed once and shared.
+fn parse_all(faces: [&[u8]; 3]) -> Result<[Arc<Font>; 3], TextError> {
+    let parse = |bytes: &[u8]| Font::from_bytes(bytes, FontSettings::default()).map(Arc::new).map_err(|e| TextError::Font(e.to_string()));
+    let r = parse(faces[0])?;
+    let b = if faces[1] == faces[0] { r.clone() } else { parse(faces[1])? };
+    let i = if faces[2] == faces[0] { r.clone() } else if faces[2] == faces[1] { b.clone() } else { parse(faces[2])? };
+    Ok([r, b, i])
 }
 
 impl Fonts {
@@ -358,7 +363,7 @@ impl Fonts {
         Fonts::from_bytes([&r, &b, &i])
     }
 
-    fn from_parts(fonts: [Font; 3], faces: Vec<FaceData>) -> Self {
+    fn from_parts(fonts: [Arc<Font>; 3], faces: Vec<FaceData>) -> Self {
         let kern = std::array::from_fn(|i| faces[i].ttf().is_some_and(|f| f.raw_face().table(Tag::from_bytes(b"kern")).is_some()));
         Fonts {
             fonts,
@@ -790,6 +795,14 @@ mod tests {
         assert!(f.cached_glyphs() >= 5);
         f.clear_caches();
         assert_eq!(f.cached_glyphs(), 0);
+    }
+
+    #[test]
+    fn faces_given_twice_are_parsed_once() {
+        let f = Fonts::from_static([REGULAR, REGULAR, ITALIC]).unwrap();
+        assert!(std::ptr::eq(f.font(Style::Regular), f.font(Style::Bold)));
+        assert!(!std::ptr::eq(f.font(Style::Regular), f.font(Style::Italic)));
+        assert_eq!(f.font(Style::Italic).metrics('a', 40.0), Fonts::load().font(Style::Italic).metrics('a', 40.0));
     }
 
     #[test]
