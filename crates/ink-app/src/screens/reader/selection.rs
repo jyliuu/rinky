@@ -639,11 +639,6 @@ impl SelectionCard {
         Rect::new(b.x, b.y, b.w.saturating_sub(SHADOW), b.h.saturating_sub(SHADOW))
     }
 
-    /// Rectangles of the main row's tools inside the card `b`.
-    pub fn tool_rects(&self, b: Rect) -> Vec<Rect> {
-        tool_rects(b, self.tools.len())
-    }
-
     /// The "More" page: (back button, pills with their index in `rest`, next-page pill).
     pub fn more_rects(&self, b: Rect) -> (Rect, Vec<(usize, Rect)>, Option<Rect>) {
         let body = SelectionCard::body(b);
@@ -724,7 +719,7 @@ impl Widget for SelectionCard {
             return;
         }
         // The quote: a black bar on the left, italic text, at most the lines that fit.
-        let rects = self.tool_rects(b);
+        let rects = tool_rects(b, self.tools.len());
         let top = body.y + PAD;
         let bottom = rects.first().map_or(body.bottom(), |r| r.y) - GAP as i32;
         let px = QUOTE_LH as f32 / 1.3;
@@ -771,7 +766,7 @@ impl Widget for SelectionCard {
             }
             return EventResult::Handled;
         }
-        match self.tool_rects(b).iter().zip(&self.tools).find(|(r, _)| r.contains(*pos)) {
+        match tool_rects(b, self.tools.len()).iter().zip(&self.tools).find(|(r, _)| r.contains(*pos)) {
             Some((_, t)) if t.action == "sel-more" => {
                 self.more = true;
                 self.first = 0;
