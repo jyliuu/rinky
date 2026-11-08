@@ -176,6 +176,11 @@ impl AutoJoin {
     pub fn failed(&mut self, essid: &str, now: Instant) {
         self.failed.push((essid.to_string(), now));
     }
+
+    /// `essid` is no longer skipped (the user asked to join it).
+    pub fn forget(&mut self, essid: &str) {
+        self.failed.retain(|(e, _)| e != essid);
+    }
 }
 
 #[cfg(test)]

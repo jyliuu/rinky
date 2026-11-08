@@ -47,6 +47,7 @@ pub mod input;
 pub mod journal;
 pub mod light;
 pub mod lipc;
+pub mod netman;
 pub use ink_platform as platform;
 pub mod screen;
 pub mod screensaver;
