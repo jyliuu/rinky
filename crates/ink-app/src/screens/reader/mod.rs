@@ -2269,8 +2269,14 @@ impl AppScreen for ReaderScreen {
         }
         let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
         // The font faces of the first page are parsed on another core while the book is
-        // read (MD5, zip, spine, TOC); the first layout takes them parsed.
-        ink_html::fonts::prewarm_faces(layout.font_family.as_deref());
+        // read (MD5, zip, spine, TOC); the first layout takes them parsed. PDF, CBZ and
+        // XPS pages are drawn by MuPDF and use none of them.
+        let fixed = ink_doc::Provider::extensions(&ink_mupdf::MupdfProvider)
+            .iter()
+            .any(|e| self.path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e)));
+        if !fixed {
+            ink_html::fonts::prewarm_faces(layout.font_family.as_deref());
+        }
         let cache = cx.paths.cache().join("pagemaps");
         // One partial MD5 for the page-map cache, the reading speed and the plugins.
         let md5 = ink_store::partial_md5(&self.path).ok();
@@ -2747,7 +2753,10 @@ impl ReaderScreen {
                     self.rerender = false;
                     self.sharp_at = None;
                     self.preview_shown = None;
-                    self.prefetch_at = Some(Instant::now() + PREFETCH_IDLE);
+                    // Only fixed-layout documents draw a page ahead; a reflowable page
+                    // turn arms no timer (no wake 250 ms after every turn).
+                    let ahead = self.doc.as_deref().is_some_and(|d| d.fixed_view().is_some());
+                    self.prefetch_at = ahead.then(|| Instant::now() + PREFETCH_IDLE);
                 }
                 if let Some(t) = self.open_trace.as_mut() {
                     t.step("decorations+plugins");
