@@ -199,7 +199,7 @@ impl Path {
     }
 }
 
-/// Bytes of coverage the per-thread [`CoverageCache`] keeps.
+/// Bytes the per-thread [`CoverageCache`] keeps (keys, coverage and runs).
 const COVERAGE_BUDGET: usize = 4 << 20;
 
 thread_local! {
@@ -217,6 +217,11 @@ struct CoverageCache {
     bytes: usize,
 }
 
+/// Memory of one [`CoverageCache`] entry.
+fn entry_bytes((key, cov, runs): &(Vec<u32>, Vec<u8>, Vec<Run>)) -> usize {
+    4 * key.len() + cov.len() + runs.len() * std::mem::size_of::<Run>()
+}
+
 impl CoverageCache {
     fn get(&mut self, w: usize, h: usize, contours: Vec<Vec<(f32, f32)>>) -> (&[u8], &[Run]) {
         let mut key = vec![w as u32, h as u32];
@@ -228,13 +233,14 @@ impl CoverageCache {
             Some(i) => self.entries.remove(i),
             None => {
                 let cov = fill_contours(w, h, &contours);
-                self.bytes += cov.len();
                 let runs = runs(&cov, w);
-                (key, cov, runs)
+                let entry = (key, cov, runs);
+                self.bytes += entry_bytes(&entry);
+                entry
             }
         };
         while self.bytes > COVERAGE_BUDGET && !self.entries.is_empty() {
-            self.bytes -= self.entries.remove(0).1.len();
+            self.bytes -= entry_bytes(&self.entries.remove(0));
         }
         self.entries.push(entry);
         let (_, cov, runs) = self.entries.last().expect("just pushed");
@@ -435,7 +441,7 @@ mod tests {
         // Another place is another key; the old entry stays usable.
         shape(90.0).fill(&mut a, 0);
         assert_eq!(COVERAGE.with_borrow(|c| c.entries.len()), cached + 1);
-        assert_eq!(COVERAGE.with_borrow(|c| c.entries.iter().map(|e| e.1.len()).sum::<usize>()), COVERAGE.with_borrow(|c| c.bytes));
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.iter().map(entry_bytes).sum::<usize>()), COVERAGE.with_borrow(|c| c.bytes));
     }
 
     #[test]
