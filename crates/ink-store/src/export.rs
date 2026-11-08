@@ -194,16 +194,7 @@ pub fn sanitize_file_name(title: &str, fallback: &str) -> String {
         }
         t.trim_start_matches('.').trim_end_matches(['.', ' ']).to_string()
     }
-    let t = clean(title);
-    if !t.is_empty() {
-        return t;
-    }
-    let f = clean(fallback);
-    if f.is_empty() {
-        "book".to_string()
-    } else {
-        f
-    }
+    [title, fallback, "book"].into_iter().map(clean).find(|t| !t.is_empty()).unwrap_or_default()
 }
 
 fn file_stem_of(book: &Path) -> String {
