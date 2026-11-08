@@ -378,34 +378,58 @@ impl WordBox {
     }
 }
 
+/// A line of a paragraph: its boxes are `start..end` of the paragraph's line boxes.
 struct Line {
-    boxes: Vec<WordBox>,
+    start: usize,
+    end: usize,
     forced: bool,
     first: bool,
 }
 
 /// A paragraph (or one chunk of a giant paragraph) being broken into lines: its display
-/// text, the source of each char, the byte offset of each char and its segments.
+/// text, the source of each char, where its multi-byte chars are and its segments.
 struct Para<'p> {
     text: &'p str,
     src: &'p [CharSrc],
-    char_at: Vec<usize>,
+    /// (char index, byte offset) just after each multi-byte char. Between two of them
+    /// (and before the first) the text is ASCII, so char and byte indices advance
+    /// together: plain ASCII text needs no table and no search.
+    wide: Vec<(u32, u32)>,
     segs: &'p [Seg],
 }
 
 impl<'p> Para<'p> {
     fn new(text: &'p str, src: &'p [CharSrc], segs: &'p [Seg]) -> Self {
-        Para { text, src, char_at: text.char_indices().map(|(b, _)| b).collect(), segs }
+        let mut wide = Vec::new();
+        if !text.is_ascii() {
+            for (ci, (b, c)) in text.char_indices().enumerate() {
+                if !c.is_ascii() {
+                    wide.push((ci as u32 + 1, (b + c.len_utf8()) as u32));
+                }
+            }
+        }
+        Para { text, src, wide, segs }
     }
 
     /// Index of the char at byte `b` (or of the first char after it).
     fn char_index(&self, b: usize) -> usize {
-        self.char_at.partition_point(|&x| x < b)
+        let b = b.min(self.text.len());
+        // The last multi-byte char ending at or before `b`; ASCII from there on, up to
+        // the next multi-byte char (a byte inside it counts that char as before `b`).
+        let k = self.wide.partition_point(|&(_, wb)| wb as usize <= b);
+        let (ci, wb) = if k == 0 { (0, 0) } else { (self.wide[k - 1].0 as usize, self.wide[k - 1].1 as usize) };
+        let i = ci + (b - wb);
+        match self.wide.get(k) {
+            Some(&(next, _)) => i.min(next as usize),
+            None => i,
+        }
     }
 
     /// Byte offset of char `i` (the text length past the end).
     fn byte(&self, i: usize) -> usize {
-        self.char_at.get(i).copied().unwrap_or(self.text.len())
+        let k = self.wide.partition_point(|&(wi, _)| wi as usize <= i);
+        let b = if k == 0 { i } else { self.wide[k - 1].1 as usize + (i - self.wide[k - 1].0 as usize) };
+        b.min(self.text.len())
     }
 
     /// The segment of the char at byte `b`.
@@ -426,7 +450,7 @@ impl<'p> Para<'p> {
             while j < stop && self.src[j].seg == seg {
                 j += 1;
             }
-            let run = (seg, self.char_at[i], self.byte(j).min(end));
+            let run = (seg, self.byte(i), self.byte(j).min(end));
             i = j;
             Some(run)
         })
@@ -468,6 +492,9 @@ pub struct Flow<'a, 'e> {
     stop: Option<StopAt>,
     /// The stop was reached: the open blocks unwind without laying out more children.
     stopped: bool,
+    /// Lines make text draw items. False for a page-map layout ([`Flow::layout_slices`]),
+    /// which needs only the slices: their geometry and keys do not depend on the items.
+    text_items: bool,
 }
 
 /// Where [`Flow::layout_until`] stops: once the flow is `extra` px below the first slice
@@ -533,6 +560,12 @@ impl<'a, 'e> Flow<'a, 'e> {
         Self::layout_until(env, p, dom, styles, chapter_path, book_lang, None).0
     }
 
+    /// [`Flow::layout`] for the page map: the same slices and height, without the draw
+    /// items of the lines (no text runs to measure again, build and drop).
+    pub fn layout_slices(env: &'a mut Env<'e>, p: &'a Params, dom: &'a Dom, styles: &'a [Option<Box<ComputedStyle>>], chapter_path: &'a str, book_lang: Option<String>) -> ChapterLayout {
+        Self::run(env, p, dom, styles, chapter_path, book_lang, None, false).0
+    }
+
     /// [`Flow::layout`] that stops early at `stop`. Returns the layout and whether it is
     /// complete (the stop was not reached). A stopped layout holds every slice up to the
     /// stop, as the full layout has them, except that blocks still open at the stop end
@@ -547,6 +580,20 @@ impl<'a, 'e> Flow<'a, 'e> {
         chapter_path: &'a str,
         book_lang: Option<String>,
         stop: Option<StopAt>,
+    ) -> (ChapterLayout, bool) {
+        Self::run(env, p, dom, styles, chapter_path, book_lang, stop, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        env: &'a mut Env<'e>,
+        p: &'a Params,
+        dom: &'a Dom,
+        styles: &'a [Option<Box<ComputedStyle>>],
+        chapter_path: &'a str,
+        book_lang: Option<String>,
+        stop: Option<StopAt>,
+        text_items: bool,
     ) -> (ChapterLayout, bool) {
         let mut has_block_desc = vec![false; dom.nodes.len()];
         // Post-order: an element has block descendants if a child is block-level or has some.
@@ -582,6 +629,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             list_numbers: std::collections::HashMap::new(),
             stop,
             stopped: false,
+            text_items,
         };
         if dom.body != NONE {
             f.block(dom.body, p.left, p.content_w);
@@ -959,20 +1007,23 @@ impl<'a, 'e> Flow<'a, 'e> {
         let keep_spaces = ws.keeps_spaces();
         let keep_nl = ws.keeps_newlines();
         let tt = st.text_transform;
-        let mut prev_alpha = out.text.chars().last().is_some_and(|c| c.is_alphanumeric());
+        let capitalize = tt == TextTransform::Capitalize;
+        // The last char of the collected text, kept here instead of decoded again for
+        // every char.
+        let mut last = out.text.chars().last();
+        let mut prev_alpha = last.is_some_and(|c| c.is_alphanumeric());
+        out.text.reserve(t.len());
         for (i, c) in t.chars().enumerate() {
             let i = i as u32;
             if c == '\n' && keep_nl {
                 out.push('\n', seg, i);
+                last = Some('\n');
                 prev_alpha = false;
                 continue;
             }
             let c = if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c };
-            if c == ' ' && !keep_spaces {
-                let last = out.text.chars().last();
-                if matches!(last, None | Some(' ') | Some('\n')) {
-                    continue;
-                }
+            if c == ' ' && !keep_spaces && matches!(last, None | Some(' ') | Some('\n')) {
+                continue;
             }
             let mut shown = match tt {
                 TextTransform::Upper => c.to_uppercase().next().unwrap_or(c),
@@ -991,8 +1042,11 @@ impl<'a, 'e> Flow<'a, 'e> {
                     shown = shown.to_uppercase().next().unwrap_or(shown);
                 }
             }
-            prev_alpha = c.is_alphanumeric();
+            if capitalize {
+                prev_alpha = c.is_alphanumeric();
+            }
             out.push(shown, seg, i);
+            last = Some(shown);
         }
     }
 
@@ -1147,7 +1201,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         let para_first_slice = self.out.slices.len();
         if text.len() <= GIANT_PARAGRAPH {
-            let src: Vec<CharSrc> = src.iter().collect();
+            let mut chars = Vec::with_capacity(src.n);
+            chars.extend(src.iter());
+            let src = chars;
             self.lay_lines(owner, &text, &src, &segs, x, w);
         } else {
             let mut src_iter = src.iter();
@@ -1191,20 +1247,28 @@ impl<'a, 'e> Flow<'a, 'e> {
         let para = Para::new(text, src, segs);
         // Break opportunities.
         let wraps = ost.white_space.wraps() || keep_spaces;
-        let mut ops: Vec<(usize, Break)> = break_opportunities(text).into_iter().filter(|(b, k)| wraps || *k == Break::Mandatory || *b == text.len()).collect();
+        let mut ops: Vec<(usize, Break)> = break_opportunities(text);
+        if !wraps {
+            ops.retain(|(b, k)| *k == Break::Mandatory || *b == text.len());
+        }
         // Allow breaks around images.
-        for (ci, c) in text.char_indices() {
-            if c == OBJ {
-                ops.push((ci, Break::Allowed));
-                ops.push((ci + c.len_utf8(), Break::Allowed));
+        if text.contains(OBJ) {
+            for (ci, c) in text.char_indices() {
+                if c == OBJ {
+                    ops.push((ci, Break::Allowed));
+                    ops.push((ci + c.len_utf8(), Break::Allowed));
+                }
             }
         }
         ops.retain(|(b, _)| *b > 0);
         ops.sort_by_key(|o| (o.0, o.1 == Break::Allowed));
         ops.dedup_by_key(|o| o.0);
         // Boxes.
-        let mut boxes: Vec<WordBox> = Vec::new();
+        let mut boxes: Vec<WordBox> = Vec::with_capacity(ops.len());
         let mut prev = 0usize;
+        // The width of a space in the last segment one was measured in (most boxes of a
+        // paragraph end with a space of the same segment).
+        let mut space_of: Option<(usize, f32)> = None;
         for (b, kind) in ops {
             let seg_text = &text[prev..b];
             let forced = kind == Break::Mandatory && b < text.len() || seg_text.ends_with('\n');
@@ -1215,7 +1279,14 @@ impl<'a, 'e> Flow<'a, 'e> {
                 let sp_seg = src[para.char_index(end).min(src.len() - 1)].seg as usize;
                 let n_sp = text[end..b].chars().filter(|&c| c == ' ').count();
                 if n_sp > 0 {
-                    self.range_width(" ", &segs[sp_seg])
+                    match space_of {
+                        Some((s, sw)) if s == sp_seg => sw,
+                        _ => {
+                            let sw = self.range_width(" ", &segs[sp_seg]);
+                            space_of = Some((sp_seg, sw));
+                            sw
+                        }
+                    }
                 } else {
                     0.0
                 }
@@ -1231,29 +1302,35 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.first_line_pending = false;
         let hyph_ok = self.p.settings.hyphenate;
         let mut lines: Vec<Line> = Vec::new();
-        let mut cur: Vec<WordBox> = Vec::new();
+        // The boxes of every line, in order; the current line is `kept[cur..]`.
+        let mut kept: Vec<WordBox> = Vec::with_capacity(boxes.len());
+        let mut cur = 0usize;
         let mut cur_w = 0.0f32;
         let mut queue: std::collections::VecDeque<WordBox> = boxes.into();
         while let Some(bx) = queue.pop_front() {
             let first_line = lines.is_empty();
             let avail = if first_line { w - indent.max(0.0) } else { w };
-            let gap = cur.last().map(|b: &WordBox| b.space).unwrap_or(0.0);
+            let empty = kept.len() == cur;
+            let gap = if empty { 0.0 } else { kept[kept.len() - 1].space };
             let need = cur_w + gap + bx.width;
-            if wraps && cur.is_empty() && need > avail + 0.01 && bx.width > 0.0 {
+            if wraps && empty && need > avail + 0.01 && bx.width > 0.0 {
                 // Alone at the start of a line and still too wide (a long URL or word):
                 // hyphenate or cut it.
                 if let Some((a, b)) = self.split_box(&para, &bx, avail, hyph_ok).or_else(|| self.cut_box(&para, &bx, avail)) {
-                    lines.push(Line { boxes: vec![a], forced: false, first: first_line });
+                    kept.push(a);
+                    lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+                    cur = kept.len();
                     queue.push_front(b);
                     continue;
                 }
             }
-            if cur.is_empty() || need <= avail + 0.01 {
+            if empty || need <= avail + 0.01 {
                 cur_w = need;
                 let forced = bx.forced;
-                cur.push(bx);
+                kept.push(bx);
                 if forced {
-                    lines.push(Line { boxes: std::mem::take(&mut cur), forced: true, first: first_line });
+                    lines.push(Line { start: cur, end: kept.len(), forced: true, first: first_line });
+                    cur = kept.len();
                     cur_w = 0.0;
                 }
                 continue;
@@ -1261,25 +1338,27 @@ impl<'a, 'e> Flow<'a, 'e> {
             // Does not fit: try to hyphenate it into the remaining space.
             let remaining = avail - cur_w - gap;
             if let Some((a, b)) = self.split_box(&para, &bx, remaining, hyph_ok) {
-                cur.push(a);
-                lines.push(Line { boxes: std::mem::take(&mut cur), forced: false, first: first_line });
+                kept.push(a);
+                lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+                cur = kept.len();
                 cur_w = 0.0;
                 queue.push_front(b);
                 continue;
             }
-            lines.push(Line { boxes: std::mem::take(&mut cur), forced: false, first: first_line });
+            lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+            cur = kept.len();
             cur_w = 0.0;
             // On a line of its own next (cut there when still too wide).
             queue.push_front(bx);
         }
-        if !cur.is_empty() {
+        if kept.len() > cur {
             let first = lines.is_empty();
-            lines.push(Line { boxes: cur, forced: true, first });
+            lines.push(Line { start: cur, end: kept.len(), forced: true, first });
         }
         let n_lines = lines.len();
-        for (li, line) in lines.into_iter().enumerate() {
+        for (li, line) in lines.iter().enumerate() {
             let last = li + 1 == n_lines;
-            self.place_line(owner, &para, line, x, w, indent, last);
+            self.place_line(owner, &para, line, &kept[line.start..line.end], x, w, indent, last);
         }
     }
 
@@ -1365,7 +1444,7 @@ impl<'a, 'e> Flow<'a, 'e> {
 
     /// Positions one line, emits its draw items and its slice.
     #[allow(clippy::too_many_arguments)]
-    fn place_line(&mut self, owner: NodeId, p: &Para, line: Line, x: f32, w: f32, indent: f32, last: bool) {
+    fn place_line(&mut self, owner: NodeId, p: &Para, line: &Line, boxes: &[WordBox], x: f32, w: f32, indent: f32, last: bool) {
         let (text, src, segs) = (p.text, p.src, p.segs);
         let ost = self.st(owner);
         // Vertical metrics: the block's strut plus every piece.
@@ -1376,43 +1455,51 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut asc = sa + half;
         let mut desc = lh - asc;
         // (piece, x offset, a hyphen is drawn after it)
-        let mut placed: Vec<(Piece, f32, bool)> = Vec::new();
-        let n_boxes = line.boxes.len();
+        let n_boxes = boxes.len();
+        let mut placed: Vec<(Piece, f32, bool)> = Vec::with_capacity(n_boxes);
         let mut pen = 0.0f32;
         let mut spaces = 0usize;
-        for (bi, b) in line.boxes.iter().enumerate() {
+        // The segment whose metrics are in `asc` and `desc` already (the same segment
+        // gives the same metrics, so the next pieces of a run of words skip them).
+        let mut measured_seg = None;
+        for (bi, b) in boxes.iter().enumerate() {
             for run in p.runs(b.start, b.end) {
-                let pc = Piece { seg: run.0, start: run.1, end: run.2, width: self.run_width(p, run) };
-                let seg = &segs[pc.seg as usize];
-                let st = self.st(seg.style);
-                let shift = seg.shift;
-                match seg.kind {
-                    SegKind::Image { h, .. } => {
-                        let a = image_ascent(st.vertical_align, h, sa);
-                        let shift = if matches!(st.vertical_align, VAlign::Middle | VAlign::Top) { 0.0 } else { shift };
-                        asc = asc.max(a + shift);
-                        desc = desc.max(h - a - shift);
-                    }
-                    SegKind::Text { face, px } => {
-                        let (a, d) = self.env.fonts.vmetrics(face, px);
-                        let l = self.line_height(st);
-                        let hl = (l - (a - d)) / 2.0;
-                        if shift == 0.0 {
-                            asc = asc.max(a + hl + shift);
-                            desc = desc.max(l - a - hl - shift);
-                        } else {
-                            // Sub/superscripts do not grow the line beyond their glyphs.
+                // Widths only place the pieces across the line.
+                let width = if self.text_items { self.run_width(p, run) } else { 0.0 };
+                let pc = Piece { seg: run.0, start: run.1, end: run.2, width };
+                if measured_seg != Some(pc.seg) {
+                    measured_seg = Some(pc.seg);
+                    let seg = &segs[pc.seg as usize];
+                    let st = self.st(seg.style);
+                    let shift = seg.shift;
+                    match seg.kind {
+                        SegKind::Image { h, .. } => {
+                            let a = image_ascent(st.vertical_align, h, sa);
+                            let shift = if matches!(st.vertical_align, VAlign::Middle | VAlign::Top) { 0.0 } else { shift };
                             asc = asc.max(a + shift);
-                            desc = desc.max(-d - shift);
+                            desc = desc.max(h - a - shift);
                         }
+                        SegKind::Text { face, px } => {
+                            let (a, d) = self.env.fonts.vmetrics(face, px);
+                            let l = self.line_height(st);
+                            let hl = (l - (a - d)) / 2.0;
+                            if shift == 0.0 {
+                                asc = asc.max(a + hl + shift);
+                                desc = desc.max(l - a - hl - shift);
+                            } else {
+                                // Sub/superscripts do not grow the line beyond their glyphs.
+                                asc = asc.max(a + shift);
+                                desc = desc.max(-d - shift);
+                            }
+                        }
+                        SegKind::Break => {}
                     }
-                    SegKind::Break => {}
                 }
                 let wdt = pc.width;
                 placed.push((pc, pen, false));
                 pen += wdt;
             }
-            if b.hyphen && bi + 1 == n_boxes && !line.forced {
+            if b.hyphen && bi + 1 == n_boxes && !line.forced && self.text_items {
                 if let Some(last_p) = placed.last_mut() {
                     last_p.2 = true;
                     let seg = &segs[last_p.0.seg as usize];
@@ -1489,10 +1576,14 @@ impl<'a, 'e> Flow<'a, 'e> {
         // Box ends (all but the last box's) for justification: a box with a space after
         // it widens that space. Each box counts its own space (an empty box, such as the
         // space after an inline image, ends where the box before it ends).
-        let mut gaps = line.boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
+        let mut gaps = boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
         let mut add = 0.0f32;
         let mut key: Option<(u32, u32)> = None;
         for (pc, off, hyphen) in placed {
+            if !self.text_items && key.is_some() {
+                // A page-map layout needs only the key of the first piece.
+                break;
+            }
             // Extra space accumulated before this piece.
             while let Some((_, spaced)) = gaps.next_if(|&(e, _)| pc.start >= e) {
                 if spaced {
@@ -1506,15 +1597,26 @@ impl<'a, 'e> Flow<'a, 'e> {
             match &seg.kind {
                 SegKind::Image { src, w, h } => {
                     let y = baseline - image_ascent(st.vertical_align, *h, sa) - seg.shift;
-                    self.out.items.push(Draw::Image(ImageRun { x: px_x, y, w: *w, h: *h, src: src.clone(), node: seg.node, link: seg.link }));
+                    if self.text_items {
+                        self.out.items.push(Draw::Image(ImageRun { x: px_x, y, w: *w, h: *h, src: src.clone(), node: seg.node, link: seg.link }));
+                    }
                     key.get_or_insert((self.dom.node(seg.node).order, 0));
                 }
                 SegKind::Break => {
                     key.get_or_insert((self.dom.node(seg.node).order, 0));
                 }
                 &SegKind::Text { face, px } => {
+                    if !self.text_items {
+                        key.get_or_insert((self.dom.node(seg.node).order, src[ci].dom));
+                        continue;
+                    }
                     let raw = &text[pc.start..pc.end];
-                    let mut shown: String = raw.chars().filter(|&c| c != SOFT_HYPHEN && c != '\n').collect();
+                    let mut shown = String::with_capacity(raw.len() + usize::from(hyphen));
+                    if raw.contains([SOFT_HYPHEN, '\n']) {
+                        shown.extend(raw.chars().filter(|&c| c != SOFT_HYPHEN && c != '\n'));
+                    } else {
+                        shown.push_str(raw);
+                    }
                     if hyphen {
                         shown.push('-');
                     }
@@ -1954,5 +2056,20 @@ mod tests {
         assert_eq!(marker_text(ListStyle::UpperRoman, 14), "XIV.");
         assert_eq!(marker_text(ListStyle::LowerAlpha, 28), "ab.");
         assert_eq!(marker_text(ListStyle::Disc, 1), "•");
+    }
+
+    #[test]
+    fn para_char_and_byte_indices_match_a_full_table() {
+        let texts = ["", "plain words", "é", "café au lait", "“Quoted”—and ‘more’.", "Съешь же ещё", "a😀b\u{ad}c\u{fffc}", "😀😀x"];
+        for text in texts {
+            let para = Para::new(text, &[], &[]);
+            let at: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+            for b in 0..=text.len() + 2 {
+                assert_eq!(para.char_index(b), at.partition_point(|&x| x < b), "char_index({b}) of {text:?}");
+            }
+            for i in 0..=at.len() + 2 {
+                assert_eq!(para.byte(i), at.get(i).copied().unwrap_or(text.len()), "byte({i}) of {text:?}");
+            }
+        }
     }
 }

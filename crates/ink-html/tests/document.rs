@@ -521,3 +521,30 @@ fn range_rects_match_the_selection_and_mark_search_hits() {
         assert!(sel.text.to_lowercase().starts_with("romeo"), "{:?} {h:?}", sel.text);
     }
 }
+
+/// The page map lays chapters out without the draw items of their lines: its page starts
+/// must be the starts of the pages the reader draws from the full layout, for books with
+/// text, images, tables, lists, notes and embedded fonts, with and without hyphenation.
+#[test]
+fn page_map_layout_has_the_full_layouts_page_starts() {
+    use ink_html::paginate::{chapter_pages, layout_chapter, paginate};
+    for name in ["juliet", "tables-lists", "images", "css-box", "css-text", "notes", "ws", "lang", "fonts", "pagelist"] {
+        let path = common::book_path(name);
+        let (meta, chapters, loader) = common::spine(&path);
+        let book = ink_html::book::Book::new(meta, chapters, &loader);
+        for (px, hyphenate) in [(28.0, false), (44.0, true)] {
+            let mut s = LayoutSettings::for_screen(1072, 1448);
+            s.font_px = px;
+            s.hyphenate = hyphenate;
+            let params = ink_html::layout::Params::new(&s);
+            let mut fonts = ink_html::fonts::FontBook::builtin();
+            let mut size = |p: &str| book.image_size(p, Some(&loader)).flatten();
+            let mut env = ink_html::layout::Env { fonts: &mut fonts, image_size: &mut size };
+            for i in 0..book.chapters.len() {
+                let full = paginate(&layout_chapter(&book, i, &params, &mut env), params.content_h);
+                let map = chapter_pages(&book, i, &params, &mut env);
+                assert_eq!(map.keys, full.iter().map(|p| p.key).collect::<Vec<_>>(), "{name} spine item {i} at {px} px");
+            }
+        }
+    }
+}
