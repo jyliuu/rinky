@@ -886,7 +886,9 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
 
 /// Parses Atom or JSON, chosen by MIME type, else by the first non-space byte.
 pub fn parse_any(body: &[u8], mime: &str, base_url: &str) -> Result<OpdsFeed> {
-    let text = String::from_utf8_lossy(body);
+    // The fast validator for the usual valid body; the lossy decoder's byte loop only for
+    // a broken one.
+    let text = std::str::from_utf8(body).map_or_else(|_| String::from_utf8_lossy(body), Cow::Borrowed);
     let text = text.trim_start_matches('\u{feff}');
     let m = mime.to_ascii_lowercase();
     if m.contains("json") || (!m.contains("xml") && text.trim_start().starts_with('{')) {
