@@ -702,10 +702,9 @@ impl Widget for Keyboard {
         for (i, &(face, k)) in rects.iter().enumerate() {
             let special = !matches!(k.action, KeyAction::Char(_));
             let down = self.pressed.iter().any(|p| p.key == i) || (k.action == KeyAction::Shift && self.upper());
-            // Every face is white (special keys too); a pressed key (and shift while on)
-            // only gets a thicker border, inside its face. Nothing else in the face
-            // changes, so the refresh changes few pixels.
-            fill_round_rect(cx.canvas, face, radius, bg);
+            // Every face is white (special keys too), as the board under it already is; a
+            // pressed key (and shift while on) only gets a thicker border, inside its
+            // face. Nothing else in the face changes, so the refresh changes few pixels.
             stroke_round_rect(cx.canvas, face, radius, if down { PRESS_BORDER } else { 2.0 }, fg);
             let icon = match (&k.action, k.icon) {
                 (KeyAction::Shift, _) if self.caps_lock => Some(Icon::ShiftLocked),
