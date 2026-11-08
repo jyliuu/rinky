@@ -128,14 +128,9 @@ impl AppCtx<'_> {
     /// Shows `rect` of the canvas now, outside the app loop's coalesced frame. For
     /// animation frames and other updates that must reach the panel before the paint
     /// returns; everything else is returned as damage from `AppScreen::paint`.
-    pub fn present_now(&mut self, rect: Rect, class: RefreshClass) -> anyhow::Result<()> {
+    pub fn show(&mut self, rect: Rect, class: RefreshClass) -> anyhow::Result<()> {
         self.screen.update(self.canvas, rect, class)?;
         Ok(())
-    }
-
-    /// Older name of [`AppCtx::present_now`].
-    pub fn show(&mut self, rect: Rect, class: RefreshClass) -> anyhow::Result<()> {
-        self.present_now(rect, class)
     }
 
     /// Shows the whole canvas now.

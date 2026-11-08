@@ -457,17 +457,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// SHA-256 of a file, lowercase hex.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let mut f = File::open(path)?;
-    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buf = vec![0u8; 64 << 10];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        ctx.update(&buf[..n]);
-    }
-    Ok(hex(ctx.finish().as_ref()))
+    Ok(HashingReader::new(File::open(path)?).finish()?)
 }
 
 /// Downloads the package into `work_dir` and checks its size and SHA-256 against
@@ -490,13 +480,12 @@ pub fn download_verified(client: &dyn HttpClient, cfg: &UpdateConfig, release: &
 
 /// Streams `asset` into `part`, hashing on the way; checks size and SHA-256.
 fn fetch_checked(client: &dyn HttpClient, cfg: &UpdateConfig, asset: &Asset, expected: &str, part: &Path) -> Result<()> {
-    let mut resp = get(client, cfg, &asset.url, "application/octet-stream", cfg.download_timeout)?;
+    let mut body = HashingReader::new(get(client, cfg, &asset.url, "application/octet-stream", cfg.download_timeout)?.body);
     let mut file = File::create(part)?;
-    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
     let mut buf = vec![0u8; 64 << 10];
     let mut total = 0u64;
     loop {
-        let n = resp.body.read(&mut buf).map_err(|e| UpdateError::Net { url: asset.url.clone(), source: NetError::Io(e) })?;
+        let n = body.read(&mut buf).map_err(|e| UpdateError::Net { url: asset.url.clone(), source: NetError::Io(e) })?;
         if n == 0 {
             break;
         }
@@ -504,7 +493,6 @@ fn fetch_checked(client: &dyn HttpClient, cfg: &UpdateConfig, asset: &Asset, exp
         if total > cfg.max_bytes {
             return Err(UpdateError::TooLarge { name: asset.name.clone(), limit: cfg.max_bytes });
         }
-        ctx.update(&buf[..n]);
         file.write_all(&buf[..n])?;
     }
     file.sync_all()?;
@@ -513,7 +501,7 @@ fn fetch_checked(client: &dyn HttpClient, cfg: &UpdateConfig, asset: &Asset, exp
             return Err(UpdateError::SizeMismatch { name: asset.name.clone(), expected: size, got: total });
         }
     }
-    let actual = hex(ctx.finish().as_ref());
+    let actual = body.finish()?;
     let expected = expected.to_ascii_lowercase();
     if actual != expected {
         return Err(UpdateError::ChecksumMismatch { name: asset.name.clone(), expected, actual });
@@ -525,6 +513,18 @@ fn fetch_checked(client: &dyn HttpClient, cfg: &UpdateConfig, asset: &Asset, exp
 struct HashingReader<R> {
     inner: R,
     ctx: ring::digest::Context,
+}
+
+impl<R: Read> HashingReader<R> {
+    fn new(inner: R) -> Self {
+        HashingReader { inner, ctx: ring::digest::Context::new(&ring::digest::SHA256) }
+    }
+
+    /// Reads the rest; the SHA-256 of everything read, lowercase hex.
+    fn finish(mut self) -> std::io::Result<String> {
+        std::io::copy(&mut self, &mut std::io::sink())?;
+        Ok(hex(self.ctx.finish().as_ref()))
+    }
 }
 
 impl<R: Read> Read for HashingReader<R> {
@@ -573,23 +573,16 @@ fn field_octal(field: &[u8]) -> Result<u64> {
 /// links, devices, pax/GNU extension headers, absolute paths and `..` are refused. The
 /// gzip stream is read to its end, so its CRC-32 and length are checked.
 /// Returns the file paths, relative to `dest`.
-pub fn unpack(archive: &Path, dest: &Path, max_unpacked: u64) -> Result<Vec<String>> {
-    unpack_inner(archive, dest, max_unpacked, None)
-}
-
-/// [`unpack`], and the archive file must have the SHA-256 `expected` (lowercase or
-/// uppercase hex). The hash is taken over the bytes that are unpacked, so the unpacked
-/// files come from exactly the verified file. On a mismatch `dest` is deleted.
-pub fn unpack_verified(archive: &Path, dest: &Path, max_unpacked: u64, expected: &str) -> Result<Vec<String>> {
-    unpack_inner(archive, dest, max_unpacked, Some(expected))
-}
-
-fn unpack_inner(archive: &Path, dest: &Path, max_unpacked: u64, expected: Option<&str>) -> Result<Vec<String>> {
+///
+/// With `expected` the archive file must have that SHA-256 (lowercase or uppercase
+/// hex). The hash is taken over the bytes that are unpacked, so the unpacked files come
+/// from exactly the verified file. On a mismatch `dest` is deleted.
+pub fn unpack(archive: &Path, dest: &Path, max_unpacked: u64, expected: Option<&str>) -> Result<Vec<String>> {
     if dest.exists() {
         std::fs::remove_dir_all(dest)?;
     }
     std::fs::create_dir_all(dest)?;
-    let raw = HashingReader { inner: File::open(archive)?, ctx: ring::digest::Context::new(&ring::digest::SHA256) };
+    let raw = HashingReader::new(File::open(archive)?);
     // flate2's read::GzDecoder buffers internally; every byte it takes from `raw` is hashed.
     let mut gz = flate2::read::GzDecoder::new(raw);
     let mut files = Vec::new();
@@ -669,9 +662,7 @@ fn unpack_inner(archive: &Path, dest: &Path, max_unpacked: u64, expected: Option
         return Err(UpdateError::UnsafeArchive("too much data after the end of the archive".into()));
     }
     if let Some(expected) = expected {
-        let mut raw = gz.into_inner();
-        std::io::copy(&mut raw, &mut std::io::sink())?;
-        let actual = hex(raw.ctx.finish().as_ref());
+        let actual = gz.into_inner().finish()?;
         let expected = expected.to_ascii_lowercase();
         if actual != expected {
             let _ = std::fs::remove_dir_all(dest);
@@ -838,7 +829,7 @@ fn install_staged(client: &dyn HttpClient, cfg: &UpdateConfig, release: &Release
     let archive = download_verified(client, cfg, release, &expected)?;
     // The download was hashed while it arrived; the file is hashed again while it is
     // unpacked, so the installer gets exactly the verified bytes.
-    let unpacked = unpack_verified(&archive, staged, MAX_UNPACKED_BYTES, &expected);
+    let unpacked = unpack(&archive, staged, MAX_UNPACKED_BYTES, Some(&expected));
     let _ = std::fs::remove_file(&archive);
     unpacked?;
     check_unpacked(staged, &release.version)?;
@@ -1294,7 +1285,7 @@ mod tests {
         let out = dir.join("out");
         let check = |entries: Vec<(String, Vec<u8>, u32, u8)>| {
             std::fs::write(&archive, targz(&entries)).unwrap();
-            unpack(&archive, &out, MAX_UNPACKED_BYTES)
+            unpack(&archive, &out, MAX_UNPACKED_BYTES, None)
         };
         let file = |n: &str| (n.to_string(), b"x".to_vec(), 0o644, b'0');
         assert_eq!(check(vec![file("rinky/a"), file("./extensions/rinky/b")]).unwrap(), vec!["rinky/a", "extensions/rinky/b"]);
@@ -1309,7 +1300,7 @@ mod tests {
             unpack(&{
                 std::fs::write(&archive, targz(&[("rinky/big".into(), vec![0; 2048], 0o644, b'0')])).unwrap();
                 archive.clone()
-            }, &out, 1024),
+            }, &out, 1024, None),
             Err(UpdateError::UnsafeArchive(_))
         ));
         // Truncated archive.
@@ -1320,7 +1311,7 @@ mod tests {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(&raw[..600]).unwrap();
         std::fs::write(&archive, enc.finish().unwrap()).unwrap();
-        assert!(matches!(unpack(&archive, &out, MAX_UNPACKED_BYTES), Err(UpdateError::UnsafeArchive(_))));
+        assert!(matches!(unpack(&archive, &out, MAX_UNPACKED_BYTES, None), Err(UpdateError::UnsafeArchive(_))));
         // A long path uses the ustar prefix field.
         let long = format!("rinky/{}/file", "d".repeat(95));
         assert_eq!(check(vec![file(&long)]).unwrap(), vec![long]);
@@ -1334,7 +1325,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&archive, package("1.2.3")).unwrap();
         let out = dir.join("out");
-        let files = unpack(&archive, &out, MAX_UNPACKED_BYTES).unwrap();
+        let files = unpack(&archive, &out, MAX_UNPACKED_BYTES, None).unwrap();
         assert!(files.contains(&"rinky/install.sh".to_string()));
         check_unpacked(&out, &Version::parse("1.2.3").unwrap()).unwrap();
         assert!(check_unpacked(&out, &Version::parse("1.2.4").unwrap()).is_err());
@@ -1374,7 +1365,7 @@ mod tests {
         assert!(fx.work_dir_empty());
     }
 
-    /// `unpack_verified` hashes the bytes it unpacks; `unpack` checks the gzip CRC.
+    /// `unpack` with a SHA-256 hashes the bytes it unpacks, and checks the gzip CRC.
     #[test]
     fn unpack_checks_the_file_hash_and_the_gzip_crc() {
         let dir = std::env::temp_dir().join(format!("ink-update-verify-{}", std::process::id()));
@@ -1384,22 +1375,22 @@ mod tests {
         let out = dir.join("out");
         let pkg = package("1.2.3");
         std::fs::write(&archive, &pkg).unwrap();
-        unpack_verified(&archive, &out, MAX_UNPACKED_BYTES, &sha(&pkg)).unwrap();
-        unpack_verified(&archive, &out, MAX_UNPACKED_BYTES, &sha(&pkg).to_uppercase()).unwrap();
-        let err = unpack_verified(&archive, &out, MAX_UNPACKED_BYTES, &sha(b"other")).unwrap_err();
+        unpack(&archive, &out, MAX_UNPACKED_BYTES, Some(&sha(&pkg))).unwrap();
+        unpack(&archive, &out, MAX_UNPACKED_BYTES, Some(&sha(&pkg).to_uppercase())).unwrap();
+        let err = unpack(&archive, &out, MAX_UNPACKED_BYTES, Some(&sha(b"other"))).unwrap_err();
         assert!(matches!(&err, UpdateError::ChecksumMismatch { name, .. } if name == NEXT_NAME), "{err}");
         assert!(!out.exists(), "unpacked files left after a hash mismatch");
         // Bytes appended after the gzip stream change the file's hash.
         let mut longer = pkg.clone();
         longer.extend_from_slice(b"appended");
         std::fs::write(&archive, &longer).unwrap();
-        assert!(matches!(unpack_verified(&archive, &out, MAX_UNPACKED_BYTES, &sha(&pkg)), Err(UpdateError::ChecksumMismatch { .. })));
+        assert!(matches!(unpack(&archive, &out, MAX_UNPACKED_BYTES, Some(&sha(&pkg))), Err(UpdateError::ChecksumMismatch { .. })));
         // A wrong CRC-32 in the gzip trailer (last 8 bytes: CRC-32, length).
         let mut bad = pkg.clone();
         let n = bad.len();
         bad[n - 8] ^= 0xff;
         std::fs::write(&archive, &bad).unwrap();
-        let err = unpack(&archive, &out, MAX_UNPACKED_BYTES).unwrap_err();
+        let err = unpack(&archive, &out, MAX_UNPACKED_BYTES, None).unwrap_err();
         assert!(matches!(&err, UpdateError::UnsafeArchive(m) if m.contains("gzip")), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1810,7 +1801,7 @@ mod tests {
         let pkg_file = fx.dir.join("pkg.tar.gz");
         std::fs::write(&pkg_file, package_bin("99.0.0", noise(100_000, 7))).unwrap();
         let pkg = fx.dir.join("pkg");
-        unpack(&pkg_file, &pkg, MAX_UNPACKED_BYTES).unwrap();
+        unpack(&pkg_file, &pkg, MAX_UNPACKED_BYTES, None).unwrap();
         let install = pkg.join("rinky/install.sh");
         // A cp that kills the installer (its parent shell) when it reaches the binary.
         let shim = fx.dir.join("kill-cp");
