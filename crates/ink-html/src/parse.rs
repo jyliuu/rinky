@@ -10,6 +10,7 @@
 //!   HTML parsing inserts into tables is dropped when the source has none, so paths stay
 //!   `table/tr/td` like crengine's.
 
+use crate::book::find_ci;
 use crate::dom::{Builder, Classifier, Dom};
 use html5ever::tendril::TendrilSink;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
@@ -150,21 +151,6 @@ fn is_void(name: &str) -> bool {
     )
 }
 
-/// Byte offset of the first ASCII-case-insensitive match of `needle` (lowercase) in
-/// `hay`.
-fn find_ascii_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    let first = *needle.first()?;
-    let mut from = 0;
-    while let Some(p) = hay[from..].iter().position(|&c| c == first) {
-        let at = from + p;
-        if hay.len() - at >= needle.len() && hay[at..at + needle.len()].eq_ignore_ascii_case(needle) {
-            return Some(at);
-        }
-        from = at + 1;
-    }
-    None
-}
-
 /// Rewrites `<x .../>` for non-void HTML elements to `<x ...></x>`, outside comments,
 /// CDATA, scripts and styles, and outside `<svg>`/`<math>` (foreign content honours `/>`).
 pub fn expand_self_closing(src: &str) -> String {
@@ -219,7 +205,7 @@ pub fn expand_self_closing(src: &str) -> String {
         }
         if (lname == "script" || lname == "style") && !closing {
             let close = format!("</{name}");
-            let end = find_ascii_ci(&b[k..], close.as_bytes()).map(|e| k + e).unwrap_or(b.len());
+            let end = find_ci(src, k, &close).unwrap_or(b.len());
             i = end;
             continue;
         }
@@ -245,7 +231,7 @@ pub fn expand_self_closing(src: &str) -> String {
 
 fn parse_html5(src: &str, classifier: &mut dyn Classifier) -> Dom {
     let fixed = expand_self_closing(src);
-    let has_tbody = find_ascii_ci(src.as_bytes(), b"<tbody").is_some();
+    let has_tbody = find_ci(src, 0, "<tbody").is_some();
     let rc = html5ever::parse_document(RcDom::default(), Default::default()).one(fixed);
     let mut b = Builder::new(Some(classifier));
     walk(&rc.document, &mut b, has_tbody);

@@ -82,7 +82,7 @@ pub fn head_end(html: &str) -> usize {
 
 /// First offset at or after `from` where `needle` (lowercase ASCII, starting with `<`)
 /// occurs in `hay`, ignoring ASCII case.
-fn find_ci(hay: &str, from: usize, needle: &str) -> Option<usize> {
+pub(crate) fn find_ci(hay: &str, from: usize, needle: &str) -> Option<usize> {
     let b = hay.as_bytes();
     let n = needle.as_bytes();
     let mut i = from;
@@ -204,19 +204,7 @@ pub fn scan_start_tags(html: &str) -> Vec<(&str, Vec<(&str, &str)>)> {
         i = end;
         if !self_closing && (local.eq_ignore_ascii_case("script") || local.eq_ignore_ascii_case("style")) {
             // Raw text up to the end tag.
-            let close = format!("</{}", name.to_ascii_lowercase());
-            let lower_from = |k: usize| -> Option<usize> {
-                let mut from = k;
-                while let Some(q) = html[from..].find("</") {
-                    let c = from + q;
-                    if html.len() - c >= close.len() && html[c..c + close.len()].eq_ignore_ascii_case(&close) {
-                        return Some(c);
-                    }
-                    from = c + 2;
-                }
-                None
-            };
-            i = lower_from(end).unwrap_or(n);
+            i = find_ci(html, end, &format!("</{}", name.to_ascii_lowercase())).unwrap_or(n);
         }
         out.push((name, attrs));
     }
