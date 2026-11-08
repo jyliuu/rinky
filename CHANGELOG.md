@@ -11,7 +11,8 @@ All notable changes to rinky are listed here. The format is based on
   place of the font and margin tabs that did nothing to them: fit the whole page or
   the page width, read two-column papers one column at a time, darker contrast for
   faint scans, two pages side by side, crop the white margins, and right to left for
-  manga. The choices are kept for each book.
+  manga, where a tap on the left or a swipe to the right turns to the next page. The
+  choices are kept for each book.
 
 ## [0.5.3] - 2026-11-07
 

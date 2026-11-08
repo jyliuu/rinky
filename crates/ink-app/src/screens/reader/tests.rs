@@ -1795,3 +1795,26 @@ fn aa_view_tab_shows_a_comic_s_own_view() {
     assert!(o.ids.contains_key("rtl") && o.ids.contains_key("spreads"));
     h.shot("01-view");
 }
+
+/// A comic set to right to left: a tap on the left side goes forward, the right side
+/// back, and the page turn wave sweeps the other way.
+#[test]
+fn right_to_left_comic_turns_forward_on_the_left() {
+    use ink_device::Wave;
+    let mut h = Harness::generated("rtl-turns", "manga.cbz", &ink_mupdf::testgen::fixture_cbz(6));
+    let last = |h: &Harness| *h.probe.updates().last().unwrap();
+    h.tap_at(1100, 900);
+    assert_eq!(h.reader.page(), 1, "left to right: the right side goes forward");
+    h.reader.book_settings.rtl = Some(true);
+    h.with_cx(|r, cx| r.relayout(cx, RefreshClass::Gc16)).unwrap();
+    h.paint();
+    h.tap_at(100, 900);
+    assert_eq!(h.reader.page(), 2, "right to left: the left side goes forward");
+    assert_eq!(last(&h).wave, Some(Wave::Right));
+    h.tap_at(1100, 900);
+    assert_eq!(h.reader.page(), 1, "and the right side back");
+    assert_eq!(last(&h).wave, Some(Wave::Left));
+    // Page keys keep their meaning: forward is forward.
+    h.key(Key::PageNext);
+    assert_eq!(h.reader.page(), 2);
+}

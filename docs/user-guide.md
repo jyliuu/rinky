@@ -210,7 +210,10 @@ Layout. What you choose there is kept for that book only:
   Kindle is turned sideways; *On* always does, *Off* never does. Two pages only show
   with the whole page fit, one column and no zoom.
 - **Crop margins:** cuts the white border off each page, so the text is larger.
-- **Right to left:** for manga. In two-page view the right page comes first.
+- **Right to left:** for manga. Page turns go the other way: the left two thirds of
+  the screen and a swipe to the right go to the next page, the right third and a swipe
+  to the left go back, and in two-page view the right page comes first. Page keys keep
+  their meaning.
 
 ## 5. Light, sleep and settings
 

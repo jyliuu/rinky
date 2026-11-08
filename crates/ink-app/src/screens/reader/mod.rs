@@ -780,6 +780,12 @@ impl ReaderScreen {
         ink_ui::message::draw_message(cx.canvas, cx.fonts, &refs);
     }
 
+    /// The book reads right to left (a fixed-layout book with Aa › View › Right to left):
+    /// page-turn gestures and the turn wave go the other way.
+    fn reads_right_to_left(&self) -> bool {
+        self.doc.as_deref().and_then(|d| d.fixed_view()).is_some_and(|v| v.rtl)
+    }
+
     fn turn(&mut self, step: i64, cx: &mut AppCtx) {
         let Some(doc) = self.doc.as_ref() else { return };
         let total = doc.page_count().pages as i64;
@@ -790,8 +796,9 @@ impl ReaderScreen {
             self.rerender = true;
             self.turned = true;
             self.dirty = Some(cx.refresh.page_turn());
-            // No right-to-left books yet: a next page sweeps left.
-            self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, false));
+            // A next page sweeps left, right in a right-to-left book.
+            let rtl = self.reads_right_to_left();
+            self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, rtl));
         }
     }
 
