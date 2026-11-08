@@ -8,7 +8,8 @@ All notable changes to rinky are listed here. The format is based on
 
 ### Changed
 - Reading settings (Aa): a tap on a control no longer redraws the whole sheet when the
-  finger goes down and again when it lifts, so the sheet answers taps sooner.
+  finger goes down and again when it lifts, so the sheet answers taps sooner. The
+  sheet also opens faster.
 
 ### Fixed
 - Reading settings (Aa): a preset or a font size step now also refreshes the preview

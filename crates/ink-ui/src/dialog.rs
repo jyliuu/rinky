@@ -4,7 +4,7 @@
 //! Modal layers go on top of a [`Scrim`]: it takes every touch outside them and reports
 //! its action (for example `dismiss`) on a tap, so nothing underneath reacts.
 
-use crate::draw::{fill_round_rect, stroke_round_rect, Path};
+use crate::draw::{fill_round_rect, fill_top_round_rect, stroke_round_rect, stroke_top_round_rect};
 use crate::gesture::{Direction, Gesture};
 use crate::icon::Icon;
 use crate::widget::{paint_button, split_rows, ButtonKind, EventResult, PaintCx, Widget};
@@ -239,9 +239,8 @@ impl Widget for BottomSheet {
         let t = cx.theme;
         // Rounded top corners and a black edge along the top and sides (the sheet
         // stands on the bottom edge of the screen).
-        let (x, y, w, h) = (b.x as f32, b.y as f32, b.w as f32, b.h as f32);
-        Path::new().top_round_rect(x, y, w, h, t.radius_lg).fill(cx.canvas, t.bg);
-        Path::new().top_round_rect_outline(x, y, w, h, t.radius_lg, t.border_px as f32).fill(cx.canvas, t.fg);
+        fill_top_round_rect(cx.canvas, b, t.radius_lg, t.bg);
+        stroke_top_round_rect(cx.canvas, b, t.radius_lg, t.border_px, t.fg);
         // The side edges stop 8 px above the bottom: the panel's last 8 px stay empty.
         cx.canvas.fill_rect(b.x, b.bottom() - 8, b.w as i32, 8, t.bg);
         // Grab handle: a pill, mid gray, thick enough not to ghost.
