@@ -20,8 +20,6 @@ pub mod exth {
     pub const SUBJECT: u32 = 105;
     /// Publishing date.
     pub const DATE: u32 = 106;
-    /// Contributor.
-    pub const CONTRIBUTOR: u32 = 108;
     /// Source.
     pub const SOURCE: u32 = 112;
     /// ASIN.
@@ -32,8 +30,6 @@ pub mod exth {
     pub const KF8_COVER_URI: u32 = 129;
     /// Cover image: offset from the first resource record.
     pub const COVER_OFFSET: u32 = 201;
-    /// Thumbnail: offset from the first resource record.
-    pub const THUMB_OFFSET: u32 = 202;
     /// Document type (`EBOK`, `PDOC`, `EBSP` for samples).
     pub const CDE_TYPE: u32 = 501;
     /// Updated title.

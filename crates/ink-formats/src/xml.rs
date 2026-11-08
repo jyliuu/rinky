@@ -111,40 +111,113 @@ impl Element {
 
 /// Collapses whitespace runs to one space and trims.
 pub fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(s.len());
+    for w in s.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    out
 }
 
-/// Escapes text content for XML.
-pub fn escape_text(s: &str) -> String {
+/// `s` with every tag (`<...>`) replaced by one space; the text is not unescaped.
+pub(crate) fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
     for c in s.chars() {
         match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            c if is_xml_char(c) => out.push(c),
+            '<' => {
+                in_tag = true;
+                out.push(' ');
+            }
+            '>' if in_tag => in_tag = false,
+            c if !in_tag => out.push(c),
             _ => {}
         }
     }
     out
 }
 
+/// Appends `s` to `out` escaped for XML: `&`, `<` and `>` always, in an attribute value
+/// (double-quoted) also `"` and the white space a parser would normalise. Characters XML
+/// does not allow ([`is_xml_char`]) are left out. Runs that need no escaping are copied as
+/// slices; the scan is over bytes, as every character it acts on is ASCII except U+FFFE
+/// and U+FFFF (`EF BF BE`, `EF BF BF`).
+fn escape_into(out: &mut String, s: &str, attr: bool) {
+    /// Bytes that may need work: markup characters, controls and the lead byte of
+    /// U+FFFE/U+FFFF; `"` only matters in attributes, which also escape white space.
+    const fn table(attr: bool) -> [bool; 256] {
+        let mut t = [false; 256];
+        let mut i = 0;
+        while i < 0x20 {
+            t[i] = attr || !matches!(i as u8, b'\t' | b'\n' | b'\r');
+            i += 1;
+        }
+        t[b'&' as usize] = true;
+        t[b'<' as usize] = true;
+        t[b'>' as usize] = true;
+        t[b'"' as usize] = attr;
+        t[0xEF] = true;
+        t
+    }
+    const TEXT: [bool; 256] = table(false);
+    const ATTR: [bool; 256] = table(true);
+    let special = if attr { &ATTR } else { &TEXT };
+    let b = s.as_bytes();
+    let mut last = 0;
+    let mut i = 0;
+    while let Some(k) = b[i..].iter().position(|&c| special[c as usize]) {
+        i += k;
+        let (rep, len) = match b[i] {
+            b'&' => ("&amp;", 1),
+            b'<' => ("&lt;", 1),
+            b'>' => ("&gt;", 1),
+            b'"' if attr => ("&quot;", 1),
+            b'\n' if attr => ("&#10;", 1),
+            b'\t' if attr => ("&#9;", 1),
+            b'\r' if attr => ("&#13;", 1),
+            0..=0x1F => ("", 1),
+            0xEF if b.get(i + 1) == Some(&0xBF) && matches!(b.get(i + 2), Some(0xBE | 0xBF)) => ("", 3),
+            // Another character starting with EF.
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        out.push_str(&s[last..i]);
+        out.push_str(rep);
+        i += len;
+        last = i;
+    }
+    out.push_str(&s[last..]);
+}
+
+/// Appends `s` escaped as XML text content to `out`.
+pub fn push_text(out: &mut String, s: &str) {
+    escape_into(out, s, false);
+}
+
+/// Appends ` name="value"` to `out`, the value escaped.
+pub fn push_attr(out: &mut String, name: &str, value: &str) {
+    out.push(' ');
+    out.push_str(name);
+    out.push_str("=\"");
+    escape_into(out, value, true);
+    out.push('"');
+}
+
+/// Escapes text content for XML.
+pub fn escape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    push_text(&mut out, s);
+    out
+}
+
 /// Escapes an attribute value for XML (double-quoted).
 pub fn escape_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\n' => out.push_str("&#10;"),
-            '\t' => out.push_str("&#9;"),
-            '\r' => out.push_str("&#13;"),
-            c if is_xml_char(c) => out.push(c),
-            _ => {}
-        }
-    }
+    escape_into(&mut out, s, true);
     out
 }
 
@@ -248,10 +321,6 @@ pub fn html_entity(name: &str) -> Option<&'static str> {
     })
 }
 
-fn resolve(name: &str) -> Option<&'static str> {
-    html_entity(name)
-}
-
 fn qname_parts(raw: &[u8]) -> (Option<String>, String) {
     let s = String::from_utf8_lossy(raw);
     match s.split_once(':') {
@@ -266,7 +335,7 @@ fn element_of(e: &BytesStart) -> Element {
     for a in e.attributes().with_checks(false).flatten() {
         let qname = String::from_utf8_lossy(a.key.as_ref()).into_owned();
         let local = String::from_utf8_lossy(a.key.local_name().as_ref()).into_owned();
-        let value = match a.unescape_value_with(resolve) {
+        let value = match a.unescape_value_with(html_entity) {
             Ok(v) => v.into_owned(),
             Err(_) => String::from_utf8_lossy(&a.value).into_owned(),
         };
@@ -329,34 +398,27 @@ pub fn parse(xml: &str) -> Result<Element, String> {
                 // Close up to the matching open element (tolerates unclosed children).
                 // The search is bounded by MAX_DEPTH.
                 if let Some(pos) = stack.iter().rposition(|el| el.name == name) {
-                    if pos == 0 {
-                        continue;
-                    }
-                    while stack.len() > pos {
-                        let el = stack.pop().expect("open element");
-                        stack.last_mut().expect("document").children.push(Node::Element(el));
+                    if pos > 0 {
+                        close_to(&mut stack, pos);
                     }
                 }
             }
             Event::Text(t) => {
-                let s = match t.unescape_with(resolve) {
+                let s = match t.unescape_with(html_entity) {
                     Ok(s) => s.into_owned(),
                     Err(_) => String::from_utf8_lossy(&t).into_owned(),
                 };
-                push_text(stack.last_mut().expect("document"), s);
+                append_text(stack.last_mut().expect("document"), s);
             }
             Event::CData(t) => {
                 let s = String::from_utf8_lossy(&t).into_owned();
-                push_text(stack.last_mut().expect("document"), s);
+                append_text(stack.last_mut().expect("document"), s);
             }
             Event::Eof => break,
             _ => {}
         }
     }
-    while stack.len() > 1 {
-        let el = stack.pop().expect("open element");
-        stack.last_mut().expect("document").children.push(Node::Element(el));
-    }
+    close_to(&mut stack, 1);
     let doc = stack.pop().expect("document");
     doc.children
         .into_iter()
@@ -367,7 +429,16 @@ pub fn parse(xml: &str) -> Result<Element, String> {
         .ok_or_else(|| "XML: no root element".to_string())
 }
 
-fn push_text(el: &mut Element, s: String) {
+/// Closes the open elements down to `len` (at least 1, the document), each becoming the
+/// last child of the one below it.
+fn close_to(stack: &mut Vec<Element>, len: usize) {
+    while stack.len() > len {
+        let el = stack.pop().expect("open element");
+        stack.last_mut().expect("document").children.push(Node::Element(el));
+    }
+}
+
+fn append_text(el: &mut Element, s: String) {
     if s.is_empty() {
         return;
     }
@@ -376,6 +447,24 @@ fn push_text(el: &mut Element, s: String) {
     } else {
         el.children.push(Node::Text(s));
     }
+}
+
+/// Index of the `>` that closes the tag opening at `start` (a `<`), skipping quoted
+/// attribute values; `None` when the tag is never closed.
+pub(crate) fn tag_end(b: &[u8], start: usize) -> Option<usize> {
+    let mut quote = 0u8;
+    for (j, &c) in b.iter().enumerate().skip(start + 1) {
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            quote = c;
+        } else if c == b'>' {
+            return Some(j);
+        }
+    }
+    None
 }
 
 /// True when the markup in `s` opens more than `limit` nested elements. A byte scan
@@ -407,38 +496,11 @@ pub fn nesting_exceeds(s: &str, limit: usize) -> bool {
             i = p + 2;
             continue;
         }
-        // A start tag: find its end, honouring quotes.
-        let mut j = p + 1;
-        let mut quote = 0u8;
-        while j < b.len() {
-            let c = b[j];
-            if quote != 0 {
-                if c == quote {
-                    quote = 0;
-                }
-            } else if c == b'"' || c == b'\'' {
-                quote = c;
-            } else if c == b'>' {
-                break;
-            }
-            j += 1;
-        }
-        if j >= b.len() {
-            break;
-        }
-        // The name up to whitespace, `/` or `>`, without copying it; void names are short
-        // ASCII words, so the local name is lowercased in a small stack buffer.
+        let Some(j) = tag_end(b, p) else { break };
+        // The name up to whitespace, `/` or `>`, without copying it.
         let name_len = rest[1..].find(|c: char| c.is_whitespace() || matches!(c, '/' | '>')).unwrap_or(rest.len() - 1);
-        let name = &rest[1..1 + name_len];
-        let local = name.rsplit(':').next().unwrap_or("");
-        let mut buf = [0u8; 16];
-        let void = local.len() <= buf.len() && {
-            let l = &mut buf[..local.len()];
-            l.copy_from_slice(local.as_bytes());
-            l.make_ascii_lowercase();
-            std::str::from_utf8(l).is_ok_and(crate::xhtml::is_void)
-        };
-        if b[j - 1] != b'/' && !void {
+        let local = rest[1..1 + name_len].rsplit(':').next().unwrap_or("");
+        if b[j - 1] != b'/' && !crate::xhtml::is_void_ignore_case(local) {
             depth += 1;
             if depth > limit {
                 return true;
@@ -475,7 +537,7 @@ pub fn is_well_formed(xml: &str) -> bool {
             Ok(Event::End(_)) => depth = depth.saturating_sub(1),
             Ok(Event::Text(t)) => {
                 // Unknown entities break the v1 parser too.
-                if t.unescape_with(resolve).is_err() {
+                if t.unescape_with(html_entity).is_err() {
                     return false;
                 }
             }
@@ -581,6 +643,40 @@ mod tests {
     fn escaping_and_entities() {
         assert_eq!(escape_text("a<b&c>\u{1}"), "a&lt;b&amp;c&gt;");
         assert_eq!(escape_attr("\"x\"\n"), "&quot;x&quot;&#10;");
+        let mut out = String::from("<p");
+        push_attr(&mut out, "title", "a\tb & ü\u{0}");
+        out.push('>');
+        push_text(&mut out, "x \"y\" <é>");
+        assert_eq!(out, "<p title=\"a&#9;b &amp; ü\">x \"y\" &lt;é&gt;");
+        // The byte scan against a char-by-char reference.
+        let reference = |s: &str, attr: bool| {
+            let mut o = String::new();
+            for c in s.chars() {
+                match c {
+                    '&' => o.push_str("&amp;"),
+                    '<' => o.push_str("&lt;"),
+                    '>' => o.push_str("&gt;"),
+                    '"' if attr => o.push_str("&quot;"),
+                    '\n' if attr => o.push_str("&#10;"),
+                    '\t' if attr => o.push_str("&#9;"),
+                    '\r' if attr => o.push_str("&#13;"),
+                    c if is_xml_char(c) => o.push(c),
+                    _ => {}
+                }
+            }
+            o
+        };
+        let all: String = (0u32..0x250)
+            .chain([0xD7FF, 0xE000, 0xEFBF, 0xFBBF, 0xFFBE, 0xFFFD, 0xFFFE, 0xFFFF, 0x10000, 0x1FFFE, 0x10FFFF])
+            .filter_map(char::from_u32)
+            .collect();
+        for attr in [false, true] {
+            let mut o = String::new();
+            escape_into(&mut o, &all, attr);
+            assert_eq!(o, reference(&all, attr));
+        }
+        assert_eq!(collapse_ws("  a \n\t b  c "), "a b c");
+        assert_eq!(collapse_ws(" \n "), "");
         assert_eq!(html_entity("eacute"), Some("é"));
         assert_eq!(html_entity("nbsp"), Some("\u{a0}"));
         assert_eq!(html_entity("yuml"), Some("ÿ"));

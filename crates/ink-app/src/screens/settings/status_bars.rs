@@ -29,6 +29,8 @@ use ink_ui::{Icon, PaintCx, Segmented, Slider, Widget};
 pub const SEPARATORS: &[(&str, &str)] = &[(" · ", "Dot"), (" | ", "Vertical bar"), (" – ", "Dash"), (" / ", "Slash"), ("   ", "Space")];
 /// Slot names, by index.
 const SLOTS: [&str; 3] = ["Left", "Centre", "Right"];
+/// Slot names in `sbar-move` actions, by index.
+const SLOT_KEYS: [&str; 3] = ["left", "center", "right"];
 /// Height of the preview.
 pub const PREVIEW_H: u32 = 300;
 
@@ -206,7 +208,7 @@ pub fn rows(bars: &StatusBars, view: &View) -> Vec<Row> {
             if i + 1 < len {
                 rows.push(mv("down", "Move later").icon(Icon::Forward));
             }
-            for (k, slot) in ["left", "center", "right"].iter().enumerate() {
+            for (k, slot) in SLOT_KEYS.iter().enumerate() {
                 if k != s {
                     rows.push(mv(slot, &format!("Move to the {} slot", SLOTS[k].to_lowercase())));
                 }
@@ -294,10 +296,7 @@ pub fn action(a: &str, bars: &mut StatusBars, view: &View) -> Option<Step> {
                     let to = j.unwrap_or(i);
                     return Some(Step::Saved(View::Item(e, s, to), format!("{} moved", label(STATUS_WIDGETS, &list[to]))));
                 }
-                "left" => 0,
-                "center" => 1,
-                "right" => 2,
-                _ => return None,
+                key => SLOT_KEYS.iter().position(|k| *k == key)?,
             };
             if target == s {
                 return Some(Step::Open(View::Item(e, s, i)));
@@ -440,7 +439,7 @@ impl Widget for Preview {
 impl SettingsScreen {
     /// Builds the status bars page `view` in `content`.
     pub(super) fn build_status_bars(&mut self, cx: &mut AppCtx, content: Rect, view: &View) {
-        let s = cx.settings_update.as_ref().unwrap_or(cx.settings);
+        let s = super::current_settings(cx);
         let bars = s.status_bars.clone();
         let x = content.x + space(4);
         let w = content.w.saturating_sub(2 * space(4) as u32);
@@ -473,7 +472,7 @@ impl SettingsScreen {
             Page::StatusBars(v) => v.clone(),
             _ => View::default(),
         };
-        let mut s = cx.settings_update.as_ref().unwrap_or(cx.settings).clone();
+        let mut s = super::current_settings(cx).clone();
         let (next, text) = match action(a, &mut s.status_bars, &view) {
             None => {
                 log::info!("settings status bars: '{a}' ignored");

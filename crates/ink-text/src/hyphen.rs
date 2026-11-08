@@ -9,7 +9,6 @@
 //! - [`NoHyphenation`]: never hyphenates.
 //! - [`hyphenator_for`]: the right one for a language tag.
 
-use crate::TextError;
 use hyphenation::{Hyphenator as _, Load, Standard};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -103,14 +102,6 @@ impl PatternHyphenator {
                 None
             }
         }
-    }
-
-    /// A dictionary file in the `hyphenation` crate's bincode format (e.g. from
-    /// `/mnt/us/rinky/hyph/`).
-    pub fn from_path(lang: &Language, path: &std::path::Path) -> Result<Self, TextError> {
-        let code = lang.patterns().ok_or_else(|| TextError::Hyphenation(format!("no patterns for {}", lang.0)))?;
-        let dict = Standard::from_path(code, path).map_err(|e| TextError::Hyphenation(format!("{}: {e}", path.display())))?;
-        Ok(PatternHyphenator { dict, lang: lang.clone(), min_word: 5 })
     }
 }
 

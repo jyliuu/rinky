@@ -7,7 +7,6 @@ use super::rows::Row;
 use super::{PageModule, Reply};
 use crate::battery_log::{self, hours_text, Rate, Sample, Stats, Use};
 use crate::router::AppCtx;
-use ink_store::Settings;
 
 /// The page.
 #[derive(Default)]
@@ -59,10 +58,6 @@ pub fn rows_for(percent: Option<u8>, charging: bool, st: &Stats) -> Vec<Row> {
 }
 
 impl PageModule for Page {
-    fn summary(&self, _s: &Settings) -> String {
-        String::new()
-    }
-
     fn rows(&mut self, cx: &mut AppCtx) -> Vec<Row> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let b = cx.services.battery.state().ok();

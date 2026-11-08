@@ -231,6 +231,14 @@ impl<T: Copy> Edges<T> {
     }
 }
 
+impl Edges<Len> {
+    /// Every side resolved against the containing block width `base` (`auto` = 0).
+    pub fn resolve(&self, base: f32) -> Edges<f32> {
+        let r = |l: Len| l.resolve(base, 0.0);
+        Edges { top: r(self.top), right: r(self.right), bottom: r(self.bottom), left: r(self.left) }
+    }
+}
+
 /// `line-height`.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum LineHeight {
@@ -656,77 +664,79 @@ pub struct StructStyle {
     pub float: bool,
 }
 
+/// Where a declaration stands in the cascade: (important, origin, specificity, order).
+type CascadeKey = (bool, Origin, u32, u32);
+
 impl Cascade {
-    fn gather<E: StyledElement>(&self, e: E) -> Vec<(u8, Origin, u32, u32, Declaration)> {
+    /// Calls `f` with the declarations that apply to `e` in cascade order (a later one
+    /// wins). The rules' declarations are borrowed, not copied.
+    fn gather<E: StyledElement, R>(&self, e: E, f: impl FnOnce(&[(CascadeKey, &Declaration)]) -> R) -> R {
         let mut matched = Vec::new();
         self.ua.matching(e, &mut matched);
         if self.publisher {
             self.author.matching(e, &mut matched);
         }
-        let mut decls: Vec<(u8, Origin, u32, u32, Declaration)> = Vec::new();
-        for (origin, spec, order, ds) in matched {
-            for d in ds.iter() {
-                decls.push((d.important as u8, origin, spec, order, d.clone()));
-            }
-        }
+        // Presentational hints and the `style` attribute: (origin, specificity, order).
+        let mut extra: Vec<(Origin, u32, u32, Declaration)> = Vec::new();
         if self.publisher {
-            for d in e.hints() {
-                decls.push((0, Origin::Hint, 0, 0, d));
-            }
+            extra.extend(e.hints().into_iter().map(|d| (Origin::Hint, 0, 0, d)));
             if let Some(s) = e.style_attr() {
-                for (i, d) in css::parse_declarations(s).into_iter().enumerate() {
-                    decls.push((d.important as u8, Origin::Inline, u32::MAX, i as u32, d));
-                }
+                extra.extend(css::parse_declarations(s).into_iter().enumerate().map(|(i, d)| (Origin::Inline, u32::MAX, i as u32, d)));
             }
         } else if matches!(e.local_name(), "img" | "image" | "svg") {
             // Image sizes from attributes stay meaningful without publisher styles.
-            for d in e.hints() {
-                if d.name == "width" || d.name == "height" {
-                    decls.push((0, Origin::Hint, 0, 0, d));
-                }
-            }
+            extra.extend(e.hints().into_iter().filter(|d| d.name == "width" || d.name == "height").map(|d| (Origin::Hint, 0, 0, d)));
         }
+        let mut decls: Vec<(CascadeKey, &Declaration)> =
+            matched.iter().flat_map(|(origin, spec, order, ds)| ds.iter().map(move |d| ((d.important, *origin, *spec, *order), d))).collect();
+        decls.extend(extra.iter().map(|(origin, spec, order, d)| ((d.important, *origin, *spec, *order), d)));
         // Stable sort: importance, then origin (important UA before author would be
         // reversed by CSS rules for user origin; there is none here), then specificity, order.
-        decls.sort_by_key(|d| (d.0, d.1, d.2, d.3));
-        decls
+        decls.sort_by_key(|d| d.0);
+        f(&decls)
     }
 
     /// Only `display`, `white-space` and `float` (used while parsing).
     pub fn structure<E: StyledElement>(&self, e: E, parent_ws: WhiteSpace) -> StructStyle {
         let mut s = StructStyle { display: Display::Inline, white_space: parent_ws, float: false };
-        for (_, _, _, _, d) in self.gather(e) {
-            match d.name.as_str() {
-                "display" => {
-                    if let Some(v) = parse_display(&d.value) {
-                        s.display = v;
+        self.gather(e, |decls| {
+            for (_, d) in decls {
+                match d.name.as_str() {
+                    "display" => {
+                        if let Some(v) = parse_display(&d.value) {
+                            s.display = v;
+                        }
                     }
-                }
-                "white-space" => {
-                    if let Some(v) = parse_white_space(&d.value, parent_ws) {
-                        s.white_space = v;
+                    "white-space" => {
+                        if let Some(v) = parse_white_space(&d.value, parent_ws) {
+                            s.white_space = v;
+                        }
                     }
+                    "float" => s.float = matches!(ident(&d.value).as_deref(), Some("left" | "right")),
+                    _ => {}
                 }
-                "float" => s.float = matches!(ident(&d.value).as_deref(), Some("left" | "right")),
-                _ => {}
             }
-        }
-        if matches!(e.local_name(), "img" | "image") && s.display.is_block_like() && !matches!(s.display, Display::Block | Display::ListItem) {
-            s.display = Display::Block;
-        }
+        });
+        s.display = image_display(e.local_name(), s.display);
         s
     }
 
     /// The full computed style of `e` given its parent's.
     pub fn compute<E: StyledElement>(&self, e: E, parent: &ComputedStyle) -> ComputedStyle {
-        let decls = self.gather(e);
-        let mut s = ComputedStyle::inherit_from(parent);
+        let mut s = self.gather(e, |decls| self.compute_from(decls, parent));
+        s.display = image_display(e.local_name(), s.display);
         if let Some(l) = e.lang() {
             let l = l.trim().to_ascii_lowercase();
             s.lang = if l.is_empty() { None } else { Some(Arc::from(l.as_str())) };
         }
+        s
+    }
+
+    /// The computed style from the declarations that apply, in cascade order.
+    fn compute_from(&self, decls: &[(CascadeKey, &Declaration)], parent: &ComputedStyle) -> ComputedStyle {
+        let mut s = ComputedStyle::inherit_from(parent);
         // Pass 1: font size (everything in em depends on it).
-        for (_, _, _, _, d) in &decls {
+        for (_, d) in decls {
             match d.name.as_str() {
                 "font-size" => {
                     if let Some(v) = self.font_size(&d.value, parent) {
@@ -747,11 +757,8 @@ impl Cascade {
             s.font_size = parent.font_size;
         }
         s.font_size = s.font_size.clamp(self.ctx.font_px * 0.3, self.ctx.font_px * 5.0);
-        for (_, _, _, _, d) in &decls {
+        for (_, d) in decls {
             self.apply(&mut s, d, parent);
-        }
-        if matches!(e.local_name(), "img" | "image") && s.display.is_block_like() && !matches!(s.display, Display::Block | Display::ListItem) {
-            s.display = Display::Block;
         }
         s
     }
@@ -1211,6 +1218,16 @@ impl Cascade {
         };
         // At most 20 lines' worth (hostile values: 1e39, NaN).
         (!f.is_nan()).then_some(LineHeight::Factor(f.clamp(0.0, 20.0)))
+    }
+}
+
+/// An image (`img`, `image`) with a block-like display other than block or list item
+/// is a block.
+fn image_display(name: &str, d: Display) -> Display {
+    if matches!(name, "img" | "image") && d.is_block_like() && !matches!(d, Display::Block | Display::ListItem) {
+        Display::Block
+    } else {
+        d
     }
 }
 

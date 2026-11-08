@@ -2,7 +2,7 @@
 //! no image files or symbol fonts, and an [`IconView`] widget.
 
 use crate::draw::Path;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{follow_press_on, look_damage, EventResult, PaintCx, Widget};
 use crate::{Gesture, UiEvent};
 use ink_device::{Canvas, Rect, RefreshClass};
 use std::f32::consts::PI;
@@ -175,6 +175,28 @@ impl Icon {
             let v: Vec<(f32, f32)> = pts.iter().map(|(x, y)| p(*x, *y)).collect();
             path.polygon(&v);
         };
+        // A filled axis-aligned box from corner (x0, y0) to (x1, y1).
+        let bar = |path: &mut Path, x0: f32, y0: f32, x1: f32, y1: f32| fill(path, &[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]);
+        // Eight rays around (cx, cy) in pixels, from radius r0 to r1 (grid units).
+        let rays = |path: &mut Path, (cx, cy): (f32, f32), r0: f32, r1: f32, width: f32| {
+            for i in 0..8 {
+                let a = i as f32 * PI / 4.0;
+                let (c, si) = (a.cos(), a.sin());
+                path.line(cx + c * r0 * s, cy + si * r0 * s, cx + c * r1 * s, cy + si * r1 * s, width);
+            }
+        };
+        // A star of `n` points around (cx, cy) in pixels, tips at `tip` and the waist
+        // between them at `waist` (pixels), the first tip up.
+        let star = |path: &mut Path, (cx, cy): (f32, f32), n: usize, tip: f32, waist: f32| {
+            let pts: Vec<(f32, f32)> = (0..2 * n)
+                .map(|i| {
+                    let r = if i % 2 == 0 { tip } else { waist };
+                    let a = -PI / 2.0 + i as f32 * PI / n as f32;
+                    (cx + r * a.cos(), cy + r * a.sin())
+                })
+                .collect();
+            path.polygon(&pts);
+        };
         match self {
             Icon::Back => poly(&mut path, &[(15.0, 5.0), (8.0, 12.0), (15.0, 19.0)]),
             Icon::Forward => poly(&mut path, &[(9.0, 5.0), (16.0, 12.0), (9.0, 19.0)]),
@@ -198,11 +220,7 @@ impl Icon {
                 let (cx, cy) = p(12.0, 12.0);
                 path.ring(cx, cy, 7.0 * s, 2.2 * s);
                 path.ring(cx, cy, 3.0 * s, w);
-                for i in 0..8 {
-                    let a = i as f32 * PI / 4.0;
-                    let (c, si) = (a.cos(), a.sin());
-                    path.line(cx + c * 6.0 * s, cy + si * 6.0 * s, cx + c * 10.0 * s, cy + si * 10.0 * s, 2.6 * s);
-                }
+                rays(&mut path, (cx, cy), 6.0, 10.0, 2.6 * s);
             }
             Icon::Home => {
                 poly(&mut path, &[(3.0, 12.0), (12.0, 4.0), (21.0, 12.0)]);
@@ -219,11 +237,7 @@ impl Icon {
             Icon::Light => {
                 let (cx, cy) = p(12.0, 12.0);
                 path.ring(cx, cy, 4.5 * s, w);
-                for i in 0..8 {
-                    let a = i as f32 * PI / 4.0;
-                    let (c, si) = (a.cos(), a.sin());
-                    path.line(cx + c * 7.0 * s, cy + si * 7.0 * s, cx + c * 10.0 * s, cy + si * 10.0 * s, w);
-                }
+                rays(&mut path, (cx, cy), 7.0, 10.0, w);
             }
             Icon::Night => {
                 let (cx, cy) = p(12.0, 12.0);
@@ -274,8 +288,8 @@ impl Icon {
             Icon::Battery => {
                 let (x, y) = p(2.0, 7.0);
                 path.round_rect_outline(x, y, 18.0 * s, 10.0 * s, 1.5 * s, w);
-                fill(&mut path, &[(20.5, 10.0), (22.0, 10.0), (22.0, 14.0), (20.5, 14.0)]);
-                fill(&mut path, &[(5.0, 10.0), (13.0, 10.0), (13.0, 14.0), (5.0, 14.0)]);
+                bar(&mut path, 20.5, 10.0, 22.0, 14.0);
+                bar(&mut path, 5.0, 10.0, 13.0, 14.0);
             }
             Icon::Check => poly(&mut path, &[(4.0, 12.5), (9.5, 18.0), (20.0, 6.5)]),
             Icon::Plus => {
@@ -287,7 +301,7 @@ impl Icon {
                 let outline = [(12.0, 3.0), (21.0, 12.0), (16.0, 12.0), (16.0, 20.0), (8.0, 20.0), (8.0, 12.0), (3.0, 12.0), (12.0, 3.0)];
                 if self == Icon::ShiftLocked {
                     fill(&mut path, &outline[..7]);
-                    fill(&mut path, &[(8.0, 22.0), (16.0, 22.0), (16.0, 23.5), (8.0, 23.5)]);
+                    bar(&mut path, 8.0, 22.0, 16.0, 23.5);
                 } else {
                     poly(&mut path, &outline);
                 }
@@ -319,22 +333,12 @@ impl Icon {
                 let (x, y) = p(2.0, 3.0);
                 path.round_rect_outline(x, y, 20.0 * s, 12.0 * s, 1.5 * s, w * 0.8);
                 for (kx, ky) in [(5.0, 6.0), (9.0, 6.0), (13.0, 6.0), (17.0, 6.0), (5.0, 9.5), (17.0, 9.5)] {
-                    fill(&mut path, &[(kx, ky), (kx + 2.0, ky), (kx + 2.0, ky + 2.0), (kx, ky + 2.0)]);
+                    bar(&mut path, kx, ky, kx + 2.0, ky + 2.0);
                 }
-                fill(&mut path, &[(8.0, 11.5), (16.0, 11.5), (16.0, 13.0), (8.0, 13.0)]);
+                bar(&mut path, 8.0, 11.5, 16.0, 13.0);
                 poly(&mut path, &[(8.0, 18.0), (12.0, 21.5), (16.0, 18.0)]);
             }
-            Icon::Star => {
-                let (cx, cy) = p(12.0, 12.5);
-                let pts: Vec<(f32, f32)> = (0..10)
-                    .map(|i| {
-                        let r = if i % 2 == 0 { 9.5 * s } else { 4.0 * s };
-                        let a = -PI / 2.0 + i as f32 * PI / 5.0;
-                        (cx + r * a.cos(), cy + r * a.sin())
-                    })
-                    .collect();
-                path.polygon(&pts);
-            }
+            Icon::Star => star(&mut path, p(12.0, 12.5), 5, 9.5 * s, 4.0 * s),
             Icon::Info => {
                 let (cx, cy) = p(12.0, 12.0);
                 path.ring(cx, cy, 9.5 * s, w);
@@ -367,14 +371,14 @@ impl Icon {
             }
             Icon::ListView => {
                 for y in [6.0, 12.0, 18.0] {
-                    fill(&mut path, &[(3.0, y - 1.75), (6.5, y - 1.75), (6.5, y + 1.75), (3.0, y + 1.75)]);
+                    bar(&mut path, 3.0, y - 1.75, 6.5, y + 1.75);
                     poly(&mut path, &[(10.0, y), (21.0, y)]);
                 }
             }
             Icon::Chart => {
-                fill(&mut path, &[(4.0, 13.0), (8.0, 13.0), (8.0, 19.5), (4.0, 19.5)]);
-                fill(&mut path, &[(10.0, 8.0), (14.0, 8.0), (14.0, 19.5), (10.0, 19.5)]);
-                fill(&mut path, &[(16.0, 4.0), (20.0, 4.0), (20.0, 19.5), (16.0, 19.5)]);
+                bar(&mut path, 4.0, 13.0, 8.0, 19.5);
+                bar(&mut path, 10.0, 8.0, 14.0, 19.5);
+                bar(&mut path, 16.0, 4.0, 20.0, 19.5);
                 poly(&mut path, &[(2.5, 21.0), (21.5, 21.0)]);
             }
             Icon::Chat => {
@@ -440,20 +444,12 @@ impl Icon {
                 let (lx, ly) = p(6.5, 8.0);
                 path.ring(lx, ly, 1.8 * s, 1.5 * s);
                 poly(&mut path, &[(12.0, 13.0), (17.5, 10.0), (17.5, 8.0)]);
-                fill(&mut path, &[(15.8, 4.6), (19.2, 4.6), (19.2, 8.0), (15.8, 8.0)]);
+                bar(&mut path, 15.8, 4.6, 19.2, 8.0);
             }
             Icon::Sparkle => {
                 // Four-pointed stars with concave sides: (centre x, y, tip, waist).
                 for (x, y, tip, waist) in [(10.5, 13.0, 9.5, 2.3), (19.0, 5.5, 4.2, 1.1), (19.5, 19.0, 3.0, 0.8)] {
-                    let (cx, cy) = p(x, y);
-                    let pts: Vec<(f32, f32)> = (0..8)
-                        .map(|i| {
-                            let r = if i % 2 == 0 { tip * s } else { waist * s };
-                            let a = -PI / 2.0 + i as f32 * PI / 4.0;
-                            (cx + r * a.cos(), cy + r * a.sin())
-                        })
-                        .collect();
-                    path.polygon(&pts);
+                    star(&mut path, p(x, y), 4, tip * s, waist * s);
                 }
             }
             Icon::Terminal => {
@@ -576,18 +572,9 @@ impl Widget for IconView {
         }
         match ev {
             UiEvent::Touch(t) => {
-                // No feedback on touch-down: the touch may still become a swipe.
-                let was = self.pressed;
-                self.pressed = t.press_on(was, b.contains(t.pos));
-                if was != self.pressed {
-                    self.changed = true;
-                    EventResult::Handled
-                } else if t.kind == crate::TouchKind::Down {
-                    // Capture the contact (for its Press) without a repaint.
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                }
+                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
+                self.changed |= changed;
+                res
             }
             UiEvent::Gesture(Gesture::Tap { .. }) => {
                 self.changed |= std::mem::take(&mut self.pressed);
@@ -602,12 +589,7 @@ impl Widget for IconView {
     }
 
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
-        // An event that changed nothing (a touch-down, a quick tap) refreshes nothing.
-        if std::mem::take(&mut self.changed) {
-            None
-        } else {
-            Some(Vec::new())
-        }
+        look_damage(&mut self.changed)
     }
 }
 

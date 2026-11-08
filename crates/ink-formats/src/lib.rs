@@ -38,7 +38,6 @@ pub use book::{Book, BookDocument, BookInfo, Cover, Identifier, PageTarget, Targ
 
 use ink_doc::{DocError, Document, Provider, Result};
 use ink_html::HtmlDocument;
-use std::io::Read;
 use std::path::Path;
 
 /// Formats this crate recognises.
@@ -78,48 +77,56 @@ impl Format {
     }
 }
 
+/// File extensions (lowercase, without the dot) and their formats, in the order the
+/// provider lists them.
+const EXTENSIONS: [(&str, Format); 20] = [
+    ("epub", Format::Epub),
+    ("kepub", Format::Epub),
+    ("html", Format::Html),
+    ("htm", Format::Html),
+    ("xhtml", Format::Html),
+    ("txt", Format::Txt),
+    ("fb2", Format::Fb2),
+    ("fb2.zip", Format::Fb2),
+    ("fbz", Format::Fb2),
+    ("fb3", Format::Fb3),
+    ("mobi", Format::Mobi),
+    ("azw3", Format::Mobi),
+    ("azw", Format::Mobi),
+    ("prc", Format::Mobi),
+    ("pdb", Format::Mobi),
+    ("kfx", Format::Kfx),
+    ("azw8", Format::Kfx),
+    ("kfx-zip", Format::Kfx),
+    ("tpz", Format::Topaz),
+    ("azw1", Format::Topaz),
+];
+
+/// The extensions of [`EXTENSIONS`] alone ([`Provider::extensions`] wants a static slice).
+const EXTENSION_NAMES: [&str; EXTENSIONS.len()] = {
+    let mut out = [""; EXTENSIONS.len()];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = EXTENSIONS[i].0;
+        i += 1;
+    }
+    out
+};
+
 /// Detects the format by file name.
 pub fn detect(path: &Path) -> Option<Format> {
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    let ends = |e: &str| name.ends_with(e);
-    Some(if ends(".epub") || ends(".kepub") {
-        Format::Epub
-    } else if ends(".html") || ends(".htm") || ends(".xhtml") {
-        Format::Html
-    } else if ends(".txt") {
-        Format::Txt
-    } else if ends(".fb2") || ends(".fb2.zip") || ends(".fbz") {
-        Format::Fb2
-    } else if ends(".fb3") {
-        Format::Fb3
-    } else if ends(".mobi") || ends(".azw3") || ends(".azw") || ends(".prc") || ends(".pdb") {
-        Format::Mobi
-    } else if ends(".kfx") || ends(".azw8") || ends(".kfx-zip") {
-        Format::Kfx
-    } else if ends(".tpz") || ends(".azw1") {
-        Format::Topaz
-    } else {
-        return None;
-    })
+    EXTENSIONS
+        .iter()
+        .find(|(ext, _)| name.strip_suffix(ext).is_some_and(|stem| stem.ends_with('.')))
+        .map(|&(_, f)| f)
 }
 
 /// Detects the format from the first bytes of the file (and zip entry names). `None`
 /// when the content says nothing (plain text, HTML) or the file cannot be read.
 pub fn sniff(path: &Path) -> Option<Format> {
-    let mut head = [0u8; 80];
-    let n = {
-        let mut f = std::fs::File::open(path).ok()?;
-        let mut n = 0;
-        while n < head.len() {
-            match f.read(&mut head[n..]) {
-                Ok(0) => break,
-                Ok(k) => n += k,
-                Err(_) => return None,
-            }
-        }
-        n
-    };
-    let head = &head[..n];
+    let head = util::read_head(path, 80).ok()?;
+    let head = head.as_slice();
     // KFX container: "CONT", little-endian version 1 or 2, header length >= 18. A text
     // file starting with "CONTENTS" must not match.
     let cont = head.len() >= 10
@@ -180,32 +187,6 @@ pub(crate) fn title_from(path: &Path) -> String {
         }
     }
     path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
-}
-
-/// Opens an HTML/XHTML file as a one-chapter book (markup repaired, see [`html`]).
-pub fn open_html(path: &Path) -> Result<HtmlDocument> {
-    html::load(path)?.into_html_document()
-}
-
-/// Converts plain text to XHTML: blank lines separate paragraphs (the phase 0 helper;
-/// [`txt`] does detection and chapters).
-pub fn txt_to_xhtml(text: &str) -> String {
-    let mut out = String::from("<html><body>");
-    for para in text.replace("\r\n", "\n").split("\n\n") {
-        let p = para.trim();
-        if !p.is_empty() {
-            out.push_str("<p>");
-            out.push_str(&xml::escape_text(p));
-            out.push_str("</p>");
-        }
-    }
-    out.push_str("</body></html>");
-    out
-}
-
-/// Opens a text file with encoding detection and chapter guessing.
-pub fn open_txt(path: &Path) -> Result<HtmlDocument> {
-    txt::open(path)?.into_html_document()
 }
 
 fn unknown(path: &Path) -> DocError {
@@ -271,10 +252,7 @@ impl Provider for FormatsProvider {
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &[
-            "epub", "kepub", "html", "htm", "xhtml", "txt", "fb2", "fb2.zip", "fbz", "fb3", "mobi", "azw3", "azw", "prc",
-            "pdb", "kfx", "azw8", "kfx-zip", "tpz", "azw1",
-        ]
+        &EXTENSION_NAMES
     }
 
     fn open(&self, path: &Path) -> Result<Box<dyn Document>> {
@@ -338,7 +316,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let t = dir.join("note.txt");
         std::fs::write(&t, "First <para>.\r\n\r\nSecond & last.\n").unwrap();
-        let mut d = open_txt(&t).unwrap();
+        let mut d = open(&t).unwrap();
         assert_eq!(d.metadata().title, "note");
         let start = ink_doc::Position::Flow(ink_doc::FlowAnchor::default());
         assert!(d.read_around(&start, 100).unwrap().contains("Second & last."));
@@ -347,6 +325,5 @@ mod tests {
         let d = FormatsProvider.open(&h).unwrap();
         assert_eq!(d.toc().len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
-        assert!(txt_to_xhtml("a<b").contains("a&lt;b"));
     }
 }

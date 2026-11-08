@@ -15,7 +15,7 @@
 //! Layout is explicit: whoever adds a widget gives its bounds (helpers [`split_rows`],
 //! [`split_cols`]).
 
-use crate::gesture::{Gesture, TouchKind};
+use crate::gesture::{Gesture, Touch, TouchKind};
 use crate::icon::Icon;
 use crate::refresh::Damage;
 use crate::theme::Theme;
@@ -93,6 +93,16 @@ impl<'a> PaintCx<'a> {
         ClipGuard { prev }
     }
 
+    /// Paints `widget` into `r`, keeping everything it draws (text, icons, shapes) inside
+    /// `r` and the clips already set: the tree clears and refreshes only `r`.
+    pub(crate) fn paint_inside(&mut self, widget: &mut dyn Widget, r: Rect) {
+        let _clip = self.push_clip(r);
+        let outer = self.canvas.clip();
+        self.canvas.set_clip(Some(outer.map_or(r, |o| o.intersect(&r))));
+        widget.paint(self, r);
+        self.canvas.set_clip(outer);
+    }
+
     /// Draws a shaped run inside the current clip (and inside `extra` when given).
     fn put_run(&mut self, run: &ink_text::TextRun, x: f32, baseline: f32, value: u8, extra: Option<Rect>) -> f32 {
         let clip = match (self.clip(), extra) {
@@ -114,20 +124,30 @@ impl<'a> PaintCx<'a> {
     /// cut with "…" when wider than `r`; inside the [`PaintCx::clip`].
     pub fn text_centered(&mut self, r: Rect, text: &str, px: f32, style: Style, value: u8) {
         let run = self.fit_run(text, px, style, r.w as f32);
-        let (asc, desc) = self.fonts.vmetrics(style, px);
+        self.put_centered(r, &run, style, value);
+    }
+
+    /// Draws `run` (in `style`) centred in `r`, inside the [`PaintCx::clip`].
+    fn put_centered(&mut self, r: Rect, run: &ink_text::TextRun, style: Style, value: u8) {
         let x = r.x as f32 + (r.w as f32 - run.width) / 2.0;
-        let baseline = r.y as f32 + (r.h as f32 - (asc - desc)) / 2.0 + asc;
-        self.put_run(&run, x, baseline, value, None);
+        let baseline = self.baseline_in(r, run.px, style);
+        self.put_run(run, x, baseline, value, None);
     }
 
     /// `text` shaped, or its [`PaintCx::ellipsize`]d form when wider than `max`.
     fn fit_run(&mut self, text: &str, px: f32, style: Style, max: f32) -> ink_text::TextRun {
         let run = self.fonts.shape(style, px, text);
+        self.fit(run, text, style, max)
+    }
+
+    /// `run` (`text` shaped in `style`), or the shaped [`PaintCx::ellipsize`]d text when
+    /// `run` is wider than `max`.
+    fn fit(&mut self, run: ink_text::TextRun, text: &str, style: Style, max: f32) -> ink_text::TextRun {
         if run.width <= max {
             return run;
         }
-        let cut = self.ellipsize(text, px, style, max);
-        self.fonts.shape(style, px, &cut)
+        let cut = self.cut_to_fit(text, run.px, style, max);
+        self.fonts.shape(style, run.px, &cut)
     }
 
     /// Like [`PaintCx::draw_text_end`], but also nothing is drawn outside `clip` (for
@@ -136,6 +156,15 @@ impl<'a> PaintCx<'a> {
     pub fn draw_text_clipped(&mut self, style: Style, px: f32, x: f32, baseline: f32, text: &str, value: u8, clip: Rect) -> f32 {
         let run = self.fonts.shape(style, px, text);
         self.put_run(&run, x, baseline, value, Some(clip))
+    }
+
+    /// Like [`PaintCx::draw_text_clipped`], but `text` ends at `right` (right-aligned);
+    /// returns its width.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_right(&mut self, style: Style, px: f32, right: f32, baseline: f32, text: &str, value: u8, clip: Rect) -> f32 {
+        let run = self.fonts.shape(style, px, text);
+        self.put_run(&run, right - run.width, baseline, value, Some(clip));
+        run.width
     }
 
     /// Draws `text` with its left edge at `x` and baseline at `baseline` in gray `value`
@@ -171,10 +200,15 @@ impl<'a> PaintCx<'a> {
     /// a few shapings of prefixes about as long as the result (a 2000-char text cut to
     /// one line shapes about 12 short prefixes, not 2000 ever shorter copies).
     pub fn ellipsize(&mut self, text: &str, px: f32, style: Style, max: f32) -> String {
-        use unicode_segmentation::UnicodeSegmentation;
         if self.fonts.shaped_width(style, px, text) <= max {
             return text.to_string();
         }
+        self.cut_to_fit(text, px, style, max)
+    }
+
+    /// [`PaintCx::ellipsize`] of a `text` known to be wider than `max`.
+    fn cut_to_fit(&mut self, text: &str, px: f32, style: Style, max: f32) -> String {
+        use unicode_segmentation::UnicodeSegmentation;
         // Candidate cuts: ends of the proper prefixes, shortest first.
         let ends: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).filter(|i| *i > 0).collect();
         let cand = |k: usize| format!("{}…", text[..ends[k]].trim_end());
@@ -274,6 +308,13 @@ struct Node {
     expires: Option<Instant>,
 }
 
+impl Node {
+    /// Marks the node for a repaint with at least `class`.
+    fn mark(&mut self, class: RefreshClass) {
+        self.dirty = Some(self.dirty.map_or(class, |c| c.max(class)));
+    }
+}
+
 /// The tree. Ids are stable until the widget is removed.
 #[derive(Default)]
 pub struct WidgetTree {
@@ -304,17 +345,25 @@ impl WidgetTree {
             full: true,
             expires: None,
         }));
-        match parent.and_then(|p| self.nodes.get_mut(p.0).and_then(Option::as_mut)) {
+        match parent.and_then(|p| self.node_mut(p)) {
             Some(p) => p.children.push(id),
             None => self.roots.push(id),
         }
         id
     }
 
+    fn node(&self, id: WidgetId) -> Option<&Node> {
+        self.nodes.get(id.0)?.as_ref()
+    }
+
+    fn node_mut(&mut self, id: WidgetId) -> Option<&mut Node> {
+        self.nodes.get_mut(id.0)?.as_mut()
+    }
+
     /// Adds a top-level layer that [`WidgetTree::expire`] removes after `ttl` (toasts).
     pub fn add_timed(&mut self, widget: Box<dyn Widget>, bounds: Rect, ttl: Duration) -> WidgetId {
         let id = self.add(None, widget, bounds);
-        if let Some(n) = self.nodes[id.0].as_mut() {
+        if let Some(n) = self.node_mut(id) {
             n.expires = Some(Instant::now() + ttl);
         }
         id
@@ -357,7 +406,7 @@ impl WidgetTree {
         for c in &node.children {
             self.remove(*c);
         }
-        match node.parent.and_then(|p| self.nodes.get_mut(p.0).and_then(Option::as_mut)) {
+        match node.parent.and_then(|p| self.node_mut(p)) {
             Some(p) => p.children.retain(|c| *c != id),
             None => self.roots.retain(|c| *c != id),
         }
@@ -371,7 +420,7 @@ impl WidgetTree {
         let mut out = Vec::new();
         let mut stack: Vec<WidgetId> = self.roots.clone();
         while let Some(id) = stack.pop() {
-            let Some(n) = self.nodes.get(id.0).and_then(Option::as_ref) else { continue };
+            let Some(n) = self.node(id) else { continue };
             if n.widget.adds_damage() {
                 if !n.bounds.is_empty() {
                     out.push(n.bounds);
@@ -385,25 +434,24 @@ impl WidgetTree {
 
     /// Bounds of a widget.
     pub fn bounds(&self, id: WidgetId) -> Option<Rect> {
-        self.nodes.get(id.0)?.as_ref().map(|n| n.bounds)
+        self.node(id).map(|n| n.bounds)
     }
 
     /// Moves or resizes a widget (marks it dirty; the old area is cleared).
     pub fn set_bounds(&mut self, id: WidgetId, r: Rect) {
-        if let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) {
-            if n.bounds != r && n.widget.adds_damage() {
-                self.exposed.push((n.bounds, n.widget.refresh_class()));
-            }
-            n.bounds = r;
-            n.dirty = Some(n.dirty.unwrap_or(RefreshClass::Du).max(n.widget.refresh_class()));
-            n.full = true;
+        let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) else { return };
+        if n.bounds != r && n.widget.adds_damage() {
+            self.exposed.push((n.bounds, n.widget.refresh_class()));
         }
+        n.bounds = r;
+        n.mark(n.widget.refresh_class());
+        n.full = true;
     }
 
     /// Marks a widget for a full repaint with at least `class`.
     pub fn mark_dirty(&mut self, id: WidgetId, class: RefreshClass) {
-        if let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) {
-            n.dirty = Some(n.dirty.map_or(class, |c| c.max(class)));
+        if let Some(n) = self.node_mut(id) {
+            n.mark(class);
             n.full = true;
         }
     }
@@ -412,8 +460,8 @@ impl WidgetTree {
     /// [`Widget::damage`] names is shown (a list whose one row changed), as after an event
     /// it took. [`WidgetTree::mark_dirty`] shows all of its bounds.
     pub fn mark_changed(&mut self, id: WidgetId, class: RefreshClass) {
-        if let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) {
-            n.dirty = Some(n.dirty.map_or(class, |c| c.max(class)));
+        if let Some(n) = self.node_mut(id) {
+            n.mark(class);
         }
     }
 
@@ -435,7 +483,7 @@ impl WidgetTree {
     /// The concrete widget behind `id`.
     pub fn get_mut<T: Widget + 'static>(&mut self, id: WidgetId) -> Option<&mut T> {
         // Deref the box first: Box<dyn Widget> is itself Any.
-        self.nodes.get_mut(id.0)?.as_mut()?.widget.as_mut().as_any_mut().downcast_mut::<T>()
+        self.node_mut(id)?.widget.as_mut().as_any_mut().downcast_mut::<T>()
     }
 
     /// Paints dirty widgets (parents before children, layers in order) and returns the
@@ -447,21 +495,20 @@ impl WidgetTree {
             cx.canvas.fill_rect(r.x, r.y, r.w as i32, r.h as i32, cx.theme.bg);
             for n in self.nodes.iter_mut().flatten() {
                 if !n.bounds.intersect(&r).is_empty() {
-                    n.dirty = Some(n.dirty.map_or(class, |c| c.max(class)));
+                    n.mark(class);
                     n.full = true;
                 }
             }
             damage.push(Damage { rect: r, class });
         }
-        let roots = self.roots.clone();
-        for r in roots {
-            self.paint_node(r, cx, None, &mut damage);
+        for i in 0..self.roots.len() {
+            self.paint_node(self.roots[i], cx, None, &mut damage);
         }
         crate::refresh::merge(damage)
     }
 
     fn paint_node(&mut self, id: WidgetId, cx: &mut PaintCx, inherited: Option<RefreshClass>, damage: &mut Vec<Damage>) {
-        let Some(node) = self.nodes.get_mut(id.0).and_then(Option::as_mut) else { return };
+        let Some(node) = self.node_mut(id) else { return };
         // The widget took an event that changed nothing on it (empty own damage): its
         // children are painted again (it drew over them) with the same pixels, so only
         // children with a change of their own report damage.
@@ -476,16 +523,8 @@ impl WidgetTree {
             if node.widget.opaque() {
                 cx.canvas.fill_rect(b.x, b.y, b.w as i32, b.h as i32, cx.theme.bg);
             }
-            {
-                // Everything the widget draws (text, icons, shapes) stays inside its
-                // bounds: only they are cleared and refreshed. A row cut by a list edge
-                // never leaves ink over the app bar or under the list.
-                let _clip = cx.push_clip(b);
-                let outer = cx.canvas.clip();
-                cx.canvas.set_clip(Some(outer.map_or(b, |o| o.intersect(&b))));
-                node.widget.paint(cx, b);
-                cx.canvas.set_clip(outer);
-            }
+            // A row cut by a list edge never leaves ink over the app bar or under the list.
+            cx.paint_inside(node.widget.as_mut(), b);
             node.full = false;
             // Called even when unused: widgets reset their change record here.
             let own = node.widget.damage(b);
@@ -503,9 +542,10 @@ impl WidgetTree {
                 _ => damage.push(Damage { rect: b, class }),
             }
         }
-        let children = node.children.clone();
-        // Children repaint (fully) with their parent, which may have cleared them.
-        for c in children {
+        // Children repaint (fully) with their parent, which may have cleared them. A
+        // paint never adds or removes widgets, so the child list stays as it is.
+        for i in 0..node.children.len() {
+            let Some(c) = self.node(id).map(|n| n.children[i]) else { return };
             if quiet && !self.subtree_dirty(c) {
                 self.paint_node(c, cx, class, &mut Vec::new());
             } else {
@@ -516,7 +556,7 @@ impl WidgetTree {
 
     /// True when `id` or a widget below it is marked dirty.
     fn subtree_dirty(&self, id: WidgetId) -> bool {
-        let Some(n) = self.nodes.get(id.0).and_then(Option::as_ref) else { return false };
+        let Some(n) = self.node(id) else { return false };
         n.dirty.is_some() || n.full || n.children.iter().any(|c| self.subtree_dirty(*c))
     }
 
@@ -549,7 +589,7 @@ impl WidgetTree {
             self.collect(*r, &mut order);
         }
         for id in order.into_iter().rev() {
-            let Some(node) = self.nodes.get(id.0).and_then(Option::as_ref) else { continue };
+            let Some(node) = self.node(id) else { continue };
             if let Some(p) = pos {
                 if !node.bounds.contains(p) {
                     continue;
@@ -567,19 +607,18 @@ impl WidgetTree {
 
     /// Gives `ev` to one widget; `None` when it ignores it.
     fn deliver(&mut self, id: WidgetId, ev: &UiEvent) -> Option<(WidgetId, EventResult)> {
-        let node = self.nodes.get_mut(id.0).and_then(Option::as_mut)?;
+        let node = self.node_mut(id)?;
         match node.widget.event(ev, node.bounds) {
             EventResult::Ignored => None,
             r => {
-                let class = node.widget.refresh_class();
-                node.dirty = Some(node.dirty.map_or(class, |c| c.max(class)));
+                node.mark(node.widget.refresh_class());
                 Some((id, r))
             }
         }
     }
 
     fn collect(&self, id: WidgetId, out: &mut Vec<WidgetId>) {
-        if let Some(n) = self.nodes.get(id.0).and_then(Option::as_ref) {
+        if let Some(n) = self.node(id) {
             out.push(id);
             for c in &n.children {
                 self.collect(*c, out);
@@ -746,6 +785,53 @@ impl Button {
     }
 }
 
+/// Follows press feedback for a touch ([`Touch::press_target`]) on a widget whose part
+/// `T` under the finger shows pressed (rows, cells, bar buttons). Returns what the widget
+/// answers and whether `pressed` changed: `Handled` on a change, or for a touch-down it
+/// takes (`take_down`: it captures the contact for its later `Press`, no repaint);
+/// else `Ignored`. Nothing shows on touch-down: the touch may still become a swipe.
+pub(crate) fn follow_press<T: Copy + PartialEq>(t: &Touch, pressed: &mut Option<T>, under: Option<T>, take_down: bool) -> (EventResult, bool) {
+    let now = t.press_target(*pressed, under);
+    if now != *pressed {
+        *pressed = now;
+        (EventResult::Handled, true)
+    } else if t.kind == TouchKind::Down && take_down {
+        (EventResult::Handled, false)
+    } else {
+        (EventResult::Ignored, false)
+    }
+}
+
+/// [`follow_press`] for a widget that shows pressed as a whole (a button, a card, an
+/// icon): `inside` tells whether the finger is on it; it takes every touch-down.
+pub(crate) fn follow_press_on(t: &Touch, pressed: &mut bool, inside: bool) -> (EventResult, bool) {
+    let mut p = pressed.then_some(());
+    let res = follow_press(t, &mut p, inside.then_some(()), true);
+    *pressed = p.is_some();
+    res
+}
+
+/// The refresh class of a widget with press feedback: DU while pressed (fast black and
+/// white), GL16 otherwise (the released look gets its gray levels back).
+pub(crate) fn press_class(pressed: bool) -> RefreshClass {
+    if pressed {
+        RefreshClass::Du
+    } else {
+        RefreshClass::Gl16
+    }
+}
+
+/// [`Widget::damage`] of a widget whose events change only its look: all of its bounds
+/// after a change, nothing after an event that changed nothing (a touch-down, a quick
+/// tap). Resets `changed`.
+pub(crate) fn look_damage(changed: &mut bool) -> Option<Vec<Rect>> {
+    if std::mem::take(changed) {
+        None
+    } else {
+        Some(Vec::new())
+    }
+}
+
 /// Paints a button face into `b`: what [`Button`] draws, for screens that paint
 /// directly. `pressed` inverts it (pure black and white, for a DU update).
 pub fn paint_button(cx: &mut PaintCx, b: Rect, label: &str, icon: Option<Icon>, kind: ButtonKind, enabled: bool, pressed: bool) {
@@ -771,9 +857,12 @@ pub fn paint_button(cx: &mut PaintCx, b: Rect, label: &str, icon: Option<Icon>, 
     }
     let style = if kind == ButtonKind::Outlined { t.label.style } else { Style::Bold };
     let px = t.label.px;
+    // The caption is shaped once: it gives the width the button needs, and it is what
+    // is drawn unless it has to be cut.
+    let caption = cx.fonts.shape(style, px, label);
     // Keep the caption off the round ends: at least `space(2)` (less on small buttons)
     // between the caption and the outline; a caption that does not fit is ellipsized.
-    let need = cx.text_width(style, px, label) + if icon.is_some() { px * 1.5 } else { 0.0 };
+    let need = caption.width + if icon.is_some() { px * 1.5 } else { 0.0 };
     let min_pad = (rad * 0.5).clamp(4.0, crate::theme::space(2) as f32);
     let pad = ((b.w as f32 - need) / 2.0).clamp(min_pad, (rad * 0.5).max(min_pad));
     let inner = Rect::new(b.x + pad as i32, b.y, b.w.saturating_sub(2 * pad as u32), b.h);
@@ -787,18 +876,17 @@ pub fn paint_button(cx: &mut PaintCx, b: Rect, label: &str, icon: Option<Icon>, 
             let side = ((px * 1.1) as u32).min(b.h * 4 / 5).min(b.w);
             let gap = px * 0.4;
             let room = (inner.w as f32 - side as f32 - gap).max(0.0);
-            let label = cx.ellipsize(label, px, style, room);
-            let tw = cx.text_width(style, px, &label);
-            let total = side as f32 + gap + tw;
+            let run = cx.fit(caption, label, style, room);
+            let total = side as f32 + gap + run.width;
             let x0 = (b.x as f32 + (b.w as f32 - total) / 2.0).max(inner.x as f32);
             let ir = Rect::new(x0 as i32, b.y + (b.h as i32 - side as i32) / 2, side, side);
             icon.draw(cx.canvas, ir, ink);
             let baseline = cx.baseline_in(b, px, style);
-            cx.draw_text_clipped(style, px, x0 + side as f32 + gap, baseline, &label, ink, b);
+            cx.put_run(&run, x0 + side as f32 + gap, baseline, ink, Some(b));
         }
         (None, _) => {
-            let label = cx.ellipsize(label, px, style, inner.w as f32);
-            cx.text_centered(inner, &label, px, style, ink)
+            let run = cx.fit(caption, label, style, inner.w as f32);
+            cx.put_centered(inner, &run, style, ink)
         }
     }
 }
@@ -818,18 +906,9 @@ impl Widget for Button {
         }
         match ev {
             UiEvent::Touch(t) => {
-                // No feedback on touch-down: the touch may still become a swipe.
-                let now = t.press_on(self.pressed, b.contains(t.pos));
-                if now != self.pressed {
-                    self.pressed = now;
-                    self.changed = true;
-                    EventResult::Handled
-                } else if t.kind == TouchKind::Down {
-                    // Capture the contact (for its Press) without a repaint.
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                }
+                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
+                self.changed |= changed;
+                res
             }
             UiEvent::Gesture(Gesture::Tap { .. }) => {
                 self.changed |= std::mem::take(&mut self.pressed);
@@ -840,21 +919,11 @@ impl Widget for Button {
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        // Pressed feedback is fast black/white; the released state gets gray levels back.
-        if self.pressed {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.pressed)
     }
 
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
-        // An event that changed nothing (a touch-down, a quick tap) refreshes nothing.
-        if std::mem::take(&mut self.changed) {
-            None
-        } else {
-            Some(Vec::new())
-        }
+        look_damage(&mut self.changed)
     }
 }
 

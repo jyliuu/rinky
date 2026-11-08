@@ -38,6 +38,7 @@ pub mod advanced;
 pub mod battery;
 pub mod control_buttons;
 pub mod diagnostics;
+#[cfg(test)]
 pub mod fakes;
 pub mod keyboard_layouts;
 pub mod order;
@@ -169,18 +170,21 @@ fn make_module(info: &PageInfo) -> Box<dyn PageModule> {
     }
 }
 
-/// The main-list rows of the module pages in `section`.
 /// Value of the Reader gestures row: how many gestures have an action.
 fn gestures_summary(map: &ink_store::prefs::GestureMap) -> String {
     let set = ink_store::prefs::GESTURES.iter().filter(|(g, _)| map.action(g) != "none").count();
     format!("{set} of {} set", ink_store::prefs::GESTURES.len())
 }
 
+/// The main-list rows of the module pages in `section`, without values.
+fn module_nav_rows(section: &str) -> impl Iterator<Item = (&'static PageInfo, Row)> + '_ {
+    PAGE_MODULES.iter().filter(move |p| p.section == section).map(|p| (p, Row::nav(p.icon, p.title, format!("page:mod:{}", p.key))))
+}
+
+/// The main-list rows of the module pages in `section`, with their values.
 fn module_rows(section: &str, s: &Settings) -> Vec<Row> {
-    PAGE_MODULES
-        .iter()
-        .filter(|p| p.section == section)
-        .map(|p| {
+    module_nav_rows(section)
+        .map(|(p, row)| {
             // fonts and status_bars are Page variants (not PageModule): their own summaries.
             let value = match p.key {
                 "fonts" => fonts::summary(s),
@@ -188,11 +192,12 @@ fn module_rows(section: &str, s: &Settings) -> Vec<Row> {
                 "gestures" => gestures_summary(&s.gestures),
                 _ => make_module(p).summary(s),
             };
-            Row::nav(p.icon, p.title, format!("page:mod:{}", p.key)).value(value)
+            row.value(value)
         })
         .collect()
 }
 
+use crate::screens::common::paint_cx;
 use crate::router::{AppCtx, AppScreen, ScreenRegistry, Transition};
 use crate::plugin_host::{self, hooks, PluginEntry};
 use crate::update;
@@ -203,7 +208,7 @@ use ink_ui::bars::APP_BAR_H;
 use ink_ui::input::InputResult;
 use ink_ui::theme::space;
 use ink_ui::{
-    AppBar, BarAction, Button, Card, CardKind, Damage, Dialog, EventResult, Icon, KeyAction, Keyboard, Label, PaintCx,
+    AppBar, BarAction, Button, Card, CardKind, Damage, Dialog, EventResult, Icon, KeyAction, Keyboard, Label,
     Scrim, TextBlock, TextInput, UiEvent, WidgetId, WidgetTree,
 };
 use ink_plugin::UiRequest;
@@ -328,16 +333,24 @@ pub fn refresh_name(n: u32) -> String {
     }
 }
 
+/// A plugin and whether the user wants it on (`plugins/disabled.txt`).
+pub type PluginChoice = (ink_plugin::PluginInfo, bool);
+
+/// How a plugin's running state differs from the user's choice `wanted` (`None`: it
+/// runs as chosen).
+fn plugin_change(p: &ink_plugin::PluginInfo, wanted: bool) -> Option<String> {
+    match (p.enabled, wanted) {
+        (true, true) | (false, false) => None,
+        (true, false) => Some("off at the next start".to_string()),
+        (false, true) if p.errors > 0 => Some(format!("stopped after {} errors", p.errors)),
+        (false, true) => Some("on at the next start".to_string()),
+    }
+}
+
 /// Second line of a plugin row: kind, state and description. `wanted` is the user's
 /// choice in `plugins/disabled.txt` (applied at the next start).
 pub fn plugin_detail(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
-    let state = match (p.enabled, wanted) {
-        (true, true) => "on".to_string(),
-        (false, false) => "off".to_string(),
-        (true, false) => "off at the next start".to_string(),
-        (false, true) if p.errors > 0 => format!("stopped after {} errors", p.errors),
-        (false, true) => "on at the next start".to_string(),
-    };
+    let state = plugin_change(p, wanted).unwrap_or_else(|| if wanted { "on" } else { "off" }.to_string());
     let mut s = format!("{} · {state}", p.kind);
     if !p.manifest.description.is_empty() {
         s.push_str(" · ");
@@ -351,12 +364,7 @@ pub fn plugin_detail(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
 /// and "Lua plugin" for a user plugin. The implementation kind of a built-in plugin
 /// ("rust") and a plain "on"/"off" are left out: the switch shows them.
 pub fn plugin_summary(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
-    let state = match (p.enabled, wanted) {
-        (true, true) | (false, false) => None,
-        (true, false) => Some("off at the next start".to_string()),
-        (false, true) if p.errors > 0 => Some(format!("stopped after {} errors", p.errors)),
-        (false, true) => Some("on at the next start".to_string()),
-    };
+    let state = plugin_change(p, wanted);
     let kind = (p.kind == "lua").then(|| "Lua plugin".to_string());
     let desc = Some(p.manifest.description.clone()).filter(|d| !d.is_empty());
     let parts: Vec<String> = [state, kind, desc].into_iter().flatten().collect();
@@ -557,11 +565,7 @@ pub struct MainValues {
 fn section_modules(v: &MainValues, section: &str) -> Vec<Row> {
     match v.modules.iter().find(|(s, _)| *s == section) {
         Some((_, rows)) => rows.clone(),
-        None => PAGE_MODULES
-            .iter()
-            .filter(|p| p.section == section)
-            .map(|p| Row::nav(p.icon, p.title, format!("page:mod:{}", p.key)))
-            .collect(),
+        None => module_nav_rows(section).map(|(_, row)| row).collect(),
     }
 }
 
@@ -637,7 +641,7 @@ pub fn light_rows(q: &QuickLight) -> Vec<Row> {
 
 /// The Plugins section of the main list: every plugin with its switch (`(info,
 /// wanted)`), followed by its settings pages (`(label, plugin)`, action `ppage:<index>`).
-pub fn plugin_section(pages: &[(String, String)], plugins: &[(ink_plugin::PluginInfo, bool)]) -> Vec<Row> {
+pub fn plugin_section(pages: &[(String, String)], plugins: &[PluginChoice]) -> Vec<Row> {
     let mut rows = Vec::new();
     for (p, wanted) in plugins {
         let name = &p.manifest.name;
@@ -722,7 +726,7 @@ pub fn wifi_line(state: &NetStatus) -> String {
 
 /// The Plugins page: plugin settings pages (`(label, plugin)`), the plugins with their
 /// on/off switch (`(info, wanted)`), and the notifications row.
-pub fn plugin_rows(pages: &[(String, String)], plugins: &[(ink_plugin::PluginInfo, bool)], notifications: &str) -> Vec<Row> {
+pub fn plugin_rows(pages: &[(String, String)], plugins: &[PluginChoice], notifications: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     if !pages.is_empty() {
         rows.push(Row::header("Plugin settings"));
@@ -1047,8 +1051,21 @@ impl SettingsScreen {
         self.rebuild = Some(RefreshClass::Gl16);
     }
 
+    /// [`Self::go`] with the status line kept (the result of what led there).
+    fn go_keep_status(&mut self, page: Page, cx: &mut AppCtx) {
+        let text = std::mem::take(&mut self.status_text);
+        self.go(page, cx);
+        self.status_text = text;
+    }
+
     fn set_status(&mut self, text: impl Into<String>) {
         self.set_status_class(text, RefreshClass::Gl16);
+    }
+
+    /// Builds the page again (the next paint) with `text` in the status line.
+    fn rebuild_with(&mut self, text: impl Into<String>) {
+        self.status_text = text.into();
+        self.rebuild = Some(RefreshClass::Gl16);
     }
 
     fn set_status_class(&mut self, text: impl Into<String>, class: RefreshClass) {
@@ -1072,14 +1089,10 @@ impl SettingsScreen {
     /// Shows a status line at once (before a call that blocks).
     fn say_now(&mut self, text: &str, cx: &mut AppCtx) -> anyhow::Result<()> {
         self.set_status(text);
-        for d in self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme }) {
+        for d in self.tree.paint(&mut paint_cx(cx)) {
             cx.show(d.rect, d.class)?;
         }
         Ok(())
-    }
-
-    fn edit(cx: &mut AppCtx, f: impl FnOnce(&mut Settings)) {
-        edit_settings(cx, f);
     }
 
     /// Adds a list of `rows` in the content area, at the scroll offset the previous
@@ -1139,7 +1152,7 @@ impl SettingsScreen {
             Page::StatusBars(v) => self.build_status_bars(cx, content, &v),
             Page::Gestures(p) => {
                 let plugins = crate::plugin_entries::gesture_choices(cx.plugins);
-                self.add_rows(gestures::rows(&cx.settings_update.as_ref().unwrap_or(cx.settings).gestures, p.as_deref(), &plugins), content)
+                self.add_rows(gestures::rows(&current_settings(cx).gestures, p.as_deref(), &plugins), content)
             }
             Page::Plugin(..) => {
                 let rows = self.plugin_page.as_ref().map_or_else(|| vec![Row::note("Not available")], PluginPage::rows);
@@ -1172,18 +1185,7 @@ impl SettingsScreen {
             Ok(b) => format!("Battery {}%{}", b.percent, if b.charging { ", charging" } else { "" }),
             Err(_) => s.info.model.clone(),
         };
-        self.plugin_pages = hooks::settings_pages(cx);
-        let off = plugin_host::user_disabled(cx.paths);
-        let pages: Vec<(String, String)> = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
-        let plugins: Vec<(ink_plugin::PluginInfo, bool)> = cx
-            .plugins
-            .plugins()
-            .into_iter()
-            .map(|p| {
-                let wanted = !off.contains(&p.manifest.name);
-                (p, wanted)
-            })
-            .collect();
+        let (pages, plugins) = self.plugin_lists(cx);
         let st = current_settings(cx);
         let r = &st.reader;
         let v = MainValues {
@@ -1445,12 +1447,18 @@ impl SettingsScreen {
         self.tree.add(None, Box::new(Button::filled("Set time (NTP)", "ntp")), button);
     }
 
-    fn build_plugins(&mut self, cx: &mut AppCtx, content: Rect) {
+    /// Reads the plugin settings pages (kept for `ppage:<index>`) as `(label, plugin)`
+    /// and every plugin with the user's choice (`(info, wanted)`).
+    fn plugin_lists(&mut self, cx: &mut AppCtx) -> (Vec<(String, String)>, Vec<PluginChoice>) {
         self.plugin_pages = hooks::settings_pages(cx);
         let off = plugin_host::user_disabled(cx.paths);
-        let pages: Vec<(String, String)> = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
-        let plugins: Vec<(ink_plugin::PluginInfo, bool)> =
-            cx.plugins.plugins().into_iter().map(|p| { let wanted = !off.contains(&p.manifest.name); (p, wanted) }).collect();
+        let pages = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
+        let plugins = cx.plugins.plugins().into_iter().map(|p| { let wanted = !off.contains(&p.manifest.name); (p, wanted) }).collect();
+        (pages, plugins)
+    }
+
+    fn build_plugins(&mut self, cx: &mut AppCtx, content: Rect) {
+        let (pages, plugins) = self.plugin_lists(cx);
         let rows = plugin_rows(&pages, &plugins, &notifications_summary(cx));
         self.add_rows(rows, content);
     }
@@ -1739,8 +1747,7 @@ impl SettingsScreen {
         self.last_action = Some(a.to_string());
         if let Some(text) = fonts::action(a, cx) {
             // aa: the Fonts page's own actions.
-            self.status_text = text;
-            self.rebuild = Some(RefreshClass::Gl16);
+            self.rebuild_with(text);
             return Ok(Transition::None);
         }
         if let Some(text) = quick_light::apply(a, cx.services.light) {
@@ -1791,7 +1798,7 @@ impl SettingsScreen {
             }
             "confirm-exit" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.ui.confirm_exit = on);
+                edit_settings(cx, |s| s.ui.confirm_exit = on);
                 self.set_status(if on { "Exit asks first" } else { "Exit does not ask" });
             }
             "dlg-cancel" => self.close_dialog(),
@@ -1802,22 +1809,20 @@ impl SettingsScreen {
             }
             "sleep" => {
                 let Ok(m) = arg.parse::<u32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.device.sleep_minutes = m);
+                edit_settings(cx, |s| s.device.sleep_minutes = m);
                 let r = cx.services.power.set_auto_sleep(auto_sleep(m));
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("Sleep: {}", sleep_name(m).to_lowercase()),
                     Err(e) => format!("Saved; the device says: {e}"),
-                };
+                });
             }
             "saver" => {
-                Self::edit(cx, |s| set_screensaver_setting(s, arg));
+                edit_settings(cx, |s| set_screensaver_setting(s, arg));
                 let r = cx.services.power.set_screensaver(crate::sleep_cover::screensaver(arg, cx.paths));
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("Screensaver: {}", screensaver_name(arg)),
                     Err(e) => format!("Saved; the device says: {e}"),
-                };
+                });
             }
             "wifi" | "airplane" => {
                 let on = arg == "on";
@@ -1826,11 +1831,10 @@ impl SettingsScreen {
                 if self.page == Page::Wifi {
                     self.networks = cx.services.wifi.scan_list().unwrap_or_default();
                 }
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => String::new(),
                     Err(e) => format!("{verb}: {e}"),
-                };
+                });
             }
             "scan" => {
                 self.say_now("Scanning…", cx)?;
@@ -1856,30 +1860,25 @@ impl SettingsScreen {
                 if n.secured && !n.known {
                     self.go(Page::Join(n.essid), cx);
                 } else if self.connect(&n.essid, None, cx)? {
-                    let text = std::mem::take(&mut self.status_text);
-                    self.go(Page::Wifi, cx);
-                    self.status_text = text;
+                    self.go_keep_status(Page::Wifi, cx);
                 } else if n.secured {
                     // The saved password may be wrong (a failed join keeps the profile):
                     // ask for it again instead of retrying the saved one forever.
-                    let text = std::mem::take(&mut self.status_text);
-                    self.go(Page::Join(n.essid), cx);
-                    self.status_text = text;
+                    self.go_keep_status(Page::Join(n.essid), cx);
                 }
             }
             "join" => self.join(cx)?,
             "forget" => self.confirm(Confirm::Forget(arg.to_string())),
             "rot" => {
                 let Ok(r) = arg.parse::<u8>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.device.rotation = r % 4);
+                edit_settings(cx, |s| s.device.rotation = r % 4);
                 // The app applies the rotation after this event; the canvas size change
                 // lays the page out again (on_resize). Same size: rebuild for the check.
-                self.status_text = format!("Orientation: {}", rotation_name(Rotation::ALL[(r % 4) as usize]).to_lowercase());
-                self.rebuild = Some(RefreshClass::Gl16);
+                self.rebuild_with(format!("Orientation: {}", rotation_name(Rotation::ALL[(r % 4) as usize]).to_lowercase()));
             }
             "night" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.device.night_mode = on);
+                edit_settings(cx, |s| s.device.night_mode = on);
                 if let Err(e) = cx.screen.set_night_mode(on) {
                     self.status_text = format!("Night mode: {e}");
                 }
@@ -1887,41 +1886,35 @@ impl SettingsScreen {
             }
             "anim" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| set_page_wave(s, on));
+                edit_settings(cx, |s| set_page_wave(s, on));
                 self.set_status(if on { "Page turn wave on" } else { "Page turn wave off" });
             }
-            "font-px" | "spacing" | "margin" => {
+            "font-px" | "spacing" | "margin" | "pspace" | "indent" | "weight" => {
                 let Ok(v) = arg.parse::<f32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| match verb {
-                    "font-px" => s.reader.font_px = v,
-                    "spacing" => s.reader.line_spacing = v,
-                    _ => s.reader.margin_x = v,
+                edit_settings(cx, |s| {
+                    let r = &mut s.reader;
+                    match verb {
+                        "font-px" => r.font_px = v,
+                        "spacing" => r.line_spacing = v,
+                        "margin" => r.margin_x = v,
+                        "pspace" => r.paragraph_spacing = v.clamp(0.0, 3.0),
+                        "indent" => r.paragraph_indent = if v < 0.0 { INDENT_BOOK } else { v.min(6.0) },
+                        _ => r.font_weight = (v.max(0.0) as u8).min(WEIGHT_MAX),
+                    }
                 });
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match verb {
+                self.rebuild_with(match verb {
                     "font-px" => format!("Default text size {v} px"),
                     "spacing" => format!("Default line spacing {v:.1}"),
-                    _ => format!("Default side margins {v} px"),
-                };
-            }
-            "pspace" | "indent" | "weight" => {
-                let Ok(v) = arg.parse::<f32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| match verb {
-                    "pspace" => s.reader.paragraph_spacing = v.clamp(0.0, 3.0),
-                    "indent" => s.reader.paragraph_indent = if v < 0.0 { INDENT_BOOK } else { v.min(6.0) },
-                    _ => s.reader.font_weight = (v.max(0.0) as u8).min(WEIGHT_MAX),
-                });
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match verb {
+                    "margin" => format!("Default side margins {v} px"),
                     "pspace" => format!("Default paragraph spacing {v} em"),
                     "indent" if v < 0.0 => "Default indent: the book's own".to_string(),
                     "indent" => format!("Default first-line indent {v} em"),
                     _ => format!("Default text weight {}", WEIGHTS.iter().find(|(l, _)| *l as f32 == v).map_or("", |w| w.1).to_lowercase()),
-                };
+                });
             }
             "hyph" | "publisher" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| if verb == "hyph" { s.reader.hyphenate = on } else { s.reader.publisher_styles = on });
+                edit_settings(cx, |s| if verb == "hyph" { s.reader.hyphenate = on } else { s.reader.publisher_styles = on });
                 self.set_status(match (verb, on) {
                     ("hyph", true) => "Hyphenation on",
                     ("hyph", false) => "Hyphenation off",
@@ -1931,7 +1924,7 @@ impl SettingsScreen {
             }
             "justify" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.reader.justify = on);
+                edit_settings(cx, |s| s.reader.justify = on);
                 self.set_status(if on { "Justified text" } else { "Ragged right text" });
             }
             "nav" => {
@@ -1942,7 +1935,7 @@ impl SettingsScreen {
                 match order::apply(&mut items, &list, name, op, NAV_MIN, NAV_MAX) {
                     Ok(text) => {
                         log::info!("settings: navigation bar {items:?}");
-                        Self::edit(cx, |s| s.ui.nav_items = items);
+                        edit_settings(cx, |s| s.ui.nav_items = items);
                         self.status_text = text;
                     }
                     Err(text) => self.status_text = text,
@@ -1960,14 +1953,13 @@ impl SettingsScreen {
                     dirs.push(dir.clone());
                 } else if on == "off" {
                     if dirs.len() <= 1 {
-                        self.status_text = "At least one folder must stay on".into();
-                        self.rebuild = Some(RefreshClass::Gl16);
+                        self.rebuild_with("At least one folder must stay on");
                         return Ok(Transition::None);
                     }
                     dirs.retain(|d| *d != dir);
                 }
                 log::info!("settings: library folders {dirs:?}");
-                Self::edit(cx, |s| s.library_dirs = dirs);
+                edit_settings(cx, |s| s.library_dirs = dirs);
                 self.set_status(format!("{} {}", dir.display(), if on == "on" { "added" } else { "removed" }));
             }
             "export-all" => {
@@ -1994,15 +1986,13 @@ impl SettingsScreen {
                 if !LANGUAGES.iter().any(|(c, _)| *c == arg) {
                     return Ok(Transition::None);
                 }
-                Self::edit(cx, |s| s.language = arg.to_string());
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = format!("Language: {}", language_name(arg));
+                edit_settings(cx, |s| s.language = arg.to_string());
+                self.rebuild_with(format!("Language: {}", language_name(arg)));
             }
             "refresh" => {
                 let Ok(n) = arg.parse::<u32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.reader.flash_every = n);
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = format!("Full refresh: {}; used from the next start", refresh_name(n).to_lowercase());
+                edit_settings(cx, |s| s.reader.flash_every = n);
+                self.rebuild_with(format!("Full refresh: {}; used from the next start", refresh_name(n).to_lowercase()));
             }
             "ntp" => {
                 self.say_now("Asking the time server…", cx)?;
@@ -2034,11 +2024,10 @@ impl SettingsScreen {
                 let Some((name, on)) = arg.rsplit_once(':') else { return Ok(Transition::None) };
                 let on = on == "on";
                 let r = plugin_host::set_user_enabled(cx.paths, name, on);
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("{name} turned {}; restart rinky to apply", if on { "on" } else { "off" }),
                     Err(e) => format!("Cannot change {name}: {e}"),
-                };
+                });
             }
             _ => {}
         }
@@ -2069,9 +2058,7 @@ impl SettingsScreen {
             return Ok(());
         }
         if self.connect(&essid, Some(&password), cx)? {
-            let text = std::mem::take(&mut self.status_text);
-            self.go(Page::Wifi, cx);
-            self.status_text = text;
+            self.go_keep_status(Page::Wifi, cx);
         }
         Ok(())
     }
@@ -2099,7 +2086,7 @@ impl SettingsScreen {
     fn poll_job(&mut self) {
         let Some(job) = self.job.as_mut() else { return };
         match job.poll() {
-            Poll::Running(_) => {
+            Poll::Running => {
                 let text = job.status();
                 if text != self.status_text {
                     // Not logged: the elapsed seconds change every second.
@@ -2255,7 +2242,7 @@ impl AppScreen for SettingsScreen {
             self.build(cx, class);
             self.built = Some(key);
         }
-        let damage = self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme });
+        let damage = self.tree.paint(&mut paint_cx(cx));
         let damage = match before {
             Some(old) => ink_ui::refresh::changed_bands(&old, cx.canvas, damage),
             None => damage,

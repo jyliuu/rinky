@@ -12,6 +12,7 @@
 //! card needs beyond the library index (chapter, time left) is read once per book and
 //! position and kept in [`HomeCache`], never on every paint.
 
+use super::browse::{authors_text, percent_text};
 use super::view::{MARGIN, TAB_H};
 use super::{Hit, LibraryScreen};
 use ink_device::Rect;
@@ -19,7 +20,8 @@ use ink_store::{BookEntry, BookState, ReadingStatus};
 use ink_text::Style;
 use ink_ui::draw::stroke_round_rect;
 use ink_ui::theme::space;
-use ink_ui::{paint_button, paint_cover, ButtonKind, Cover, Icon, NavBar, NavItem, PaintCx, ProgressBar, Widget};
+use crate::screens::common::pill;
+use ink_ui::{paint_cover, Cover, Icon, NavBar, NavItem, PaintCx, ProgressBar, Widget};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -106,21 +108,6 @@ pub(crate) fn left_text(secs: u64) -> String {
     }
 }
 
-/// Percentage label, `42%`.
-fn pct_label(v: f32) -> String {
-    let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-    format!("{}%", (v * 100.0).round() as u32)
-}
-
-/// Authors joined, or "Unknown author".
-fn authors(b: &BookEntry) -> String {
-    if b.authors.is_empty() {
-        "Unknown author".into()
-    } else {
-        b.authors.join(", ")
-    }
-}
-
 /// The chapter title the reader saved in the sidecar (`"chapter"`), if any.
 fn saved_chapter(path: &Path) -> Option<String> {
     let st = BookState::load(path).ok()?;
@@ -129,24 +116,26 @@ fn saved_chapter(path: &Path) -> Option<String> {
 
 /// The hero book: the one being read, else the newest unread book that opens, else
 /// the newest unread one, else the most recently opened one. `true` when it is being read.
-pub(crate) fn hero_book(lib: &super::Library) -> Option<(BookEntry, bool)> {
+/// `new`: [`want_to_read`].
+pub(crate) fn hero_book<'a>(lib: &'a super::Library, new: &[&'a BookEntry]) -> Option<(&'a BookEntry, bool)> {
     if let Some(b) = lib.current() {
-        return Some((b.clone(), true));
+        return Some((b, true));
     }
-    let new = want_to_read(lib);
     new.iter()
         .find(|b| !b.unsupported)
         .or(new.first())
-        .cloned()
-        .or_else(|| lib.index.recent(1).first().map(|b| (*b).clone()))
-        .or_else(|| lib.index.books.first().cloned())
+        .copied()
+        .or_else(|| lib.index.recent(1).first().copied())
+        .or_else(|| lib.index.books.first())
         .map(|b| (b, false))
 }
 
-/// Books never opened, newest first.
-pub(crate) fn want_to_read(lib: &super::Library) -> Vec<BookEntry> {
-    let mut v: Vec<BookEntry> = lib.index.books.iter().filter(|b| b.last_opened.is_none() && b.status == ReadingStatus::New).cloned().collect();
-    v.sort_by(|a, b| b.added.cmp(&a.added).then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())));
+/// Books never opened, newest first (then by title). A first scan adds every book at
+/// the same second, so the title decides most comparisons: it is lowercased once per
+/// book, not twice per comparison.
+pub(crate) fn want_to_read(lib: &super::Library) -> Vec<&BookEntry> {
+    let mut v: Vec<&BookEntry> = lib.index.books.iter().filter(|b| b.last_opened.is_none() && b.status == ReadingStatus::New).collect();
+    v.sort_by_cached_key(|b| (std::cmp::Reverse(b.added), b.title.to_lowercase()));
     v
 }
 
@@ -180,10 +169,12 @@ impl LibraryScreen {
             self.draw_home_empty(p, w, h);
             return;
         }
-        let hero = hero_book(lib);
-        let hero_path = hero.as_ref().map(|(b, _)| b.path.clone());
-        let recent: Vec<BookEntry> = lib.index.recent(SHELF_COLS + 1).into_iter().filter(|b| Some(&b.path) != hero_path.as_ref()).take(SHELF_COLS).cloned().collect();
-        let new: Vec<BookEntry> = want_to_read(lib).into_iter().filter(|b| Some(&b.path) != hero_path.as_ref()).take(SHELF_COLS * MAX_ROWS).collect();
+        // Only the books on the page are cloned (the drawing needs `&mut self`).
+        let new = want_to_read(lib);
+        let hero = hero_book(lib, &new).map(|(b, reading)| (b.clone(), reading));
+        let other = |b: &&BookEntry| Some(&b.path) != hero.as_ref().map(|(h, _)| &h.path);
+        let recent: Vec<BookEntry> = lib.index.recent(SHELF_COLS + 1).into_iter().filter(other).take(SHELF_COLS).cloned().collect();
+        let new: Vec<BookEntry> = new.into_iter().filter(other).take(SHELF_COLS * MAX_ROWS).cloned().collect();
         let bottom = h - TAB_H - space(1);
         let mut y = TOP;
         if let Some((b, reading)) = hero {
@@ -214,7 +205,7 @@ impl LibraryScreen {
     /// The cover of `b` for `paint_cover`, scaled from the thumbnail cache to `w` x `h`.
     fn cover_of(&mut self, b: &BookEntry, w: u32, h: u32) -> Cover {
         match b.cover.as_deref().and_then(|c| self.covers.get(c, w, h)) {
-            Some(img) => Cover::image(b.title.clone(), Arc::new(img.clone())),
+            Some(img) => Cover::image(b.title.clone(), Arc::clone(img)),
             None => Cover::placeholder(b.title.clone()),
         }
     }
@@ -250,12 +241,12 @@ impl LibraryScreen {
             y += lh;
         }
         y += space(1);
-        p.text_left(Rect::new(x, y, tw, 48), &authors(b), t.label.px, Style::Regular, t.muted);
+        p.text_left(Rect::new(x, y, tw, 48), &authors_text(b), t.label.px, Style::Regular, t.muted);
         y += 56;
         if !reading && !b.unsupported {
             // The card is the target; the button says what a tap does.
             let bw = 380.min(tw as i32);
-            paint_button(p, Rect::new(x, y + space(2), bw as u32, t.control_h()), if b.status == ReadingStatus::New { "Start reading" } else { "Open book" }, Some(Icon::Book), ButtonKind::Filled, true, false);
+            pill(p, Rect::new(x, y + space(2), bw as u32, t.control_h()), if b.status == ReadingStatus::New { "Start reading" } else { "Open book" }, Some(Icon::Book), true);
         }
         if reading {
             if let Some(c) = self.home.chapter.clone() {
@@ -283,7 +274,7 @@ impl LibraryScreen {
         };
         // No bar for a book marked unread or at 0 % (the line below says "Unread").
         if super::browse::shows_progress(b) {
-            let mut bar = ProgressBar::new(pc).with_label(pct_label(pc));
+            let mut bar = ProgressBar::new(pc).with_label(percent_text(pc));
             bar.paint(p, Rect::new(x - 4, bar_y, tw + 4, bar_h as u32));
         }
         p.text_left(Rect::new(x, r.bottom() - pad - line_h, tw, line_h as u32), &below, t.caption.px, Style::Regular, t.muted);
@@ -307,7 +298,7 @@ impl LibraryScreen {
                 // The row keeps its height; a book marked unread or at 0 % has no bar.
                 if super::browse::shows_progress(b) {
                     let pc = if b.status == ReadingStatus::Complete { 1.0 } else { b.percent.unwrap_or(0.0) };
-                    let mut bar = ProgressBar::thin(pc).with_label(pct_label(pc));
+                    let mut bar = ProgressBar::thin(pc).with_label(percent_text(pc));
                     bar.paint(p, Rect::new(cell.x, y, cell.w, 28));
                 }
                 y += 32;
@@ -316,7 +307,7 @@ impl LibraryScreen {
             p.text_centered(Rect::new(cell.x, y, cell.w, 40), &b.title, t.caption.px, Style::Bold, title_c);
             y += 40;
             if !progress {
-                p.text_centered(Rect::new(cell.x, y, cell.w, 36), &authors(b), t.caption.px, Style::Regular, t.muted);
+                p.text_centered(Rect::new(cell.x, y, cell.w, 36), &authors_text(b), t.caption.px, Style::Regular, t.muted);
             }
             self.hits.push((cell, Hit::Book(b.path.clone())));
         }
@@ -346,7 +337,7 @@ impl LibraryScreen {
         y += space(4);
         let bw = 360;
         let b = Rect::new((w - bw) / 2, y.min(h - TAB_H - 140), bw as u32, t.control_h());
-        paint_button(p, b, "Look again", Some(Icon::Sync), ButtonKind::Outlined, true, false);
+        pill(p, b, "Look again", Some(Icon::Sync), false);
         self.hits.push((b, Hit::Rescan));
     }
 
@@ -397,6 +388,35 @@ mod tests {
     }
 
     #[test]
+    fn want_to_read_is_newest_first_then_by_title_and_the_hero_opens() {
+        let root = std::env::temp_dir().join(format!("ink-home-order-{}", std::process::id()));
+        let mut lib = super::super::Library::open(&ink_store::Paths { root: root.clone() }, &[]);
+        let book = |title: &str, added: u64, unsupported: bool, opened: Option<u64>| BookEntry {
+            path: PathBuf::from(format!("/b/{title}.epub")),
+            title: title.into(),
+            added,
+            unsupported,
+            last_opened: opened,
+            ..Default::default()
+        };
+        lib.index.books = vec![
+            book("beta", 1, false, None),
+            book("Alpha", 1, false, None),
+            book("locked", 2, true, None),
+            book("opened", 3, false, Some(9)),
+        ];
+        let new = want_to_read(&lib);
+        assert_eq!(new.iter().map(|b| b.title.as_str()).collect::<Vec<_>>(), ["locked", "Alpha", "beta"]);
+        // The most recently opened book that is not finished is being read: the hero.
+        assert_eq!(hero_book(&lib, &new).map(|(b, r)| (b.title.as_str(), r)), Some(("opened", true)));
+        lib.index.books.pop();
+        let new = want_to_read(&lib);
+        // The newest unread book that opens, not the locked one.
+        assert_eq!(hero_book(&lib, &new).map(|(b, r)| (b.title.as_str(), r)), Some(("Alpha", false)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn time_left_needs_pages_and_pace() {
         assert_eq!(time_left(0.5, Some(200), Some(60.0)), Some(6000));
         assert_eq!(time_left(f32::NAN, Some(10), Some(60.0)), Some(600));
@@ -415,12 +435,5 @@ mod tests {
         assert_eq!(left_text(61), "2 min left in book");
         assert_eq!(left_text(59 * 60), "59 min left in book");
         assert_eq!(left_text(3 * 3600 + 5 * 60), "3 h 05 min left in book");
-    }
-
-    #[test]
-    fn percent_labels_clamp() {
-        assert_eq!(pct_label(0.424), "42%");
-        assert_eq!(pct_label(f32::NAN), "0%");
-        assert_eq!(pct_label(3.0), "100%");
     }
 }

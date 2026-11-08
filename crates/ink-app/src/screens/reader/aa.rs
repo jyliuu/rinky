@@ -45,7 +45,7 @@ use ink_device::{Point, Rect, RefreshClass, Size};
 use ink_doc::LayoutSettings;
 use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::sidecar::BookSettings;
-use ink_store::{BookState, Settings};
+use ink_store::Settings;
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
 use ink_ui::{BottomSheet, Button, EventResult, Gesture, Icon, Label, PaintCx, Segmented, Tabs, Toggle, TouchKind, UiEvent, Widget};
@@ -655,11 +655,7 @@ impl ReaderScreen {
     }
 
     fn save_book_settings(&self) {
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        state.settings = self.book_settings.clone();
-        if let Err(e) = state.save(&self.path) {
-            log::warn!("aa: cannot save book settings: {e}");
-        }
+        self.update_sidecar("book settings", |state| state.settings = self.book_settings.clone());
     }
 }
 
@@ -893,10 +889,15 @@ impl SliderPanel {
         }
         s.set(i, v);
         drop(s);
+        self.mark(k);
+        true
+    }
+
+    /// Row `k` is drawn again at the next paint.
+    fn mark(&mut self, k: usize) {
         if !self.changed.contains(&k) {
             self.changed.push(k);
         }
-        true
     }
 
     fn paint_row(&self, cx: &mut PaintCx, k: usize, row: Rect) {
@@ -1040,9 +1041,7 @@ impl Widget for SliderPanel {
                             let spec = SLIDERS[self.which[k]];
                             self.drag = Some((k, self.shown.borrow().get(self.which[k])));
                             self.set(k, Self::value_at(&spec, track, t.pos));
-                            if !self.changed.contains(&k) {
-                                self.changed.push(k);
-                            }
+                            self.mark(k);
                             return EventResult::Handled;
                         }
                     }
@@ -1063,7 +1062,7 @@ impl Widget for SliderPanel {
                     Some((k, _)) => {
                         let (_, _, track, _) = Self::parts(rows[k]);
                         self.set(k, Self::value_at(&SLIDERS[self.which[k]], track, t.pos));
-                        self.changed.push(k);
+                        self.mark(k);
                         self.settle = true;
                         log::info!("aa: {} drag ended, last panel paint {:?}", SLIDERS[self.which[k]].label, self.last_paint);
                         self.report(k)
@@ -1146,14 +1145,19 @@ impl FamilyGrid {
         }
     }
 
+    /// (cells in `b`, names per page, pages): with more names than cells the last cell
+    /// is the "More" cell.
+    fn paging(&self, b: Rect) -> (usize, usize, usize) {
+        let per = (Self::cols(b) * ((b.h + GAP) / (CONTROL_H + GAP)).max(1)) as usize;
+        let per_page = if self.names.len() > per { per - 1 } else { per };
+        (per, per_page, self.names.len().div_ceil(per_page.max(1)).max(1))
+    }
+
     /// The cells of the current page.
     fn cells(&self, b: Rect) -> Vec<(Rect, Cell2)> {
         let cols = Self::cols(b);
-        let rows = ((b.h + GAP) / (CONTROL_H + GAP)).max(1);
-        let per = (cols * rows) as usize;
-        let paged = self.names.len() > per;
-        let per_page = if paged { per - 1 } else { per };
-        let pages = self.names.len().div_ceil(per_page.max(1)).max(1);
+        let (per, per_page, pages) = self.paging(b);
+        let paged = per_page < per;
         let page = self.page % pages;
         let w = (b.w - (cols - 1) * GAP) / cols;
         let at = |n: usize| {
@@ -1169,12 +1173,7 @@ impl FamilyGrid {
     }
 
     fn pages(&self, b: Rect) -> usize {
-        let per = (Self::cols(b) * ((b.h + GAP) / (CONTROL_H + GAP)).max(1)) as usize;
-        if self.names.len() > per {
-            self.names.len().div_ceil(per - 1)
-        } else {
-            1
-        }
+        self.paging(b).2
     }
 
     fn selected(&self) -> String {
@@ -1269,6 +1268,12 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
     let s = shown.borrow().clone();
     let ctl = |f, inner, values: Vec<String>| -> Box<dyn Widget> { Box::new(Control::new(f, inner, values, shown)) };
     let toggle = |f, label: &str, on: bool, action: &str| ctl(f, Inner::Toggle(Toggle::new(label, on, action)), Vec::new());
+    // A segmented choice from a (value, caption) table; option I reports `action:value`.
+    fn choice<T: std::fmt::Display>(table: &[(T, &str)], action: &str) -> (Inner, Vec<String>) {
+        let captions: Vec<&str> = table.iter().map(|x| x.1).collect();
+        (seg(&captions), table.iter().map(|x| format!("{action}:{}", x.0)).collect())
+    }
+    let pick = |f, (inner, values): (Inner, Vec<String>)| ctl(f, inner, values);
     match tab {
         0 => {
             let preset_names: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
@@ -1295,25 +1300,20 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
                     stack_narrow: true,
                     widgets: vec![
                         (Some("publisher"), toggle(Field::Publisher, "Book's styles", s.publisher, "aa-publisher")),
-                        (Some("weight"), ctl(Field::Weight, seg(&WEIGHTS.map(|x| x.1)), WEIGHTS.iter().map(|x| format!("aa-weight:{}", x.0)).collect())),
+                        (Some("weight"), pick(Field::Weight, choice(&WEIGHTS, "aa-weight"))),
                     ],
                 },
             ]
         }
         1 => vec![
             Row::one("sliders", None, SliderPanel::height(4, PREVIEW_H), Box::new(SliderPanel::new(vec![1, 2, 3, 4], shown, screen_w))),
-            Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, ctl(Field::ParaSpace, Inner::Seg(Segmented::new(&PARA_SPACINGS.map(|x| x.1), "seg")), PARA_SPACINGS.iter().map(|x| format!("aa-pspace:{}", x.0)).collect())),
-            Row::one("indent", Some("First-line indent"), CONTROL_H, ctl(Field::Indent, seg(&INDENTS.map(|x| x.1)), INDENTS.iter().map(|x| format!("aa-indent:{}", x.0)).collect())),
+            Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, pick(Field::ParaSpace, choice(&PARA_SPACINGS, "aa-pspace"))),
+            Row::one("indent", Some("First-line indent"), CONTROL_H, pick(Field::Indent, choice(&INDENTS, "aa-indent"))),
         ],
         _ => [
             s.extras.wave_supported.then(|| Row::one("wave", None, CONTROL_H, toggle(Field::Wave, "Page turn wave", s.extras.wave, "aa-anim"))),
             Some(Row::one("statusbars", None, CONTROL_H, Box::new(Button::new("Status bars…", "aa-statusbars")))),
-            Some(Row::one(
-                "flash",
-                Some("Full refresh every"),
-                CONTROL_H,
-                ctl(Field::Flash, Inner::Seg(Segmented::new(&FLASHES.iter().map(|x| x.1).collect::<Vec<_>>(), "seg")), FLASHES.iter().map(|x| format!("aa-flash:{}", x.0)).collect()),
-            )),
+            Some(Row::one("flash", Some("Full refresh every"), CONTROL_H, pick(Field::Flash, choice(&FLASHES, "aa-flash")))),
             Some(Row::one("night", None, CONTROL_H, toggle(Field::Night, "Night mode", s.extras.night, "aa-night"))),
         ]
         .into_iter()
@@ -1536,5 +1536,25 @@ mod tests {
                 assert!(back.right() < size.w as i32 / 2 - 220 && back.h >= 96, "{back:?} clear of the title");
             }
         }
+    }
+
+    /// A drag on a slider reports the preview and the dragged row as damage, each once,
+    /// also on the lift that moved the value again.
+    #[test]
+    fn a_slider_drag_reports_its_row_once() {
+        let l = LayoutSettings::for_screen(1272, 1696);
+        let shown = Rc::new(RefCell::new(Shown::new(&l, &AaExtras::default())));
+        let mut p = SliderPanel::new(vec![1, 2], &shown, 1272);
+        let b = Rect::new(0, 0, 1200, SliderPanel::height(2, PREVIEW_H));
+        let (preview, rows) = SliderPanel::areas(b, 2);
+        let (_, _, track, _) = SliderPanel::parts(rows[1]);
+        let y = track.y + track.h as i32 / 2;
+        let touch = |kind, x: i32| UiEvent::Touch(ink_ui::Touch { slot: 0, kind, pos: Point::new(x, y), start: Point::new(track.x + 10, y), held: Duration::ZERO, moved: true });
+        p.event(&touch(TouchKind::Down, track.x + 10), b);
+        assert_eq!(p.damage(b), Some(vec![preview, rows[1]]));
+        p.event(&touch(TouchKind::Move, track.x + track.w as i32 / 3), b);
+        p.event(&touch(TouchKind::Up, track.x + track.w as i32 / 2), b);
+        assert_eq!(p.damage(b), Some(vec![preview, rows[1]]));
+        assert_eq!(p.damage(b), None);
     }
 }

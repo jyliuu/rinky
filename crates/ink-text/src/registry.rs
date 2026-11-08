@@ -236,11 +236,6 @@ pub fn installed() -> std::sync::Arc<[FontFamily]> {
     INSTALLED.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| Vec::new().into())
 }
 
-/// True once [`set_installed`] was called.
-pub fn installed_known() -> bool {
-    INSTALLED.read().unwrap_or_else(|e| e.into_inner()).is_some()
-}
-
 /// The installed family `name` (case-insensitive).
 pub fn installed_family(name: &str) -> Option<FontFamily> {
     let name = name.trim();

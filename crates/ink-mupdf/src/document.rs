@@ -224,6 +224,42 @@ fn part_index(off: f32, len: f32, n: usize) -> usize {
     }
 }
 
+/// Scale that fits a `rw` x `rh` region into a `w` x `h` screen.
+fn fit_scale(fit: Fit, w: f32, h: f32, rw: f32, rh: f32) -> f32 {
+    match fit {
+        Fit::Page => (w / rw).min(h / rh),
+        Fit::Width => w / rw,
+    }
+}
+
+/// Page space to screen: rotate by `rot`, scale, and put the top-left corner of `rr`
+/// (the region already rotated) at `(left, top)`.
+fn place(rot: &Matrix, rr: &FRect, scale: f32, left: f32, top: f32) -> Matrix {
+    rot.then(&Matrix::scale(scale)).then(&Matrix::translate(left - rr.x0 * scale, top - rr.y0 * scale))
+}
+
+/// The screen pixels that `region` covers under `ctm`, inside `screen`.
+fn clip_of(ctm: &Matrix, region: &FRect, screen: &FRect) -> Rect {
+    ctm.map_rect(region).intersect(screen).to_rect().intersect(&screen.to_rect())
+}
+
+impl Setup {
+    /// Screen `view` of a tile plan as (page, column, row, tile across), or `None` for
+    /// spreads and screens past the end.
+    fn tile(&self, view: usize) -> Option<(usize, usize, usize, usize)> {
+        let Plan::Tiles { cols, nx, ny } = self.plan else {
+            return None;
+        };
+        let per = cols * nx * ny;
+        let page = view / per;
+        if page >= self.pages {
+            return None;
+        }
+        let (col, rem) = (view % per / (nx * ny), view % per % (nx * ny));
+        Some((page, col, rem / nx, rem % nx))
+    }
+}
+
 impl Inner {
     fn bound(&mut self, page: usize) -> FRect {
         if let Some(b) = self.bounds.get(&page) {
@@ -253,11 +289,17 @@ impl Inner {
         Ok((Gray { w, h, px }, k, b))
     }
 
-    fn geom(&mut self, page: usize, opts: &FixedOptions) -> PageGeom {
+    /// Crop box and column regions of `page` for `opts`, analysed on first use.
+    fn geom(&mut self, page: usize, opts: &FixedOptions) -> &PageGeom {
         let key = (page, opts.crop_margins, opts.columns.max(1));
-        if let Some(g) = self.geom.get(&key) {
-            return g.clone();
+        if !self.geom.contains_key(&key) {
+            let g = self.analyse(page, opts);
+            self.geom.insert(key, g);
         }
+        &self.geom[&key]
+    }
+
+    fn analyse(&mut self, page: usize, opts: &FixedOptions) -> PageGeom {
         let b = self.bound(page);
         let cols = opts.columns.max(1) as usize;
         let g = if !opts.crop_margins && cols == 1 {
@@ -271,7 +313,6 @@ impl Inner {
                 }
             }
         };
-        self.geom.insert(key, g.clone());
         g
     }
 
@@ -306,14 +347,7 @@ impl Inner {
         let Plan::Tiles { cols, nx, ny } = s.plan else {
             return None;
         };
-        let per = cols * nx * ny;
-        let page = view / per;
-        if page >= s.pages {
-            return None;
-        }
-        let t = view % per;
-        let (col, rem) = (t / (nx * ny), t % (nx * ny));
-        let (row, xi) = (rem / nx, rem % nx);
+        let (page, col, row, xi) = s.tile(view)?;
         let region = self.tile_region(s, page, cols, col);
         let rot = Matrix::rotate(s.opts.rotate as i32);
         let rr = rot.map_rect(&region);
@@ -368,29 +402,17 @@ impl Inner {
         let mut out = Vec::new();
         match s.plan {
             Plan::Tiles { cols, nx, ny } => {
-                let per = cols * nx * ny;
-                let page = view / per;
-                if page >= s.pages {
-                    return out;
-                }
-                let t = view % per;
-                let col = t / (nx * ny);
-                let rem = t % (nx * ny);
-                let (row, xi) = (rem / nx, rem % nx);
+                let Some((page, col, row, xi)) = s.tile(view) else { return out };
                 let region = self.tile_region(s, page, cols, col);
                 let rr = rot.map_rect(&region);
                 let (rw, rh) = (rr.w().max(1.0), rr.h().max(1.0));
-                let base = match s.opts.fit {
-                    Fit::Page => (s.w / rw).min(s.h / rh),
-                    Fit::Width => s.w / rw,
-                };
+                let base = fit_scale(s.opts.fit, s.w, s.h, rw, rh);
                 let scale = (base * s.opts.zoom).min(nx as f32 * s.w / rw).min(ny as f32 * s.h / rh);
                 let (cw, ch) = (rw * scale, rh * scale);
                 let left = if cw <= s.w + 0.5 || nx < 2 { (s.w - cw) / 2.0 } else { -(xi as f32) * (cw - s.w) / (nx - 1) as f32 };
                 let top = if ch <= s.h + 0.5 || ny < 2 { (s.h - ch) / 2.0 } else { -(row as f32) * (ch - s.h) / (ny - 1) as f32 };
-                let ctm = rot.then(&Matrix::scale(scale)).then(&Matrix::translate(left - rr.x0 * scale, top - rr.y0 * scale));
-                let clip = ctm.map_rect(&region).intersect(&screen).to_rect().intersect(&FRect::to_rect(&screen));
-                out.push(Piece { page, ctm, clip, region });
+                let ctm = place(&rot, &rr, scale, left, top);
+                out.push(Piece { page, ctm, clip: clip_of(&ctm, &region, &screen), region });
             }
             Plan::Spread { cover_alone, rtl } => {
                 let pages = spread_pages(view, s.pages, cover_alone);
@@ -411,10 +433,8 @@ impl Inner {
                     } else {
                         s.w / 2.0 - cw
                     };
-                    let top = (s.h - ch) / 2.0;
-                    let ctm = rot.then(&Matrix::scale(scale)).then(&Matrix::translate(left - rr.x0 * scale, top - rr.y0 * scale));
-                    let clip = ctm.map_rect(&region).intersect(&screen).to_rect().intersect(&FRect::to_rect(&screen));
-                    out.push(Piece { page, ctm, clip, region });
+                    let ctm = place(&rot, &rr, scale, left, (s.h - ch) / 2.0);
+                    out.push(Piece { page, ctm, clip: clip_of(&ctm, &region, &screen), region });
                 }
             }
         }
@@ -672,11 +692,7 @@ impl MupdfDocument {
                     for r in g.regions.iter().take(cols) {
                         let rr = rot.map_rect(r);
                         let (rw, rh) = (rr.w().max(1.0), rr.h().max(1.0));
-                        let base = match self.opts.fit {
-                            Fit::Page => (w / rw).min(h / rh),
-                            Fit::Width => w / rw,
-                        };
-                        let s = base * self.opts.zoom;
+                        let s = fit_scale(self.opts.fit, w, h, rw, rh) * self.opts.zoom;
                         fx = fx.max(rw * s / w);
                         fy = fy.max(rh * s / h);
                     }
@@ -790,7 +806,7 @@ impl MupdfDocument {
             return Err(DocError::PageOutOfRange(page));
         }
         let opts = self.opts;
-        Ok(self.inner.borrow_mut().geom(page, &opts).regions)
+        Ok(self.inner.borrow_mut().geom(page, &opts).regions.clone())
     }
 
     /// The text of document page `page`.
@@ -845,6 +861,28 @@ impl MupdfDocument {
         }
     }
 
+    /// Draws `page` with `ctm` into the rectangle `clip` of `dst`, an image `dst_w`
+    /// pixels wide, and applies the contrast and gamma table. `clip` lies inside `dst`.
+    fn render_into(&self, page: usize, ctm: &Matrix, clip: Rect, dst: &mut [u8], dst_w: usize) -> Result<()> {
+        let (x, y, cw, ch) = (clip.x as usize, clip.y as usize, clip.w as usize, clip.h as usize);
+        if x == 0 && cw == dst_w {
+            // Whole rows (a page as wide as the screen): drawn in place.
+            let rows = &mut dst[y * dst_w..(y + ch) * dst_w];
+            self.inner.borrow_mut().raw.render(page, ctm, clip, rows)?;
+            self.apply_lut(rows);
+            return Ok(());
+        }
+        // The shim clears the area to white before drawing.
+        let mut tmp = vec![0u8; cw * ch];
+        self.inner.borrow_mut().raw.render(page, ctm, clip, &mut tmp)?;
+        self.apply_lut(&mut tmp);
+        for (row, src) in tmp.chunks_exact(cw).enumerate() {
+            let at = (y + row) * dst_w + x;
+            dst[at..at + cw].copy_from_slice(src);
+        }
+        Ok(())
+    }
+
     /// Renders `screen` into a new `w * h` buffer (no cache).
     fn draw_screen(&self, screen: usize) -> Result<Vec<u8>> {
         let s = self.setup();
@@ -854,32 +892,23 @@ impl MupdfDocument {
         if pieces.is_empty() {
             return Err(DocError::PageOutOfRange(screen));
         }
-        for p in pieces {
-            let c = p.clip;
-            if c.is_empty() {
-                continue;
-            }
-            let (cw, ch) = (c.w as usize, c.h as usize);
-            let mut tmp = vec![255u8; cw * ch];
-            self.inner.borrow_mut().raw.render(p.page, &p.ctm, c, &mut tmp)?;
-            self.apply_lut(&mut tmp);
-            for row in 0..ch {
-                let dy = c.y as usize + row;
-                let dx = c.x as usize;
-                buf[dy * w + dx..dy * w + dx + cw].copy_from_slice(&tmp[row * cw..(row + 1) * cw]);
-            }
+        for p in pieces.iter().filter(|p| !p.clip.is_empty()) {
+            self.render_into(p.page, &p.ctm, p.clip, &mut buf, w)?;
         }
         Ok(buf)
     }
 
-    fn screen_pixels(&self, screen: usize) -> Result<Vec<u8>> {
+    /// Calls `f` with the pixels of `screen`, from the cache or drawn (and cached) now,
+    /// without copying them.
+    fn with_screen<R>(&self, screen: usize, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
         if let Some(px) = self.inner.borrow_mut().screens.get(&screen) {
-            return Ok(px.clone());
+            return Ok(f(px));
         }
         let px = self.draw_screen(screen)?;
+        let r = f(&px);
         let bytes = px.len();
-        self.inner.borrow_mut().screens.insert(screen, px.clone(), bytes);
-        Ok(px)
+        self.inner.borrow_mut().screens.insert(screen, px, bytes);
+        Ok(r)
     }
 
     /// Renders `screen` into the cache without showing it (call after a page turn for the
@@ -921,7 +950,7 @@ impl MupdfDocument {
         let rot = Matrix::rotate(spec.rotate as i32);
         let z = spec.zoom.clamp(FREE_ZOOM_RANGE.0, FREE_ZOOM_RANGE.1);
         let rr = rot.map_rect(&region);
-        let ctm = rot.then(&Matrix::scale(z)).then(&Matrix::translate(-rr.x0 * z - zx, -rr.y0 * z - zy));
+        let ctm = place(&rot, &rr, z, -zx, -zy);
         let (w, h) = (canvas.width, canvas.height);
         let canvas_rect = Rect::new(0, 0, w.min(i32::MAX as usize) as u32, h.min(i32::MAX as usize) as u32);
         let clip = ctm.map_rect(&region).intersect(&FRect::new(0.0, 0.0, w as f32, h as f32)).to_rect().intersect(&canvas_rect);
@@ -929,16 +958,7 @@ impl MupdfDocument {
         if clip.is_empty() || canvas.pixels.len() < w * h {
             return Ok(());
         }
-        let (cw, ch) = (clip.w as usize, clip.h as usize);
-        let mut tmp = vec![255u8; cw * ch];
-        self.inner.borrow_mut().raw.render(page, &ctm, clip, &mut tmp)?;
-        self.apply_lut(&mut tmp);
-        for row in 0..ch {
-            let dy = clip.y as usize + row;
-            let dx = clip.x as usize;
-            canvas.pixels[dy * w + dx..dy * w + dx + cw].copy_from_slice(&tmp[row * cw..(row + 1) * cw]);
-        }
-        Ok(())
+        self.render_into(page, &ctm, clip, &mut canvas.pixels, w)
     }
 
     /// A thumbnail of the first page (the cover) that fits in `max_w` x `max_h`.
@@ -1039,18 +1059,20 @@ impl Document for MupdfDocument {
         if page >= self.screens() {
             return Err(DocError::PageOutOfRange(page));
         }
-        let px = self.screen_pixels(page)?;
         let (w, h) = (self.layout.width as usize, self.layout.height as usize);
-        if canvas.width == w && canvas.height == h {
-            canvas.pixels.copy_from_slice(&px);
-        } else {
-            canvas.clear(255);
-            for y in 0..h.min(canvas.height) {
+        self.with_screen(page, |px| {
+            if canvas.width == w && canvas.height == h {
+                canvas.pixels.copy_from_slice(px);
+            } else {
+                canvas.clear(255);
                 let n = w.min(canvas.width);
-                canvas.pixels[y * canvas.width..y * canvas.width + n].copy_from_slice(&px[y * w..y * w + n]);
+                if n > 0 {
+                    for (dst, src) in canvas.pixels.chunks_exact_mut(canvas.width).zip(px.chunks_exact(w)) {
+                        dst[..n].copy_from_slice(&src[..n]);
+                    }
+                }
             }
-        }
-        Ok(())
+        })
     }
 
     fn position_of_page(&self, page: usize) -> Result<Position> {
@@ -1173,11 +1195,11 @@ impl Document for MupdfDocument {
         let screen = self.page_of(pos)?;
         let piece = self.pieces(screen).into_iter().find(|x| x.page == page);
         let raw = self.inner.borrow_mut().raw.links(page)?;
-        let text = self.page_text(page)?;
+        let labels = self.page_text(page)?.texts_under(&raw.iter().map(|l| l.rect).collect::<Vec<_>>());
         Ok(raw
             .into_iter()
-            .map(|l| {
-                let label = text.range_in(&[l.rect]).map(|r| text.text_of(r)).unwrap_or_default();
+            .zip(labels)
+            .map(|(l, label)| {
                 let footnote = !label.is_empty()
                     && label.chars().count() <= 3
                     && label.chars().all(|c| c.is_ascii_digit() || "*\u{2020}\u{2021}\u{a7}".contains(c));

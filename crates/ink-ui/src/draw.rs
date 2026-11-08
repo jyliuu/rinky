@@ -40,40 +40,37 @@ fn circle_points(cx: f32, cy: f32, r: f32) -> Vec<(f32, f32)> {
     .collect()
 }
 
+/// Appends a quarter circle of radius `r` around `(cx, cy)`, clockwise on screen from
+/// angle `a0`: the corner of a rounded rectangle, in a few segments for its size.
+fn corner(pts: &mut Vec<(f32, f32)>, (cx, cy): (f32, f32), r: f32, a0: f32) {
+    let steps = ((r / 2.0) as usize).clamp(3, 16);
+    for i in 0..=steps {
+        let a = a0 + i as f32 / steps as f32 * PI / 2.0;
+        pts.push((cx + r * a.cos(), cy + r * a.sin()));
+    }
+}
+
 fn round_rect_points(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
     let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
     if r < 0.5 {
         return vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
     }
     let mut pts = Vec::new();
-    let steps = ((r / 2.0) as usize).clamp(3, 16);
-    let corners = [(x + w - r, y + r, -PI / 2.0), (x + w - r, y + h - r, 0.0), (x + r, y + h - r, PI / 2.0), (x + r, y + r, PI)];
-    for (cx, cy, a0) in corners {
-        for i in 0..=steps {
-            let a = a0 + i as f32 / steps as f32 * PI / 2.0;
-            pts.push((cx + r * a.cos(), cy + r * a.sin()));
-        }
-    }
+    corner(&mut pts, (x + w - r, y + r), r, -PI / 2.0);
+    corner(&mut pts, (x + w - r, y + h - r), r, 0.0);
+    corner(&mut pts, (x + r, y + h - r), r, PI / 2.0);
+    corner(&mut pts, (x + r, y + r), r, PI);
     pts
 }
 
 /// A rectangle with only its top corners rounded (sheets attached to the bottom edge).
 fn top_round_rect_points(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
     let r = r.min(w / 2.0).min(h).max(0.0);
-    let steps = ((r / 2.0) as usize).clamp(3, 16);
     let mut pts = Vec::new();
-    for (cx, cy, a0) in [(x + w - r, y + r, -PI / 2.0)] {
-        for i in 0..=steps {
-            let a = a0 + i as f32 / steps as f32 * PI / 2.0;
-            pts.push((cx + r * a.cos(), cy + r * a.sin()));
-        }
-    }
+    corner(&mut pts, (x + w - r, y + r), r, -PI / 2.0);
     pts.push((x + w, y + h));
     pts.push((x, y + h));
-    for i in 0..=steps {
-        let a = PI + i as f32 / steps as f32 * PI / 2.0;
-        pts.push((x + r + r * a.cos(), y + r + r * a.sin()));
-    }
+    corner(&mut pts, (x + r, y + r), r, PI);
     pts
 }
 
@@ -202,13 +199,10 @@ impl Path {
 
 /// Blends `value` into `r` of the canvas with per-pixel coverage `cov` (`r.w * r.h`).
 pub fn blend(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {
-    // Row slices of the part of `r` on the canvas and inside its clip (what
-    // `Canvas::set` would write), instead of a bounds-checked get/set per pixel: the
-    // sheets and panels blend their full-size outlines on every paint.
-    let area = match canvas.clip() {
-        Some(c) => r.intersect(&canvas.bounds()).intersect(&c),
-        None => r.intersect(&canvas.bounds()),
-    };
+    // Row slices of the part of `r` that drawing may change, instead of a bounds-checked
+    // get/set per pixel: the sheets and panels blend their full-size outlines on every
+    // paint.
+    let area = drawable(canvas, r);
     if area.is_empty() {
         return;
     }
@@ -247,23 +241,30 @@ pub fn blit_fit(canvas: &mut Canvas, src: &Canvas, r: Rect) -> Rect {
     let scale = (r.w as f32 / src.width as f32).min(r.h as f32 / src.height as f32);
     let (w, h) = (((src.width as f32 * scale).round() as u32).clamp(1, r.w), ((src.height as f32 * scale).round() as u32).clamp(1, r.h));
     let dst = Rect::new(r.x + (r.w - w) as i32 / 2, r.y + (r.h - h) as i32 / 2, w, h);
+    // Source span `(start, end, sample step)` of target column or row `i`: at most 4
+    // samples per axis, enough for thumbnails and cheap for big images.
+    let span = |i: u32, scale: f32, len: usize| {
+        let end = (((i + 1) as f32 * scale) as usize).clamp(1, len);
+        let start = ((i as f32 * scale) as usize).min(end - 1);
+        (start, end, (end - start).div_ceil(4).max(1))
+    };
     let (sx, sy) = (src.width as f32 / w as f32, src.height as f32 / h as f32);
-    for y in 0..h {
-        let (y0, y1) = ((y as f32 * sy) as usize, (((y + 1) as f32 * sy) as usize).clamp(1, src.height));
-        let y0 = y0.min(y1 - 1);
-        for x in 0..w {
-            let (x0, x1) = ((x as f32 * sx) as usize, (((x + 1) as f32 * sx) as usize).clamp(1, src.width));
-            let x0 = x0.min(x1 - 1);
-            // At most 4 x 4 samples per pixel: enough for thumbnails, cheap for big images.
-            let (stx, sty) = ((x1 - x0).div_ceil(4), (y1 - y0).div_ceil(4));
+    // Only the part that drawing may change; the column spans are the same on every row.
+    let vis = drawable(canvas, dst);
+    let (vx, vy) = ((vis.x - dst.x) as u32, (vis.y - dst.y) as u32);
+    let cols: Vec<(usize, usize, usize)> = (vx..vx + vis.w).map(|x| span(x, sx, src.width)).collect();
+    for y in vy..vy + vis.h {
+        let (y0, y1, sty) = span(y, sy, src.height);
+        let row = (dst.y + y as i32) as usize * canvas.width + vis.x as usize;
+        for (p, &(x0, x1, stx)) in canvas.pixels[row..row + cols.len()].iter_mut().zip(&cols) {
             let (mut sum, mut n) = (0u32, 0u32);
-            for yy in (y0..y1).step_by(sty.max(1)) {
-                for xx in (x0..x1).step_by(stx.max(1)) {
+            for yy in (y0..y1).step_by(sty) {
+                for xx in (x0..x1).step_by(stx) {
                     sum += src.pixels[yy * src.width + xx] as u32;
                     n += 1;
                 }
             }
-            canvas.set(dst.x + x as i32, dst.y + y as i32, (sum / n.max(1)) as u8);
+            *p = (sum / n.max(1)) as u8;
         }
     }
     dst
@@ -272,13 +273,22 @@ pub fn blit_fit(canvas: &mut Canvas, src: &Canvas, r: Rect) -> Rect {
 /// Forces `r` of the canvas to two levels (black below `threshold`, else white): what a
 /// DU animation frame shows, so the simulator and screenshots match the panel.
 pub fn two_level(canvas: &mut Canvas, r: Rect, threshold: u8) {
-    let r = r.intersect(&canvas.bounds());
+    let r = drawable(canvas, r);
     for y in r.y..r.bottom() {
-        for x in r.x..r.right() {
-            if let Some(v) = canvas.get(x, y) {
-                canvas.set(x, y, if v < threshold { 0 } else { 255 });
-            }
+        let i = y as usize * canvas.width + r.x as usize;
+        for p in &mut canvas.pixels[i..i + r.w as usize] {
+            *p = if *p < threshold { 0 } else { 255 };
         }
+    }
+}
+
+/// The part of `r` that drawing may change: on the canvas and inside its clip (what
+/// `Canvas::set` writes).
+fn drawable(canvas: &Canvas, r: Rect) -> Rect {
+    let r = r.intersect(&canvas.bounds());
+    match canvas.clip() {
+        Some(c) => r.intersect(&c),
+        None => r,
     }
 }
 
@@ -388,11 +398,32 @@ mod tests {
         assert_eq!(c.get(50, 90), Some(255));
         assert_eq!(c.get(10, 10), Some(255), "outside the picture");
         assert_eq!(blit_fit(&mut c, &Canvas::new(0, 0), Rect::new(0, 0, 10, 10)).w, 0);
+        // A gradient scaled down, also partly off the canvas and under a clip: the same
+        // pixels where they land, nothing elsewhere.
+        let grad = Canvas::from_pixels(300, 200, (0..300 * 200).map(|i| ((i % 300) * 255 / 300 + i / 300 % 7) as u8).collect());
+        let mut full = Canvas::new(100, 100);
+        blit_fit(&mut full, &grad, Rect::new(5, 5, 90, 90));
+        let mut cut = Canvas::new(100, 100);
+        cut.set_clip(Some(Rect::new(20, 30, 50, 10)));
+        blit_fit(&mut cut, &grad, Rect::new(5, 5, 90, 90));
+        for (i, (a, b)) in full.pixels.iter().zip(&cut.pixels).enumerate() {
+            let inside = Rect::new(20, 30, 50, 10).contains(ink_device::Point::new((i % 100) as i32, (i / 100) as i32));
+            assert_eq!(*b, if inside { *a } else { 255 }, "pixel {i}");
+        }
+        let mut edge = Canvas::new(100, 100);
+        let r = blit_fit(&mut edge, &grad, Rect::new(-40, 60, 90, 90));
+        assert_eq!(r, Rect::new(-40, 75, 90, 60));
+        assert_eq!(edge.get(0, 80), full.get(45, 25));
         let mut g = Canvas::new(4, 1);
         for (x, v) in [0x22, 0x77, 0x99, 0xDD].iter().enumerate() {
             g.set(x as i32, 0, *v);
         }
         two_level(&mut g, Rect::new(0, 0, 10, 10), 0x80);
         assert_eq!(g.pixels, vec![0, 0, 255, 255]);
+        // Only inside the canvas's clip.
+        let mut g = Canvas::from_pixels(4, 1, vec![0x22, 0x77, 0x99, 0xDD]);
+        g.set_clip(Some(Rect::new(1, 0, 2, 1)));
+        two_level(&mut g, Rect::new(-5, -5, 20, 20), 0x80);
+        assert_eq!(g.pixels, vec![0x22, 0, 255, 0xDD]);
     }
 }

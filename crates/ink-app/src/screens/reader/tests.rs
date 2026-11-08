@@ -112,6 +112,13 @@ impl Harness {
         h
     }
 
+    /// Runs `f` on the reader with the app context the app loop would give it.
+    pub fn with_cx<R>(&mut self, f: impl FnOnce(&mut ReaderScreen, &mut AppCtx) -> R) -> R {
+        let p = providers();
+        let mut cx = cx!(self, p);
+        f(&mut self.reader, &mut cx)
+    }
+
     pub fn paint(&mut self) {
         let p = providers();
         let mut cx = cx!(self, p);
@@ -191,19 +198,6 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
-}
-
-#[test]
-fn zones() {
-    let (w, h) = (1272, 1696);
-    // No hidden exit corner: the top band opens the menu.
-    assert_eq!(zone(Point::new(1200, 60), w, h), Zone::Menu);
-    assert_eq!(zone(Point::new(400, 60), w, h), Zone::Menu);
-    assert_eq!(zone(Point::new(636, 848), w, h), Zone::Menu);
-    // The tap the e2e scripts and tests use for "next page".
-    assert_eq!(zone(Point::new(1000, 900), w, h), Zone::Next);
-    assert_eq!(zone(Point::new(100, 900), w, h), Zone::Prev);
-    assert_eq!(zone(Point::new(636, 1600), w, h), Zone::Next);
 }
 
 #[test]
@@ -674,8 +668,7 @@ fn search_types_finds_lists_and_steps_through_hits() {
     assert_eq!(h.kind(), None);
     // No matches.
     h.reader.query = "zzqxj".into();
-    let p = providers();
-    h.reader.run_search(&mut cx!(h, p));
+    h.with_cx(|r, cx| r.run_search(cx));
     assert_eq!(h.reader.hits.as_ref().map(Vec::len), Some(0));
 }
 
@@ -1067,8 +1060,7 @@ fn jumps_work_while_pagination_runs() {
     let toc = doc.toc();
     let last = toc.len() - 1;
     let target = toc[last].position.clone();
-    let p = providers();
-    h.reader.action(&format!("toc:{last}"), &mut cx!(h, p)).unwrap();
+    h.with_cx(|r, cx| r.action(&format!("toc:{last}"), cx)).unwrap();
     h.paint();
     let page = h.reader.page();
     let doc = h.reader.doc.as_deref_mut().unwrap();
@@ -1076,8 +1068,7 @@ fn jumps_work_while_pagination_runs() {
     assert_eq!(page, doc.page_of(&target).unwrap(), "last TOC entry");
     // Percent on a fresh reader.
     let mut h = Harness::open("unpaginated2", "juliet.epub", false);
-    let p = providers();
-    h.reader.action("pct:90", &mut cx!(h, p)).unwrap();
+    h.with_cx(|r, cx| r.action("pct:90", cx)).unwrap();
     let page = h.reader.page();
     let doc = h.reader.doc.as_deref_mut().unwrap();
     assert!(doc.wait_paginated(std::time::Duration::from_secs(60)));
@@ -1157,8 +1148,7 @@ fn on_resize_lays_the_book_out_for_the_new_size() {
     let size = h.dev.screen.size();
     assert!(size.w > size.h);
     h.canvas = Canvas::new(size.w as usize, size.h as usize);
-    let p = providers();
-    h.reader.on_resize(&mut cx!(h, p)).unwrap();
+    h.with_cx(|r, cx| r.on_resize(cx)).unwrap();
     h.paint();
     let doc = h.reader.doc.as_deref_mut().unwrap();
     assert_eq!(doc.layout().width, size.w);
@@ -1177,13 +1167,9 @@ fn on_resize_after_a_half_turn_redraws_the_same_page() {
     h.dev.screen.set_rotation(ink_device::Rotation::UpsideDown).unwrap();
     let size = h.dev.screen.size();
     h.canvas = Canvas::new(size.w as usize, size.h as usize);
-    let p = providers();
-    h.reader.on_resize(&mut cx!(h, p)).unwrap();
+    h.with_cx(|r, cx| r.on_resize(cx)).unwrap();
     let n = h.probe.updates().len();
-    {
-        let mut cx = cx!(h, p);
-        crate::plugin_host::hooks::app_paint(&mut h.reader, &mut cx).unwrap();
-    }
+    h.with_cx(|r, cx| crate::plugin_host::hooks::app_paint(r, cx)).unwrap();
     assert_eq!(h.reader.page, 20);
     // The reader shows a full page itself (not as returned damage): one full GC16.
     let all = h.canvas.bounds();
@@ -1323,8 +1309,7 @@ fn saved_highlights_are_drawn_after_reopen_and_relayout() {
     // Open the book again in a new reader: no session highlights, only the sidecar.
     let path = h.reader.path.clone();
     h.reader = ReaderScreen::new(path);
-    let pr = providers();
-    h.reader.on_enter(&mut cx!(h, pr)).unwrap();
+    h.with_cx(|r, cx| r.on_enter(cx)).unwrap();
     assert!(h.reader.doc.as_deref_mut().unwrap().wait_paginated(std::time::Duration::from_secs(60)));
     h.paint();
     assert_eq!(h.reader.page(), 30);
@@ -1356,10 +1341,9 @@ fn saved_highlights_are_drawn_after_reopen_and_relayout() {
 fn search_hits_are_marked_on_the_page() {
     let mut h = Harness::new("hitmarks", "juliet.epub");
     h.reader.query = "Romeo".into();
-    let pr = providers();
-    h.reader.run_search(&mut cx!(h, pr));
+    h.with_cx(|r, cx| r.run_search(cx));
     h.paint();
-    h.reader.action("hit:3", &mut cx!(h, pr)).unwrap();
+    h.with_cx(|r, cx| r.action("hit:3", cx)).unwrap();
     h.paint();
     assert_eq!(h.kind(), Some(overlay::OverlayKind::Hits));
     let page = h.reader.page();
@@ -1618,15 +1602,14 @@ fn reveal_after_a_panel_restores_only_its_rect() {
     // The panel drew over the canvas (and the panel showed it).
     h.canvas.fill_rect(panel.x, panel.y, panel.w as i32, panel.h as i32, 0x55);
     let n = h.probe.updates().len();
-    let p = providers();
-    h.reader.on_reveal(&mut cx!(h, p), panel, RefreshClass::Reagl).unwrap();
+    h.with_cx(|r, cx| r.on_reveal(cx, panel, RefreshClass::Reagl)).unwrap();
     h.paint();
     let ups: Vec<_> = h.probe.updates()[n..].iter().map(|u| (u.rect, u.class)).collect();
     assert_eq!(ups, vec![(panel, RefreshClass::Reagl)]);
     assert_eq!(h.panel_rows_differ(&page, 0, page.height), 0, "the page is back");
     // A full-screen pop takes the full path.
     let n = h.probe.updates().len();
-    h.reader.on_reveal(&mut cx!(h, p), FULL, RefreshClass::Gc16).unwrap();
+    h.with_cx(|r, cx| r.on_reveal(cx, FULL, RefreshClass::Gc16)).unwrap();
     h.paint();
     assert!(h.probe.updates()[n..].iter().any(|u| u.rect == FULL && u.class == RefreshClass::Gc16));
 }
@@ -1719,4 +1702,39 @@ fn a_wifi_status_change_redraws_only_the_bars() {
     let n = h.probe.updates().len();
     h.feed(InputEvent::Power(PowerEvent::Network(NetEvent::Status(home(Some(5))))));
     assert_eq!(h.probe.updates().len(), n, "a signal change draws nothing");
+}
+
+/// A document that cannot map a saved range to rectangles (fixed layouts): the
+/// highlights made this session are drawn from the rectangles kept for their page and
+/// layout, found under a tap, and forgotten when removed.
+#[test]
+fn session_highlights_of_an_unmappable_document() {
+    let dir = tmp("session-hl");
+    let mut r = ReaderScreen::new(dir.join("book.pdf"));
+    let mut doc = selection::tests::three_pages();
+    let key = ink_doc::Document::layout(&doc).cache_key();
+    let start: Position = "flow:0.1.0".parse().unwrap();
+    let end: Position = "flow:0.1.5".parse().unwrap();
+    let rect = Rect::new(100, 160, 100, 50);
+    let mark = |layout: &str, page: usize| SessionMark { layout: layout.into(), page, rects: vec![rect], start: start.clone() };
+    let saved = vec![(start.clone(), end.clone())];
+    let lit = |doc: &mut selection::tests::PagedDoc, page: usize, session: &[SessionMark]| {
+        let mut c = Canvas::new(400, 400);
+        c.pixels.fill(255);
+        draw_highlights(doc, page, &mut c, &saved, session);
+        c.pixels[200 * 400 + 150] != 255
+    };
+    assert!(lit(&mut doc, 0, &[mark(&key, 0)]), "drawn on its page");
+    assert!(!lit(&mut doc, 1, &[mark(&key, 0)]), "not on another page");
+    assert!(!lit(&mut doc, 0, &[mark("other-layout", 0)]), "not in another layout");
+    r.doc = Some(Box::new(doc));
+    r.saved_hl = saved.clone();
+    r.session_hl = vec![mark("other-layout", 0), mark(&key, 0)];
+    let (s, e, rects) = r.highlight_at(Point::new(150, 185)).expect("the mark under the tap");
+    assert_eq!((s, e, rects), (start.clone(), end.clone(), vec![rect]));
+    assert!(r.highlight_at(Point::new(150, 400)).is_none());
+    r.remove_highlight(&start, &end);
+    assert!(r.session_hl.is_empty() && r.saved_hl.is_empty());
+    assert!(r.highlight_at(Point::new(150, 185)).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
 }

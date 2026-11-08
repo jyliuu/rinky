@@ -156,6 +156,21 @@ fn text_align_and_indent() {
     assert!((last.x + last.width - RIGHT).abs() < 1.5, "{}", last.x + last.width);
 }
 
+/// A justified line with an inline image followed by a space still ends at the right
+/// edge (the space after the image used to be counted but never added).
+#[test]
+fn justified_line_with_an_inline_image() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>"#;
+    let d = doc(
+        &format!("<p>aaa {svg} bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn ooo ppp qqq rrr sss ttt uuu vvv www xxx yyy zzz end</p>"),
+        "p { text-indent: 0; text-align: justify }",
+    );
+    let l = layout(&d, 0);
+    let first_line: Vec<TextRun> = runs(&l).into_iter().filter(|t| t.line_top == run(&l, "aaa").line_top).collect();
+    let last = first_line.last().unwrap();
+    assert!((last.x + last.width - RIGHT).abs() < 1.5, "{}", last.x + last.width);
+}
+
 /// The user's paragraph spacing and indent on top of the book's CSS.
 #[test]
 fn user_paragraph_spacing_and_indent() {

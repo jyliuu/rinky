@@ -44,17 +44,12 @@ pub enum Obfuscation {
 impl Obfuscation {
     /// Undoes (or applies; XOR is symmetric) the obfuscation in place.
     pub fn apply(&self, data: &mut [u8]) {
-        match self {
-            Obfuscation::Idpf(key) => {
-                for (i, b) in data.iter_mut().take(1040).enumerate() {
-                    *b ^= key[i % 20];
-                }
-            }
-            Obfuscation::Adobe(key) => {
-                for (i, b) in data.iter_mut().take(1024).enumerate() {
-                    *b ^= key[i % 16];
-                }
-            }
+        let (key, len): (&[u8], usize) = match self {
+            Obfuscation::Idpf(key) => (key, 1040),
+            Obfuscation::Adobe(key) => (key, 1024),
+        };
+        for (b, k) in data.iter_mut().take(len).zip(key.iter().cycle()) {
+            *b ^= k;
         }
     }
 }
@@ -200,10 +195,7 @@ pub struct Package {
 
 impl Package {
     fn dir(&self) -> &str {
-        match self.opf_path.rfind('/') {
-            Some(i) => &self.opf_path[..i + 1],
-            None => "",
-        }
+        dir_of(&self.opf_path)
     }
 
     /// Full zip path of manifest item `id`.
@@ -270,21 +262,10 @@ fn chapter_text(bytes: Vec<u8>) -> String {
     text
 }
 
-fn strip_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => {
-                in_tag = true;
-                out.push(' ');
-            }
-            '>' if in_tag => in_tag = false,
-            c if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    let decoded = out.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&");
+/// Plain text of a description written as escaped HTML (`&lt;p&gt;...`, which the XML
+/// parser has unescaped once): tags dropped, the common entities decoded.
+fn description_text(s: &str) -> String {
+    let decoded = xml::strip_tags(s).replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&");
     collapse_ws(&decoded)
 }
 
@@ -354,7 +335,7 @@ pub fn parse_opf(xml_text: &str) -> Result<Package> {
     p.metadata.authors = authors.into_iter().filter(|a| !a.is_empty()).collect();
     p.metadata.language = get("language").first().map(|l| l.text_collapsed()).filter(|l| !l.is_empty());
     p.metadata.publisher = get("publisher").first().map(|l| l.text_collapsed()).filter(|l| !l.is_empty());
-    p.metadata.description = get("description").first().map(|d| strip_tags(&d.text())).filter(|d| !d.is_empty());
+    p.metadata.description = get("description").first().map(|d| description_text(&d.text())).filter(|d| !d.is_empty());
     p.date = get("date").first().map(|d| d.text_collapsed()).filter(|d| !d.is_empty());
     p.subjects = get("subject").iter().map(|s| s.text_collapsed()).filter(|s| !s.is_empty()).collect();
     for id in get("identifier") {
@@ -751,8 +732,9 @@ pub fn read_toc<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> (Vec<To
     (toc, pages)
 }
 
-/// [`load`] plus the engine's navigation (TOC and page list hrefs) for [`open`].
-fn load_parts(path: &Path) -> Result<(Book, ink_html::Navigation)> {
+/// [`load`], plus the engine's navigation (TOC and page list hrefs) for [`open`] when
+/// `with_nav` is set.
+fn load_parts(path: &Path, with_nav: bool) -> Result<(Book, Option<ink_html::Navigation>)> {
     use ink_doc::timing::step;
     let t = std::time::Instant::now();
     let (loader, pkg, drm) = prepare(path)?;
@@ -770,8 +752,10 @@ fn load_parts(path: &Path) -> Result<(Book, ink_html::Navigation)> {
     let t = step("spine read", t);
     let (toc, page_list) = read_toc(&loader, &pkg);
     // TOC and page list for the engine itself (NCX / EPUB 3 nav parsed by ink-html,
-    // api-request html.md): `open` hands it to HtmlDocument::set_navigation.
-    let nav = loader.read(&pkg.opf_path).map(|b| ink_html::nav::from_opf(&text_of(b), &pkg.opf_path, &loader)).unwrap_or_default();
+    // api-request html.md): `open` hands it to HtmlDocument::set_navigation. The book's
+    // own TOC above is what `load` callers use, so they skip this second parse.
+    let nav = with_nav
+        .then(|| loader.read(&pkg.opf_path).map(|b| ink_html::nav::from_opf(&text_of(b), &pkg.opf_path, &loader)).unwrap_or_default());
     step("toc+nav read", t);
     Ok((Book { info, chapters, toc, page_list, resources: Box::new(loader) }, nav))
 }
@@ -841,15 +825,15 @@ fn read_spine(file: &Path, loader: &ZipLoader<File>, paths: Vec<String>) -> Vec<
 
 /// Converts an EPUB file. DRM-protected books are refused.
 pub fn load(path: &Path) -> Result<Book> {
-    Ok(load_parts(path)?.0)
+    Ok(load_parts(path, false)?.0)
 }
 
 /// Opens an EPUB file as the plain engine document, with the engine's own TOC and page
 /// list (crengine xpointers resolved by ink-html).
 pub fn open(path: &Path) -> Result<HtmlDocument> {
-    let (book, nav) = load_parts(path)?;
+    let (book, nav) = load_parts(path, true)?;
     let mut doc = book.into_html_document()?;
-    doc.set_navigation(nav);
+    doc.set_navigation(nav.unwrap_or_default());
     Ok(doc)
 }
 

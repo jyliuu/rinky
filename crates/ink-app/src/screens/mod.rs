@@ -9,6 +9,7 @@
 //! | `demo/` | `Route::Demo` | `ui` (wave A) |
 //! | `stats/` | `Route::Statistics`, `Route::Vocabulary` | `stats` (wave C) |
 
+pub(crate) mod common;
 pub mod demo;
 pub mod library;
 pub mod reader;

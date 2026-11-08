@@ -136,12 +136,33 @@ impl Accumulator {
     }
 
     fn finish(self) -> Vec<u8> {
+        // The running sum is one long chain of dependent float additions. Large shapes
+        // (panels, keys, sheets) have long runs of 0 cells (inside or outside the
+        // shape); adding 0 leaves the sum and its coverage as they are, so a block of
+        // CHUNK zero cells repeats the last value without an add. The test is per block,
+        // not per cell: a per-cell branch mispredicts on small glyphs, whose zero and
+        // non-zero cells alternate, and made them slower than the plain sum.
+        const CHUNK: usize = 16;
+        let cells = &self.a[..self.w * self.h];
+        let mut out = Vec::with_capacity(cells.len());
         let mut acc = 0.0f32;
-        let mut out = Vec::with_capacity(self.w * self.h);
-        for a in &self.a[..self.w * self.h] {
-            acc += a;
-            out.push((acc.abs().min(1.0) * 255.0 + 0.5) as u8);
+        let mut sum = |out: &mut Vec<u8>, part: &[f32]| {
+            for a in part {
+                acc += a;
+                out.push((acc.abs().min(1.0) * 255.0 + 0.5) as u8);
+            }
+        };
+        let mut chunks = cells.chunks_exact(CHUNK);
+        for c in &mut chunks {
+            // Zero or minus zero in every cell (sign bit masked off).
+            if c.iter().fold(0u32, |m, a| m | a.to_bits()) & 0x7fff_ffff == 0 {
+                let v = out.last().copied().unwrap_or(0);
+                out.resize(out.len() + CHUNK, v);
+            } else {
+                sum(&mut out, c);
+            }
         }
+        sum(&mut out, chunks.remainder());
         out
     }
 }
@@ -389,6 +410,49 @@ mod tests {
         assert_eq!(m[5 * 10 + 5], 0, "hole");
         assert_eq!(m.iter().filter(|v| **v == 255).count(), 100 - 16);
         assert!(fill_contours(0, 5, &[]).is_empty());
+    }
+
+    /// `finish` skips blocks of zero cells; the result is the plain running sum's, bit for bit.
+    #[test]
+    fn finish_matches_the_plain_running_sum() {
+        let plain = |a: &Accumulator| {
+            let mut acc = 0.0f32;
+            a.a[..a.w * a.h].iter().map(|v| {
+                acc += v;
+                (acc.abs().min(1.0) * 255.0 + 0.5) as u8
+            }).collect::<Vec<u8>>()
+        };
+        let mut seed = 11u32;
+        let mut rnd = move |m: f32| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 * m
+        };
+        for n in 3..40 {
+            let mut a = Accumulator::new(37, 23);
+            // A random polygon, self-intersecting and partly off the bitmap.
+            let pts: Vec<(f32, f32)> = (0..n).map(|_| (rnd(50.0) - 6.0, rnd(34.0) - 5.0)).collect();
+            for i in 0..n {
+                let (p, q) = (pts[i], pts[(i + 1) % n]);
+                a.line(p.0, p.1, q.0, q.1);
+            }
+            let want = plain(&a);
+            assert_eq!(a.finish(), want, "polygon of {n} points");
+        }
+        // A large shape: whole blocks of zero cells inside and outside it, between
+        // blocks with edges; minus zero cells count as zero.
+        let mut a = Accumulator::new(101, 61);
+        let sq = [(3.3, 2.7), (90.6, 4.1), (88.2, 57.9), (5.1, 55.4)];
+        for i in 0..4 {
+            let (p, q) = (sq[i], sq[(i + 1) % 4]);
+            a.line(p.0, p.1, q.0, q.1);
+        }
+        for i in (0..a.a.len()).step_by(7) {
+            if a.a[i] == 0.0 {
+                a.a[i] = -0.0;
+            }
+        }
+        let want = plain(&a);
+        assert_eq!(a.finish(), want, "large shape");
     }
 
     #[test]

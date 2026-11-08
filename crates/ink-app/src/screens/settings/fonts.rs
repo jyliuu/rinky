@@ -11,6 +11,7 @@
 //! `font-ui:NAME`, `fonts-more`. The page is self-contained: the settings screen calls
 //! [`build`] for its content area and gives every action to [`action`] first.
 
+use super::{current_settings, edit_settings};
 use crate::fonts::{self, BUILTIN};
 use crate::router::AppCtx;
 use ink_device::Rect;
@@ -39,11 +40,6 @@ thread_local! {
     static LIST_PAGE: Cell<usize> = const { Cell::new(0) };
 }
 
-/// The settings the page shows (a change not yet taken by the app counts).
-fn current<'a>(cx: &'a AppCtx) -> &'a Settings {
-    cx.settings_update.as_ref().unwrap_or(cx.settings)
-}
-
 /// The family picked for reading (`reader.font_family`, resolved like the reader does).
 pub fn reading_family(s: &Settings) -> String {
     fonts::reading_default(s).unwrap_or_else(|| BUILTIN.to_string())
@@ -66,11 +62,6 @@ pub fn summary(s: &Settings) -> String {
 /// the page again), `None` otherwise.
 pub fn action(a: &str, cx: &mut AppCtx) -> Option<String> {
     let (verb, arg) = a.split_once(':').unwrap_or((a, ""));
-    let edit = |cx: &mut AppCtx, f: &dyn Fn(&mut Settings)| {
-        let mut s = cx.settings_update.take().unwrap_or_else(|| cx.settings.clone());
-        f(&mut s);
-        *cx.settings_update = Some(s);
-    };
     match verb {
         "fonts-tab" => {
             TAB.with(|t| t.set(arg.parse::<usize>().unwrap_or(0).min(1)));
@@ -84,14 +75,14 @@ pub fn action(a: &str, cx: &mut AppCtx) -> Option<String> {
             Some(String::new())
         }
         "font-reading" => {
-            let name = arg.to_string();
-            edit(cx, &|s| s.reader.font_family = name.clone());
+            edit_settings(cx, |s| s.reader.font_family = arg.to_string());
+            let name = arg;
             log::info!("fonts page: reading font '{name}' (books without their own font)");
             Some(format!("Reading font: {name}. Books with their own font in Aa keep it."))
         }
         "font-ui" => {
             let name = if arg.eq_ignore_ascii_case(fonts::UI_BUILTIN) { String::new() } else { arg.to_string() };
-            edit(cx, &|s| s.ui.font_family = name.clone());
+            edit_settings(cx, |s| s.ui.font_family = name);
             log::info!("fonts page: interface font '{arg}'");
             Some(format!("Interface font: {arg} (loading…)"))
         }
@@ -101,7 +92,7 @@ pub fn action(a: &str, cx: &mut AppCtx) -> Option<String> {
 
 /// Adds the page's widgets for the content area `area`.
 pub fn build(tree: &mut WidgetTree, cx: &AppCtx, area: Rect) {
-    let s = current(cx);
+    let s = current_settings(cx);
     let tab = TAB.with(Cell::get);
     let x = area.x + space(4);
     let w = area.w.saturating_sub(2 * space(4) as u32);

@@ -96,25 +96,14 @@ impl PageText {
 
     /// The text of a character range, normalized like [`PageText::plain`].
     pub fn text_of(&self, range: Range<usize>) -> String {
+        text_of(&self.normalized(), range)
+    }
+
+    /// The text under each of `rects` ([`PageText::range_in`] of each, then
+    /// [`PageText::text_of`]; empty where no character is), normalizing the page once.
+    pub fn texts_under(&self, rects: &[FRect]) -> Vec<String> {
         let norm = self.normalized();
-        let mut out = String::new();
-        for (k, n) in norm.iter().enumerate() {
-            let inside = match n.src {
-                Some(i) => range.contains(&i),
-                None => {
-                    // A space between lines belongs to the range when both neighbours do.
-                    let prev = norm[..k].iter().rev().find_map(|m| m.src);
-                    let next = norm[k + 1..].iter().find_map(|m| m.src);
-                    matches!((prev, next), (Some(a), Some(b)) if range.contains(&a) && range.contains(&b))
-                }
-            };
-            if inside {
-                if let Some(c) = n.orig {
-                    out.push(c);
-                }
-            }
-        }
-        out.trim().to_string()
+        rects.iter().map(|r| self.range_in(std::slice::from_ref(r)).map(|range| text_of(&norm, range)).unwrap_or_default()).collect()
     }
 
     /// Every case-insensitive match of `query` (white space in the query matches any run
@@ -197,31 +186,15 @@ impl PageText {
     /// Characters whose centre lies inside any of `rects` (page space), as one range from
     /// the first to the last.
     pub fn range_in(&self, rects: &[FRect]) -> Option<Range<usize>> {
-        let hits: Vec<usize> = self
-            .chars
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                let (cx, cy) = c.rect.center();
-                rects.iter().any(|r| r.inflate(0.5).contains(cx, cy))
-            })
-            .map(|(i, _)| i)
-            .collect();
-        Some(*hits.first()?..*hits.last()? + 1)
+        let first = self.chars.iter().position(|c| centre_in(c, rects))?;
+        let last = self.chars.iter().rposition(|c| centre_in(c, rects)).unwrap_or(first);
+        Some(first..last + 1)
     }
 
     /// The text of the characters whose centre lies inside any of `rects` (reading order,
     /// normalized like [`PageText::plain`]).
     pub fn text_in(&self, rects: &[FRect]) -> String {
-        let chars = self
-            .chars
-            .iter()
-            .filter(|c| {
-                let (cx, cy) = c.rect.center();
-                rects.iter().any(|r| r.inflate(0.5).contains(cx, cy))
-            })
-            .copied()
-            .collect();
+        let chars = self.chars.iter().filter(|c| centre_in(c, rects)).copied().collect();
         PageText::new(self.page, chars).plain()
     }
 
@@ -233,6 +206,34 @@ impl PageText {
         let b = (a + chars).min(n);
         a.saturating_sub(chars.saturating_sub(b - a))..b
     }
+}
+
+/// True when the centre of `c` lies inside one of `rects` (grown by half a point).
+fn centre_in(c: &TextChar, rects: &[FRect]) -> bool {
+    let (cx, cy) = c.rect.center();
+    rects.iter().any(|r| r.inflate(0.5).contains(cx, cy))
+}
+
+/// The text of the character range `range` from the normalized stream `norm`.
+fn text_of(norm: &[Norm], range: Range<usize>) -> String {
+    let mut out = String::new();
+    for (k, n) in norm.iter().enumerate() {
+        let inside = match n.src {
+            Some(i) => range.contains(&i),
+            None => {
+                // A space between lines belongs to the range when both neighbours do.
+                let prev = norm[..k].iter().rev().find_map(|m| m.src);
+                let next = norm[k + 1..].iter().find_map(|m| m.src);
+                matches!((prev, next), (Some(a), Some(b)) if range.contains(&a) && range.contains(&b))
+            }
+        };
+        if inside {
+            if let Some(c) = n.orig {
+                out.push(c);
+            }
+        }
+    }
+    out.trim().to_string()
 }
 
 #[cfg(test)]
@@ -284,6 +285,10 @@ mod tests {
         assert_eq!(p.text_of(4..10), "def ghi");
         assert_eq!(p.range_in(&[FRect::new(0.0, 18.0, 100.0, 40.0)]), Some(7..10));
         assert_eq!(p.text_in(&[FRect::new(35.0, 0.0, 100.0, 40.0)]), "def");
+        assert_eq!(
+            p.texts_under(&[FRect::new(35.0, 0.0, 100.0, 12.0), FRect::new(0.0, 100.0, 9.0, 120.0), FRect::new(0.0, 18.0, 100.0, 40.0)]),
+            vec!["def", "", "ghi"]
+        );
         assert_eq!(p.window(5, 4), 3..7);
         assert_eq!(p.window(0, 100), 0..10);
     }
