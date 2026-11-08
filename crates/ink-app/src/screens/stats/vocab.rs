@@ -83,19 +83,9 @@ pub fn context_line(w: &VocabWord) -> String {
     if prev.is_empty() && next.is_empty() {
         return String::new();
     }
-    let mut s = String::new();
-    if !prev.is_empty() {
-        s.push('…');
-        s.push_str(prev);
-        s.push(' ');
-    }
-    s.push_str(&w.word);
-    if !next.is_empty() {
-        s.push(' ');
-        s.push_str(next);
-        s.push('…');
-    }
-    s
+    let before = if prev.is_empty() { String::new() } else { format!("…{prev} ") };
+    let after = if next.is_empty() { String::new() } else { format!(" {next}…") };
+    format!("{before}{}{after}", w.word)
 }
 
 impl VocabScreen {
@@ -238,13 +228,9 @@ impl VocabScreen {
                 p.canvas.fill_rect(MARGIN, y - t.rule_px / 2, w - 2 * MARGIN, t.rule_px, t.light);
             }
             // Word (bold) with the lookup count and the review streak on the right.
-            let mut right = String::new();
-            if wd.lookup_count > 1 {
-                right.push_str(&format!("×{}", wd.lookup_count));
-            }
-            if wd.streak_count > 0 {
-                right.push_str(&format!("{}known {}×", if right.is_empty() { "" } else { " · " }, wd.streak_count));
-            }
+            let count = (wd.lookup_count > 1).then(|| format!("×{}", wd.lookup_count));
+            let streak = (wd.streak_count > 0).then(|| format!("known {}×", wd.streak_count));
+            let right = count.into_iter().chain(streak).collect::<Vec<_>>().join(" · ");
             let rw = if right.is_empty() { 0.0 } else { p.text_width(t.caption.style, t.caption.px, &right) + space(3) as f32 };
             let word = p.ellipsize(&wd.word, t.body.px, Style::Bold, tw as f32 - rw);
             p.text_left(Rect::new(MARGIN, y + 12, tw, 56), &word, t.body.px, Style::Bold, t.fg);
@@ -253,11 +239,7 @@ impl VocabScreen {
                 let x = (w - MARGIN) as f32 - p.text_width(t.caption.style, t.caption.px, &right);
                 p.draw_text(t.caption.style, t.caption.px, x, base, &right, t.muted);
             }
-            let detail = match (&wd.definition, context_line(wd)) {
-                (Some(d), _) => d.clone(),
-                (None, c) if !c.is_empty() => c,
-                _ => String::new(),
-            };
+            let detail = wd.definition.clone().unwrap_or_else(|| context_line(wd));
             let detail = p.ellipsize(&detail, t.caption.px, t.caption.style, tw as f32);
             p.text_left(Rect::new(MARGIN, y + 70, tw, 40), &detail, t.caption.px, t.caption.style, t.fg);
             let book = p.ellipsize(wd.title.as_deref().unwrap_or(""), t.caption.px, Style::Italic, tw as f32);
