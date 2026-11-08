@@ -1670,16 +1670,12 @@ impl<'a, 'e> Flow<'a, 'e> {
                     cmin[col] = cmin[col].max(mn);
                     cmax[col] = cmax[col].max(mx);
                 } else if col + span <= ncols {
-                    let have: f32 = cmin[col..col + span].iter().sum();
-                    if mn > have {
-                        for v in &mut cmin[col..col + span] {
-                            *v += (mn - have) / span as f32;
-                        }
-                    }
-                    let havex: f32 = cmax[col..col + span].iter().sum();
-                    if mx > havex {
-                        for v in &mut cmax[col..col + span] {
-                            *v += (mx - havex) / span as f32;
+                    // A spanning cell spreads what its columns lack evenly over them.
+                    for (widths, need) in [(&mut cmin, mn), (&mut cmax, mx)] {
+                        let cols = &mut widths[col..col + span];
+                        let have: f32 = cols.iter().sum();
+                        if need > have {
+                            cols.iter_mut().for_each(|v| *v += (need - have) / span as f32);
                         }
                     }
                 }
