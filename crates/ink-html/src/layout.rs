@@ -492,6 +492,9 @@ pub struct Flow<'a, 'e> {
     stop: Option<StopAt>,
     /// The stop was reached: the open blocks unwind without laying out more children.
     stopped: bool,
+    /// Lines make text draw items. False for a page-map layout ([`Flow::layout_slices`]),
+    /// which needs only the slices: their geometry and keys do not depend on the items.
+    text_items: bool,
 }
 
 /// Where [`Flow::layout_until`] stops: once the flow is `extra` px below the first slice
@@ -557,6 +560,12 @@ impl<'a, 'e> Flow<'a, 'e> {
         Self::layout_until(env, p, dom, styles, chapter_path, book_lang, None).0
     }
 
+    /// [`Flow::layout`] for the page map: the same slices and height, without the draw
+    /// items of the lines (no text runs to measure again, build and drop).
+    pub fn layout_slices(env: &'a mut Env<'e>, p: &'a Params, dom: &'a Dom, styles: &'a [Option<Box<ComputedStyle>>], chapter_path: &'a str, book_lang: Option<String>) -> ChapterLayout {
+        Self::run(env, p, dom, styles, chapter_path, book_lang, None, false).0
+    }
+
     /// [`Flow::layout`] that stops early at `stop`. Returns the layout and whether it is
     /// complete (the stop was not reached). A stopped layout holds every slice up to the
     /// stop, as the full layout has them, except that blocks still open at the stop end
@@ -571,6 +580,20 @@ impl<'a, 'e> Flow<'a, 'e> {
         chapter_path: &'a str,
         book_lang: Option<String>,
         stop: Option<StopAt>,
+    ) -> (ChapterLayout, bool) {
+        Self::run(env, p, dom, styles, chapter_path, book_lang, stop, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        env: &'a mut Env<'e>,
+        p: &'a Params,
+        dom: &'a Dom,
+        styles: &'a [Option<Box<ComputedStyle>>],
+        chapter_path: &'a str,
+        book_lang: Option<String>,
+        stop: Option<StopAt>,
+        text_items: bool,
     ) -> (ChapterLayout, bool) {
         let mut has_block_desc = vec![false; dom.nodes.len()];
         // Post-order: an element has block descendants if a child is block-level or has some.
@@ -606,6 +629,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             list_numbers: std::collections::HashMap::new(),
             stop,
             stopped: false,
+            text_items,
         };
         if dom.body != NONE {
             f.block(dom.body, p.left, p.content_w);
@@ -1419,7 +1443,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut spaces = 0usize;
         for (bi, b) in boxes.iter().enumerate() {
             for run in p.runs(b.start, b.end) {
-                let pc = Piece { seg: run.0, start: run.1, end: run.2, width: self.run_width(p, run) };
+                // Widths only place the pieces across the line.
+                let width = if self.text_items { self.run_width(p, run) } else { 0.0 };
+                let pc = Piece { seg: run.0, start: run.1, end: run.2, width };
                 let seg = &segs[pc.seg as usize];
                 let st = self.st(seg.style);
                 let shift = seg.shift;
@@ -1449,7 +1475,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 placed.push((pc, pen, false));
                 pen += wdt;
             }
-            if b.hyphen && bi + 1 == n_boxes && !line.forced {
+            if b.hyphen && bi + 1 == n_boxes && !line.forced && self.text_items {
                 if let Some(last_p) = placed.last_mut() {
                     last_p.2 = true;
                     let seg = &segs[last_p.0.seg as usize];
@@ -1530,6 +1556,10 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut add = 0.0f32;
         let mut key: Option<(u32, u32)> = None;
         for (pc, off, hyphen) in placed {
+            if !self.text_items && key.is_some() {
+                // A page-map layout needs only the key of the first piece.
+                break;
+            }
             // Extra space accumulated before this piece.
             while let Some((_, spaced)) = gaps.next_if(|&(e, _)| pc.start >= e) {
                 if spaced {
@@ -1543,13 +1573,19 @@ impl<'a, 'e> Flow<'a, 'e> {
             match &seg.kind {
                 SegKind::Image { src, w, h } => {
                     let y = baseline - image_ascent(st.vertical_align, *h, sa) - seg.shift;
-                    self.out.items.push(Draw::Image(ImageRun { x: px_x, y, w: *w, h: *h, src: src.clone(), node: seg.node, link: seg.link }));
+                    if self.text_items {
+                        self.out.items.push(Draw::Image(ImageRun { x: px_x, y, w: *w, h: *h, src: src.clone(), node: seg.node, link: seg.link }));
+                    }
                     key.get_or_insert((self.dom.node(seg.node).order, 0));
                 }
                 SegKind::Break => {
                     key.get_or_insert((self.dom.node(seg.node).order, 0));
                 }
                 &SegKind::Text { face, px } => {
+                    if !self.text_items {
+                        key.get_or_insert((self.dom.node(seg.node).order, src[ci].dom));
+                        continue;
+                    }
                     let raw = &text[pc.start..pc.end];
                     let mut shown = String::with_capacity(raw.len() + usize::from(hyphen));
                     if raw.contains([SOFT_HYPHEN, '\n']) {

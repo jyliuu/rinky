@@ -353,11 +353,14 @@ pub fn layout_chapter_until(book: &Book, i: usize, params: &Params, env: &mut En
     out
 }
 
-/// Lays out and paginates chapter `i` for the page map.
+/// Lays out and paginates chapter `i` for the page map (slices only: the page starts
+/// are those of [`layout_chapter`]'s pages). Records the same [`ink_doc::timing`] steps.
 pub fn chapter_pages(book: &Book, i: usize, params: &Params, env: &mut Env) -> ChapterPages {
-    let lay = layout_chapter(book, i, params, env);
+    let (ch, styles, t) = styled_chapter(book, i, params);
+    let lay = Flow::layout_slices(env, params, &ch.dom, &styles, &book.chapters[i].path, book.meta.language.clone());
+    step("chapter layout", t);
     let pages = paginate(&lay, params.content_h);
-    let text_bytes = chapter_text_bytes(&book.chapter(i).dom);
+    let text_bytes = chapter_text_bytes(&ch.dom);
     ChapterPages { keys: pages.iter().map(|p| p.key).collect(), text_bytes }
 }
 
