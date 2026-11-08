@@ -163,12 +163,12 @@ impl TestServer {
                 let _ = std::thread::Builder::new().name("testserver-conn".into()).spawn(move || {
                     let _ = tcp.set_read_timeout(Some(Duration::from_secs(20)));
                     let _ = tcp.set_nodelay(true);
-                    let conn = match tls_cfg {
+                    let conn: Conn = match tls_cfg {
                         Some(cfg) => match rustls::ServerConnection::new(cfg) {
-                            Ok(c) => Conn::Tls(Box::new(rustls::StreamOwned::new(c, tcp))),
+                            Ok(c) => Box::new(rustls::StreamOwned::new(c, tcp)),
                             Err(_) => return,
                         },
-                        None => Conn::Plain(tcp),
+                        None => Box::new(tcp),
                     };
                     handle_connection(conn, &state);
                 });
@@ -239,45 +239,33 @@ pub fn server_tls_config() -> io::Result<Arc<rustls::ServerConfig>> {
     Ok(Arc::new(cfg))
 }
 
-enum Conn {
-    Plain(TcpStream),
-    Tls(Box<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>),
-}
-
-impl Read for Conn {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Conn::Plain(s) => s.read(buf),
-            Conn::Tls(s) => s.read(buf),
-        }
+/// A client connection: plain TCP, or TLS over TCP.
+trait Stream: Read + Write + Send {
+    /// True for TLS (absolute URLs in answers use `https`).
+    fn tls(&self) -> bool {
+        false
     }
-}
 
-impl Write for Conn {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Conn::Plain(s) => s.write(buf),
-            Conn::Tls(s) => s.write(buf),
-        }
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Conn::Plain(s) => s.flush(),
-            Conn::Tls(s) => s.flush(),
-        }
-    }
-}
-
-impl Conn {
     /// Ends the connection cleanly (TLS close_notify).
-    fn close(mut self) {
-        if let Conn::Tls(s) = &mut self {
-            s.conn.send_close_notify();
-            let _ = s.flush();
-        }
+    fn close(&mut self) {
         let _ = self.flush();
     }
 }
+
+impl Stream for TcpStream {}
+
+impl Stream for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    fn tls(&self) -> bool {
+        true
+    }
+
+    fn close(&mut self) {
+        self.conn.send_close_notify();
+        let _ = self.flush();
+    }
+}
+
+type Conn = Box<dyn Stream>;
 
 /// How a handler wants the connection to end.
 enum End {
@@ -398,7 +386,7 @@ pub fn file_bytes(size: usize) -> Vec<u8> {
 }
 
 fn host_base(req: &Recorded, w: &Conn) -> String {
-    let scheme = if matches!(w, Conn::Tls(_)) { "https" } else { "http" };
+    let scheme = if w.tls() { "https" } else { "http" };
     format!("{scheme}://{}", req.header("host").unwrap_or("127.0.0.1"))
 }
 
