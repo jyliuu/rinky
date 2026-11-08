@@ -647,8 +647,6 @@ fn walk(dir: &Path, depth: usize, w: &mut Walk) {
             }
         };
         let path = e.path();
-        let name = e.file_name();
-        let name_b = crate::os_bytes(&name);
         let meta = match e.file_type() {
             // Follow links to files only (links to folders could loop).
             Ok(t) if t.is_symlink() => match std::fs::metadata(&path) {
@@ -656,6 +654,17 @@ fn walk(dir: &Path, depth: usize, w: &mut Walk) {
                 Ok(_) => continue,
                 Err(err) => Err(err),
             },
+            // The listing tells folders and files apart: no `stat` for a folder or for a
+            // file that is not a book (covers and metadata.opf in a Calibre library).
+            Ok(t) if t.is_dir() => {
+                let name = e.file_name();
+                let name_b = crate::os_bytes(&name);
+                if !name_b.starts_with(b".") && !name_b.ends_with(b".sdr") {
+                    walk(&path, depth + 1, w);
+                }
+                continue;
+            }
+            Ok(t) if t.is_file() && !is_book_name(&path) => continue,
             Ok(_) => e.metadata(),
             Err(err) => Err(err),
         };
@@ -674,11 +683,7 @@ fn walk(dir: &Path, depth: usize, w: &mut Walk) {
                 continue;
             }
         };
-        if meta.is_dir() {
-            if !name_b.starts_with(b".") && !name_b.ends_with(b".sdr") {
-                walk(&path, depth + 1, w);
-            }
-        } else if is_book_name(&path) {
+        if is_book_name(&path) {
             w.found.push((path, meta));
         }
     }
