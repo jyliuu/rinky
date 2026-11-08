@@ -425,11 +425,13 @@ impl PluginHost {
             Lifecycle::Selection(s) => format!("({:?})", short(&s.text, 40)),
             _ => String::new(),
         };
+        let page_turn = matches!(ev, Lifecycle::PageChange(_));
         manager.broadcast(&ev, |m, f| {
             let t = Instant::now();
             let doc = access.as_mut().map(|a| a as &mut dyn DocumentAccess);
             let r = with_cx(m, stores, cfg, book_path, net, doc, out, |cx| f(cx));
-            log::info!("plugins: {hook}{arg} -> {} ({:.1} ms)", m.name, t.elapsed().as_secs_f64() * 1000.0);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            log::log!(hook_log_level(page_turn, ms), "plugins: {hook}{arg} -> {} ({ms:.1} ms)", m.name);
             r.ok();
         });
         self.after_calls();
@@ -863,6 +865,20 @@ impl PluginHost {
 }
 
 // ---------------------------------------------------------------------------------------
+/// An `on_page_change` call slower than this (ms) is logged at info, a faster one at
+/// debug (each page turn calls every plugin).
+const PAGE_HOOK_INFO_MS: f64 = 5.0;
+
+/// Log level of a lifecycle call that took `ms`: every page turn calls every plugin, so
+/// only a slow `on_page_change` (`page_turn`) is worth an info line.
+fn hook_log_level(page_turn: bool, ms: f64) -> log::Level {
+    if page_turn && ms <= PAGE_HOOK_INFO_MS {
+        log::Level::Debug
+    } else {
+        log::Level::Info
+    }
+}
+
 // Turning plugins on and off, `rinky plugins`
 
 /// File under `paths.plugins()` with the names of the plugins the user turned off, one
@@ -3519,6 +3535,15 @@ mod tests {
             let mut cx = PaintCx { canvas: &mut self.canvas, fonts: &mut self.fonts, theme: &self.theme };
             ui.paint(&mut cx, below)
         }
+    }
+
+    /// Fast page-turn calls log at debug; slow ones and every other hook at info.
+    #[test]
+    fn only_slow_page_turn_calls_log_at_info() {
+        assert_eq!(hook_log_level(true, 0.2), log::Level::Debug);
+        assert_eq!(hook_log_level(true, PAGE_HOOK_INFO_MS), log::Level::Debug);
+        assert_eq!(hook_log_level(true, 12.0), log::Level::Info);
+        assert_eq!(hook_log_level(false, 0.0), log::Level::Info);
     }
 
     /// A viewer shown twice before a paint (Insightful's Explain: the chat is shown, then
