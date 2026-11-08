@@ -176,10 +176,77 @@ pub struct BookEntry {
     /// DRM or unsupported format detected (listed, refused on open).
     #[serde(skip_serializing_if = "is_false")]
     pub unsupported: bool,
+    /// Lowercase title, authors and series for [`BookEntry::matches`]; not saved.
+    /// Built when the index is loaded and when a book is added or gets metadata. After
+    /// editing those fields directly, call [`BookEntry::refresh_search_key`]; until then
+    /// an edit that changes a length is noticed and the key is not used.
+    #[serde(skip)]
+    pub search_key: SearchKey,
 }
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
+}
+
+/// The lowercase text a library search looks in, with the lengths of the fields it
+/// was made from. It never makes two entries unequal.
+#[derive(Clone, Debug, Default)]
+pub struct SearchKey {
+    /// [`SourceLens`] of the fields when `text` was made; `None` = never made.
+    made_from: Option<SourceLens>,
+    /// Lowercase title, each author and the series, separated by NUL.
+    text: String,
+}
+
+/// Byte lengths of title, authors and series: a check that costs a few additions per
+/// book (comparing or hashing the text would cost about as much as lowercasing it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceLens {
+    title: usize,
+    authors: usize,
+    author_bytes: usize,
+    series: Option<usize>,
+}
+
+impl SourceLens {
+    fn of(b: &BookEntry) -> Self {
+        SourceLens { title: b.title.len(), authors: b.authors.len(), author_bytes: b.authors.iter().map(String::len).sum(), series: b.series.as_ref().map(String::len) }
+    }
+}
+
+impl PartialEq for SearchKey {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl BookEntry {
+    /// Rebuilds [`BookEntry::search_key`] from the title, authors and series.
+    pub fn refresh_search_key(&mut self) {
+        let mut text = self.title.to_lowercase();
+        for a in &self.authors {
+            text.push('\0');
+            text.push_str(&a.to_lowercase());
+        }
+        if let Some(s) = &self.series {
+            text.push('\0');
+            text.push_str(&s.to_lowercase());
+        }
+        self.search_key = SearchKey { made_from: Some(SourceLens::of(self)), text };
+    }
+
+    /// True when the title, an author or the series contains `query`, which must
+    /// already be lowercase. Uses the cached key when it is current, else lowercases
+    /// the fields on the spot (same answer, slower).
+    pub fn matches(&self, query: &str) -> bool {
+        let key = &self.search_key;
+        if key.made_from.is_some_and(|l| l == SourceLens::of(self)) && !query.contains('\0') {
+            return key.text.contains(query);
+        }
+        self.title.to_lowercase().contains(query)
+            || self.authors.iter().any(|a| a.to_lowercase().contains(query))
+            || self.series.as_deref().is_some_and(|s| s.to_lowercase().contains(query))
+    }
 }
 
 /// A named collection.
@@ -261,7 +328,10 @@ impl LibraryIndex {
     pub fn load(path: &Path) -> Result<Self> {
         let r = load_recovering(path, parse_index)?;
         match (r.value, r.source) {
-            (Some(v), _) => Ok(v),
+            (Some(mut v), _) => {
+                v.refresh_search_keys();
+                Ok(v)
+            }
             (None, LoadSource::Missing) if r.errors.is_empty() => Ok(LibraryIndex::default()),
             _ => Err(StoreError::Format(r.errors.join("; "))),
         }
@@ -272,6 +342,15 @@ impl LibraryIndex {
         let json = serde_json::to_vec(&VersionedRef { version: self.version.max(Self::VERSION), books: &self.books, collections: &self.collections })
             .map_err(|e| StoreError::Format(e.to_string()))?;
         save_with_backup(path, &json, |b| parse_index(b).is_ok())
+    }
+
+    /// Rebuilds the search key of every book (after editing titles, authors or series
+    /// through `books` directly; [`LibraryIndex::search`] is right without it, only
+    /// slower for the edited books).
+    pub fn refresh_search_keys(&mut self) {
+        for b in &mut self.books {
+            b.refresh_search_key();
+        }
     }
 
     /// Finds a book by path.
@@ -332,7 +411,7 @@ impl LibraryIndex {
                     let format = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
                     let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                     index.insert(path.clone(), self.books.len());
-                    self.books.push(BookEntry {
+                    let mut entry = BookEntry {
                         title,
                         unsupported: format == "kfx",
                         format,
@@ -341,7 +420,9 @@ impl LibraryIndex {
                         added: now,
                         path,
                         ..Default::default()
-                    });
+                    };
+                    entry.refresh_search_key();
+                    self.books.push(entry);
                 }
             }
         }
@@ -371,6 +452,7 @@ impl LibraryIndex {
         b.cover = meta.cover.or(b.cover.take());
         b.unsupported = meta.unsupported;
         b.meta_mtime = b.mtime.max(1);
+        b.refresh_search_key();
         true
     }
 
@@ -430,16 +512,11 @@ impl LibraryIndex {
     }
 
     /// Books whose title, author or series contains `query` (case-insensitive).
+    /// Each book's lowercase text is cached ([`BookEntry::search_key`]), so a query
+    /// lowercases only itself.
     pub fn search(&self, query: &str) -> Vec<&BookEntry> {
         let q = query.to_lowercase();
-        self.books
-            .iter()
-            .filter(|b| {
-                b.title.to_lowercase().contains(&q)
-                    || b.authors.iter().any(|a| a.to_lowercase().contains(&q))
-                    || b.series.as_deref().is_some_and(|s| s.to_lowercase().contains(&q))
-            })
-            .collect()
+        self.books.iter().filter(|b| b.matches(&q)).collect()
     }
 
     /// Books with status `status`.
@@ -649,6 +726,7 @@ pub fn synthetic_index(n: usize) -> LibraryIndex {
             rating: (i % 7 == 0).then_some(4),
             collections: if i % 5 == 0 { vec![format!("Collection {}", i % 20)] } else { Vec::new() },
             unsupported: false,
+            search_key: SearchKey::default(),
         });
     }
     lib
@@ -793,6 +871,49 @@ mod tests {
 
     /// 10k books: save and load times (debug build here; the release ARM number is in
     /// the selftest output on the emulator).
+    #[test]
+    fn search_keys_follow_edits_and_never_change_equality() {
+        let mut lib = LibraryIndex::default();
+        lib.books.push(BookEntry { path: "/b/a.epub".into(), title: "Über Alles".into(), authors: vec!["Ann Zebra".into()], series: Some("Saga".into()), ..Default::default() });
+        // Not built yet: lowercases on the spot.
+        assert_eq!(lib.search("über").len(), 1);
+        let plain = lib.clone();
+        lib.refresh_search_keys();
+        assert_eq!(lib, plain, "the key is not part of equality");
+        for q in ["ÜBER", "zebra", "saga", "ann z", ""] {
+            assert_eq!(lib.search(q).len(), 1, "{q}");
+        }
+        // No match across fields, even though the key holds them together.
+        assert!(lib.search("alles\0ann").is_empty() && lib.search("allesann").is_empty());
+        // A direct edit that changes a length makes the key stale; search notices.
+        lib.books[0].title = "Different".into();
+        assert!(lib.search("über").is_empty());
+        assert_eq!(lib.search("differ").len(), 1);
+        lib.books[0].series = None;
+        assert!(lib.search("saga").is_empty());
+        // set_metadata rebuilds it.
+        let p = lib.books[0].path.clone();
+        lib.set_metadata(&p, BookMeta { title: Some("New Title".into()), ..Default::default() });
+        assert_eq!(lib.books[0].search_key.text, "new title\0ann zebra");
+        assert_eq!(lib.search("new t").len(), 1);
+    }
+
+    #[test]
+    #[ignore = "measurement: time of LibraryIndex::search over 10k books, per query"]
+    fn library_10k_search_time() {
+        let mut lib = synthetic_index(10_000);
+        lib.refresh_search_keys();
+        for q in ["number 9999", "zzz", "author 1", "e"] {
+            let n = lib.search(q).len();
+            let reps = 50u32;
+            let t = Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(lib.search(std::hint::black_box(q)));
+            }
+            eprintln!("search {q:?} over 10k: {n} hits, {:.2} ms per query", t.elapsed().as_secs_f64() * 1000.0 / reps as f64);
+        }
+    }
+
     #[test]
     fn library_10k_benchmark() {
         let tmp = TempDir::new("lib-10k");
