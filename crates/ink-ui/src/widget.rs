@@ -675,10 +675,9 @@ impl Label {
         Label { centered: false, ..Label::new(text, px) }
     }
 
-    /// The same label in `style`.
-    pub fn styled(mut self, style: Style) -> Self {
-        self.style = style;
-        self
+    setters! {
+        /// The same label in `style`.
+        styled(style: Style) => style = style;
     }
 }
 
@@ -746,16 +745,11 @@ impl Button {
         Button { kind: ButtonKind::Text, ..Button::new(label, action) }
     }
 
-    /// With an icon.
-    pub fn with_icon(mut self, icon: Icon) -> Self {
-        self.icon = Some(icon);
-        self
-    }
-
-    /// Disabled.
-    pub fn disabled(mut self) -> Self {
-        self.enabled = false;
-        self
+    setters! {
+        /// With an icon.
+        with_icon(icon: Icon) => icon = Some(icon);
+        /// Disabled.
+        disabled() => enabled = false;
     }
 }
 

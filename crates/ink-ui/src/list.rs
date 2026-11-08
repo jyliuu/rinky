@@ -47,40 +47,19 @@ impl ListItem {
         ListItem { title: title.into(), subtitle: None, detail: None, icon: None, action: action.into(), checked: None, cover: None, progress: None }
     }
 
-    /// With a subtitle.
-    pub fn subtitle(mut self, s: impl Into<String>) -> Self {
-        self.subtitle = Some(s.into());
-        self
-    }
-
-    /// With a detail text.
-    pub fn detail(mut self, s: impl Into<String>) -> Self {
-        self.detail = Some(s.into());
-        self
-    }
-
-    /// With an icon.
-    pub fn icon(mut self, i: Icon) -> Self {
-        self.icon = Some(i);
-        self
-    }
-
-    /// With a check mark state.
-    pub fn checked(mut self, c: bool) -> Self {
-        self.checked = Some(c);
-        self
-    }
-
-    /// With a book cover on the left.
-    pub fn cover(mut self, c: Cover) -> Self {
-        self.cover = Some(c);
-        self
-    }
-
-    /// With reading progress (0..=1).
-    pub fn progress(mut self, p: f32) -> Self {
-        self.progress = Some(p);
-        self
+    setters! {
+        /// With a subtitle.
+        subtitle(s: impl Into<String>) => subtitle = Some(s.into());
+        /// With a detail text.
+        detail(s: impl Into<String>) => detail = Some(s.into());
+        /// With an icon.
+        icon(i: Icon) => icon = Some(i);
+        /// With a check mark state.
+        checked(c: bool) => checked = Some(c);
+        /// With a book cover on the left.
+        cover(c: Cover) => cover = Some(c);
+        /// With reading progress (0..=1).
+        progress(p: f32) => progress = Some(p);
     }
 }
 
@@ -193,34 +172,17 @@ impl Card {
         Card { title: title.into(), subtitle: None, body: None, cover: None, progress: None, action: action.into(), kind: CardKind::Outlined, pressed: false, changed: false }
     }
 
-    /// With a subtitle.
-    pub fn subtitle(mut self, s: impl Into<String>) -> Self {
-        self.subtitle = Some(s.into());
-        self
-    }
-
-    /// With body text.
-    pub fn body(mut self, s: impl Into<String>) -> Self {
-        self.body = Some(s.into());
-        self
-    }
-
-    /// With a cover.
-    pub fn cover(mut self, c: Cover) -> Self {
-        self.cover = Some(c);
-        self
-    }
-
-    /// With progress.
-    pub fn progress(mut self, p: f32) -> Self {
-        self.progress = Some(p);
-        self
-    }
-
-    /// With a look.
-    pub fn kind(mut self, k: CardKind) -> Self {
-        self.kind = k;
-        self
+    setters! {
+        /// With a subtitle.
+        subtitle(s: impl Into<String>) => subtitle = Some(s.into());
+        /// With body text.
+        body(s: impl Into<String>) => body = Some(s.into());
+        /// With a cover.
+        cover(c: Cover) => cover = Some(c);
+        /// With progress.
+        progress(p: f32) => progress = Some(p);
+        /// With a look.
+        kind(k: CardKind) => kind = k;
     }
 
     /// The cover rectangle inside `b` (2:3, the card's height minus padding).

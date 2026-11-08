@@ -69,16 +69,11 @@ impl AppBar {
         AppBar { title: title.into(), subtitle: None, back: false, actions: Vec::new(), rule: true, pressed: None, changed: false }
     }
 
-    /// With a back button.
-    pub fn with_back(mut self) -> Self {
-        self.back = true;
-        self
-    }
-
-    /// With a subtitle.
-    pub fn with_subtitle(mut self, s: impl Into<String>) -> Self {
-        self.subtitle = Some(s.into());
-        self
+    setters! {
+        /// With a back button.
+        with_back() => back = true;
+        /// With a subtitle.
+        with_subtitle(s: impl Into<String>) => subtitle = Some(s.into());
     }
 
     /// With a trailing action.
@@ -261,10 +256,9 @@ impl NavBar {
         NavBar { items, selected: 0, pressed: None, changed: Vec::new() }
     }
 
-    /// With `i` selected.
-    pub fn with_selected(mut self, i: usize) -> Self {
-        self.selected = i;
-        self
+    setters! {
+        /// With `i` selected.
+        with_selected(i: usize) => selected = i;
     }
 
     /// Cell rectangles inside `b`.

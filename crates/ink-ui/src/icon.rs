@@ -510,10 +510,9 @@ impl IconView {
         IconView { icon, caption: String::new(), action: action.into(), inverted: false, pressed: false, changed: false }
     }
 
-    /// With a caption.
-    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
-        self.caption = caption.into();
-        self
+    setters! {
+        /// With a caption.
+        with_caption(caption: impl Into<String>) => caption = caption.into();
     }
 }
 

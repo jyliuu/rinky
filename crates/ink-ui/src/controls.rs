@@ -306,34 +306,17 @@ impl ProgressBar {
         ProgressBar { kind: ProgressKind::Thin, ..ProgressBar::new(value) }
     }
 
-    /// Black and white only (see [`ProgressBar::two_level`]).
-    pub fn two_level(mut self) -> Self {
-        self.two_level = true;
-        self
-    }
-
-    /// With chapter marks (fractions).
-    pub fn with_marks(mut self, marks: Vec<f32>) -> Self {
-        self.marks = marks;
-        self
-    }
-
-    /// With a label on the right.
-    pub fn with_label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-
-    /// Reserves the label column for `widest` (see [`ProgressBar::label_slot`]).
-    pub fn with_label_slot(mut self, widest: impl Into<String>) -> Self {
-        self.label_slot = Some(widest.into());
-        self
-    }
-
-    /// With a caption above the bar.
-    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
-        self.caption = Some(caption.into());
-        self
+    setters! {
+        /// Black and white only (see [`ProgressBar::two_level`]).
+        two_level() => two_level = true;
+        /// With chapter marks (fractions).
+        with_marks(marks: Vec<f32>) => marks = marks;
+        /// With a label on the right.
+        with_label(label: impl Into<String>) => label = Some(label.into());
+        /// Reserves the label column for `widest` (see [`ProgressBar::label_slot`]).
+        with_label_slot(widest: impl Into<String>) => label_slot = Some(widest.into());
+        /// With a caption above the bar.
+        with_caption(caption: impl Into<String>) => caption = Some(caption.into());
     }
 
     /// Track thickness for `kind` in a box `h` tall.
@@ -473,10 +456,9 @@ impl RingProgress {
         RingProgress { value, label: Some(format!("{}%", (unit(value) * 100.0).round() as u32)) }
     }
 
-    /// Without the label.
-    pub fn bare(mut self) -> Self {
-        self.label = None;
-        self
+    setters! {
+        /// Without the label.
+        bare() => label = None;
     }
 
     /// Square badge rectangle `side` big in the bottom-right corner of `cover`, inset by
@@ -540,10 +522,9 @@ impl Segmented {
         Segmented { options: options.iter().map(|s| s.to_string()).collect(), selected: 0, action: action.into() }
     }
 
-    /// With `i` selected.
-    pub fn with_selected(mut self, i: usize) -> Self {
-        self.selected = i;
-        self
+    setters! {
+        /// With `i` selected.
+        with_selected(i: usize) => selected = i;
     }
 
     /// Segment rectangles inside `b`.
@@ -639,10 +620,9 @@ impl Chips {
         }
     }
 
-    /// Only one chip on at a time.
-    pub fn single(mut self) -> Self {
-        self.single = true;
-        self
+    setters! {
+        /// Only one chip on at a time.
+        single() => single = true;
     }
 
     /// With chip `i` selected.
@@ -824,10 +804,9 @@ impl TextBlock {
         self
     }
 
-    /// With an alignment.
-    pub fn aligned(mut self, align: Align) -> Self {
-        self.align = align;
-        self
+    setters! {
+        /// With an alignment.
+        aligned(align: Align) => align = align;
     }
 
     /// Lines as (text, ends with a hyphen) for a width (for tests and measuring).
