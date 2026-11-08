@@ -2166,3 +2166,20 @@ fn zoom_shows_a_scaled_preview_then_the_sharp_page() {
     h.paint();
     assert_eq!(h.probe.panel().pixels, sharp.pixels);
 }
+
+/// The search hit bar leaves the page in use, so a zoom under it shows the preview and
+/// then the sharp page, as without the bar.
+#[test]
+fn zoom_under_the_hit_bar_sharpens_too() {
+    let mut h = Harness::generated("zoom-hits", "comic.cbz", &ink_mupdf::testgen::fixture_cbz(6));
+    h.reader.go_to_page(2);
+    h.paint();
+    h.reader.overlay = Some(search::hit_bar(0, 3, h.dev.screen.size()));
+    h.paint();
+    assert!(h.reader.zoom_step(1));
+    h.paint();
+    assert!(h.reader.preview_shown.is_some(), "the zoom shows a preview");
+    h.rest_for_sharp();
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Hits));
+    assert!(h.reader.sharp_at.is_none() && h.reader.preview_shown.is_none(), "the sharp page came");
+}

@@ -975,9 +975,11 @@ impl ReaderScreen {
     }
 
     /// When the sharp page replaces a zoom preview: like [`ReaderScreen::prefetch_due`],
-    /// not while a finger is down or an overlay is open.
+    /// not while a finger is down or an overlay is open. The search hit bar leaves the
+    /// page in use (a pinch under it zooms), so it does not hold the sharp page back.
     fn sharp_due(&self) -> Option<Instant> {
-        self.sharp_at.filter(|_| !self.touching && self.overlay.is_none())
+        let page_free = self.overlay.as_ref().is_none_or(|o| o.kind == overlay::OverlayKind::Hits);
+        self.sharp_at.filter(|_| !self.touching && page_free)
     }
 
     /// Draws the page after the one shown, in the direction of the last turn, into the
