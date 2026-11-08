@@ -2201,8 +2201,12 @@ mod tests {
         s.ui.control_buttons = ["wifi", "plugin:drift:d"].map(String::from).to_vec();
         let tile = layout(Size::new(1272, 1696), 2).tiles[1];
         let (x, y) = (tile.x + 40, tile.y + tile.h as i32 / 2);
+        // The fake light never finishes its state read, so the first tile poll comes
+        // STATE_WAIT (4 s, plus up to one 150 ms poll) and PLUGIN_POLL (2 s) after the
+        // panel opens. 6000 ms of script sleep left no margin: the script counts only time
+        // spent sleeping, and one late wake-up on a busy machine put the poll after `quit`.
         let (mut device, probe) =
-            headless::open(HeadlessOptions { script: parse(&format!("{OPEN}sleep 6000\nquit\n")).unwrap(), out_dir: None, ..Default::default() });
+            headless::open(HeadlessOptions { script: parse(&format!("{OPEN}sleep 7000\nquit\n")).unwrap(), out_dir: None, ..Default::default() });
         let _fake = crate::screens::settings::fakes::install(&mut device);
         let root = std::env::temp_dir().join(format!("ink-cc-drift-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

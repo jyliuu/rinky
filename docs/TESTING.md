@@ -171,8 +171,10 @@ Rules the fixes below follow; keep to them in new tests:
 Fixed: ink-doc `tests::loaders` (read the crate's `Cargo.toml`), ink-store
 `load_waits_for_a_save_in_progress` and `verifier2_settings_load_or_recover_waits_...`
 (both failed in the same `cargo test --workspace` run on a loaded machine), the time
-bounds in ink-store's no-wait check and ink-app `signal_flush`, and the shared sim state
-of `verify_cli` and `signal_flush`.
+bounds in ink-store's no-wait check and ink-app `signal_flush`, the shared sim state
+of `verify_cli` and `signal_flush`, and quick-light
+`plugin_tiles_follow_state_changes_while_open` (its 6000 ms script sleep equalled the
+4 s state wait plus the 2 s tile poll, with no margin; now 7000 ms).
 
 Faster, same checks: the headless screen's per-frame coverage check compares rows as
 slices (it was half of the ink-app screen tests' time in debug builds); the two
