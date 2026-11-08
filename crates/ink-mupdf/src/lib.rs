@@ -174,13 +174,11 @@ impl FixedOptions {
     /// Options from `RINKY_FIXED` (defaults when unset or invalid; an invalid value is
     /// logged).
     pub fn from_env() -> Self {
-        match std::env::var("RINKY_FIXED") {
-            Ok(s) => FixedOptions::parse(&s).unwrap_or_else(|e| {
-                log::warn!("RINKY_FIXED: {e}");
-                FixedOptions::default()
-            }),
-            Err(_) => FixedOptions::default(),
-        }
+        let Ok(s) = std::env::var("RINKY_FIXED") else { return FixedOptions::default() };
+        FixedOptions::parse(&s).unwrap_or_else(|e| {
+            log::warn!("RINKY_FIXED: {e}");
+            FixedOptions::default()
+        })
     }
 }
 
