@@ -261,14 +261,14 @@ impl RawDoc {
     /// Structured text of `page` in reading order.
     pub fn text(&mut self, page: usize) -> Result<Vec<RawChar>> {
         let (list, doc) = (self.list(page)?.0, self.ptr());
-        let char = |c: &ffi::InkChar| RawChar {
+        let ch = |c: &ffi::InkChar| RawChar {
             c: char::from_u32(c.c as u32).unwrap_or('\u{fffd}'),
             rect: c.rect,
             line: c.line as u32,
         };
         // SAFETY: ink_text on this document and one of its lists, freed with ink_text_free.
         unsafe {
-            self.records(format_args!("text of page {page}"), |o, n| ffi::ink_text(doc, list, o, n), ffi::ink_text_free, char)
+            self.records(format_args!("text of page {page}"), |o, n| ffi::ink_text(doc, list, o, n), ffi::ink_text_free, ch)
         }
     }
 
