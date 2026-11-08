@@ -252,20 +252,21 @@ fn library_dir_default(defaults: &mut Map<String, Value>, settings: &Settings) {
     }
 }
 
-/// How many entries of each registry (plural names, as the start log says them) pass
-/// `of(plugin name)`.
-fn registrations(r: &ink_plugin::registry::Registry, of: impl Fn(&str) -> bool) -> [(&'static str, usize); 7] {
+/// How many entries of each registry pass `of(plugin name)`, with the registry's plural
+/// name (as the start log says it) and its short name (as `rinky plugins list` has
+/// always printed it).
+fn registrations(r: &ink_plugin::registry::Registry, of: impl Fn(&str) -> bool) -> [(&'static str, &'static str, usize); 7] {
     fn count<T>(entries: &[T], plugin: impl Fn(&T) -> &str, of: &impl Fn(&str) -> bool) -> usize {
         entries.iter().filter(|e| of(plugin(e))).count()
     }
     [
-        ("menu items", count(&r.menu_items, |e| &e.plugin, &of)),
-        ("selection actions", count(&r.selection_actions, |e| &e.plugin, &of)),
-        ("gestures", count(&r.gestures, |e| &e.plugin, &of)),
-        ("gesture-map actions", count(&r.actions, |e| &e.plugin, &of)),
-        ("settings pages", count(&r.settings_pages, |e| &e.plugin, &of)),
-        ("library actions", count(&r.library_actions, |e| &e.plugin, &of)),
-        ("status widgets", count(&r.status_widgets, |e| &e.plugin, &of)),
+        ("menu items", "menu", count(&r.menu_items, |e| &e.plugin, &of)),
+        ("selection actions", "selection", count(&r.selection_actions, |e| &e.plugin, &of)),
+        ("gestures", "gesture", count(&r.gestures, |e| &e.plugin, &of)),
+        ("gesture-map actions", "action", count(&r.actions, |e| &e.plugin, &of)),
+        ("settings pages", "settings", count(&r.settings_pages, |e| &e.plugin, &of)),
+        ("library actions", "library", count(&r.library_actions, |e| &e.plugin, &of)),
+        ("status widgets", "status", count(&r.status_widgets, |e| &e.plugin, &of)),
     ]
 }
 
@@ -400,7 +401,7 @@ impl PluginHost {
             );
         }
         let r = &manager.registry;
-        let counts_text = |counts: [(&str, usize); 7]| counts.map(|(k, c)| format!("{c} {k}")).join(", ");
+        let counts_text = |counts: [(&str, &str, usize); 7]| counts.map(|(k, _, c)| format!("{c} {k}")).join(", ");
         for info in manager.info().iter().filter(|i| i.enabled) {
             let n = &info.manifest.name;
             log::info!("plugins: {n} registered {}", counts_text(registrations(r, |p| p == n)));
@@ -917,10 +918,7 @@ pub fn plugin_list(host: &PluginHost) -> Vec<String> {
             } else {
                 "failed"
             };
-            // The short names `rinky plugins list` has always printed, in registry order.
-            const SHORT: [&str; 7] = ["menu", "selection", "gesture", "action", "settings", "library", "status"];
-            let counts = registrations(r, |p| p == n);
-            let regs: Vec<String> = SHORT.iter().zip(counts).filter(|(_, (_, c))| *c > 0).map(|(k, (_, c))| format!("{k} {c}")).collect();
+            let regs: Vec<String> = registrations(r, |p| p == n).iter().filter(|(_, _, c)| *c > 0).map(|(_, k, c)| format!("{k} {c}")).collect();
             let perms: Vec<&str> = i.manifest.permissions.iter().map(|p| p.name()).collect();
             format!(
                 "{n}\t{}\t{}\t{state}\terrors {}\t[{}]\t{}\t{}",
@@ -1152,16 +1150,15 @@ pub mod hooks {
         // A screen that still paints the overlay itself (older docs) did it already;
         // composing again would save the overlay's own pixels as its background.
         let Recorder { shown, wave } = rec.watch;
-        if cx.plugins.overlay_painted {
-            return Ok(Frame { shown, damage, wave });
+        if !cx.plugins.overlay_painted {
+            let changed: Vec<Rect> = shown.iter().chain(damage.iter()).map(|d| d.rect).collect();
+            let over = cx.plugins.ui.compose(&mut PaintCx { canvas: &mut *cx.canvas, fonts: &mut *cx.fonts, theme: cx.theme }, &changed);
+            if !over.is_empty() {
+                damage.extend(over);
+                damage = ink_ui::refresh::merge(damage);
+            }
         }
-        let changed: Vec<Rect> = shown.iter().chain(damage.iter()).map(|d| d.rect).collect();
-        let over = cx.plugins.ui.compose(&mut PaintCx { canvas: &mut *cx.canvas, fonts: &mut *cx.fonts, theme: cx.theme }, &changed);
-        if over.is_empty() {
-            return Ok(Frame { shown, damage, wave });
-        }
-        damage.extend(over);
-        Ok(Frame { shown, damage: ink_ui::refresh::merge(damage), wave })
+        Ok(Frame { shown, damage, wave })
     }
 
     /// App loop, once per turn: while plugin network requests run, asks `power` to
