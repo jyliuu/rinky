@@ -431,7 +431,16 @@ impl Fonts {
     }
 
     /// (ascent, descent) in pixels; descent is negative.
+    ///
+    /// Read from the face's tables with `ttf-parser`, by the same arithmetic as
+    /// `fontdue`'s `horizontal_line_metrics` (ascender and descender times `px` over
+    /// units per em, in `f32`), so the numbers are the same to the bit and no `fontdue`
+    /// face is needed for them.
     pub fn vmetrics(&self, style: Style, px: f32) -> (f32, f32) {
+        if let Some(t) = self.faces[index(style)].ttf() {
+            let scale = px / t.units_per_em() as f32;
+            return (t.ascender() as f32 * scale, t.descender() as f32 * scale);
+        }
         match self.fonts[index(style)].horizontal_line_metrics(px) {
             Some(m) => (m.ascent, m.descent),
             None => (px * 0.8, -px * 0.2),
@@ -824,6 +833,28 @@ mod tests {
         assert!(f.cached_glyphs() >= 5);
         f.clear_caches();
         assert_eq!(f.cached_glyphs(), 0);
+    }
+
+    /// `vmetrics` reads the tables itself; its numbers are `fontdue`'s to the bit, for
+    /// every embedded face (Noto Serif and the UI's Noto Sans) and the test font, at
+    /// every size from 1 to 200 px in quarter pixels and some odd ones.
+    #[test]
+    fn vmetrics_are_fontdues_to_the_bit() {
+        let sans = |name: &str| std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts/ui").join(name)).unwrap();
+        let faces = [REGULAR.to_vec(), BOLD.to_vec(), ITALIC.to_vec(), sans("NotoSans-Regular.ttf"), sans("NotoSans-Bold.ttf"), sans("NotoSans-Italic.ttf"), std::fs::read(test_font()).unwrap()];
+        let sizes = (4..=800).map(|q| q as f32 / 4.0).chain([0.0, 13.37, 31.9, 44.0 * 0.9, 1e-3, 1234.5]);
+        let sizes: Vec<f32> = sizes.collect();
+        for bytes in &faces {
+            let f = Fonts::from_bytes([bytes, bytes, bytes]).unwrap();
+            let face = Font::from_bytes(bytes.as_slice(), fontdue::FontSettings::default()).unwrap();
+            for &px in &sizes {
+                let m = face.horizontal_line_metrics(px).unwrap();
+                for style in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
+                    let (asc, desc) = f.vmetrics(style, px);
+                    assert_eq!((asc.to_bits(), desc.to_bits()), (m.ascent.to_bits(), m.descent.to_bits()), "{px} px");
+                }
+            }
+        }
     }
 
     #[test]
