@@ -101,6 +101,15 @@ struct Counting {
     created: Cell<usize>,
 }
 
+/// `TreeSink` methods that go straight to the inner [`RcDom`].
+macro_rules! forward {
+    ($($name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)*) => {
+        $(fn $name(&self, $($arg: $ty),*) $(-> $ret)? {
+            self.dom.$name($($arg),*)
+        })*
+    };
+}
+
 impl TreeSink for Counting {
     type Handle = Handle;
     type Output = RcDom;
@@ -112,12 +121,6 @@ impl TreeSink for Counting {
     fn finish(self) -> RcDom {
         self.dom
     }
-    fn parse_error(&self, msg: Cow<'static, str>) {
-        self.dom.parse_error(msg)
-    }
-    fn get_document(&self) -> Handle {
-        self.dom.get_document()
-    }
     fn elem_name<'a>(&'a self, target: &'a Handle) -> Self::ElemName<'a> {
         self.dom.elem_name(target)
     }
@@ -125,65 +128,29 @@ impl TreeSink for Counting {
         self.created.set(self.created.get() + 1);
         self.dom.create_element(name, attrs, flags)
     }
-    fn create_comment(&self, text: StrTendril) -> Handle {
-        self.dom.create_comment(text)
-    }
-    fn create_pi(&self, target: StrTendril, data: StrTendril) -> Handle {
-        self.dom.create_pi(target, data)
-    }
-    fn append(&self, parent: &Handle, child: NodeOrText<Handle>) {
-        self.dom.append(parent, child)
-    }
-    fn append_based_on_parent_node(&self, element: &Handle, prev_element: &Handle, child: NodeOrText<Handle>) {
-        self.dom.append_based_on_parent_node(element, prev_element, child)
-    }
-    fn append_doctype_to_document(&self, name: StrTendril, public_id: StrTendril, system_id: StrTendril) {
-        self.dom.append_doctype_to_document(name, public_id, system_id)
-    }
-    fn mark_script_already_started(&self, node: &Handle) {
-        self.dom.mark_script_already_started(node)
-    }
-    fn pop(&self, node: &Handle) {
-        self.dom.pop(node)
-    }
-    fn get_template_contents(&self, target: &Handle) -> Handle {
-        self.dom.get_template_contents(target)
-    }
-    fn same_node(&self, x: &Handle, y: &Handle) -> bool {
-        self.dom.same_node(x, y)
-    }
-    fn set_quirks_mode(&self, mode: QuirksMode) {
-        self.dom.set_quirks_mode(mode)
-    }
-    fn append_before_sibling(&self, sibling: &Handle, new_node: NodeOrText<Handle>) {
-        self.dom.append_before_sibling(sibling, new_node)
-    }
-    fn add_attrs_if_missing(&self, target: &Handle, attrs: Vec<Attribute>) {
-        self.dom.add_attrs_if_missing(target, attrs)
-    }
-    fn associate_with_form(&self, target: &Handle, form: &Handle, nodes: (&Handle, Option<&Handle>)) {
-        self.dom.associate_with_form(target, form, nodes)
-    }
-    fn remove_from_parent(&self, target: &Handle) {
-        self.dom.remove_from_parent(target)
-    }
-    fn reparent_children(&self, node: &Handle, new_parent: &Handle) {
-        self.dom.reparent_children(node, new_parent)
-    }
-    fn is_mathml_annotation_xml_integration_point(&self, handle: &Handle) -> bool {
-        self.dom.is_mathml_annotation_xml_integration_point(handle)
-    }
-    fn set_current_line(&self, line_number: u64) {
-        self.dom.set_current_line(line_number)
-    }
-    fn allow_declarative_shadow_roots(&self, intended_parent: &Handle) -> bool {
-        self.dom.allow_declarative_shadow_roots(intended_parent)
-    }
-    fn attach_declarative_shadow(&self, location: &Handle, template: &Handle, attrs: &[Attribute]) -> bool {
-        self.dom.attach_declarative_shadow(location, template, attrs)
-    }
-    fn maybe_clone_an_option_into_selectedcontent(&self, option: &Handle) {
-        self.dom.maybe_clone_an_option_into_selectedcontent(option)
+    forward! {
+        parse_error(msg: Cow<'static, str>);
+        get_document() -> Handle;
+        create_comment(text: StrTendril) -> Handle;
+        create_pi(target: StrTendril, data: StrTendril) -> Handle;
+        append(parent: &Handle, child: NodeOrText<Handle>);
+        append_based_on_parent_node(element: &Handle, prev_element: &Handle, child: NodeOrText<Handle>);
+        append_doctype_to_document(name: StrTendril, public_id: StrTendril, system_id: StrTendril);
+        mark_script_already_started(node: &Handle);
+        pop(node: &Handle);
+        get_template_contents(target: &Handle) -> Handle;
+        same_node(x: &Handle, y: &Handle) -> bool;
+        set_quirks_mode(mode: QuirksMode);
+        append_before_sibling(sibling: &Handle, new_node: NodeOrText<Handle>);
+        add_attrs_if_missing(target: &Handle, attrs: Vec<Attribute>);
+        associate_with_form(target: &Handle, form: &Handle, nodes: (&Handle, Option<&Handle>));
+        remove_from_parent(target: &Handle);
+        reparent_children(node: &Handle, new_parent: &Handle);
+        is_mathml_annotation_xml_integration_point(handle: &Handle) -> bool;
+        set_current_line(line_number: u64);
+        allow_declarative_shadow_roots(intended_parent: &Handle) -> bool;
+        attach_declarative_shadow(location: &Handle, template: &Handle, attrs: &[Attribute]) -> bool;
+        maybe_clone_an_option_into_selectedcontent(option: &Handle);
     }
 }
 
