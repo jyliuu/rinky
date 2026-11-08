@@ -577,7 +577,8 @@ pub struct Builder<'c> {
 }
 
 impl<'c> Builder<'c> {
-    /// A builder; `classifier` decides display/white-space (None = element defaults only).
+    /// A builder; `classifier` decides display/white-space (None = element defaults
+    /// only). It is first asked at `<body>`, when the head's stylesheets are known.
     pub fn new(classifier: Option<&'c mut dyn Classifier>) -> Self {
         Builder {
             dom: Dom { body: NONE, ..Default::default() },
@@ -594,16 +595,6 @@ impl<'c> Builder<'c> {
     /// Stylesheet references met so far (complete once the body starts).
     pub fn sheets(&self) -> &[SheetRef] {
         &self.dom.sheets
-    }
-
-    /// Replaces the classifier (called when the head is complete).
-    pub fn set_classifier(&mut self, c: &'c mut dyn Classifier) {
-        self.classifier = Some(c);
-    }
-
-    /// True once `<body>` has been opened.
-    pub fn in_body(&self) -> bool {
-        !self.stack.is_empty()
     }
 
     fn top(&self) -> Option<NodeId> {

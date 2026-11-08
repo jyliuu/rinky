@@ -103,30 +103,17 @@ fn parse_xml(src: &str, classifier: &mut dyn Classifier) -> Option<Dom> {
         c.trim_text(false);
         c.check_comments = false;
     }
-    let mut b = Builder::new(None);
-    let mut classifier = Some(classifier);
+    let mut b = Builder::new(Some(classifier));
     let mut depth = 0usize;
     loop {
         match r.read_event() {
             Ok(Event::Start(e)) => {
-                let qname = e.name();
-                let name = local(qname.as_ref());
-                if name == "body" && !b.in_body() {
-                    if let Some(c) = classifier.take() {
-                        b.set_classifier(c);
-                    }
-                }
-                b.start(&name, attrs_of(&e));
+                b.start(&local(e.name().as_ref()), attrs_of(&e));
                 depth += 1;
             }
             Ok(Event::Empty(e)) => {
                 let qname = e.name();
                 let name = local(qname.as_ref());
-                if name == "body" && !b.in_body() {
-                    if let Some(c) = classifier.take() {
-                        b.set_classifier(c);
-                    }
-                }
                 b.start(&name, attrs_of(&e));
                 b.end(&name);
             }
@@ -260,15 +247,14 @@ fn parse_html5(src: &str, classifier: &mut dyn Classifier) -> Dom {
     let fixed = expand_self_closing(src);
     let has_tbody = find_ascii_ci(src.as_bytes(), b"<tbody").is_some();
     let rc = html5ever::parse_document(RcDom::default(), Default::default()).one(fixed);
-    let mut b = Builder::new(None);
-    let mut classifier = Some(classifier);
-    walk(&rc.document, &mut b, &mut classifier, has_tbody);
+    let mut b = Builder::new(Some(classifier));
+    walk(&rc.document, &mut b, has_tbody);
     b.finish()
 }
 
 /// Feeds the html5ever tree to the builder (iteratively: deep nesting must not overflow
 /// the stack).
-fn walk<'c>(root: &Handle, b: &mut Builder<'c>, classifier: &mut Option<&'c mut dyn Classifier>, has_tbody: bool) {
+fn walk(root: &Handle, b: &mut Builder, has_tbody: bool) {
     enum Step {
         Enter(Handle),
         Exit(String),
@@ -307,11 +293,6 @@ fn walk<'c>(root: &Handle, b: &mut Builder<'c>, classifier: &mut Option<&'c mut 
                         (k, a.value.to_string())
                     })
                     .collect();
-                if lname == "body" && !b.in_body() {
-                    if let Some(c) = classifier.take() {
-                        b.set_classifier(c);
-                    }
-                }
                 b.start(&lname, attrs);
                 stack.push(Step::Exit(lname));
                 push_children(&mut stack);
