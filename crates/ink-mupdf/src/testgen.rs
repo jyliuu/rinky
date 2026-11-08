@@ -337,54 +337,37 @@ fn crc32(data: &[u8]) -> u32 {
     c ^ 0xffff_ffff
 }
 
+/// Appends `(value, width in bytes)` fields, little-endian.
+fn le(out: &mut Vec<u8>, fields: &[(u32, usize)]) {
+    for &(v, n) in fields {
+        out.extend_from_slice(&v.to_le_bytes()[..n]);
+    }
+}
+
 /// A zip archive with stored (uncompressed) entries, in the given order.
 pub fn write_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut central = Vec::new();
     for (name, data) in entries {
-        let crc = crc32(data);
-        let off = out.len() as u32;
-        let le16 = |v: u16| v.to_le_bytes();
-        let le32 = |v: u32| v.to_le_bytes();
-        let mut local = Vec::new();
-        local.extend_from_slice(&le32(0x0403_4b50));
-        local.extend_from_slice(&le16(20));
-        local.extend_from_slice(&le16(0));
-        local.extend_from_slice(&le16(0)); // stored
-        local.extend_from_slice(&le16(0));
-        local.extend_from_slice(&le16(0x21));
-        local.extend_from_slice(&le32(crc));
-        local.extend_from_slice(&le32(data.len() as u32));
-        local.extend_from_slice(&le32(data.len() as u32));
-        local.extend_from_slice(&le16(name.len() as u16));
-        local.extend_from_slice(&le16(0));
-        local.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(&local);
+        let (len, off, crc, nlen) = (data.len() as u32, out.len() as u32, crc32(data), name.len() as u32);
+        // Shared by both headers: version 20, no flags, stored, time 0, date 0x21, CRC,
+        // compressed and plain size, name length.
+        let common = [(20, 2), (0, 2), (0, 2), (0, 2), (0x21, 2), (crc, 4), (len, 4), (len, 4), (nlen, 2)];
+        le(&mut out, &[(0x0403_4b50, 4)]);
+        le(&mut out, &common);
+        le(&mut out, &[(0, 2)]); // extra length
+        out.extend_from_slice(name.as_bytes());
         out.extend_from_slice(data);
-        central.extend_from_slice(&le32(0x0201_4b50));
-        central.extend_from_slice(&le16(20));
-        central.extend_from_slice(&le16(20));
-        central.extend_from_slice(&le16(0));
-        central.extend_from_slice(&le16(0));
-        central.extend_from_slice(&le16(0));
-        central.extend_from_slice(&le16(0x21));
-        central.extend_from_slice(&le32(crc));
-        central.extend_from_slice(&le32(data.len() as u32));
-        central.extend_from_slice(&le32(data.len() as u32));
-        central.extend_from_slice(&le16(name.len() as u16));
-        central.extend_from_slice(&[0; 12]); // extra, comment, disk, internal attr, external attr (2+2+2+2+4)
-        central.extend_from_slice(&le32(off));
+        le(&mut central, &[(0x0201_4b50, 4), (20, 2)]); // signature, made by version 20
+        le(&mut central, &common);
+        // Extra, comment, disk, internal attributes, external attributes, header offset.
+        le(&mut central, &[(0, 2), (0, 2), (0, 2), (0, 2), (0, 4), (off, 4)]);
         central.extend_from_slice(name.as_bytes());
     }
-    let cd_off = out.len() as u32;
+    let (count, size, cd_off) = (entries.len() as u32, central.len() as u32, out.len() as u32);
     out.extend_from_slice(&central);
-    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    out.extend_from_slice(&[0; 4]);
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
-    out.extend_from_slice(&cd_off.to_le_bytes());
-    out.extend_from_slice(&[0; 2]);
+    // End of central directory: signature, disk numbers, entry counts, size, offset, comment.
+    le(&mut out, &[(0x0605_4b50, 4), (0, 2), (0, 2), (count, 2), (count, 2), (size, 4), (cd_off, 4), (0, 2)]);
     out
 }
 
