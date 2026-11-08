@@ -643,98 +643,60 @@ impl ReaderScreen {
     }
 }
 
-/// What a [`Control`] edits (how it reads [`Shown`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Field {
-    Hyph,
-    Publisher,
-    ParaSpace,
-    Indent,
-    Weight,
-    Justify,
-    Preset,
-    Night,
-    Wave,
-    Flash,
-}
-
-/// The ink-ui control inside a [`Control`].
+/// The ink-ui control inside a [`Control`], with how it reads the shared [`Shown`].
 enum Inner {
-    Seg(Segmented),
-    Toggle(Toggle),
+    /// Chips: the action and the value of each chip, and the shown value (the chip with
+    /// that value is selected).
+    Seg(Segmented, Vec<(String, f32)>, fn(&Shown) -> f32),
+    /// A switch, on when the shown value is.
+    Toggle(Toggle, fn(&Shown) -> bool),
 }
 
-impl Inner {
-    fn widget(&mut self) -> &mut dyn Widget {
-        match self {
-            Inner::Seg(w) => w,
-            Inner::Toggle(w) => w,
-        }
-    }
-
-    /// Selects option `i` (segmented, single chips).
-    fn select(&mut self, i: Option<usize>) {
-        match self {
-            Inner::Seg(s) => s.selected = i.unwrap_or(usize::MAX),
-            Inner::Toggle(_) => {}
-        }
-    }
-}
-
-/// An ink-ui control bound to one [`Field`] of the shared [`Shown`]: it shows the
-/// shared value, maps an option index to its action (`values[i]`) and records the
-/// action in the shared values.
+/// An ink-ui control bound to one value of the shared [`Shown`]: it shows the shared
+/// value, maps a chip to its action and records the action in the shared values.
 struct Control {
-    field: Field,
     inner: Inner,
-    /// Action per option index (segmented, chips); empty: the control's own action.
-    values: Vec<String>,
     shown: Rc<RefCell<Shown>>,
 }
 
 impl Control {
-    fn new(field: Field, inner: Inner, values: Vec<String>, shown: &Rc<RefCell<Shown>>) -> Self {
-        let mut c = Control { field, inner, values, shown: shown.clone() };
+    fn new(inner: Inner, shown: &Rc<RefCell<Shown>>) -> Self {
+        let mut c = Control { inner, shown: shown.clone() };
         c.sync();
         c
     }
 
     fn sync(&mut self) {
         let s = self.shown.borrow();
-        let e = &s.extras;
-        if let Inner::Toggle(t) = &mut self.inner {
-            t.on = match self.field {
-                Field::Night => e.night,
-                Field::Wave => e.wave,
-                Field::Hyph => s.hyph,
-                Field::Publisher => s.publisher,
-                _ => s.justify,
-            };
-            return;
+        match &mut self.inner {
+            Inner::Seg(w, chips, value) => {
+                let v = value(&s);
+                w.selected = chips.iter().position(|(_, c)| (c - v).abs() < 0.01).unwrap_or(usize::MAX);
+            }
+            Inner::Toggle(t, on) => t.on = on(&s),
         }
-        let sel = match self.field {
-            Field::Preset => s.preset(),
-            Field::Flash => FLASHES.iter().position(|(n, _)| *n == e.flash_every),
-            Field::ParaSpace => PARA_SPACINGS.iter().position(|(v, _)| (*v - s.para_space).abs() < 0.01),
-            Field::Indent => INDENTS.iter().position(|(v, _)| (*v - s.indent).abs() < 0.01),
-            Field::Weight => WEIGHTS.iter().position(|(v, _)| *v == s.weight),
-            _ => None,
-        };
-        self.inner.select(sel);
+    }
+
+    fn widget(&mut self) -> &mut dyn Widget {
+        match &mut self.inner {
+            Inner::Seg(w, ..) => w,
+            Inner::Toggle(w, _) => w,
+        }
     }
 }
 
 impl Widget for Control {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         self.sync();
-        self.inner.widget().paint(cx, b);
+        self.widget().paint(cx, b);
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        match self.inner.widget().event(ev, b) {
+        match self.widget().event(ev, b) {
             EventResult::Action(a) => {
-                let a = match a.split(':').nth(1).and_then(|i| i.parse::<usize>().ok()).and_then(|i| self.values.get(i)) {
-                    Some(v) if !self.values.is_empty() => v.clone(),
+                let chip = a.split(':').nth(1).and_then(|i| i.parse::<usize>().ok());
+                let a = match (&self.inner, chip) {
+                    (Inner::Seg(_, chips, _), Some(i)) if i < chips.len() => chips[i].0.clone(),
                     _ => a,
                 };
                 self.shown.borrow_mut().apply(&a);
@@ -745,7 +707,7 @@ impl Widget for Control {
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
-        self.inner.widget().damage(b)
+        self.widget().damage(b)
     }
 }
 
@@ -1242,39 +1204,40 @@ impl Row {
     }
 }
 
-fn seg(options: &[&str]) -> Inner {
-    Inner::Seg(Segmented::new(options, "seg"))
+/// Chips for a table of (value, caption): actions `<action>:<value>`.
+fn chips<T: Copy + std::fmt::Display + Into<f64>>(table: &[(T, &'static str)], action: &str) -> Vec<(&'static str, String, f32)> {
+    table.iter().map(|&(v, label)| (label, format!("{action}:{v}"), v.into() as f32)).collect()
 }
 
 /// The rows of tab `tab`.
 fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
     let screen_w = size.w;
     let s = shown.borrow().clone();
-    let ctl = |f, inner, values: Vec<String>| -> Box<dyn Widget> { Box::new(Control::new(f, inner, values, shown)) };
-    let toggle = |f, label: &str, on: bool, action: &str| ctl(f, Inner::Toggle(Toggle::new(label, on, action)), Vec::new());
-    // A segmented choice from a (value, caption) table; option I reports `action:value`.
-    fn choice<T: std::fmt::Display>(table: &[(T, &str)], action: &str) -> (Inner, Vec<String>) {
-        let captions: Vec<&str> = table.iter().map(|x| x.1).collect();
-        (seg(&captions), table.iter().map(|x| format!("{action}:{}", x.0)).collect())
-    }
-    let pick = |f, (inner, values): (Inner, Vec<String>)| ctl(f, inner, values);
+    let seg = |chips: Vec<(&str, String, f32)>, value: fn(&Shown) -> f32| -> Box<dyn Widget> {
+        let labels: Vec<&str> = chips.iter().map(|c| c.0).collect();
+        let inner = Inner::Seg(Segmented::new(&labels, "seg"), chips.into_iter().map(|(_, a, v)| (a, v)).collect(), value);
+        Box::new(Control::new(inner, shown))
+    };
+    let toggle = |label: &str, action: &str, on: fn(&Shown) -> bool| -> Box<dyn Widget> {
+        Box::new(Control::new(Inner::Toggle(Toggle::new(label, false, action), on), shown))
+    };
     match tab {
         0 => {
-            let preset_names: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
+            let presets = PRESETS.iter().enumerate().map(|(i, p)| (p.name, format!("aa-preset:{i}"), i as f32)).collect();
             let mut families = s.extras.families.clone();
             if families.is_empty() {
                 families.push(BUILTIN.to_string());
             }
             vec![
-                Row::one("preset", None, CONTROL_H, ctl(Field::Preset, seg(&preset_names), (0..PRESETS.len()).map(|i| format!("aa-preset:{i}")).collect())),
+                Row::one("preset", None, CONTROL_H, seg(presets, |s| s.preset().map_or(-1.0, |i| i as f32))),
                 Row::one("size", None, SliderPanel::height(1, PREVIEW_H), Box::new(SliderPanel::new(vec![0], shown, screen_w))),
                 Row::one("font", Some("Font"), 2 * CONTROL_H + GAP, Box::new(FamilyGrid { names: families, shown: shown.clone(), page: 0 })),
                 Row {
                     caption: None,
                     h: CONTROL_H,
                     widgets: vec![
-                        (Some("justify"), toggle(Field::Justify, "Justify", s.justify, "aa-justify")),
-                        (Some("hyph"), toggle(Field::Hyph, "Hyphenate", s.hyph, "aa-hyph")),
+                        (Some("justify"), toggle("Justify", "aa-justify", |s| s.justify)),
+                        (Some("hyph"), toggle("Hyphenate", "aa-hyph", |s| s.hyph)),
                     ],
                     stack_narrow: false,
                 },
@@ -1283,22 +1246,22 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
                     h: CONTROL_H,
                     stack_narrow: true,
                     widgets: vec![
-                        (Some("publisher"), toggle(Field::Publisher, "Book's styles", s.publisher, "aa-publisher")),
-                        (Some("weight"), pick(Field::Weight, choice(&WEIGHTS, "aa-weight"))),
+                        (Some("publisher"), toggle("Book's styles", "aa-publisher", |s| s.publisher)),
+                        (Some("weight"), seg(chips(&WEIGHTS, "aa-weight"), |s| s.weight as f32)),
                     ],
                 },
             ]
         }
         1 => vec![
             Row::one("sliders", None, SliderPanel::height(4, PREVIEW_H), Box::new(SliderPanel::new(vec![1, 2, 3, 4], shown, screen_w))),
-            Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, pick(Field::ParaSpace, choice(&PARA_SPACINGS, "aa-pspace"))),
-            Row::one("indent", Some("First-line indent"), CONTROL_H, pick(Field::Indent, choice(&INDENTS, "aa-indent"))),
+            Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, seg(chips(&PARA_SPACINGS, "aa-pspace"), |s| s.para_space)),
+            Row::one("indent", Some("First-line indent"), CONTROL_H, seg(chips(&INDENTS, "aa-indent"), |s| s.indent)),
         ],
         _ => [
-            s.extras.wave_supported.then(|| Row::one("wave", None, CONTROL_H, toggle(Field::Wave, "Page turn wave", s.extras.wave, "aa-anim"))),
+            s.extras.wave_supported.then(|| Row::one("wave", None, CONTROL_H, toggle("Page turn wave", "aa-anim", |s| s.extras.wave))),
             Some(Row::one("statusbars", None, CONTROL_H, Box::new(Button::new("Status bars…", "aa-statusbars")))),
-            Some(Row::one("flash", Some("Full refresh every"), CONTROL_H, pick(Field::Flash, choice(&FLASHES, "aa-flash")))),
-            Some(Row::one("night", None, CONTROL_H, toggle(Field::Night, "Night mode", s.extras.night, "aa-night"))),
+            Some(Row::one("flash", Some("Full refresh every"), CONTROL_H, seg(chips(&FLASHES, "aa-flash"), |s| s.extras.flash_every as f32))),
+            Some(Row::one("night", None, CONTROL_H, toggle("Night mode", "aa-night", |s| s.extras.night))),
         ]
         .into_iter()
         .flatten()
