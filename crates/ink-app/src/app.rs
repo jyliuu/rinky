@@ -259,6 +259,8 @@ impl App {
             }
         }
         crate::screens::settings::apply_device_settings(&mut device, &settings, &paths);
+        // The network worker starts: Wi-Fi on again when it was on last time.
+        device.wifi.start_network(settings.device.wifi_was_on);
         let device_rotation = device.screen.rotation();
         let size = device.screen.size();
         let space = ScreenSpace { panel: device.screen.panel_size(), rotation: device.screen.rotation() };
@@ -292,6 +294,20 @@ impl App {
             battery_log,
             shown,
             revealed_part: false,
+        }
+    }
+
+    /// Keeps what the network worker reports that must outlive the process ("Wi-Fi was
+    /// on", for the next start).
+    fn network_event(&mut self, e: &ink_device::NetEvent) {
+        if let ink_device::NetEvent::WasOn(on) = e {
+            if self.settings.device.wifi_was_on != *on {
+                log::info!("wifi: was on {on} (kept in the settings)");
+                let mut s = self.settings.clone();
+                s.device.wifi_was_on = *on;
+                self.settings_update = Some(s);
+                self.take_settings_update();
+            }
         }
     }
 
@@ -396,16 +412,20 @@ impl App {
                     UiEvent::Power(PowerEvent::BatteryLevel(_)) if self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake => {
                         self.note_battery(true);
                     }
-                    // wifid lost the connection: look for a saved network in range.
-                    UiEvent::Power(PowerEvent::WifiState(s)) if !matches!(s.as_str(), "CONNECTED" | "PENDING") => {
-                        self.device.wifi.look_for_networks();
-                    }
+                    // wifid's connection state changed: the network worker probes the link.
+                    UiEvent::Power(PowerEvent::WifiState(s)) => self.device.wifi.link_changed(s),
+                    UiEvent::Power(PowerEvent::Network(e)) => self.network_event(e),
                     _ => {}
                 }
-                if matches!(ev, UiEvent::Power(PowerEvent::OutOfScreenSaver)) {
-                    self.repaint_after_wake = true;
-                    // Carried somewhere else while asleep: look for networks there.
-                    self.device.wifi.look_for_networks();
+                match ev {
+                    UiEvent::Power(PowerEvent::GoingToScreenSaver) => self.device.wifi.set_awake(false),
+                    UiEvent::Power(PowerEvent::OutOfScreenSaver) => {
+                        self.repaint_after_wake = true;
+                        // Wi-Fi back on (a Kobo turns it off to sleep), or a network
+                        // looked for where the device was carried while asleep.
+                        self.device.wifi.set_awake(true);
+                    }
+                    _ => {}
                 }
                 if matches!(ev, UiEvent::Power(PowerEvent::GoingToScreenSaver | PowerEvent::OutOfScreenSaver | PowerEvent::Resuming)) {
                     // The screensaver (or a resume) changed the panel behind the app's back.

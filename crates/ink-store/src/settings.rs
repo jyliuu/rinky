@@ -186,11 +186,21 @@ pub struct DeviceSettings {
     /// Screensaver: `page` (current page), `cover`, `blank` or `image:PATH`, as
     /// `ink_device::screensaver::Screensaver::from_setting` reads it.
     pub screensaver: String,
+    /// Wi-Fi was on when rinky last ran (turned on, or connected, and not turned off
+    /// by the user since): Wi-Fi is turned on again at start-up and after a wake.
+    pub wifi_was_on: bool,
 }
 
 impl Default for DeviceSettings {
     fn default() -> Self {
-        DeviceSettings { touch: String::new(), night_mode: false, rotation: 0, sleep_minutes: 10, screensaver: DEFAULT_SCREENSAVER.into() }
+        DeviceSettings {
+            touch: String::new(),
+            night_mode: false,
+            rotation: 0,
+            sleep_minutes: 10,
+            screensaver: DEFAULT_SCREENSAVER.into(),
+            wifi_was_on: false,
+        }
     }
 }
 

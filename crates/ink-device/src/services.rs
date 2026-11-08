@@ -160,17 +160,6 @@ pub struct WifiState {
     pub signal: Option<u8>,
 }
 
-impl WifiState {
-    /// The radio is on but neither connected nor joining: worth a scan.
-    pub fn searching(&self) -> bool {
-        self.enabled && !matches!(self.state.as_str(), "CONNECTED" | "PENDING")
-    }
-}
-
-/// How long a wake, the radio turned on or a lost connection waits before rinky looks for a network: the
-/// radio rejoins the network it had by itself when that one is still in range.
-pub const WIFI_WAKE_SETTLE: Duration = Duration::from_secs(5);
-
 /// A network found by a scan.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WifiNetwork {
@@ -230,11 +219,31 @@ pub trait Wifi {
     fn set_airplane_mode(&mut self, _on: bool) -> Result<()> {
         unsupported("airplane mode")
     }
-    /// The device woke from sleep or the connection changed: when the radio is on but
-    /// not connected (carried away from the network it had), looks for networks in the
-    /// background, so a saved network in range is joined and the Wi-Fi page lists what is
-    /// around. Returns at once.
-    fn look_for_networks(&mut self) {}
+    /// What the network is doing ([`crate::netman`]). Backends with a network worker
+    /// answer its last status without reading the device; the others read
+    /// [`Wifi::state`].
+    fn status(&self) -> Result<crate::netman::NetStatus> {
+        self.state().map(|s| crate::netman::NetStatus::from_state(&s))
+    }
+    /// The app started; `restore`: Wi-Fi was on when it last ran (kept in the settings
+    /// from [`crate::netman::NetEvent::WasOn`]). Starts the network worker's work.
+    fn start_network(&mut self, _restore: bool) {}
+    /// The device left (`true`) or entered (`false`) the screensaver.
+    fn set_awake(&mut self, _awake: bool) {}
+    /// The platform's connection state changed (wifid's `cmStateChange`).
+    fn link_changed(&mut self, _state: &str) {}
+    /// Joins a network in the background when the backend can: `Ok(true)` means it
+    /// started and [`crate::PowerEvent::Network`] events follow; `Ok(false)` means it
+    /// joined already (the default runs [`Wifi::connect`]).
+    fn connect_in_background(&mut self, essid: &str, password: Option<&str>) -> Result<bool> {
+        self.connect(essid, password).map(|()| false)
+    }
+    /// Scans in the background when the backend can: `Ok(true)` means a
+    /// [`crate::netman::NetEvent::Scanned`] follows; `Ok(false)` means the scan finished
+    /// ([`Wifi::scan_list`] has the networks).
+    fn scan_in_background(&mut self) -> Result<bool> {
+        self.scan().map(|_| false)
+    }
 }
 
 /// USB state.
@@ -314,17 +323,6 @@ impl Clock for SystemClock {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A wake scans only with the radio on and no network joined or being joined.
-    #[test]
-    fn searching_is_radio_on_without_a_network() {
-        let s = |enabled, state: &str| WifiState { enabled, state: state.into(), essid: None, signal: None }.searching();
-        assert!(s(true, "NA"));
-        assert!(s(true, "READY"));
-        assert!(!s(true, "CONNECTED"));
-        assert!(!s(true, "PENDING"));
-        assert!(!s(false, "NA"));
-    }
 
     #[test]
     fn unsupported_services_report_errors() {
