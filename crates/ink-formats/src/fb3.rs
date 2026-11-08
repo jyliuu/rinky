@@ -430,7 +430,7 @@ pub fn load(path: &Path, zip: Option<ZipArchive<File>>) -> Result<Book> {
         };
         chapters.push(HtmlChapter { path: files.path(i), html: chapter_html(&title, &c.out) });
     }
-    let mut toc = files.section_toc(&body, section_title);
+    let mut toc = files.section_toc(&body, &section_title);
     for (i, (kind, els)) in units.iter().enumerate() {
         if *kind == "notes" {
             if let Some(t) = els[0].child("title").map(|t| t.text_collapsed()).filter(|t| !t.is_empty()) {

@@ -496,7 +496,7 @@ impl Chapters {
 
     /// TOC nodes for the sections below `el` whose id is in a chapter; sections without a
     /// title (`title_of`) pass their children up.
-    pub(crate) fn section_toc(&self, el: &Element, title_of: fn(&Element) -> Option<String>) -> Vec<TocNode> {
+    pub(crate) fn section_toc(&self, el: &Element, title_of: &dyn Fn(&Element) -> Option<String>) -> Vec<TocNode> {
         let mut out = Vec::new();
         for s in el.children_named("section") {
             let children = self.section_toc(s, title_of);
@@ -554,6 +554,9 @@ pub fn convert(mut root: Element) -> Result<Book> {
             Unit::Section(e, _) | Unit::Body(e) => files.add(e, i),
         }
     }
+    // Section titles by element, for the chapters and then the TOC (a calibre title can
+    // hold the whole chapter, so it is collapsed once).
+    let mut titles: HashMap<*const Element, Option<String>> = HashMap::new();
     let mut chapters = Vec::with_capacity(units.len());
     for u in &units {
         let mut c = Conv { chapters: &files, images: &images, out: String::new(), in_notes: false, inline: false };
@@ -574,14 +577,14 @@ pub fn convert(mut root: Element) -> Result<Book> {
                 }
                 if section {
                     c.out.push_str("</div>");
-                    section_title(parent).unwrap_or_default()
+                    titles.entry(std::ptr::from_ref(*parent)).or_insert_with(|| section_title(parent)).clone().unwrap_or_default()
                 } else {
                     info.metadata.title.clone()
                 }
             }
             Unit::Section(e, depth) => {
                 c.element(e, *depth);
-                section_title(e).unwrap_or_default()
+                titles.entry(std::ptr::from_ref(*e)).or_insert_with(|| section_title(e)).clone().unwrap_or_default()
             }
             Unit::Body(b) => {
                 c.in_notes = true;
@@ -598,7 +601,7 @@ pub fn convert(mut root: Element) -> Result<Book> {
         chapters.push(HtmlChapter { path: files.path(chapters.len()), html: chapter_html(&title, &c.out) });
     }
     // TOC: section titles of the main body (nested), then the titles of extra bodies.
-    let mut toc = files.section_toc(main, section_title);
+    let mut toc = files.section_toc(main, &|s| titles.get(&std::ptr::from_ref(s)).cloned().unwrap_or_else(|| section_title(s)));
     for (i, u) in units.iter().enumerate() {
         if let Unit::Body(b) = u {
             let title = b.child("title").map(|t| t.text_collapsed()).filter(|t| !t.is_empty());
