@@ -29,7 +29,7 @@
 //! `rinky.json`, then the prototype's `BOOK.rinky` position, then the defaults
 //! are used.
 
-use crate::{load_recovering, os_bytes, os_from_bytes, save_with_backup, LoadSource, Recovered, Result, StoreError};
+use crate::{load_recovering, os_bytes, os_from_bytes, parse_json, save_with_backup, LoadSource, Recovered, Result, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::ffi::{OsStr, OsString};
@@ -367,10 +367,6 @@ pub struct LoadReport {
     pub errors: Vec<String>,
 }
 
-fn parse_state(b: &[u8]) -> std::result::Result<BookState, String> {
-    serde_json::from_slice(b).map_err(|e| e.to_string())
-}
-
 /// True if `key` names a typed field of `T` rather than a key its flattened `extra`
 /// keeps: a key in `extra` with such a name would be written twice (serde refuses
 /// duplicate fields), so `save` drops it. Asked of `T` itself: the key alone, set to
@@ -409,7 +405,7 @@ pub fn value_depth(v: &Value) -> usize {
 /// Never moved aside or written: it may belong to another format of the same title.
 fn shared_sidecar(book: &Path) -> Option<BookState> {
     let file = legacy_sidecar_path(book);
-    let state = [file.clone(), crate::backup_path(&file)].iter().find_map(|f| std::fs::read(f).ok().and_then(|b| parse_state(&b).ok()))?;
+    let state = [file.clone(), crate::backup_path(&file)].iter().find_map(|f| std::fs::read(f).ok().and_then(|b| parse_json::<BookState>(&b).ok()))?;
     let belongs = match state.md5.as_deref() {
         Some(m) => crate::partial_md5(book).is_ok_and(|own| own == m),
         None => !has_sibling_with_same_sdr(book),
@@ -471,7 +467,7 @@ impl BookState {
         // has none, and its files are not looked for one by one (each look is a round trip
         // on the Kindle's FUSE store).
         let sdr = !std::fs::metadata(sidecar_dir(book)).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
-        let r = if sdr { load_recovering(&sidecar_path(book), parse_state)? } else { Recovered::default() };
+        let r = if sdr { load_recovering(&sidecar_path(book), parse_json::<BookState>)? } else { Recovered::default() };
         let (state, source) = match (r.value, r.source) {
             (Some(s), LoadSource::Primary | LoadSource::Temp) => (s, StateSource::Sidecar),
             (Some(s), _) => (s, StateSource::Backup),
@@ -531,8 +527,8 @@ impl BookState {
     pub fn save(&self, book: &Path) -> Result<()> {
         let s = self.sanitized();
         let json = serde_json::to_vec_pretty(&s).map_err(|e| StoreError::Format(e.to_string()))?;
-        parse_state(&json).map_err(|e| StoreError::Invalid(format!("sidecar for {} would not load again: {e}", book.display())))?;
-        save_with_backup(&sidecar_path(book), &json, |b| parse_state(b).is_ok())
+        parse_json::<BookState>(&json).map_err(|e| StoreError::Invalid(format!("sidecar for {} would not load again: {e}", book.display())))?;
+        save_with_backup(&sidecar_path(book), &json, |b| parse_json::<BookState>(b).is_ok())
     }
 
     /// Adds a highlight; one with the same start and end replaces the old one.

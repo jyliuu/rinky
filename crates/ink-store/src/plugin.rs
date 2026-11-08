@@ -16,7 +16,7 @@
 //! only after [`validate_name`] accepted the name.
 
 use crate::sidecar::BookState;
-use crate::{save_with_backup, Paths, Result, StoreError};
+use crate::{parse_json, save_with_backup, Paths, Result, StoreError};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
@@ -32,10 +32,6 @@ pub fn validate_name(name: &str) -> Result<()> {
     } else {
         Err(StoreError::Invalid(format!("plugin name {name:?}: use 1-{MAX_NAME} of a-z, A-Z, 0-9, _ and -")))
     }
-}
-
-fn parse_settings(b: &[u8]) -> std::result::Result<Map<String, Value>, String> {
-    serde_json::from_slice(b).map_err(|e| e.to_string())
 }
 
 /// Settings, per-book data and the data directory of one plugin.
@@ -54,7 +50,7 @@ impl<'a> PluginStore<'a> {
     pub fn open(paths: &Paths, name: &str, book: Option<&'a mut BookState>) -> Result<Self> {
         validate_name(name)?;
         let file = paths.plugin_settings(name);
-        let r = crate::load_recovering(&file, parse_settings)?;
+        let r = crate::load_recovering(&file, parse_json::<Map<String, Value>>)?;
         Ok(PluginStore { name: name.to_string(), paths: paths.clone(), settings: r.value.unwrap_or_default(), book })
     }
 
@@ -74,14 +70,14 @@ impl<'a> PluginStore<'a> {
     pub fn set(&mut self, key: &str, value: Value) -> Result<()> {
         let old = if value.is_null() { self.settings.remove(key) } else { self.settings.insert(key.to_string(), value) };
         let json = serde_json::to_vec_pretty(&self.settings).map_err(|e| StoreError::Format(e.to_string()))?;
-        if let Err(e) = parse_settings(&json) {
+        if let Err(e) = parse_json::<Map<String, Value>>(&json) {
             match old {
                 Some(v) => self.settings.insert(key.to_string(), v),
                 None => self.settings.remove(key),
             };
             return Err(StoreError::Invalid(format!("plugin {} setting {key:?} would not load again: {e}", self.name)));
         }
-        save_with_backup(&self.paths.plugin_settings(&self.name), &json, |b| parse_settings(b).is_ok())
+        save_with_backup(&self.paths.plugin_settings(&self.name), &json, |b| parse_json::<Map<String, Value>>(b).is_ok())
     }
 
     /// All settings.

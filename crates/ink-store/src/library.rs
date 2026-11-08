@@ -19,7 +19,7 @@
 //! index unsaveable.
 
 use crate::sidecar::{BookState, ReadingStatus};
-use crate::{load_recovering, save_with_backup, LoadSource, Result, StoreError};
+use crate::{load_recovering, parse_json, save_with_backup, LoadSource, Result, StoreError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
@@ -313,10 +313,6 @@ fn mtime_secs(m: &std::fs::Metadata) -> u64 {
     m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn parse_index(b: &[u8]) -> std::result::Result<LibraryIndex, String> {
-    serde_json::from_slice(b).map_err(|e| e.to_string())
-}
-
 impl LibraryIndex {
     /// Current format version. 1: phase 0. 2: metadata, covers, collections list, rating.
     pub const VERSION: u32 = 2;
@@ -324,7 +320,7 @@ impl LibraryIndex {
     /// Loads `path`; a missing file gives an empty index. A corrupt file is moved aside
     /// and its `.old` backup is used; [`StoreError::Format`] only if neither parses.
     pub fn load(path: &Path) -> Result<Self> {
-        let r = load_recovering(path, parse_index)?;
+        let r = load_recovering(path, parse_json::<LibraryIndex>)?;
         match (r.value, r.source) {
             (Some(v), _) => Ok(v),
             (None, LoadSource::Missing) if r.errors.is_empty() => Ok(LibraryIndex::default()),
@@ -336,7 +332,7 @@ impl LibraryIndex {
     pub fn save(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_vec(&VersionedRef { version: self.version.max(Self::VERSION), books: &self.books, collections: &self.collections })
             .map_err(|e| StoreError::Format(e.to_string()))?;
-        save_with_backup(path, &json, |b| parse_index(b).is_ok())
+        save_with_backup(path, &json, |b| parse_json::<LibraryIndex>(b).is_ok())
     }
 
     /// Finds a book by path.

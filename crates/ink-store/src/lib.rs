@@ -185,6 +185,11 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// JSON `bytes` as a `T`, or the parse error as text (a parser for [`load_recovering`]).
+pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, String> {
+    serde_json::from_slice(bytes).map_err(|e| e.to_string())
+}
+
 /// `path` with `suffix` appended to its file name (`a.json` + `.old` = `a.json.old`).
 pub(crate) fn with_suffix(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
