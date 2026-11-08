@@ -885,10 +885,7 @@ impl MupdfDocument {
         if screen >= self.screens() || self.is_cached(screen) {
             return Ok(());
         }
-        let px = self.draw_screen(screen)?;
-        let bytes = px.len();
-        self.inner.borrow_mut().screens.insert(screen, px, bytes);
-        Ok(())
+        self.with_screen(screen, |_| ())
     }
 
     /// Free zoom and pan: draws document page `page` scaled by `spec.zoom` pixels per
