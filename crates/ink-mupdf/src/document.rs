@@ -158,15 +158,6 @@ struct PageGeom {
     regions: Vec<FRect>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Setup {
-    opts: FixedOptions,
-    plan: Plan,
-    w: f32,
-    h: f32,
-    pages: usize,
-}
-
 struct Inner {
     raw: RawDoc,
     bounds: HashMap<usize, FRect>,
@@ -270,23 +261,6 @@ fn clip_of(ctm: &Matrix, region: &FRect, screen: &FRect) -> Rect {
     ctm.map_rect(region).intersect(screen).to_rect().intersect(&screen.to_rect())
 }
 
-impl Setup {
-    /// Screen `view` of a tile plan as (page, column, row, tile across), or `None` for
-    /// spreads and screens past the end.
-    fn tile(&self, view: usize) -> Option<(usize, usize, usize, usize)> {
-        let Plan::Tiles { cols, nx, ny } = self.plan else {
-            return None;
-        };
-        let per = cols * nx * ny;
-        let page = view / per;
-        if page >= self.pages {
-            return None;
-        }
-        let (col, rem) = (view % per / (nx * ny), view % per % (nx * ny));
-        Some((page, col, rem / nx, rem % nx))
-    }
-}
-
 impl Inner {
     fn bound(&mut self, page: usize) -> FRect {
         if let Some(b) = self.bounds.get(&page) {
@@ -341,11 +315,28 @@ impl Inner {
         self.texts.insert(page, t.clone(), bytes);
         Ok(t)
     }
+}
+
+impl MupdfDocument {
+    /// Screen `view` of a tile plan as (page, column, row, tile across), or `None` for
+    /// spreads and screens past the end.
+    fn tile(&self, view: usize) -> Option<(usize, usize, usize, usize)> {
+        let Plan::Tiles { cols, nx, ny } = self.plan else {
+            return None;
+        };
+        let per = cols * nx * ny;
+        let page = view / per;
+        if page >= self.pages {
+            return None;
+        }
+        let (col, rem) = (view % per / (nx * ny), view % per % (nx * ny));
+        Some((page, col, rem / nx, rem % nx))
+    }
 
     /// The part of `page` that text column `col` of a `cols`-column tile plan shows (the
     /// crop box when the plan has one column).
-    fn tile_region(&mut self, s: &Setup, page: usize, cols: usize, col: usize) -> FRect {
-        let g = self.geom(page, &s.opts);
+    fn tile_region(&self, inner: &mut Inner, page: usize, cols: usize, col: usize) -> FRect {
+        let g = inner.geom(page, &self.opts);
         if cols <= 1 {
             g.content
         } else {
@@ -358,14 +349,14 @@ impl Inner {
     /// Cells cut each column region into an even `nx` x `ny` grid (in the rotated frame, so
     /// rows run down the screen). They do not overlap, and the tile of a cell always shows
     /// all of it: tiles are at least one cell long and the last tile ends where the region
-    /// ends. [`Inner::screen_at`] maps any point of a cell back to that tile.
-    fn cell(&mut self, s: &Setup, view: usize) -> Option<(usize, FRect)> {
-        let Plan::Tiles { cols, nx, ny } = s.plan else {
+    /// ends. [`MupdfDocument::screen_at`] maps any point of a cell back to that tile.
+    fn cell_with(&self, inner: &mut Inner, view: usize) -> Option<(usize, FRect)> {
+        let Plan::Tiles { cols, nx, ny } = self.plan else {
             return None;
         };
-        let (page, col, row, xi) = s.tile(view)?;
-        let region = self.tile_region(s, page, cols, col);
-        let rot = Matrix::rotate(s.opts.rotate as i32);
+        let (page, col, row, xi) = self.tile(view)?;
+        let region = self.tile_region(inner, page, cols, col);
+        let rot = Matrix::rotate(self.opts.rotate as i32);
         let rr = rot.map_rect(&region);
         let at = |a: f32, b: f32, k: usize, n: usize| if k >= n { b } else { a + (b - a) * k as f32 / n as f32 };
         let cell = FRect::new(at(rr.x0, rr.x1, xi, nx), at(rr.y0, rr.y1, row, ny), at(rr.x0, rr.x1, xi + 1, nx), at(rr.y0, rr.y1, row + 1, ny));
@@ -375,8 +366,8 @@ impl Inner {
     /// The screen of `page` whose tile cell holds page point `(x, y)`: the column region
     /// that holds `x` (else the nearest one), then the cell of the even grid over it. A
     /// point outside the region goes to the nearest cell. O(columns), no tile scan.
-    fn screen_at(&mut self, s: &Setup, page: usize, x: f32, y: f32) -> usize {
-        let Plan::Tiles { cols, nx, ny } = s.plan else {
+    fn screen_at(&self, inner: &mut Inner, page: usize, x: f32, y: f32) -> usize {
+        let Plan::Tiles { cols, nx, ny } = self.plan else {
             return 0;
         };
         let per = cols * nx * ny;
@@ -388,7 +379,7 @@ impl Inner {
         if cols > 1 {
             let mut best = f32::INFINITY;
             for c in 0..cols {
-                let r = self.tile_region(s, page, cols, c);
+                let r = self.tile_region(inner, page, cols, c);
                 let d = if x < r.x0 {
                     r.x0 - x
                 } else if x >= r.x1 {
@@ -402,8 +393,8 @@ impl Inner {
                 }
             }
         }
-        let region = self.tile_region(s, page, cols, col);
-        let rot = Matrix::rotate(s.opts.rotate as i32);
+        let region = self.tile_region(inner, page, cols, col);
+        let rot = Matrix::rotate(self.opts.rotate as i32);
         let rr = rot.map_rect(&region);
         let (px, py) = rot.apply(x, y);
         let xi = part_index(px - rr.x0, rr.w(), nx);
@@ -412,44 +403,45 @@ impl Inner {
     }
 
     /// The pieces that make up screen `view`.
-    fn pieces(&mut self, s: &Setup, view: usize) -> Vec<Piece> {
-        let screen = FRect::new(0.0, 0.0, s.w, s.h);
-        let rot = Matrix::rotate(s.opts.rotate as i32);
+    fn pieces_with(&self, inner: &mut Inner, view: usize) -> Vec<Piece> {
+        let (w, h) = (self.layout.width as f32, self.layout.height as f32);
+        let screen = FRect::new(0.0, 0.0, w, h);
+        let rot = Matrix::rotate(self.opts.rotate as i32);
         let mut out = Vec::new();
-        match s.plan {
+        match self.plan {
             Plan::Tiles { cols, nx, ny } => {
-                let Some((page, col, row, xi)) = s.tile(view) else { return out };
-                let region = self.tile_region(s, page, cols, col);
+                let Some((page, col, row, xi)) = self.tile(view) else { return out };
+                let region = self.tile_region(inner, page, cols, col);
                 let rr = rot.map_rect(&region);
                 let (rw, rh) = (rr.w().max(1.0), rr.h().max(1.0));
-                let base = fit_scale(s.opts.fit, s.w, s.h, rw, rh);
-                let scale = (base * s.opts.zoom).min(nx as f32 * s.w / rw).min(ny as f32 * s.h / rh);
+                let base = fit_scale(self.opts.fit, w, h, rw, rh);
+                let scale = (base * self.opts.zoom).min(nx as f32 * w / rw).min(ny as f32 * h / rh);
                 let (cw, ch) = (rw * scale, rh * scale);
-                let left = if cw <= s.w + 0.5 || nx < 2 { (s.w - cw) / 2.0 } else { -(xi as f32) * (cw - s.w) / (nx - 1) as f32 };
-                let top = if ch <= s.h + 0.5 || ny < 2 { (s.h - ch) / 2.0 } else { -(row as f32) * (ch - s.h) / (ny - 1) as f32 };
+                let left = if cw <= w + 0.5 || nx < 2 { (w - cw) / 2.0 } else { -(xi as f32) * (cw - w) / (nx - 1) as f32 };
+                let top = if ch <= h + 0.5 || ny < 2 { (h - ch) / 2.0 } else { -(row as f32) * (ch - h) / (ny - 1) as f32 };
                 let ctm = place(&rot, &rr, scale, left, top);
                 out.push(Piece { page, ctm, clip: clip_of(&ctm, &region, &screen), region });
             }
             Plan::Spread { cover_alone, rtl } => {
-                let pages = spread_pages(view, s.pages, cover_alone);
+                let pages = spread_pages(view, self.pages, cover_alone);
                 let n = pages.len();
                 for (k, &page) in pages.iter().enumerate() {
-                    let g = self.geom(page, &s.opts);
+                    let g = inner.geom(page, &self.opts);
                     let region = g.content;
                     let rr = rot.map_rect(&region);
                     let (rw, rh) = (rr.w().max(1.0), rr.h().max(1.0));
-                    let area_w = if n == 2 { s.w / 2.0 } else { s.w };
-                    let scale = (area_w / rw).min(s.h / rh) * s.opts.zoom.min(1.0);
+                    let area_w = if n == 2 { w / 2.0 } else { w };
+                    let scale = (area_w / rw).min(h / rh) * self.opts.zoom.min(1.0);
                     let (cw, ch) = (rw * scale, rh * scale);
                     let right_side = n == 2 && ((k == 1) != rtl);
                     let left = if n == 1 {
-                        (s.w - cw) / 2.0
+                        (w - cw) / 2.0
                     } else if right_side {
-                        s.w / 2.0
+                        w / 2.0
                     } else {
-                        s.w / 2.0 - cw
+                        w / 2.0 - cw
                     };
-                    let ctm = place(&rot, &rr, scale, left, (s.h - ch) / 2.0);
+                    let ctm = place(&rot, &rr, scale, left, (h - ch) / 2.0);
                     out.push(Piece { page, ctm, clip: clip_of(&ctm, &region, &screen), region });
                 }
             }
@@ -650,10 +642,6 @@ impl MupdfDocument {
         self.plan
     }
 
-    fn setup(&self) -> Setup {
-        Setup { opts: self.opts, plan: self.plan, w: self.layout.width as f32, h: self.layout.height as f32, pages: self.pages }
-    }
-
     fn replan(&mut self) {
         let o = self.opts;
         // Fit page, no zoom, one column: whole pages, one per screen or two side by side.
@@ -732,8 +720,7 @@ impl MupdfDocument {
 
     /// The pieces (pages, transforms, clip rectangles) of `screen`.
     pub fn pieces(&self, screen: usize) -> Vec<Piece> {
-        let s = self.setup();
-        self.inner.borrow_mut().pieces(&s, screen)
+        self.pieces_with(&mut self.inner.borrow_mut(), screen)
     }
 
     /// The screen of `page` that shows page-space point `(x, y)`: in tile modes the tile
@@ -743,8 +730,7 @@ impl MupdfDocument {
         if self.plan.per_page() <= 1 || page >= self.pages {
             return self.first_screen_of(page);
         }
-        let s = self.setup();
-        self.inner.borrow_mut().screen_at(&s, page, x, y)
+        self.screen_at(&mut self.inner.borrow_mut(), page, x, y)
     }
 
     /// In tile modes: the document page of `screen` and the cell of it that this tile is
@@ -756,8 +742,7 @@ impl MupdfDocument {
         if screen >= self.screens() {
             return None;
         }
-        let s = self.setup();
-        self.inner.borrow_mut().cell(&s, screen)
+        self.cell_with(&mut self.inner.borrow_mut(), screen)
     }
 
     /// Size of document page `page` in points (after its own `/Rotate`).
@@ -845,10 +830,9 @@ impl MupdfDocument {
 
     /// Renders `screen` into a new `w * h` buffer (no cache).
     fn draw_screen(&self, screen: usize) -> Result<Vec<u8>> {
-        let s = self.setup();
         let (w, h) = (self.layout.width as usize, self.layout.height as usize);
         let mut buf = vec![255u8; w * h];
-        let pieces = self.inner.borrow_mut().pieces(&s, screen);
+        let pieces = self.pieces(screen);
         if pieces.is_empty() {
             return Err(DocError::PageOutOfRange(screen));
         }
