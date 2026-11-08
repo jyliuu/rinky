@@ -705,7 +705,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         self.y += pb + b.bottom;
         let box_bottom = self.y;
-        self.push_border(b, box_x, box_w, box_top, box_bottom, box_bottom - box_top);
+        self.out.decor.extend(border_rects(b, box_x, box_w, box_top, box_bottom, box_bottom - box_top));
         self.add_margin(mb);
         if !self.in_cell {
             match st.break_after {
@@ -722,24 +722,6 @@ impl<'a, 'e> Flow<'a, 'e> {
                     }
                 }
             }
-        }
-    }
-
-    /// The border rectangles of a box from `top` to `bottom` (`h`: the height of the
-    /// side borders).
-    fn push_border(&mut self, b: Edges<f32>, x: f32, w: f32, top: f32, bottom: f32, h: f32) {
-        let mut add = |x, y, w, h| self.out.decor.push(RectRun { x, y, w, h, gray: 0 });
-        if b.top > 0.0 {
-            add(x, top, w, b.top);
-        }
-        if b.bottom > 0.0 {
-            add(x, bottom - b.bottom, w, b.bottom);
-        }
-        if b.left > 0.0 {
-            add(x, top, b.left, h);
-        }
-        if b.right > 0.0 {
-            add(x + w - b.right, top, b.right, h);
         }
     }
 
@@ -1502,14 +1484,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 if c == '▪' {
                     self.out.items.push(Draw::Rect(RectRun { x: mx, y, w: sz, h: sz, gray: 0 }));
                 } else {
-                    for r in [
-                        RectRun { x: mx, y, w: sz, h: t, gray: 0 },
-                        RectRun { x: mx, y: y + sz - t, w: sz, h: t, gray: 0 },
-                        RectRun { x: mx, y, w: t, h: sz, gray: 0 },
-                        RectRun { x: mx + sz - t, y, w: t, h: sz, gray: 0 },
-                    ] {
-                        self.out.items.push(Draw::Rect(r));
-                    }
+                    self.out.items.extend(border_rects(Edges::all(t), mx, sz, y, y + sz, sz).map(Draw::Rect));
                 }
             } else {
                 self.out.items.push(Draw::Text(TextRun {
@@ -1781,7 +1756,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             for (lay, cx, cw, c) in sub {
                 self.append_drawn(lay, row_top);
                 // Cell borders span the full row height.
-                self.push_border(self.st(c).border, cx, cw, row_top, row_top + row_h, row_h);
+                self.out.decor.extend(border_rects(self.st(c).border, cx, cw, row_top, row_top + row_h, row_h));
             }
             self.y = row_top + row_h;
             self.push_slice(row_top, self.y, key, first_item);
@@ -1899,6 +1874,14 @@ impl<'a, 'e> Flow<'a, 'e> {
         max = max.max(line);
         (min.min(w), max)
     }
+}
+
+/// The rectangles of a box border from `top` to `bottom` (`h`: the height of the side
+/// borders): top, bottom, left and right, leaving out sides of width 0.
+fn border_rects(b: Edges<f32>, x: f32, w: f32, top: f32, bottom: f32, h: f32) -> impl Iterator<Item = RectRun> {
+    let r = |x, y, w, h| RectRun { x, y, w, h, gray: 0 };
+    let sides = [(b.top, r(x, top, w, b.top)), (b.bottom, r(x, bottom - b.bottom, w, b.bottom)), (b.left, r(x, top, b.left, h)), (b.right, r(x + w - b.right, top, b.right, h))];
+    sides.into_iter().filter(|(width, _)| *width > 0.0).map(|(_, r)| r)
 }
 
 /// Height of an inline image above the baseline (`sa`: the line's strut ascent).
