@@ -71,7 +71,15 @@ pub fn split(arg: &str) -> Option<(&str, &str)> {
 /// A page module's reply to a reported `<prefix>:<name>:<op>` action: [`apply`] on
 /// `chosen` (between `min` and `max` of `list`), the new order saved with `store`; a
 /// refused change only says why. `None`: not an action of `prefix`.
-pub fn page_action(action: &str, prefix: &str, list: &[(&str, &str)], mut chosen: Vec<String>, (min, max): (usize, usize), cx: &mut AppCtx, store: impl FnOnce(&mut Settings, Vec<String>)) -> Option<Reply> {
+pub fn page_action(
+    action: &str,
+    prefix: &str,
+    list: &[(&str, &str)],
+    mut chosen: Vec<String>,
+    (min, max): (usize, usize),
+    cx: &mut AppCtx,
+    store: impl FnOnce(&mut Settings, Vec<String>),
+) -> Option<Reply> {
     let (name, op) = action.strip_prefix(prefix)?.strip_prefix(':').and_then(split)?;
     Some(match apply(&mut chosen, list, name, op, min, max) {
         Ok(text) => {
