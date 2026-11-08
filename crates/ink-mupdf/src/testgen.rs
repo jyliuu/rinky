@@ -398,19 +398,9 @@ fn fill(px: &mut [u8], w: usize, x0: usize, y0: usize, x1: usize, y1: usize, v: 
 fn digit(px: &mut [u8], w: usize, x: usize, y: usize, dw: usize, dh: usize, d: u32) {
     let t = dw / 6;
     let half = dh / 2;
-    // a b c d e f g
-    let segs: [bool; 7] = match d {
-        0 => [true, true, true, true, true, true, false],
-        1 => [false, true, true, false, false, false, false],
-        2 => [true, true, false, true, true, false, true],
-        3 => [true, true, true, true, false, false, true],
-        4 => [false, true, true, false, false, true, true],
-        5 => [true, false, true, true, false, true, true],
-        6 => [true, false, true, true, true, true, true],
-        7 => [true, true, true, false, false, false, false],
-        8 => [true; 7],
-        _ => [true, true, true, true, false, true, true],
-    };
+    // Segments lit per digit, bit 0 = a .. bit 6 = g (anything above 9 draws a 9).
+    const SEGMENTS: [u8; 10] = [0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f];
+    let segs = SEGMENTS[(d as usize).min(9)];
     let rects = [
         (x, y, x + dw, y + t),                         // a
         (x + dw - t, y, x + dw, y + half),             // b
@@ -420,8 +410,8 @@ fn digit(px: &mut [u8], w: usize, x: usize, y: usize, dw: usize, dh: usize, d: u
         (x, y, x + t, y + half),                       // f
         (x, y + half - t / 2, x + dw, y + half + t / 2), // g
     ];
-    for (on, r) in segs.iter().zip(rects) {
-        if *on {
+    for (k, r) in rects.into_iter().enumerate() {
+        if segs >> k & 1 != 0 {
             fill(px, w, r.0, r.1, r.2, r.3, 0);
         }
     }
