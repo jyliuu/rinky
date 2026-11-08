@@ -414,19 +414,32 @@ fn walk_ids(el: &Element, path: &mut Vec<Step>, wanted: &HashSet<&str>, out: &mu
 }
 
 /// Resolves targets to positions, parsing each chapter at most once.
-pub struct Resolver<'a> {
-    chapters: Vec<&'a str>,
+pub struct Resolver {
+    /// Number of chapters.
+    chapters: usize,
     cache: HashMap<usize, HashMap<String, Vec<Step>>>,
 }
 
-impl<'a> Resolver<'a> {
+impl Resolver {
     /// Prepares resolution of `targets` in `chapters`.
-    pub fn new<'t>(chapters: &'a [HtmlChapter], targets: impl IntoIterator<Item = &'t Target>) -> Self {
+    pub fn new<'t>(chapters: &[HtmlChapter], targets: impl IntoIterator<Item = &'t Target>) -> Self {
         Self::from_sources(chapters.iter().map(|c| c.html.as_str()).collect(), targets)
     }
 
     /// [`Resolver::new`] over the XHTML sources of the chapters.
-    pub fn from_sources<'t>(chapters: Vec<&'a str>, targets: impl IntoIterator<Item = &'t Target>) -> Self {
+    pub fn from_sources<'t>(chapters: Vec<&str>, targets: impl IntoIterator<Item = &'t Target>) -> Self {
+        Self::from_fn(chapters.len(), |i| chapters[i].len(), |i| chapters[i], targets)
+    }
+
+    /// [`Resolver::from_sources`] over `chapters` chapters whose XHTML `source` gives,
+    /// asked for on the resolving threads and only for chapters with targets. `len` is
+    /// the length of a chapter's source or an estimate of it (it decides on threads).
+    pub fn from_fn<'s, 't>(
+        chapters: usize,
+        len: impl Fn(usize) -> usize,
+        source: impl Fn(usize) -> &'s str + Sync,
+        targets: impl IntoIterator<Item = &'t Target>,
+    ) -> Self {
         let mut wanted: HashMap<usize, HashSet<&str>> = HashMap::new();
         for t in targets {
             if let Some(id) = &t.id {
@@ -434,19 +447,19 @@ impl<'a> Resolver<'a> {
             }
         }
         // Each chapter with targets is parsed once; big books spread that over threads.
-        let jobs: Vec<(usize, HashSet<&str>)> = wanted.into_iter().filter(|(ch, _)| *ch < chapters.len()).collect();
-        let bytes: usize = jobs.iter().map(|(ch, _)| chapters[*ch].len()).sum();
+        let jobs: Vec<(usize, HashSet<&str>)> = wanted.into_iter().filter(|(ch, _)| *ch < chapters).collect();
+        let bytes: usize = jobs.iter().map(|(ch, _)| len(*ch)).sum();
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4);
         let threads = if bytes > 512 * 1024 { cores.min(jobs.len()).max(1) } else { 1 };
         let cache = if threads <= 1 {
-            jobs.into_iter().map(|(ch, ids)| (ch, id_paths(chapters[ch], &ids))).collect()
+            jobs.into_iter().map(|(ch, ids)| (ch, id_paths(source(ch), &ids))).collect()
         } else {
             let per = jobs.len().div_ceil(threads);
-            let chapters = &chapters;
+            let source = &source;
             std::thread::scope(|scope| {
                 let handles: Vec<_> = jobs
                     .chunks(per)
-                    .map(|part| scope.spawn(move || part.iter().map(|(ch, ids)| (*ch, id_paths(chapters[*ch], ids))).collect::<Vec<_>>()))
+                    .map(|part| scope.spawn(move || part.iter().map(|(ch, ids)| (*ch, id_paths(source(*ch), ids))).collect::<Vec<_>>()))
                     .collect();
                 // A panicking part loses its targets (they open at the chapter start).
                 handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
@@ -457,7 +470,7 @@ impl<'a> Resolver<'a> {
 
     /// The xpointer of `t`: the element path when the id is found, else the chapter start.
     pub fn position(&self, t: &Target) -> Position {
-        let n = t.chapter.min(self.chapters.len().saturating_sub(1)) as u32 + 1;
+        let n = t.chapter.min(self.chapters.saturating_sub(1)) as u32 + 1;
         let mut x = XPointer::fragment_start(n);
         if let Some(steps) = t.id.as_ref().and_then(|id| self.cache.get(&t.chapter)?.get(id)) {
             x.steps.extend(steps.iter().cloned());
@@ -624,7 +637,10 @@ impl BookDocument {
         let positions = match cached {
             Some(p) => p,
             None => {
-                let r = Resolver::from_sources(chapters.iter().map(|c| c.html()).collect(), targets.iter().copied());
+                // Spine items not read yet are read on the resolving threads, and only
+                // those with targets.
+                let (len, source) = (|i: usize| chapters[i].src_len(), |i: usize| chapters[i].html());
+                let r = Resolver::from_fn(chapters.len(), len, source, targets.iter().copied());
                 let p: Vec<Position> = targets.iter().map(|t| r.position(t)).collect();
                 if let Some(f) = &self.toc_file {
                     if let Err(e) = write_toc_file(f, hash, &p) {
@@ -947,6 +963,27 @@ mod tests {
             assert_eq!(flat(&d.resolved().0), flat(&want_toc), "{} (stale file)", b.display());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolving_reads_only_spine_items_with_targets() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        for name in ["juliet.epub", "formats/epub2-ncx.epub", "formats/epub3-nav.epub"] {
+            let b = root.join(name);
+            let d = crate::epub::open_book(&b, None).unwrap();
+            let (want_toc, want_labels) = crate::load(&b).unwrap().positions();
+            let (toc, labels) = d.resolved();
+            assert_eq!(toc, &want_toc, "{name}");
+            assert_eq!(labels, &want_labels, "{name}");
+            let with_ids: HashSet<usize> = all_targets(&d.nodes, &d.page_list).iter().filter(|t| t.id.is_some()).map(|t| t.chapter).collect();
+            let chapters = &d.doc.book().chapters;
+            let first = chapters.iter().position(|c| !c.html().trim().is_empty()).unwrap();
+            for (i, c) in chapters.iter().enumerate() {
+                // (A spine item missing from the archive is "read" as empty.)
+                let needed = i <= first || with_ids.contains(&i);
+                assert!(needed || !c.is_read() || c.html().is_empty(), "{name}: spine item {i} read without a target in it");
+            }
+        }
     }
 
     #[test]
