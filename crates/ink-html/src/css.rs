@@ -189,13 +189,8 @@ fn tok_of(t: &Token, p: &mut Parser, depth: u32) -> Option<Tok> {
         Token::Delim(c) => Tok::Delim(*c),
         Token::Function(name) => {
             let name = name.to_ascii_lowercase();
-            let args = if depth < MAX_NESTING {
-                p.parse_nested_block(|p| -> Result<Vec<Tok>, cssparser::ParseError<'_, ()>> { Ok(collect_tokens_at(p, depth + 1)) }).unwrap_or_default()
-            } else {
-                // Too deep: the arguments are skipped.
-                let _ = p.parse_nested_block(|_| -> Result<(), cssparser::ParseError<'_, ()>> { Ok(()) });
-                Vec::new()
-            };
+            // Too deep: the arguments are skipped.
+            let args = nested(p, |p| if depth < MAX_NESTING { collect_tokens_at(p, depth + 1) } else { Vec::new() });
             if name == "url" {
                 if let Some(Tok::Str(s)) = args.first() {
                     return Some(Tok::Url(s.clone()));
@@ -207,6 +202,12 @@ fn tok_of(t: &Token, p: &mut Parser, depth: u32) -> Option<Tok> {
         Token::Semicolon => Tok::Delim(';'),
         _ => return None,
     })
+}
+
+/// Runs `f` on the contents of the block whose start `p` just read; the rest of the block
+/// is skipped, and a failure gives `T::default()`.
+fn nested<T: Default>(p: &mut Parser, f: impl FnOnce(&mut Parser) -> T) -> T {
+    p.parse_nested_block(|p| -> Result<T, cssparser::ParseError<'_, ()>> { Ok(f(p)) }).unwrap_or_default()
 }
 
 fn collect_tokens_at(p: &mut Parser, depth: u32) -> Vec<Tok> {
@@ -307,34 +308,20 @@ fn rules_into(p: &mut Parser, sheet: &mut Stylesheet, depth: u32) {
                             sheet.imports.push(url);
                         }
                     }
-                    ("media", true) => {
-                        let apply = media_applies(&prelude) && depth < MAX_NESTING;
-                        let _ = p.parse_nested_block(|p| -> Result<(), cssparser::ParseError<'_, ()>> {
+                    ("media" | "supports", true) => {
+                        let apply = depth < MAX_NESTING && (name == "supports" || media_applies(&prelude));
+                        nested(p, |p| {
                             if apply {
                                 rules_into(p, sheet, depth + 1);
                             }
-                            Ok(())
-                        });
-                    }
-                    ("supports", true) => {
-                        let _ = p.parse_nested_block(|p| -> Result<(), cssparser::ParseError<'_, ()>> {
-                            if depth < MAX_NESTING {
-                                rules_into(p, sheet, depth + 1);
-                            }
-                            Ok(())
                         });
                     }
                     ("font-face", true) => {
-                        let decls = p
-                            .parse_nested_block(|p| -> Result<Vec<Declaration>, cssparser::ParseError<'_, ()>> { Ok(declarations(p)) })
-                            .unwrap_or_default();
-                        if let Some(ff) = font_face(&decls) {
+                        if let Some(ff) = font_face(&nested(p, declarations)) {
                             sheet.font_faces.push(ff);
                         }
                     }
-                    (_, true) => {
-                        let _ = p.parse_nested_block(|_| -> Result<(), cssparser::ParseError<'_, ()>> { Ok(()) });
-                    }
+                    (_, true) => nested(p, |_| ()),
                     _ => {}
                 }
             }
@@ -345,9 +332,7 @@ fn rules_into(p: &mut Parser, sheet: &mut Stylesheet, depth: u32) {
                     break;
                 }
                 let prelude = p.slice(start..end).to_string();
-                let decls = p
-                    .parse_nested_block(|p| -> Result<Vec<Declaration>, cssparser::ParseError<'_, ()>> { Ok(declarations(p)) })
-                    .unwrap_or_default();
+                let decls = nested(p, declarations);
                 let selectors = parse_selector_list(&prelude);
                 if !selectors.is_empty() && !decls.is_empty() {
                     sheet.rules.push(StyleRule { selectors, decls });
@@ -366,7 +351,7 @@ fn prelude_until_block(p: &mut Parser) -> (cssparser::SourcePosition, bool) {
             Ok(Token::CurlyBracketBlock) => return (end, true),
             Ok(Token::Semicolon) | Err(_) => return (end, false),
             Ok(Token::Function(_)) | Ok(Token::ParenthesisBlock) | Ok(Token::SquareBracketBlock) => {
-                let _ = p.parse_nested_block(|_| -> Result<(), cssparser::ParseError<'_, ()>> { Ok(()) });
+                nested(p, |_| ());
                 end = p.position();
             }
             Ok(_) => end = p.position(),
