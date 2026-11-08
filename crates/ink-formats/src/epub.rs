@@ -208,13 +208,6 @@ impl Package {
         self.items.iter().find(|i| i.id == id)
     }
 
-    fn resolve_paths(&mut self) {
-        let dir = self.dir().to_string();
-        for it in &mut self.items {
-            it.path = resolve_href(&dir, &it.href);
-        }
-    }
-
     /// Zip path of the cover image, by EPUB 3 property, `<meta name="cover">` or a
     /// manifest image named like a cover. The guide's cover page needs the archive
     /// ([`find_cover`]).
@@ -288,10 +281,11 @@ fn scheme_of(value: &str, declared: Option<String>) -> Option<String> {
     None
 }
 
-/// Parses an OPF document.
-pub fn parse_opf(xml_text: &str) -> Result<Package> {
+/// Parses an OPF document found at `opf_path` in the archive.
+pub fn parse_opf(xml_text: &str, opf_path: &str) -> Result<Package> {
     let root = xml::parse(xml_text).map_err(|e| DocError::Format(format!("OPF: {e}")))?;
-    let mut p = Package { version: root.attr("version").unwrap_or("").to_string(), ..Default::default() };
+    let version = root.attr("version").unwrap_or("").to_string();
+    let mut p = Package { opf_path: opf_path.into(), version, ..Default::default() };
     let unique_id = root.attr("unique-identifier").map(str::to_string);
     let empty = Element::default();
     let meta = root.child("metadata").unwrap_or(&empty);
@@ -370,7 +364,7 @@ pub fn parse_opf(xml_text: &str) -> Result<Package> {
                 p.items.push(ManifestItem {
                     id: id.to_string(),
                     href: href.to_string(),
-                    path: String::new(),
+                    path: resolve_href(dir_of(opf_path), href),
                     media_type: it.attr("media-type").unwrap_or("").to_string(),
                     properties: it.attr("properties").unwrap_or("").split_whitespace().map(str::to_string).collect(),
                 });
@@ -393,7 +387,6 @@ pub fn parse_opf(xml_text: &str) -> Result<Package> {
             }
         }
     }
-    p.resolve_paths();
     p.metadata.cover = p.cover_image();
     Ok(p)
 }
@@ -411,11 +404,7 @@ pub fn read_package<R: Read + Seek>(loader: &ZipLoader<R>) -> Result<Package> {
         .and_then(|r| r.attr("full-path"))
         .map(|p| percent_decode(p).trim_start_matches('/').to_string())
         .ok_or_else(|| DocError::Format("container.xml has no rootfile".into()))?;
-    let mut p = parse_opf(&xml::decode_xml_bytes(&loader.read_raw(&opf_path)?))?;
-    p.opf_path = opf_path;
-    p.resolve_paths();
-    p.metadata.cover = p.cover_image();
-    Ok(p)
+    parse_opf(&xml::decode_xml_bytes(&loader.read_raw(&opf_path)?), &opf_path)
 }
 
 /// One `EncryptedData` entry of `META-INF/encryption.xml`.
@@ -849,15 +838,13 @@ mod tests {
             <meta name="cover" content="img"/></metadata>
             <manifest><item id="c1" href="Text/c%201.xhtml"/><item id="img" href="../cover.jpg" media-type="image/jpeg"/></manifest>
             <spine><itemref idref="c1"/><itemref idref="missing"/></spine></package>"#;
-        let mut p = parse_opf(opf).unwrap();
-        p.opf_path = "OEBPS/content.opf".into();
+        let p = parse_opf(opf, "OEBPS/content.opf").unwrap();
         assert_eq!(p.metadata.title, "Romeo and Juliet");
         assert_eq!(p.metadata.authors, vec!["William Shakespeare".to_string()]);
         assert_eq!(p.metadata.language.as_deref(), Some("en"));
         assert_eq!(p.spine, vec!["c1", "missing"]);
         assert_eq!(p.item_path("c1").as_deref(), Some("OEBPS/Text/c 1.xhtml"));
         assert_eq!(p.item_path("missing"), None);
-        p.resolve_paths();
         assert_eq!(p.cover_image().as_deref(), Some("cover.jpg"));
     }
 
@@ -878,9 +865,7 @@ mod tests {
             <meta refines="#s1" property="collection-type">series</meta><meta refines="#s1" property="group-position">3</meta>
             </metadata><manifest><item id="cv" href="img/c.png" media-type="image/png" properties="cover-image"/>
             <item id="f" href="fonts/a.otf" media-type="application/vnd.ms-opentype"/></manifest><spine/></package>"##;
-        let mut p = parse_opf(opf).unwrap();
-        p.opf_path = "OPS/package.opf".into();
-        p.resolve_paths();
+        let p = parse_opf(opf, "OPS/package.opf").unwrap();
         assert_eq!(p.metadata.title, "Main Title");
         assert_eq!(p.metadata.authors, vec!["Ann Author", "Second Author"]);
         assert_eq!(p.metadata.identifier.as_deref(), Some("urn:uuid:12345678-1234-1234-1234-123456789abc"));
@@ -898,7 +883,7 @@ mod tests {
     #[test]
     fn calibre_series_and_ncx_nav() {
         let opf = r#"<package version="2.0"><metadata><meta name="calibre:series" content="Foo"/><meta name="calibre:series_index" content="2.5"/></metadata></package>"#;
-        assert_eq!(parse_opf(opf).unwrap().metadata.series, Some(("Foo".into(), 2.5)));
+        assert_eq!(parse_opf(opf, "content.opf").unwrap().metadata.series, Some(("Foo".into(), 2.5)));
         let spine: HashMap<String, usize> = [("OEBPS/a.xhtml".to_string(), 0), ("OEBPS/b c.xhtml".to_string(), 1)].into();
         let ncx = r#"<ncx><navMap><navPoint><navLabel><text>One</text></navLabel><content src="a.xhtml"/>
             <navPoint><navLabel><text>One.1</text></navLabel><content src="b%20c.xhtml#s1"/></navPoint></navPoint>
