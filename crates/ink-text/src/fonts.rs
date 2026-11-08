@@ -281,7 +281,15 @@ pub struct Fonts {
     /// Faces added with [`Fonts::add_face`]: drawn only on request, never fallbacks.
     own: Vec<FaceId>,
     shaped: GlyphCache,
+    /// Runs made by [`Fonts::shape`] by (style, size bits) and text: UI text is shaped
+    /// again on every paint. Emptied when it holds [`RUN_CACHE`] runs or a fallback face
+    /// comes in.
+    runs: FastMap<(Style, u32), FastMap<Box<str>, TextRun>>,
+    run_count: usize,
 }
+
+/// Most runs [`Fonts::shape`] keeps.
+const RUN_CACHE: usize = 1024;
 
 fn index(style: Style) -> usize {
     match style {
@@ -374,6 +382,8 @@ impl Fonts {
             fallback_for: FastMap::default(),
             own: Vec::new(),
             shaped: GlyphCache::new(GLYPH_CACHE_BYTES),
+            runs: FastMap::default(),
+            run_count: 0,
         }
     }
 
@@ -477,6 +487,8 @@ impl Fonts {
         self.glyphs.clear();
         self.advance.clear();
         self.shaped.clear();
+        self.runs.clear();
+        self.run_count = 0;
     }
 
     // ---- Faces ----
@@ -501,6 +513,8 @@ impl Fonts {
         self.faces.push(face);
         // Earlier misses may now be found.
         self.fallback_for.retain(|_, v| v.is_some());
+        self.runs.clear();
+        self.run_count = 0;
         (self.faces.len() - 1) as FaceId
     }
 
@@ -623,7 +637,18 @@ impl Fonts {
 
     /// Shapes `text` with kerning and ligatures.
     pub fn shape(&mut self, style: Style, px: f32, text: &str) -> TextRun {
-        self.shape_with(style, px, text, &ShapeOptions::default())
+        let key = (style, px.to_bits());
+        if let Some(run) = self.runs.get(&key).and_then(|m| m.get(text)) {
+            return run.clone();
+        }
+        let run = self.shape_with(style, px, text, &ShapeOptions::default());
+        if self.run_count >= RUN_CACHE {
+            self.runs.clear();
+            self.run_count = 0;
+        }
+        self.runs.entry(key).or_default().insert(text.into(), run.clone());
+        self.run_count += 1;
+        run
     }
 
     /// Shapes `text`: splits it into runs per face (grapheme clusters stay together),
@@ -1028,6 +1053,20 @@ mod tests {
         }
         assert!(f.cached_bytes() <= 20_000, "{}", f.cached_bytes());
         assert!(f.cached_glyphs() > 0);
+    }
+
+    #[test]
+    fn shaped_runs_are_kept_up_to_a_bound() {
+        let mut f = Fonts::load();
+        let run = f.shape(Style::Regular, 40.0, "Juliet");
+        assert_eq!(f.shape(Style::Regular, 40.0, "Juliet"), run);
+        assert_eq!(f.shape_with(Style::Regular, 40.0, "Juliet", &ShapeOptions::default()), run);
+        assert_ne!(f.shape(Style::Bold, 40.0, "Juliet"), run);
+        assert_ne!(f.shape(Style::Regular, 41.0, "Juliet"), run);
+        for i in 0..RUN_CACHE + 10 {
+            f.shape(Style::Regular, 20.0, &i.to_string());
+            assert!(f.run_count <= RUN_CACHE);
+        }
     }
 
     #[test]
