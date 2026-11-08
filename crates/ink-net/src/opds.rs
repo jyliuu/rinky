@@ -840,15 +840,16 @@ fn json_publication(p: &serde_json::Value, base: &str) -> OpdsEntry {
     e
 }
 
-fn json_navigation(n: &serde_json::Value, base: &str) -> Option<OpdsEntry> {
-    let mut l = json_link(n, base)?;
+/// A navigation entry for a link to another feed, titled `title` or else by the link;
+/// the link gets `subsection` and the OPDS 2 type when it has none.
+fn nav_entry(mut l: OpdsLink, title: Option<String>) -> OpdsEntry {
     if l.rel.is_empty() {
         l.rel = "subsection".into();
     }
     if l.mime.is_empty() {
         l.mime = "application/opds+json".into();
     }
-    Some(OpdsEntry { id: l.href.clone(), title: l.title.clone().unwrap_or_default(), links: vec![l], ..Default::default() })
+    OpdsEntry { id: l.href.clone(), title: title.or_else(|| l.title.clone()).unwrap_or_default(), links: vec![l], ..Default::default() }
 }
 
 /// Parses a basic OPDS 2 feed: metadata, links, navigation, publications, groups and
@@ -875,18 +876,14 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
     }
     feed.links.extend(json_array(&v, "links").iter().filter_map(|l| json_link(l, base_url)));
     let add_items = |obj: &serde_json::Value, feed: &mut OpdsFeed| {
-        feed.entries.extend(json_array(obj, "navigation").iter().filter_map(|n| json_navigation(n, base_url)));
+        feed.entries.extend(json_array(obj, "navigation").iter().filter_map(|n| json_link(n, base_url)).map(|l| nav_entry(l, None)));
         feed.entries.extend(json_array(obj, "publications").iter().map(|p| json_publication(p, base_url)));
     };
     add_items(&v, &mut feed);
     for g in json_array(&v, "groups") {
         let title = g.get("metadata").and_then(|m| m.get("title")).and_then(json_str).unwrap_or_default();
-        if let Some(mut l) = json_array(g, "links").iter().filter_map(|l| json_link(l, base_url)).find(|l| l.rel == "self") {
-            l.rel = "subsection".into();
-            if l.mime.is_empty() {
-                l.mime = "application/opds+json".into();
-            }
-            feed.entries.push(OpdsEntry { id: l.href.clone(), title: title.clone(), links: vec![l], ..Default::default() });
+        if let Some(l) = json_array(g, "links").iter().filter_map(|l| json_link(l, base_url)).find(|l| l.rel == "self") {
+            feed.entries.push(nav_entry(OpdsLink { rel: "subsection".into(), ..l }, Some(title)));
         }
         add_items(g, &mut feed);
     }
