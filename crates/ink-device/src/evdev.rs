@@ -37,8 +37,6 @@ pub const ABS_X: u16 = 0x00;
 pub const ABS_Y: u16 = 0x01;
 /// `ABS_MT_SLOT`.
 pub const ABS_MT_SLOT: u16 = 0x2f;
-/// `ABS_MT_TOUCH_MAJOR`.
-pub const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
 /// `ABS_MT_POSITION_X`.
 pub const ABS_MT_POSITION_X: u16 = 0x35;
 /// `ABS_MT_POSITION_Y`.

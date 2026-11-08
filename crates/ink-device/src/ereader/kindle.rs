@@ -497,29 +497,11 @@ impl Power for LipcServices {
         self.lipc.set_int(POWERD, "deferSuspend", duration.as_secs() as i64)
     }
 
-    fn prevent_screensaver(&mut self, prevent: bool) -> Result<()> {
-        if let Ok(v) = self.lipc.get_int(POWERD, "preventScreenSaver") {
-            self.journal(Entry::lipc_int(POWERD, "preventScreenSaver", v));
-        }
-        self.lipc.set_int(POWERD, "preventScreenSaver", prevent as i64)
-    }
-
-    fn request_screensaver(&mut self) -> Result<()> {
-        if self.shared.sleep_enabled() {
-            return self.request(Request::Sleep);
-        }
-        self.lipc.set_int(POWERD, "powerButton", 1)
-    }
-
     fn state(&self) -> Result<String> {
         if self.shared.sleep_enabled() {
             return Ok(self.shared.sleep_state().name().into());
         }
         self.lipc.get_str(POWERD, "state")
-    }
-
-    fn rtc_wakeup(&mut self, after: Duration) -> Result<()> {
-        self.lipc.set_int(POWERD, "rtcWakeup", after.as_secs() as i64)
     }
 
     fn suspend(&mut self, wake_after: Option<Duration>) -> Result<()> {
@@ -669,13 +651,6 @@ impl Usb for LipcServices {
 
     fn set_charge_only(&mut self, on: bool) -> Result<()> {
         self.request(Request::ChargeOnly(on))
-    }
-
-    fn drive_mode(&self) -> Result<DriveModeState> {
-        match self.shared.drive_state() {
-            Some(d) => Ok(d),
-            None => Ok(DriveModeState::from_volumd(self.lipc.get_int("com.lab126.volumd", "driveModeState")?)),
-        }
     }
 }
 
