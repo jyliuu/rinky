@@ -495,13 +495,24 @@ impl OpenElements {
     }
 }
 
-/// `(local name, value)` of every attribute.
-fn attrs(e: &BytesStart<'_>) -> Vec<(String, String)> {
-    e.attributes().with_checks(false).flatten().map(|a| (local(a.key.as_ref()).into_owned(), decode_entities(&String::from_utf8_lossy(&a.value)))).collect()
+/// `(local name, value)` of every attribute, borrowed from the document where possible.
+fn attrs<'a>(e: &'a BytesStart<'_>) -> Vec<(Cow<'a, str>, Cow<'a, str>)> {
+    let value = |v: Cow<'a, [u8]>| {
+        let v = match v {
+            Cow::Borrowed(b) => String::from_utf8_lossy(b),
+            Cow::Owned(b) => Cow::Owned(String::from_utf8_lossy(&b).into_owned()),
+        };
+        if v.contains('&') {
+            Cow::Owned(decode_entities(&v))
+        } else {
+            v
+        }
+    };
+    e.attributes().with_checks(false).flatten().map(|a| (local(a.key.into_inner()), value(a.value))).collect()
 }
 
-fn attr<'a>(list: &'a [(String, String)], local_name: &str) -> Option<&'a str> {
-    list.iter().find(|(l, _)| l == local_name).map(|(_, v)| v.as_str())
+fn attr<'a>(list: &'a [(Cow<'_, str>, Cow<'_, str>)], local_name: &str) -> Option<&'a str> {
+    list.iter().find(|(l, _)| l == local_name).map(|(_, v)| v.as_ref())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
