@@ -33,7 +33,7 @@ static PLACEHOLDER: &[u8] = include_bytes!("../fonts/Placeholder.ttf");
 pub type FamilyId = u16;
 
 /// A face request resolved to a family and style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FaceKey {
     /// Family.
     pub family: FamilyId,
@@ -75,6 +75,18 @@ fn face_index(bold: bool, italic: bool) -> usize {
     bold as usize | (italic as usize) << 1
 }
 
+/// Face `idx` of a family's four faces (by [`face_index`]): a missing bold or italic
+/// face uses the regular one, a missing bold italic the bold one.
+fn pick_face<T: Copy>(f: [Option<T>; 4], idx: usize) -> Option<T> {
+    let bold = f[1].or(f[0]);
+    match idx {
+        0 => f[0],
+        1 => bold,
+        2 => f[2].or(f[0]),
+        _ => f[3].or(bold),
+    }
+}
+
 impl Family {
     fn new(src: Src) -> Self {
         let mut f = Family { src, faces: [None, None, None, None], canon: [0, 1, 2, 3], use_pool: false };
@@ -96,32 +108,17 @@ impl Family {
             }),
             Src::Mono => Some(MONO),
             Src::Bytes(_) => None,
-            Src::Mapped(f) => {
-                let bold = f[1].or(f[0]);
-                match idx {
-                    0 => f[0],
-                    1 => bold,
-                    2 => f[2].or(f[0]),
-                    _ => f[3].or(bold),
-                }
-            }
+            Src::Mapped(f) => pick_face(*f, idx),
         }
     }
 
-    /// Font data for face `idx`, with the family's fallbacks: a missing bold or italic
-    /// face uses the regular one, a missing bold italic the bold one; a book family
-    /// without a regular face uses its bold or italic face as the regular one.
+    /// Font data for face `idx`, with the family's fallbacks ([`pick_face`]); a book
+    /// family without a regular face uses its bold or italic face as the regular one.
     fn bytes(&self, idx: usize) -> Option<&[u8]> {
         let Src::Bytes(b) = &self.src else { return self.static_bytes(idx) };
-        let reg = b.regular.as_ref().or(b.bold.as_ref()).or(b.italic.as_ref());
-        let bold = b.bold.as_ref().or(reg);
-        let pick = match idx {
-            0 => reg,
-            1 => bold,
-            2 => b.italic.as_ref().or(reg),
-            _ => b.bold_italic.as_ref().or(bold),
-        };
-        pick.map(|a| a.as_slice())
+        let mut f = b.0.each_ref().map(|o| o.as_deref().map(Vec::as_slice));
+        f[0] = f[0].or(f[1]).or(f[2]);
+        pick_face(f, idx)
     }
 
     /// Parses face `idx` if needed; true when it is usable.
@@ -132,10 +129,8 @@ impl Family {
             let pooled = if self.use_pool { self.static_bytes(c).and_then(pool::take) } else { None };
             let parsed = pooled.or_else(|| {
                 // Data that lives for the whole program is not copied.
-                let r = match self.static_bytes(c) {
-                    Some(b) => Some(Fonts::from_static([b, PLACEHOLDER, PLACEHOLDER])),
-                    None => self.bytes(c).map(|b| Fonts::from_bytes([b, PLACEHOLDER, PLACEHOLDER])),
-                };
+                let r = self.static_bytes(c).map(|b| Fonts::from_static([b, PLACEHOLDER, PLACEHOLDER]));
+                let r = r.or_else(|| self.bytes(c).map(|b| Fonts::from_bytes([b, PLACEHOLDER, PLACEHOLDER])));
                 r.and_then(|r| match r {
                     Ok(f) => Some(f),
                     Err(e) => {
@@ -165,30 +160,10 @@ impl Family {
     }
 }
 
-/// Font bytes of one family: regular, bold, italic, bold italic (any may be missing).
+/// Font bytes of one family by [`face_index`]: regular, bold, italic, bold italic (any
+/// may be missing).
 #[derive(Clone, Debug, Default)]
-pub struct FamilyBytes {
-    /// Regular face.
-    pub regular: Option<Arc<Vec<u8>>>,
-    /// Bold face.
-    pub bold: Option<Arc<Vec<u8>>>,
-    /// Italic face.
-    pub italic: Option<Arc<Vec<u8>>>,
-    /// Bold italic face.
-    pub bold_italic: Option<Arc<Vec<u8>>>,
-}
-
-impl FamilyBytes {
-    /// The face for a style.
-    fn slot(&mut self, bold: bool, italic: bool) -> &mut Option<Arc<Vec<u8>>> {
-        match (bold, italic) {
-            (false, false) => &mut self.regular,
-            (true, false) => &mut self.bold,
-            (false, true) => &mut self.italic,
-            (true, true) => &mut self.bold_italic,
-        }
-    }
-}
+pub struct FamilyBytes(pub [Option<Arc<Vec<u8>>>; 4]);
 
 /// Word widths of one (face, size bits), keyed by the word.
 type WordWidths = HashMap<Box<str>, f32, FxBuild>;
@@ -217,12 +192,7 @@ type Segment = (bool, std::ops::Range<usize>);
 
 /// `ink_text` style for a face request (fallback faces synthesize bold and italic).
 fn style_of(k: FaceKey) -> Style {
-    match (k.bold, k.italic) {
-        (false, false) => Style::Regular,
-        (true, false) => Style::Bold,
-        (false, true) => Style::Italic,
-        (true, true) => Style::BoldItalic,
-    }
+    [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic][face_index(k.bold, k.italic)]
 }
 
 /// Everything needed to build a [`FontBook`] (cheap to clone, `Send + Sync`).
@@ -255,7 +225,7 @@ impl FontSources {
                     &mut self.families.last_mut().unwrap().1
                 }
             };
-            fam.slot(r.bold, r.italic).get_or_insert(bytes);
+            fam.0[face_index(r.bold, r.italic)].get_or_insert(bytes);
         }
     }
 
@@ -283,13 +253,13 @@ impl FontSources {
             if !(bold || italic || plain) {
                 continue;
             }
-            let slot = fam.slot(bold, italic);
+            let slot = &mut fam.0[face_index(bold, italic)];
             if slot.is_none() {
                 let Ok(bytes) = std::fs::read(&f.path) else { continue };
                 *slot = Some(Arc::new(bytes));
             }
         }
-        if fam.regular.is_none() {
+        if fam.0[0].is_none() {
             return false;
         }
         self.families.push((key, fam));
@@ -327,7 +297,7 @@ impl FontSources {
             fb.by_name.insert(n.into(), 1);
         }
         for (name, bytes) in &self.families {
-            if bytes.regular.is_none() && bytes.bold.is_none() && bytes.italic.is_none() {
+            if bytes.0[..3].iter().all(Option::is_none) {
                 continue;
             }
             fb.families.push(Family::new(Src::Bytes(bytes.clone())));
@@ -531,12 +501,9 @@ impl FontBook {
             } else {
                 t
             };
+            // No sans face is embedded: a sans name only matches a system or book family.
             if let Some(&id) = self.by_name.get(k) {
                 return id;
-            }
-            if k == "sans-serif" || k.contains("sans") {
-                // No sans face is embedded; a system or book sans would have matched above.
-                continue;
             }
         }
         0
@@ -809,6 +776,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn family_face_fallbacks() {
+        let picks = |f: [Option<u8>; 4]| [0, 1, 2, 3].map(|i| pick_face(f, i));
+        assert_eq!(picks([Some(0), None, None, None]), [Some(0); 4]);
+        assert_eq!(picks([Some(0), Some(1), None, None]), [Some(0), Some(1), Some(0), Some(1)]);
+        assert_eq!(picks([None, None, Some(2), Some(3)]), [None, None, Some(2), Some(3)]);
+        // A book family without a regular face uses its bold (else italic) face.
+        let a = |b: &[u8]| Some(Arc::new(b.to_vec()));
+        let fam = Family::new(Src::Bytes(FamilyBytes([None, None, a(b"i"), None])));
+        assert_eq!([0, 1, 2, 3].map(|i| fam.bytes(i)), [Some(&b"i"[..]); 4]);
+        let fam = Family::new(Src::Bytes(FamilyBytes([None, a(b"b"), a(b"i"), None])));
+        assert_eq!([0, 1, 2, 3].map(|i| fam.bytes(i)), [Some(&b"b"[..]), Some(&b"b"[..]), Some(&b"i"[..]), Some(&b"b"[..])]);
+        assert_eq!(fam.canon, [0, 0, 2, 0]);
+    }
+
+    #[test]
     fn builtin_families_and_faces() {
         let mut fb = FontBook::builtin();
         assert_eq!(fb.family(&["Courier New".into(), "monospace".into()]), 1);
@@ -870,7 +852,7 @@ mod tests {
         assert_eq!(parsed(&fb, 1), [true, false, false, false]);
         // A book family with only a regular face: every request uses it.
         let mut s = FontSources::default();
-        s.families.push(("only".into(), FamilyBytes { regular: Some(Arc::new(embedded_font_bytes(Style::Regular).to_vec())), ..Default::default() }));
+        s.families.push(("only".into(), FamilyBytes([Some(Arc::new(embedded_font_bytes(Style::Regular).to_vec())), None, None, None])));
         let mut fb = s.build();
         let id = fb.family_by_name("only").unwrap();
         let k = FaceKey { family: id, bold: true, italic: true };
@@ -878,7 +860,7 @@ mod tests {
         assert_eq!(parsed(&fb, id as usize), [true, false, false, false]);
         // Data that does not parse: the default family is used.
         let mut s = FontSources::default();
-        s.families.push(("junk".into(), FamilyBytes { regular: Some(Arc::new(b"not a font".to_vec())), ..Default::default() }));
+        s.families.push(("junk".into(), FamilyBytes([Some(Arc::new(b"not a font".to_vec())), None, None, None])));
         let mut fb = s.build();
         let id = fb.family_by_name("junk").unwrap();
         let junk = fb.width(FaceKey { family: id, bold: false, italic: false }, 30.0, "Juliet");

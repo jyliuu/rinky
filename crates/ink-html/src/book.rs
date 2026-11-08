@@ -67,11 +67,9 @@ impl std::fmt::Debug for Book {
     }
 }
 
-fn dir_of(path: &str) -> String {
-    match path.rfind('/') {
-        Some(i) => path[..=i].to_string(),
-        None => String::new(),
-    }
+/// The directory part of a book path, with its trailing `/` (empty for none).
+pub(crate) fn dir_of(path: &str) -> &str {
+    path.rfind('/').map_or("", |i| &path[..=i])
 }
 
 /// Byte offset of the first `<body` (any case) in `html`, or its length. Steps from `<`
@@ -82,7 +80,7 @@ pub fn head_end(html: &str) -> usize {
 
 /// First offset at or after `from` where `needle` (lowercase ASCII, starting with `<`)
 /// occurs in `hay`, ignoring ASCII case.
-fn find_ci(hay: &str, from: usize, needle: &str) -> Option<usize> {
+pub(crate) fn find_ci(hay: &str, from: usize, needle: &str) -> Option<usize> {
     let b = hay.as_bytes();
     let n = needle.as_bytes();
     let mut i = from;
@@ -204,19 +202,7 @@ pub fn scan_start_tags(html: &str) -> Vec<(&str, Vec<(&str, &str)>)> {
         i = end;
         if !self_closing && (local.eq_ignore_ascii_case("script") || local.eq_ignore_ascii_case("style")) {
             // Raw text up to the end tag.
-            let close = format!("</{}", name.to_ascii_lowercase());
-            let lower_from = |k: usize| -> Option<usize> {
-                let mut from = k;
-                while let Some(q) = html[from..].find("</") {
-                    let c = from + q;
-                    if html.len() - c >= close.len() && html[c..c + close.len()].eq_ignore_ascii_case(&close) {
-                        return Some(c);
-                    }
-                    from = c + 2;
-                }
-                None
-            };
-            i = lower_from(end).unwrap_or(n);
+            i = find_ci(html, end, &format!("</{}", name.to_ascii_lowercase())).unwrap_or(n);
         }
         out.push((name, attrs));
     }
@@ -267,10 +253,7 @@ pub fn has_image_tag(html: &str) -> bool {
             j += 1;
         }
         let name = &b[start..j];
-        let local = match name.iter().rposition(|&c| c == b':') {
-            Some(k) => &name[k + 1..],
-            None => name,
-        };
+        let local = name.rsplit(|&c| c == b':').next().unwrap_or(name);
         if local.eq_ignore_ascii_case(b"img") || local.eq_ignore_ascii_case(b"image") {
             return true;
         }
@@ -316,7 +299,7 @@ impl Book {
                     fragment += 1;
                     Some(fragment)
                 };
-                ChapterSrc { dir: dir_of(&path), path, html, fragment: frag }
+                ChapterSrc { dir: dir_of(&path).to_string(), path, html, fragment: frag }
             })
             .collect();
         let mut sheets: HashMap<String, Arc<Stylesheet>> = HashMap::new();
@@ -358,7 +341,7 @@ impl Book {
             let sheet = css::parse_stylesheet(&String::from_utf8_lossy(&bytes));
             let dir = dir_of(&path);
             for imp in &sheet.imports {
-                todo.push(resolve_href(&dir, imp));
+                todo.push(resolve_href(dir, imp));
             }
             sheets.insert(path, Arc::new(sheet));
         }
@@ -367,7 +350,7 @@ impl Book {
         let mut linked: Vec<(&String, &Arc<Stylesheet>)> = sheets.iter().collect();
         linked.sort_by_key(|(path, _)| *path);
         let mut font_faces: Vec<(String, FontFaceRule)> =
-            linked.into_iter().flat_map(|(path, sheet)| sheet.font_faces.iter().map(|ff| (dir_of(path), ff.clone()))).collect();
+            linked.into_iter().flat_map(|(path, sheet)| sheet.font_faces.iter().map(|ff| (dir_of(path).to_string(), ff.clone()))).collect();
         font_faces.extend(inline_faces);
         for (dir, ff) in &font_faces {
             for src in &ff.sources {
@@ -455,7 +438,7 @@ impl Book {
         };
         let dir = dir_of(path);
         for imp in &sheet.imports {
-            self.add_sheet_path(rs, &resolve_href(&dir, imp), added);
+            self.add_sheet_path(rs, &resolve_href(dir, imp), added);
         }
         rs.add_sheet(&sheet, Origin::Author);
     }
@@ -483,10 +466,7 @@ impl Book {
         let ch = &self.chapters[i];
         let mut cl = ChapterClassifier { book: self, dir: &ch.dir, cascade: None };
         let dom = crate::parse::parse_chapter(&ch.html, &mut cl);
-        let author = match cl.cascade {
-            Some(c) => c.author,
-            None => self.author_rules(&ch.dir, &dom.sheets),
-        };
+        let author = cl.cascade.map_or_else(|| self.author_rules(&ch.dir, &dom.sheets), |c| c.author);
         ChapterDom { dom, author }
     }
 }

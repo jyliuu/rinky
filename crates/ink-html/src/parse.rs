@@ -10,6 +10,7 @@
 //!   HTML parsing inserts into tables is dropped when the source has none, so paths stay
 //!   `table/tr/td` like crengine's.
 
+use crate::book::find_ci;
 use crate::dom::{Builder, Classifier, Dom};
 use html5ever::tendril::TendrilSink;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
@@ -53,19 +54,10 @@ pub fn decode_attr(raw: &str) -> String {
         if let Some(e) = end.filter(|&e| rest.as_bytes().get(e) == Some(&b';')) {
             let name = &rest[1..e];
             let decoded = if let Some(num) = name.strip_prefix('#') {
-                let code = match num.strip_prefix(['x', 'X']) {
-                    Some(h) => u32::from_str_radix(h, 16).ok(),
-                    None => num.parse::<u32>().ok(),
-                };
+                let code = num.strip_prefix(['x', 'X']).map_or_else(|| num.parse().ok(), |h| u32::from_str_radix(h, 16).ok());
                 code.and_then(char::from_u32).map(|c| c.to_string())
             } else {
-                crate::dom::named_entity(name).map(|(a, b)| {
-                    let mut s = a.to_string();
-                    if let Some(b) = b {
-                        s.push(b);
-                    }
-                    s
-                })
+                crate::dom::named_entity(name).map(|(a, b)| std::iter::once(a).chain(b).collect())
             };
             if let Some(d) = decoded {
                 out.push_str(&d);
@@ -103,30 +95,17 @@ fn parse_xml(src: &str, classifier: &mut dyn Classifier) -> Option<Dom> {
         c.trim_text(false);
         c.check_comments = false;
     }
-    let mut b = Builder::new(None);
-    let mut classifier = Some(classifier);
+    let mut b = Builder::new(Some(classifier));
     let mut depth = 0usize;
     loop {
         match r.read_event() {
             Ok(Event::Start(e)) => {
-                let qname = e.name();
-                let name = local(qname.as_ref());
-                if name == "body" && !b.in_body() {
-                    if let Some(c) = classifier.take() {
-                        b.set_classifier(c);
-                    }
-                }
-                b.start(&name, attrs_of(&e));
+                b.start(&local(e.name().as_ref()), attrs_of(&e));
                 depth += 1;
             }
             Ok(Event::Empty(e)) => {
                 let qname = e.name();
                 let name = local(qname.as_ref());
-                if name == "body" && !b.in_body() {
-                    if let Some(c) = classifier.take() {
-                        b.set_classifier(c);
-                    }
-                }
                 b.start(&name, attrs_of(&e));
                 b.end(&name);
             }
@@ -161,21 +140,6 @@ fn is_void(name: &str) -> bool {
         "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input" | "link" | "meta" | "param" | "source" | "track"
             | "wbr" | "image" | "keygen" | "basefont" | "bgsound" | "frame"
     )
-}
-
-/// Byte offset of the first ASCII-case-insensitive match of `needle` (lowercase) in
-/// `hay`.
-fn find_ascii_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    let first = *needle.first()?;
-    let mut from = 0;
-    while let Some(p) = hay[from..].iter().position(|&c| c == first) {
-        let at = from + p;
-        if hay.len() - at >= needle.len() && hay[at..at + needle.len()].eq_ignore_ascii_case(needle) {
-            return Some(at);
-        }
-        from = at + 1;
-    }
-    None
 }
 
 /// Rewrites `<x .../>` for non-void HTML elements to `<x ...></x>`, outside comments,
@@ -232,7 +196,7 @@ pub fn expand_self_closing(src: &str) -> String {
         }
         if (lname == "script" || lname == "style") && !closing {
             let close = format!("</{name}");
-            let end = find_ascii_ci(&b[k..], close.as_bytes()).map(|e| k + e).unwrap_or(b.len());
+            let end = find_ci(src, k, &close).unwrap_or(b.len());
             i = end;
             continue;
         }
@@ -258,17 +222,16 @@ pub fn expand_self_closing(src: &str) -> String {
 
 fn parse_html5(src: &str, classifier: &mut dyn Classifier) -> Dom {
     let fixed = expand_self_closing(src);
-    let has_tbody = find_ascii_ci(src.as_bytes(), b"<tbody").is_some();
+    let has_tbody = find_ci(src, 0, "<tbody").is_some();
     let rc = html5ever::parse_document(RcDom::default(), Default::default()).one(fixed);
-    let mut b = Builder::new(None);
-    let mut classifier = Some(classifier);
-    walk(&rc.document, &mut b, &mut classifier, has_tbody);
+    let mut b = Builder::new(Some(classifier));
+    walk(&rc.document, &mut b, has_tbody);
     b.finish()
 }
 
 /// Feeds the html5ever tree to the builder (iteratively: deep nesting must not overflow
 /// the stack).
-fn walk<'c>(root: &Handle, b: &mut Builder<'c>, classifier: &mut Option<&'c mut dyn Classifier>, has_tbody: bool) {
+fn walk(root: &Handle, b: &mut Builder, has_tbody: bool) {
     enum Step {
         Enter(Handle),
         Exit(String),
@@ -300,18 +263,10 @@ fn walk<'c>(root: &Handle, b: &mut Builder<'c>, classifier: &mut Option<&'c mut 
                     .borrow()
                     .iter()
                     .map(|a| {
-                        let k = match &a.name.prefix {
-                            Some(p) => format!("{}:{}", p, a.name.local),
-                            None => a.name.local.to_string(),
-                        };
+                        let k = a.name.prefix.as_ref().map_or_else(|| a.name.local.to_string(), |p| format!("{p}:{}", a.name.local));
                         (k, a.value.to_string())
                     })
                     .collect();
-                if lname == "body" && !b.in_body() {
-                    if let Some(c) = classifier.take() {
-                        b.set_classifier(c);
-                    }
-                }
                 b.start(&lname, attrs);
                 stack.push(Step::Exit(lname));
                 push_children(&mut stack);
