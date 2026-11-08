@@ -16,7 +16,7 @@ use crate::raster::{self, embolden_px, GlyphMask, Synth};
 use crate::{Style, TextError};
 use fontdue::{Font, FontSettings, Metrics};
 use ink_device::{Canvas, Rect};
-use rustybuzz::ttf_parser::GlyphId;
+use rustybuzz::ttf_parser::{GlyphId, Tag};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Range;
@@ -244,6 +244,8 @@ pub const GLYPH_CACHE_BYTES: usize = 8 << 20;
 /// A set of faces (main family plus fallbacks) with caches.
 pub struct Fonts {
     fonts: [Font; 3],
+    /// Per main face: it has a legacy `kern` table, the only kerning `fontdue` reads.
+    kern: [bool; 3],
     advance: FastMap<(Style, char, u32), f32>,
     /// The default hasher on purpose: with [`FastMap`] this map made drawing a line on
     /// the prototype path slower (26 -> 32 us for 108 glyphs, host release build).
@@ -306,8 +308,10 @@ impl Fonts {
     }
 
     fn from_parts(fonts: [Font; 3], faces: Vec<FaceData>) -> Self {
+        let kern = std::array::from_fn(|i| faces[i].ttf().is_some_and(|f| f.raw_face().table(Tag::from_bytes(b"kern")).is_some()));
         Fonts {
             fonts,
+            kern,
             advance: FastMap::default(),
             glyphs: HashMap::new(),
             faces,
@@ -323,6 +327,17 @@ impl Fonts {
     }
 
     // ---- Prototype path (exact math; golden pages depend on it) ----
+
+    /// Pair kerning before `c` on the prototype path (0 at the start of the text). A
+    /// face without a `kern` table (all embedded faces: Noto kerns in `GPOS`) skips the
+    /// two char lookups `fontdue` makes for every pair.
+    fn kern(&self, style: Style, prev: Option<char>, c: char, px: f32) -> f32 {
+        let i = index(style);
+        match prev {
+            Some(p) if self.kern[i] => self.fonts[i].horizontal_kern(p, c, px).unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
 
     /// Advance width of `c` at `px` pixels per em (cached). Bold italic adds the
     /// synthetic bold widening.
@@ -344,9 +359,7 @@ impl Fonts {
         let mut w = 0.0;
         let mut prev: Option<char> = None;
         for c in text.chars() {
-            if let Some(p) = prev {
-                w += self.fonts[index(style)].horizontal_kern(p, c, px).unwrap_or(0.0);
-            }
+            w += self.kern(style, prev, c, px);
             w += self.advance(style, c, px);
             prev = Some(c);
         }
@@ -400,9 +413,7 @@ impl Fonts {
         let mut pen = x;
         let mut prev: Option<char> = None;
         for c in text.chars() {
-            if let Some(p) = prev {
-                pen += self.font(style).horizontal_kern(p, c, px).unwrap_or(0.0);
-            }
+            pen += self.kern(style, prev, c, px);
             let (m, mask) = self.glyph_extra(style, c, px, extra);
             let gx = (pen + m.xmin as f32).round() as i32;
             let gy = (baseline - (m.height as i32 + m.ymin) as f32).round() as i32;
@@ -774,6 +785,19 @@ mod tests {
             prev = Some(c);
         }
         assert_eq!(w, pen);
+    }
+
+    #[test]
+    fn faces_with_a_kern_table_kern_on_the_prototype_path() {
+        let p = crate::testdirs::data().join("kern/InkTestKern.ttf");
+        let mut f = Fonts::from_files([p.as_path(), p.as_path(), p.as_path()]).unwrap();
+        let font = f.font(Style::Regular).clone();
+        let kern = font.horizontal_kern('日', '本', 40.0).unwrap();
+        assert!((kern + 10.0).abs() < 0.01, "250 of 1000 units at 40 px: {kern}");
+        let plain = font.metrics('日', 40.0).advance_width + font.metrics('本', 40.0).advance_width;
+        assert_eq!(f.text_width(Style::Regular, "日本", 40.0), plain + kern);
+        let mut c = Canvas::new(200, 80);
+        assert_eq!(f.draw_text(&mut c, Style::Regular, 40.0, 10.0, 60.0, "日本"), 10.0 + plain + kern);
     }
 
     #[test]

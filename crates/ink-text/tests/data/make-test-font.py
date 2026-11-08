@@ -7,6 +7,11 @@ glyphs apart and see that they are not the .notdef box. No outlines come from an
 font; the file is part of rinky (AGPL-3.0-or-later) and may be used freely in tests.
 
     python3 crates/ink-text/tests/data/make-test-font.py crates/ink-text/tests/data/InkTestFallback.ttf
+
+With `--kern`, it writes InkTestKern.ttf instead: the same glyphs as "InkTest Kern" with a
+legacy `kern` table (日 then 本 closer by 250 units), the kerning the prototype path reads.
+
+    python3 crates/ink-text/tests/data/make-test-font.py --kern crates/ink-text/tests/data/kern/InkTestKern.ttf
 """
 
 import sys
@@ -80,7 +85,19 @@ def notdef():
     return pen.glyph()
 
 
-def main(out):
+def kern_table():
+    from fontTools.ttLib import newTable
+    from fontTools.ttLib.tables._k_e_r_n import KernTable_format_0
+
+    sub = KernTable_format_0()
+    sub.version, sub.coverage, sub.format = 0, 1, 0
+    sub.kernTable = {("uni65E5", "uni672C"): -250}
+    kern = newTable("kern")
+    kern.version, kern.kernTables = 0, [sub]
+    return kern
+
+
+def main(out, kern=False):
     names = [".notdef", "space"] + [n for _, n in CHARS]
     fb = FontBuilder(UPEM, isTTF=True)
     fb.setupGlyphOrder(names)
@@ -99,11 +116,16 @@ def main(out):
             metrics[n] = (metrics[n][0], g.xMin)
     fb.setupHorizontalMetrics(metrics)
     fb.setupHorizontalHeader(ascent=880, descent=-120)
-    fb.setupNameTable({"familyName": "InkTest Fallback", "styleName": "Regular"})
+    fb.setupNameTable({"familyName": "InkTest Kern" if kern else "InkTest Fallback", "styleName": "Regular"})
     fb.setupOS2(sTypoAscender=880, sTypoDescender=-120, usWinAscent=880, usWinDescent=120, usWeightClass=400)
     fb.setupPost()
+    if kern:
+        fb.font["kern"] = kern_table()
     fb.save(out)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if sys.argv[1] == "--kern":
+        main(sys.argv[2], kern=True)
+    else:
+        main(sys.argv[1])
