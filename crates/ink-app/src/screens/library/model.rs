@@ -365,9 +365,15 @@ impl Library {
 
     /// Marks a book opened now (before the reader is pushed).
     pub fn record_open(&mut self, path: &Path) {
-        if self.index.record_open(path, now()) {
+        self.record_open_at(path, now());
+        self.save();
+    }
+
+    /// Marks a book opened at `t` (seconds since the epoch); saved by the next
+    /// [`Library::save`].
+    pub fn record_open_at(&mut self, path: &Path, t: u64) {
+        if self.index.record_open(path, t) {
             self.unsaved = true;
-            self.save();
         }
     }
 
