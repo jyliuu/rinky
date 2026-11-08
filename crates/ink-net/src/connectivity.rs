@@ -236,11 +236,7 @@ pub struct ActivityGuard<'a> {
     pub keep_errors: u32,
 }
 
-impl std::fmt::Debug for ActivityGuard<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ActivityGuard").field("id", &self.id).field("renewals", &self.renewals).field("keep_skipped", &self.keep_skipped).field("keep_errors", &self.keep_errors).finish_non_exhaustive()
-    }
-}
+debug_fields!([] ActivityGuard<'_>, "ActivityGuard", |s| "id": s.id, "renewals": s.renewals, "keep_skipped": s.keep_skipped, "keep_errors": s.keep_errors);
 
 impl ActivityGuard<'_> {
     /// Call from the read loop: renews the hold when [`ActivityGuard::renew_every`] passed.

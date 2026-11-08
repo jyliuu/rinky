@@ -22,11 +22,11 @@
 //! There is no hidden exit anywhere on the page: `exit` is an action like any other and
 //! asks first ("Exit to Kindle?") when `settings.ui.confirm_exit` is on.
 
-use super::overlay::{Overlay, OverlayKind, PageScrim};
-use super::ReaderScreen;
+use super::overlay::{Overlay, OverlayKind};
+use super::{light_gestures, ReaderScreen};
 use crate::router::{AppCtx, Transition};
 use crate::screens::settings::quick_light;
-use ink_device::{Point, Rect, Size};
+use ink_device::{Point, Size};
 use ink_store::prefs::{GestureMap, LONG_PRESS_ACTIONS};
 use ink_store::Settings;
 use ink_ui::{Direction, DoubleTapMode, Gesture};
@@ -247,7 +247,7 @@ impl ReaderScreen {
             "light_up" | "light_down" | "warmth_up" | "warmth_down" => light_step(action, cx),
             "light_toggle" | "warmth_toggle" => {
                 let now = cx.services.clock.local_now();
-                super::light_gestures::toggle(action == "warmth_toggle", &mut *cx.services.light, &now);
+                light_gestures::toggle(action == "warmth_toggle", &mut *cx.services.light, &now);
             }
             // Edge slides follow the finger (light_gestures); as a tap or swipe: nothing.
             "light_slide" | "warmth_slide" => {}
@@ -303,8 +303,7 @@ impl ReaderScreen {
     /// Opens the "Exit to Kindle?" dialog (Cancel closes it, Exit leaves the app).
     fn confirm_exit(&mut self, cx: &mut AppCtx) {
         let size = cx.screen.size();
-        let mut o = Overlay::new(OverlayKind::Popup);
-        o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
+        let mut o = Overlay::over_page(OverlayKind::Popup, size, "close");
         let dialog = ink_ui::Dialog {
             title: format!("Exit to {}?", ink_platform::current().device_name()),
             body: format!("rinky closes and the {} home screen starts.", ink_platform::current().device_name()),
@@ -322,19 +321,11 @@ impl ReaderScreen {
 /// the control center's light code (auto warmth keeps the user's warmth).
 fn light_step(action: &str, cx: &mut AppCtx) {
     let warmth = action.starts_with("warmth");
-    let up = action.ends_with("_up");
-    let ((lo, hi), cur) = super::light_gestures::level(&*cx.services.light, warmth);
-    let cur = match cur {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("reader: {action}: {e}");
-            return;
-        }
-    };
+    let Some(((lo, hi), cur)) = light_gestures::level(&*cx.services.light, warmth, action) else { return };
     let step = ((hi.saturating_sub(lo)) * LIGHT_STEP_PERCENT / 100).max(1);
-    let v = if up { cur.saturating_add(step).min(hi) } else { cur.saturating_sub(step).max(lo) };
+    let v = if action.ends_with("_up") { cur.saturating_add(step).min(hi) } else { cur.saturating_sub(step).max(lo) };
     let now = cx.services.clock.local_now();
-    if let Some(text) = super::light_gestures::set_level(&mut *cx.services.light, warmth, v, &now) {
+    if let Some(text) = light_gestures::set_level(&mut *cx.services.light, warmth, v, &now) {
         log::info!("reader: {action}: {cur} -> {text}");
     }
 }

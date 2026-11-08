@@ -22,7 +22,7 @@ pub mod mobi6;
 pub mod palmdb;
 
 use crate::book::{Book, BookInfo, Cover, Identifier};
-use crate::util::{extension_for, sniff_media_type};
+use crate::util::{extension_for, sniff_media_type, LANGUAGES};
 use crate::Format;
 use header::{exth, MobiHeader};
 use ink_doc::{DocError, ResourceLoader, Result};
@@ -103,14 +103,10 @@ pub const MAX_TEXT: usize = 64 << 20;
 pub const MAX_FONT: usize = 32 << 20;
 
 /// Decodes a `FONT` record (KindleUnpack `read_font_record`): optional XOR of the first
-/// 1040 bytes with the key in the record, then optional zlib.
-pub fn decode_font(rec: &[u8]) -> Option<Vec<u8>> {
-    decode_font_max(rec, MAX_FONT)
-}
-
-/// [`decode_font`] stopping after `max` bytes (`None` when the font is larger, unless
-/// `max` is below [`MAX_FONT`], which reads only a prefix for sniffing the type).
-fn decode_font_max(rec: &[u8], max: usize) -> Option<Vec<u8>> {
+/// 1040 bytes with the key in the record, then optional zlib. Stops after `max` bytes:
+/// `None` when the font is larger, unless `max` is below [`MAX_FONT`], which reads only
+/// a prefix (enough to tell the font type).
+pub fn decode_font(rec: &[u8], max: usize) -> Option<Vec<u8>> {
     use crate::util::be32;
     if rec.get(..4) != Some(b"FONT") {
         return None;
@@ -145,11 +141,6 @@ fn decode_font_max(rec: &[u8], max: usize) -> Option<Vec<u8>> {
     }
     data.truncate(max);
     Some(data)
-}
-
-/// The first bytes of a `FONT` record's font, enough to tell its type.
-fn font_head(rec: &[u8]) -> Option<Vec<u8>> {
-    decode_font_max(rec, 64)
 }
 
 impl Mobi {
@@ -246,7 +237,7 @@ impl Mobi {
                 break;
             }
             let (kind, media) = if magic == b"FONT" {
-                match font_head(data) {
+                match decode_font(data, 64) {
                     Some(f) => (ResKind::Font, sniff_media_type(&f).unwrap_or("font/ttf").to_string()),
                     None => continue,
                 }
@@ -318,7 +309,7 @@ impl Mobi {
         info.metadata.authors = all(exth::AUTHOR);
         info.metadata.publisher = get(exth::PUBLISHER);
         info.metadata.description = get(exth::DESCRIPTION).map(|d| crate::xml::collapse_ws(&crate::xml::strip_tags(&d)));
-        info.metadata.language = get(exth::LANGUAGE).or_else(|| locale_language(h.locale));
+        info.metadata.language = get(exth::LANGUAGE).or_else(|| LANGUAGES.iter().find(|l| l.1 == h.locale & 0xFF).map(|l| l.2.to_string()));
         info.subjects = all(exth::SUBJECT);
         info.date = get(exth::DATE);
         for isbn in all(exth::ISBN) {
@@ -344,31 +335,6 @@ impl Mobi {
         }
         info
     }
-}
-
-/// Language from the MOBI locale field (low byte = Windows primary language id).
-fn locale_language(locale: u32) -> Option<String> {
-    Some(
-        match locale & 0xFF {
-            9 => "en",
-            7 => "de",
-            12 => "fr",
-            10 => "es",
-            16 => "it",
-            6 => "da",
-            19 => "nl",
-            25 => "ru",
-            22 => "pt",
-            29 => "sv",
-            20 => "no",
-            11 => "fi",
-            21 => "pl",
-            4 => "zh",
-            17 => "ja",
-            _ => return None,
-        }
-        .to_string(),
-    )
 }
 
 fn find_kf8(db: &PalmDb, h: &MobiHeader) -> Option<MobiHeader> {
@@ -412,7 +378,7 @@ impl ResourceLoader for MobiLoader {
         match r.kind {
             ResKind::Image => Ok(data.to_vec()),
             ResKind::Cres => Ok(data.get(12..).unwrap_or(&[]).to_vec()),
-            ResKind::Font => decode_font(data).ok_or_else(|| DocError::Format(format!("bad FONT record {path}"))),
+            ResKind::Font => decode_font(data, MAX_FONT).ok_or_else(|| DocError::Format(format!("bad FONT record {path}"))),
         }
     }
 
@@ -427,18 +393,12 @@ fn font_paths(res: &Resources) -> Vec<String> {
     v.into_iter().map(|r| r.path.clone()).collect()
 }
 
-/// Message for an encrypted book.
-fn refuse(m: &Mobi) -> Result<()> {
-    match m.drm() {
-        Some(s) => Err(DocError::Unsupported(crate::epub::drm_message(&s))),
-        None => Ok(()),
-    }
-}
-
-/// Converts a Mobipocket file (KF8 part preferred).
+/// Converts a Mobipocket file (KF8 part preferred). Encrypted books are refused.
 pub fn load(path: &Path) -> Result<Book> {
     let m = Mobi::open(path)?;
-    refuse(&m)?;
+    if let Some(scheme) = m.drm() {
+        return Err(DocError::Unsupported(crate::epub::drm_message(&scheme)));
+    }
     let mut info = m.info();
     if info.metadata.title.is_empty() {
         info.metadata.title = crate::title_from(path);
@@ -449,35 +409,25 @@ pub fn load(path: &Path) -> Result<Book> {
         let (chapters, toc) = crate::txt::convert_text(&text, &info.metadata.title);
         return Ok(Book { info, chapters, toc, page_list: Vec::new(), resources: Box::new(ink_doc::MemoryLoader::default()) });
     }
-    let (h, kf8) = match &m.kf8 {
-        Some(k) => (k.clone(), true),
-        None => (m.header.clone(), false),
-    };
-    let res = m.resources(&h);
+    let (h, kf8) = (m.main(), m.kf8.is_some());
+    let mut res = m.resources(h);
     info.metadata.cover = m.cover(&res).map(|r| r.path.clone());
     info.fonts = font_paths(&res);
-    let converted = if kf8 { kf8::convert(&m, &h, &res) } else { mobi6::convert(&m, &h, &res) };
+    let converted = if kf8 { kf8::convert(&m, h, &res) } else { mobi6::convert(&m, h, &res) };
     let (chapters, toc, files) = match converted {
         Ok(c) => c,
         // A broken KF8 part in a joint file: fall back to the MOBI 6 part.
         Err(e) if kf8 && !m.header.is_kf8() => {
             log::warn!("KF8 part unreadable ({e}); using the MOBI 6 part");
-            let res6 = m.resources(&m.header);
-            let c = mobi6::convert(&m, &m.header, &res6)?;
-            return Ok(Book {
-                info,
-                chapters: c.0,
-                toc: c.1,
-                page_list: Vec::new(),
-                resources: Box::new(MobiLoader::new(m.db.clone(), &res6, c.2)),
-            });
+            res = m.resources(&m.header);
+            mobi6::convert(&m, &m.header, &res)?
         }
         Err(e) => return Err(e),
     };
     if chapters.is_empty() {
         return Err(DocError::Format("MOBI: no text".into()));
     }
-    Ok(Book { info, chapters, toc, page_list: Vec::new(), resources: Box::new(MobiLoader::new(m.db.clone(), &res, files)) })
+    Ok(Book { info, chapters, toc, page_list: Vec::new(), resources: Box::new(MobiLoader::new(m.db, &res, files)) })
 }
 
 /// Metadata and cover of a Mobipocket file (also for DRM-protected books).
@@ -524,8 +474,8 @@ mod tests {
         }
         rec.extend_from_slice(&key);
         rec.extend_from_slice(&data);
-        assert_eq!(decode_font(&rec).unwrap(), font);
-        assert_eq!(decode_font(b"nope"), None);
+        assert_eq!(decode_font(&rec, MAX_FONT).unwrap(), font);
+        assert_eq!(decode_font(b"nope", MAX_FONT), None);
     }
 
     #[test]

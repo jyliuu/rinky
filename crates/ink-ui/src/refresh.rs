@@ -384,7 +384,7 @@ pub enum Change {
 }
 
 /// Decides the class of page turns and UI updates.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RefreshScheduler {
     /// Flash every this many page turns (0 = never).
     pub flash_every: u32,
@@ -406,18 +406,7 @@ impl RefreshScheduler {
     /// request (`ui_flash_every = 0`): a periodic flash while typing is worse than a
     /// little DU ghosting; screens request one when a large overlay closes.
     pub fn new(flash_every: u32) -> Self {
-        RefreshScheduler {
-            flash_every,
-            night_flash_every: None,
-            ui_flash_every: 0,
-            turns: 0,
-            force: false,
-            ui_updates: 0,
-            ui_force: false,
-            night: false,
-            ghost_debt: 0,
-            image_flash: false,
-        }
+        RefreshScheduler { flash_every, ..Default::default() }
     }
 
     /// Class for the next page turn: [`RefreshClass::Reagl`], or [`RefreshClass::Gc16`]

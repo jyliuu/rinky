@@ -27,6 +27,20 @@
 
 #![warn(missing_docs)]
 
+/// Builder methods that each set one field, written inside an `impl` block as
+/// `name(arg: Type) => field = value;` after the method's doc comment.
+macro_rules! setters {
+    ($($(#[$doc:meta])* $name:ident($($arg:ident: $t:ty)?) => $field:ident = $value:expr;)*) => {
+        $(
+            $(#[$doc])*
+            pub fn $name(mut self $(, $arg: $t)?) -> Self {
+                self.$field = $value;
+                self
+            }
+        )*
+    };
+}
+
 pub mod bars;
 pub mod controls;
 pub mod dialog;

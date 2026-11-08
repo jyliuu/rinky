@@ -9,72 +9,62 @@ use ink_plugin::serde_json::{self, json, Value};
 
 /// Opcodes (calibre `smart_device_app/driver.py`, KOReader `wireless.lua`).
 pub mod op {
-    /// Answer.
-    pub const OK: i64 = 0;
-    /// calibre stores its drive info on the device.
-    pub const SET_CALIBRE_DEVICE_INFO: i64 = 1;
-    /// calibre sets the device name (unused).
-    pub const SET_CALIBRE_DEVICE_NAME: i64 = 2;
-    /// calibre asks for the device info.
-    pub const GET_DEVICE_INFORMATION: i64 = 3;
-    /// Total bytes of the books folder's file system.
-    pub const TOTAL_SPACE: i64 = 4;
-    /// Free bytes of the books folder's file system.
-    pub const FREE_SPACE: i64 = 5;
-    /// calibre asks for the book list.
-    pub const GET_BOOK_COUNT: i64 = 6;
-    /// calibre sends its book lists (metadata follows).
-    pub const SEND_BOOKLISTS: i64 = 7;
-    /// calibre sends a book.
-    pub const SEND_BOOK: i64 = 8;
-    /// First message of calibre after the connection.
-    pub const GET_INITIALIZATION_INFO: i64 = 9;
-    /// End of a book (unused with binary streaming).
-    pub const BOOK_DONE: i64 = 11;
-    /// Keep-alive, metadata requests, eject.
-    pub const NOOP: i64 = 12;
-    /// calibre deletes books.
-    pub const DELETE_BOOK: i64 = 13;
-    /// calibre fetches a book from the device.
-    pub const GET_BOOK_FILE_SEGMENT: i64 = 14;
-    /// calibre asks for one book's metadata (unused by calibre today).
-    pub const GET_BOOK_METADATA: i64 = 15;
-    /// Updated metadata of one book.
-    pub const SEND_BOOK_METADATA: i64 = 16;
-    /// A message for the user; kind 1 = wrong password.
-    pub const DISPLAY_MESSAGE: i64 = 17;
-    /// calibre is busy.
-    pub const CALIBRE_BUSY: i64 = 18;
-    /// Name and id of calibre's current library.
-    pub const SET_LIBRARY_INFO: i64 = 19;
-    /// An error (both directions, calibre 4.18 and newer).
-    pub const ERROR: i64 = 20;
+    /// The opcode constants and [`name`], from one table.
+    macro_rules! opcodes {
+        ($($(#[$doc:meta])* $name:ident = $value:literal,)*) => {
+            $($(#[$doc])* pub const $name: i64 = $value;)*
 
-    /// Name of an opcode for logs.
-    pub fn name(op: i64) -> &'static str {
-        match op {
-            OK => "OK",
-            SET_CALIBRE_DEVICE_INFO => "SET_CALIBRE_DEVICE_INFO",
-            SET_CALIBRE_DEVICE_NAME => "SET_CALIBRE_DEVICE_NAME",
-            GET_DEVICE_INFORMATION => "GET_DEVICE_INFORMATION",
-            TOTAL_SPACE => "TOTAL_SPACE",
-            FREE_SPACE => "FREE_SPACE",
-            GET_BOOK_COUNT => "GET_BOOK_COUNT",
-            SEND_BOOKLISTS => "SEND_BOOKLISTS",
-            SEND_BOOK => "SEND_BOOK",
-            GET_INITIALIZATION_INFO => "GET_INITIALIZATION_INFO",
-            BOOK_DONE => "BOOK_DONE",
-            NOOP => "NOOP",
-            DELETE_BOOK => "DELETE_BOOK",
-            GET_BOOK_FILE_SEGMENT => "GET_BOOK_FILE_SEGMENT",
-            GET_BOOK_METADATA => "GET_BOOK_METADATA",
-            SEND_BOOK_METADATA => "SEND_BOOK_METADATA",
-            DISPLAY_MESSAGE => "DISPLAY_MESSAGE",
-            CALIBRE_BUSY => "CALIBRE_BUSY",
-            SET_LIBRARY_INFO => "SET_LIBRARY_INFO",
-            ERROR => "ERROR",
-            _ => "?",
-        }
+            /// Name of an opcode for logs.
+            pub fn name(op: i64) -> &'static str {
+                match op {
+                    $($name => stringify!($name),)*
+                    _ => "?",
+                }
+            }
+        };
+    }
+
+    opcodes! {
+        /// Answer.
+        OK = 0,
+        /// calibre stores its drive info on the device.
+        SET_CALIBRE_DEVICE_INFO = 1,
+        /// calibre sets the device name (unused).
+        SET_CALIBRE_DEVICE_NAME = 2,
+        /// calibre asks for the device info.
+        GET_DEVICE_INFORMATION = 3,
+        /// Total bytes of the books folder's file system.
+        TOTAL_SPACE = 4,
+        /// Free bytes of the books folder's file system.
+        FREE_SPACE = 5,
+        /// calibre asks for the book list.
+        GET_BOOK_COUNT = 6,
+        /// calibre sends its book lists (metadata follows).
+        SEND_BOOKLISTS = 7,
+        /// calibre sends a book.
+        SEND_BOOK = 8,
+        /// First message of calibre after the connection.
+        GET_INITIALIZATION_INFO = 9,
+        /// End of a book (unused with binary streaming).
+        BOOK_DONE = 11,
+        /// Keep-alive, metadata requests, eject.
+        NOOP = 12,
+        /// calibre deletes books.
+        DELETE_BOOK = 13,
+        /// calibre fetches a book from the device.
+        GET_BOOK_FILE_SEGMENT = 14,
+        /// calibre asks for one book's metadata (unused by calibre today).
+        GET_BOOK_METADATA = 15,
+        /// Updated metadata of one book.
+        SEND_BOOK_METADATA = 16,
+        /// A message for the user; kind 1 = wrong password.
+        DISPLAY_MESSAGE = 17,
+        /// calibre is busy.
+        CALIBRE_BUSY = 18,
+        /// Name and id of calibre's current library.
+        SET_LIBRARY_INFO = 19,
+        /// An error (both directions, calibre 4.18 and newer).
+        ERROR = 20,
     }
 }
 

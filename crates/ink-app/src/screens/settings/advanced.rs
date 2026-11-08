@@ -7,12 +7,12 @@
 //! component for every button and for plugin tiles), with settings rows built from the
 //! button's [`Options`] ([`Options::popup`]):
 //!
-//! - [`Kind::Choice`]: a setting with a few values (Rotate: the angle a tap turns to;
+//! - A choice ([`setting_options`]): a setting with a few values (Rotate: the angle a tap turns to;
 //!   Full refresh: how often pages flash; Status bars: the top and bottom bar switches).
 //!   The Settings page "Control center buttons" shows the same values as choice rows
 //!   ([`settings_rows`], [`settings_action`]), or a link to the button's settings page
 //!   when it has one ([`Spec::page`]).
-//! - [`Kind::Picker`]: a list read from the device (Wi-Fi: the networks, with their
+//! - A picker: a list read from the device (Wi-Fi: the networks, with their
 //!   signal bars and locks, as on the Wi-Fi page). Settings links to the full page.
 //!
 //! A row may open the button's full settings page ("All networks…", "All status bar
@@ -57,15 +57,6 @@ pub const PICK_CLOSE: &str = "cc-pick:close";
 /// Settings row actions: `ccadv:<button name>:<item index>`.
 pub const SETTINGS_PREFIX: &str = "ccadv";
 
-/// Where the options of a long press come from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// A setting with a few values ([`setting_options`]): choice rows in Settings too.
-    Choice,
-    /// A list read from the device: a link to `page` in Settings.
-    Picker,
-}
-
 /// A button with long-press options.
 #[derive(Clone, Copy, Debug)]
 pub struct Spec {
@@ -73,8 +64,6 @@ pub struct Spec {
     pub name: &'static str,
     /// What the long press does (row subtitle in Settings).
     pub what: &'static str,
-    /// What it opens.
-    pub kind: Kind,
     /// Settings page with these and more options ([`super::open_at`] name): Settings
     /// links to it instead of listing the choices.
     pub page: Option<&'static str>,
@@ -84,10 +73,10 @@ pub struct Spec {
 
 /// The buttons with long-press options, in Settings order.
 pub const SPECS: &[Spec] = &[
-    Spec { name: "wifi", what: "Lists the networks; tap one to join it", kind: Kind::Picker, page: Some("wifi"), icon: Icon::Wifi },
-    Spec { name: "rotate", what: "Chooses the angle a tap turns to", kind: Kind::Choice, page: None, icon: Icon::Rotate },
-    Spec { name: "status_bars", what: "Turns the top and bottom bar on and off", kind: Kind::Choice, page: Some("status_bars"), icon: Icon::Info },
-    Spec { name: "full_refresh", what: "Chooses how often pages fully refresh", kind: Kind::Choice, page: Some("refresh"), icon: Icon::Star },
+    Spec { name: "wifi", what: "Lists the networks; tap one to join it", page: Some("wifi"), icon: Icon::Wifi },
+    Spec { name: "rotate", what: "Chooses the angle a tap turns to", page: None, icon: Icon::Rotate },
+    Spec { name: "status_bars", what: "Turns the top and bottom bar on and off", page: Some("status_bars"), icon: Icon::Info },
+    Spec { name: "full_refresh", what: "Chooses how often pages fully refresh", page: Some("refresh"), icon: Icon::Star },
 ];
 
 /// The [`SPECS`] entry of button `name`.
@@ -227,7 +216,7 @@ pub fn rotate_tap(current: u8, deg: u16) -> u8 {
     }
 }
 
-/// The options of a [`Kind::Choice`] button from the settings alone.
+/// The options of a button with a choice, from the settings alone.
 pub fn setting_options(name: &str, s: &Settings) -> Option<Options> {
     match name {
         "rotate" => {
@@ -345,13 +334,10 @@ fn wifi_options_from(cx: &mut AppCtx, max: usize) -> Options {
 /// The popup options of a long press on button `name` (`None`: it has none); a device
 /// list has at most `max` rows.
 pub fn options(name: &str, max: usize, cx: &mut AppCtx) -> Option<Options> {
-    let spec = spec(name)?;
-    match spec.kind {
-        Kind::Choice => setting_options(name, current_settings(cx)),
-        Kind::Picker => match name {
-            "wifi" => Some(wifi_options_from(cx, max)),
-            _ => None,
-        },
+    spec(name)?;
+    match name {
+        "wifi" => Some(wifi_options_from(cx, max)),
+        _ => setting_options(name, current_settings(cx)),
     }
 }
 
@@ -446,9 +432,9 @@ pub fn settings_rows(s: &Settings) -> Vec<Row> {
     let mut rows = vec![Row::header("Long-press options"), Row::note("Hold a control center button to open its options.")];
     for spec in SPECS {
         let name = label(CONTROL_BUTTONS, spec.name);
-        match (spec.kind, setting_options(spec.name, s), spec.page) {
-            (_, _, Some(page)) => rows.push(Row::nav(spec.icon, name, format!("page:{page}")).subtitle(spec.what)),
-            (Kind::Choice, Some(o), None) => {
+        match (setting_options(spec.name, s), spec.page) {
+            (_, Some(page)) => rows.push(Row::nav(spec.icon, name, format!("page:{page}")).subtitle(spec.what)),
+            (Some(o), None) => {
                 rows.push(Row::header(format!("{name}: {}", o.title.to_lowercase())));
                 for (i, item) in o.items.iter().enumerate() {
                     let row = Row::choice(item.label.clone(), item.selected == Some(true), format!("{SETTINGS_PREFIX}:{}:{i}", spec.name));
@@ -503,9 +489,11 @@ mod tests {
         let s = Settings::default();
         for spec in SPECS {
             assert!(CONTROL_BUTTONS.iter().any(|(n, _)| *n == spec.name), "{}", spec.name);
-            match spec.kind {
-                Kind::Choice => assert!(setting_options(spec.name, &s).is_some(), "{}", spec.name),
-                Kind::Picker => assert!(spec.page.is_some(), "{}", spec.name),
+            // Wi-Fi is the one picker (a device list, with a settings page); every other
+            // button is a choice the settings answer.
+            match spec.name {
+                "wifi" => assert!(spec.page.is_some(), "{}", spec.name),
+                _ => assert!(setting_options(spec.name, &s).is_some(), "{}", spec.name),
             }
             if let Some(p) = spec.page {
                 assert!(super::super::Page::from_name(p).is_some(), "settings page {p}");

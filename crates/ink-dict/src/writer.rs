@@ -192,13 +192,9 @@ pub fn write(dir: &Path, spec: &Spec) -> Result<PathBuf> {
 pub fn sample_english() -> Spec {
     let e = |w: &str, html: &str| (w.to_string(), vec![('h', html.as_bytes().to_vec())]);
     Spec {
-        stem: "sample-en".into(),
-        bookname: "Sample English Dictionary".into(),
         sametypesequence: "h".into(),
-        offset64: false,
         dictzip: true,
         chunk_len: 64,
-        gzip_idx: false,
         entries: vec![
             e("household", "<b>household</b> <i>noun</i><br>a house and its occupants regarded as a unit: <i>the head of the household</i>.<br><b>adjective</b> relating to the running of a home: <i>household chores</i>."),
             e("dignity", "<b>dignity</b> <i>noun</i><ol><li>the state or quality of being worthy of honour or respect.</li><li>a composed or serious manner or style: <i>he bowed with great dignity</i>.</li><li>a sense of pride in oneself; self-respect.</li></ol>"),
@@ -213,5 +209,6 @@ pub fn sample_english() -> Spec {
             e("civil", "<b>civil</b> <i>adjective</i><br>relating to ordinary citizens and their concerns, as distinct from military or ecclesiastical matters: <i>civil blood</i>."),
         ],
         synonyms: vec![("broke".into(), "break".into()), ("lay".into(), "lie".into()), ("households".into(), "household".into())],
+        ..Spec::plain("sample-en", "Sample English Dictionary", &[])
     }
 }

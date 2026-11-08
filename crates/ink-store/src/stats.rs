@@ -383,17 +383,15 @@ impl StatsDb {
     }
 
     fn totals(&self, md5: Option<&str>) -> Result<Vec<BookTotals>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT b.md5, b.title, b.authors, b.pages,
+        let sql = "SELECT b.md5, b.title, b.authors, b.pages,
                     (SELECT coalesce(sum(duration), 0) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT count(DISTINCT page) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT count(*) FROM session s WHERE s.id_book = b.id),
                     (SELECT min(start_time) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT max(start_time + duration) FROM page_stat_data p WHERE p.id_book = b.id)
              FROM book b WHERE (?1 IS NULL OR b.md5 = ?1)
-             ORDER BY 9 DESC NULLS LAST, b.id",
-        )?;
-        let rows = st.query_map([md5], |r| {
+             ORDER BY 9 DESC NULLS LAST, b.id";
+        crate::query_all(&self.conn, sql, [md5], |r| {
             Ok(BookTotals {
                 md5: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 title: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -405,48 +403,33 @@ impl StatsDb {
                 first_read: r.get::<_, Option<i64>>(7)?.map(u),
                 last_read: r.get::<_, Option<i64>>(8)?.map(u),
             })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })
     }
 
     /// Sessions, newest first; of one book when `md5` is given.
     pub fn sessions(&self, md5: Option<&str>, limit: usize) -> Result<Vec<Session>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT s.id, b.md5, s.start_time, s.end_time, s.duration, s.pages, s.source FROM session s JOIN book b ON b.id = s.id_book
-             WHERE (?1 IS NULL OR b.md5 = ?1) ORDER BY s.start_time DESC, s.id DESC LIMIT ?2",
-        )?;
-        let rows = st.query_map(params![md5, limit as i64], row_session)?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let sql = "SELECT s.id, b.md5, s.start_time, s.end_time, s.duration, s.pages, s.source FROM session s JOIN book b ON b.id = s.id_book
+             WHERE (?1 IS NULL OR b.md5 = ?1) ORDER BY s.start_time DESC, s.id DESC LIMIT ?2";
+        crate::query_all(&self.conn, sql, params![md5, limit as i64], row_session)
     }
 
     /// Page records of the book with `md5`, oldest first.
     pub fn page_stats(&self, md5: &str) -> Result<Vec<PageRecord>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT p.page, p.total_pages, p.start_time, p.duration FROM page_stat_data p JOIN book b ON b.id = p.id_book
-             WHERE b.md5 = ?1 ORDER BY p.start_time, p.page",
-        )?;
-        let rows = st.query_map([md5], |r| {
-            Ok(PageRecord {
-                page: u32_of(r.get(0)?),
-                total_pages: u32_of(r.get(1)?),
-                start_time: u(r.get(2)?),
-                duration: u32_of(r.get(3)?),
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let sql = "SELECT p.page, p.total_pages, p.start_time, p.duration FROM page_stat_data p JOIN book b ON b.id = p.id_book
+             WHERE b.md5 = ?1 ORDER BY p.start_time, p.page";
+        crate::query_all(&self.conn, sql, [md5], |r| {
+            Ok(PageRecord { page: u32_of(r.get(0)?), total_pages: u32_of(r.get(1)?), start_time: u(r.get(2)?), duration: u32_of(r.get(3)?) })
+        })
     }
 
     /// Reading per day for page records starting in `from..to`, with days counted in a
     /// time zone `utc_offset` seconds east of UTC.
     pub fn daily(&self, from: u64, to: u64, utc_offset: i64) -> Result<Vec<DayTotal>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT date(start_time + ?3, 'unixepoch') AS day, sum(duration), count(*), count(DISTINCT id_book)
-             FROM page_stat_data WHERE start_time >= ?1 AND start_time < ?2 GROUP BY day ORDER BY day",
-        )?;
-        let rows = st.query_map(params![from as i64, to as i64, utc_offset], |r| {
+        let sql = "SELECT date(start_time + ?3, 'unixepoch') AS day, sum(duration), count(*), count(DISTINCT id_book)
+             FROM page_stat_data WHERE start_time >= ?1 AND start_time < ?2 GROUP BY day ORDER BY day";
+        crate::query_all(&self.conn, sql, params![from as i64, to as i64, utc_offset], |r| {
             Ok(DayTotal { day: r.get(0)?, seconds: u(r.get(1)?), pages: u(r.get(2)?), books: u(r.get(3)?) })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })
     }
 
     /// Copies KOReader's statistics in: books are matched by md5 (created if missing),
@@ -539,14 +522,9 @@ fn update_book_totals(conn: &Connection, book: i64) -> Result<()> {
 /// that no rinky session covers. Returns the number of sessions.
 fn rebuild_koreader_sessions(conn: &Connection, book: i64) -> Result<usize> {
     conn.execute("DELETE FROM session WHERE id_book = ?1 AND source = 'koreader'", [book])?;
-    let ours: Vec<(i64, i64)> = conn
-        .prepare("SELECT start_time, end_time FROM session WHERE id_book = ?1")?
-        .query_map([book], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<std::result::Result<_, _>>()?;
-    let rows: Vec<(i64, i64, i64)> = conn
-        .prepare("SELECT start_time, duration, page FROM page_stat_data WHERE id_book = ?1 ORDER BY start_time, page")?
-        .query_map([book], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<std::result::Result<_, _>>()?;
+    let ours: Vec<(i64, i64)> = crate::query_all(conn, "SELECT start_time, end_time FROM session WHERE id_book = ?1", [book], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let sql = "SELECT start_time, duration, page FROM page_stat_data WHERE id_book = ?1 ORDER BY start_time, page";
+    let rows: Vec<(i64, i64, i64)> = crate::query_all(conn, sql, [book], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     let mut sessions: Vec<(i64, i64, i64, std::collections::HashSet<i64>)> = Vec::new();
     for (start, dur, page) in rows {
         if ours.iter().any(|&(a, b)| start >= a && start <= b) {

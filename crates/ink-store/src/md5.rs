@@ -31,21 +31,15 @@ pub fn sample_offsets() -> impl Iterator<Item = u64> {
 /// Partial MD5 of any seekable reader, as lowercase hex.
 pub fn partial_md5_reader<R: Read + Seek>(r: &mut R) -> std::io::Result<String> {
     let mut hasher = Md5::new();
-    let mut buf = vec![0u8; SAMPLE as usize];
+    let mut buf = Vec::with_capacity(SAMPLE as usize);
     for off in sample_offsets() {
         r.seek(SeekFrom::Start(off))?;
-        let mut n = 0;
-        while n < buf.len() {
-            let got = r.read(&mut buf[n..])?;
-            if got == 0 {
-                break;
-            }
-            n += got;
-        }
-        if n == 0 {
+        buf.clear();
+        r.by_ref().take(SAMPLE).read_to_end(&mut buf)?;
+        if buf.is_empty() {
             break;
         }
-        hasher.update(&buf[..n]);
+        hasher.update(&buf);
     }
     Ok(format!("{:x}", hasher.finalize()))
 }

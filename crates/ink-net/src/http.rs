@@ -188,11 +188,7 @@ pub struct Response {
     pub url: String,
 }
 
-impl std::fmt::Debug for Response {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Response").field("status", &self.status).field("url", &self.url).field("headers", &self.headers).finish_non_exhaustive()
-    }
-}
+debug_fields!([] Response, "Response", |s| "status": s.status, "url": s.url, "headers": s.headers);
 
 impl Response {
     /// A response (for fakes in tests); header names are lowercased.
@@ -237,7 +233,8 @@ impl Response {
 
     /// Reads the body as UTF-8 text (lossy), at most `limit` bytes.
     pub fn text(self, limit: usize) -> Result<String> {
-        Ok(String::from_utf8_lossy(&self.bytes(limit)?).into_owned())
+        // A valid body becomes the string without a copy.
+        Ok(String::from_utf8(self.bytes(limit)?).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
     }
 
     /// Reads and parses a JSON body (at most `limit` bytes).
@@ -288,23 +285,17 @@ pub trait HttpClient {
     fn send(&self, req: Request) -> Result<Response>;
 }
 
-impl<T: HttpClient + ?Sized> HttpClient for &T {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
+/// References and smart pointers to a client are clients.
+macro_rules! forward_client {
+    ($($ptr:ty),+) => {$(
+        impl<T: HttpClient + ?Sized> HttpClient for $ptr {
+            fn send(&self, req: Request) -> Result<Response> {
+                (**self).send(req)
+            }
+        }
+    )+};
 }
-
-impl<T: HttpClient + ?Sized> HttpClient for Box<T> {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
-}
-
-impl<T: HttpClient + ?Sized> HttpClient for Arc<T> {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
-}
+forward_client!(&T, Box<T>, Arc<T>);
 
 /// Which certificate authorities a [`UreqClient`] trusts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -482,10 +473,6 @@ pub fn map_ureq(e: ureq::Error) -> NetError {
     }
 }
 
-fn is_redirect(status: u16) -> bool {
-    matches!(status, 301 | 302 | 303 | 307 | 308)
-}
-
 /// Header names that carry credentials; dropped when a redirect changes the origin.
 pub fn is_sensitive_header(name: &str) -> bool {
     // `auth` covers Authorization and Proxy-Authorization.
@@ -523,7 +510,7 @@ impl HttpClient for UreqClient {
                 return Err(NetError::Http(format!("https only: refusing {}", req.url)));
             }
             let resp = self.send_once(&req)?;
-            if req.max_redirects == 0 || !is_redirect(resp.status) {
+            if req.max_redirects == 0 || !matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
                 return Ok(resp);
             }
             let Some(location) = resp.header("location").map(str::to_string) else {

@@ -66,21 +66,6 @@ impl KoreaderDirs {
     pub fn vocabulary(&self) -> PathBuf {
         self.settings_dir().join("vocabulary_builder.sqlite3")
     }
-
-    /// `docsettings/` (the "dir" sidecar location).
-    pub fn docsettings(&self) -> PathBuf {
-        self.root.join("docsettings")
-    }
-
-    /// `hashdocsettings/` (the "hash" sidecar location).
-    pub fn hashdocsettings(&self) -> PathBuf {
-        self.root.join("hashdocsettings")
-    }
-
-    /// `history/` (legacy sidecars).
-    pub fn history(&self) -> PathBuf {
-        self.root.join("history")
-    }
 }
 
 /// Kind of a KOReader annotation.
@@ -232,24 +217,14 @@ pub fn merge_into(state: &mut BookState, ko: &KoBookMetadata, prefer_koreader: b
         state.page = ko.last_page.map(|p| p.saturating_sub(1)).or(state.page);
         sum.position = true;
     }
-    if prefer_koreader || state.percent.is_none() {
-        state.percent = ko.percent_finished.map(|p| p.clamp(0.0, 1.0) as f32).or(state.percent);
-    }
+    fill(&mut state.percent, ko.percent_finished.map(|p| p.clamp(0.0, 1.0) as f32), prefer_koreader);
     if (prefer_koreader || state.status == ReadingStatus::New) && ko.status != ReadingStatus::New {
         state.status = ko.status;
     }
-    if prefer_koreader || state.rating.is_none() {
-        state.rating = ko.rating.or(state.rating);
-    }
-    if prefer_koreader || state.review.is_none() {
-        state.review = ko.review.clone().or(state.review.take());
-    }
-    if state.md5.is_none() {
-        state.md5 = ko.md5.clone();
-    }
-    if ko.doc_pages.is_some() && state.pages.is_none() {
-        state.pages = ko.doc_pages;
-    }
+    fill(&mut state.rating, ko.rating, prefer_koreader);
+    fill(&mut state.review, ko.review.clone(), prefer_koreader);
+    fill(&mut state.md5, ko.md5.clone(), false);
+    fill(&mut state.pages, ko.doc_pages, false);
     // What `state` has, to skip equal entries without a scan per annotation (a sync
     // merges every KOReader annotation again).
     let mut have_highlights: HashSet<(String, String, Option<u32>)> = state.highlights.iter().map(|h| (h.start.clone(), h.end.clone(), h.page)).collect();
@@ -292,10 +267,15 @@ pub fn merge_into(state: &mut BookState, ko: &KoBookMetadata, prefer_koreader: b
             }
         }
     }
-    if state.imported_from.is_none() {
-        state.imported_from = Some(format!("koreader:{}", ko.path.display()));
-    }
+    fill(&mut state.imported_from, Some(format!("koreader:{}", ko.path.display())), false);
     sum
+}
+
+/// Puts `theirs` into `ours` when it is set and `ours` is not (or `prefer` is set).
+fn fill<T>(ours: &mut Option<T>, theirs: Option<T>, prefer: bool) {
+    if prefer || ours.is_none() {
+        *ours = theirs.or(ours.take());
+    }
 }
 
 /// A box as a quad; boxes are only built from finite numbers (see `boxes`), and the
@@ -356,12 +336,12 @@ pub fn metadata_candidates(book: &Path, ko: Option<&KoreaderDirs>, md5: Option<&
         // KOReader: DOCSETTINGS_DIR .. "<absolute path without suffix>.sdr".
         let b = os_bytes(doc_dir.as_os_str());
         let rel = os_from_bytes(b[b.iter().take_while(|&&c| c == b'/').count()..].to_vec());
-        v.extend(with_old(ko.docsettings().join(rel).join(&name)));
+        v.extend(with_old(ko.root.join("docsettings").join(rel).join(&name)));
         // Only a real book id names a directory (it comes from a file).
         if let Some(md5) = md5.and_then(crate::md5::normalize_md5) {
-            v.extend(with_old(ko.hashdocsettings().join(&md5[..2]).join(format!("{md5}.sdr")).join(&name)));
+            v.extend(with_old(ko.root.join("hashdocsettings").join(&md5[..2]).join(format!("{md5}.sdr")).join(&name)));
         }
-        v.extend(with_old(ko.history().join(history_name(book))));
+        v.extend(with_old(ko.root.join("history").join(history_name(book))));
     }
     v.push(with_suffix(book, ".kpdfview.lua"));
     v
@@ -508,28 +488,25 @@ pub fn metadata_from_table(path: &Path, t: &Table, paging: Option<bool>) -> KoBo
     }
 }
 
+/// How a list of annotations stores its pages: `Some(true)` when the first entry's `page`
+/// is a number (paging), `Some(false)` when it is an xpointer string (rolling), else `None`.
+fn stored_paging(list: &Table) -> Option<bool> {
+    match list.get_index(1)?.as_table()?.get("page")? {
+        Value::Int(_) | Value::Num(_) => Some(true),
+        Value::Str(_) => Some(false),
+        _ => None,
+    }
+}
+
 /// Paging if the stored annotations say so (numeric `page`), else if `last_page` is set.
 fn guess_paging(t: &Table, has_last_page: bool) -> bool {
-    for key in ["annotations", "bookmarks"] {
-        if let Some(first) = t.table(key).and_then(|a| a.seq().first().and_then(|v| v.as_table())) {
-            match first.get("page") {
-                Some(Value::Int(_) | Value::Num(_)) => return true,
-                Some(Value::Str(_)) => return false,
-                _ => {}
-            }
-        }
-    }
-    has_last_page
+    ["annotations", "bookmarks"].into_iter().find_map(|key| t.table(key).and_then(stored_paging)).unwrap_or(has_last_page)
 }
 
 /// True if the annotation list stores pages the way `paging` expects (numbers for paging,
 /// xpointer strings for rolling). Empty lists match.
 fn list_matches(list: &Table, paging: bool) -> bool {
-    match list.seq().first().and_then(|v| v.as_table()).and_then(|a| a.get("page")) {
-        Some(Value::Int(_) | Value::Num(_)) => paging,
-        Some(Value::Str(_)) => !paging,
-        _ => true,
-    }
+    stored_paging(list).is_none_or(|p| p == paging)
 }
 
 fn annotations(t: &Table, paging: bool) -> Vec<KoAnnotation> {
@@ -676,18 +653,9 @@ fn same_time(a: &Table, b: &Table) -> bool {
 fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, paging: bool, import_old: bool) -> Vec<KoAnnotation> {
     // Highlights by page, with their table (for the drawer and pboxes).
     let mut hls: Vec<(i64, &Table)> = Vec::new();
-    if let Some(h) = highlights {
-        for (k, v) in &h.entries {
-            let page = match k {
-                lua::Key::Int(i) => *i,
-                _ => 0,
-            };
-            if let Some(list) = v.as_table() {
-                for hl in list.seq().into_iter().filter_map(|x| x.as_table()) {
-                    hls.push((page, hl));
-                }
-            }
-        }
+    for (k, list) in highlights.iter().flat_map(|h| &h.entries).filter_map(|(k, v)| Some((k, v.as_table()?))) {
+        let page = if let lua::Key::Int(i) = k { *i } else { 0 };
+        hls.extend(list.seq().into_iter().filter_map(|x| x.as_table()).map(|hl| (page, hl)));
     }
     // A highlighted bookmark and a highlight are the same when their positions are
     // equal and their datetimes do not differ; the highlights are indexed by position so
@@ -700,18 +668,13 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
     }
     let mut items: Vec<(Cow<Table>, Option<&Table>)> = Vec::new();
     let mut used = vec![false; hls.len()];
-    if let Some(b) = bookmarks {
-        for bm in b.seq().into_iter().filter_map(|x| x.as_table()) {
-            let mut hl = None;
-            if bm.bool("highlighted") == Some(true) {
-                let found = pos_key(bm, paging).and_then(|k| by_pos.get(&k)).and_then(|c| c.iter().copied().find(|&i| same_time(hls[i].1, bm)));
-                if let Some(i) = found {
-                    used[i] = true;
-                    hl = Some(hls[i].1);
-                }
-            }
-            items.push((Cow::Borrowed(bm), hl));
+    for bm in bookmarks.iter().flat_map(|b| b.seq()).filter_map(|x| x.as_table()) {
+        let candidates = pos_key(bm, paging).filter(|_| bm.bool("highlighted") == Some(true)).and_then(|k| by_pos.get(&k));
+        let found = candidates.and_then(|c| c.iter().copied().find(|&i| same_time(hls[i].1, bm)));
+        if let Some(i) = found {
+            used[i] = true;
         }
+        items.push((Cow::Borrowed(bm), found.map(|i| hls[i].1)));
     }
     if import_old {
         // The datetimes of the highlighted items by position.
@@ -732,19 +695,15 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
             if used[i] || h.get("pos0").is_none() || is_marked() {
                 continue;
             }
-            let mut bm = Table::default();
-            let set = |bm: &mut Table, k: &str, v: Option<&Value>| {
-                if let Some(v) = v {
-                    bm.entries.push((lua::Key::Str(k.into()), v.clone()));
-                }
-            };
-            set(&mut bm, "datetime", h.get("datetime"));
-            set(&mut bm, "notes", h.get("text"));
-            set(&mut bm, "pos0", h.get("pos0"));
-            set(&mut bm, "pos1", h.get("pos1"));
-            set(&mut bm, "chapter", h.get("chapter"));
-            bm.entries.push((lua::Key::Str("highlighted".into()), Value::Bool(true)));
+            // The bookmark KOReader made of such a highlight (`pos0` is set: checked above).
             let page_v = if paging { Value::Int(*page) } else { h.get("pos0").cloned().unwrap_or(Value::Nil) };
+            let mut bm = Table::default();
+            for (to, from) in [("datetime", "datetime"), ("notes", "text"), ("pos0", "pos0"), ("pos1", "pos1"), ("chapter", "chapter")] {
+                if let Some(v) = h.get(from) {
+                    bm.entries.push((lua::Key::Str(to.into()), v.clone()));
+                }
+            }
+            bm.entries.push((lua::Key::Str("highlighted".into()), Value::Bool(true)));
             bm.entries.push((lua::Key::Str("page".into()), page_v));
             mark(&mut marked, &bm);
             items.push((Cow::Owned(bm), Some(h)));

@@ -6,6 +6,7 @@
 //! manifest items are the navigation document and the NCX, so the loader can hand the
 //! result to [`crate::HtmlDocument::set_navigation`].
 
+use crate::book::dir_of;
 use crate::dom::{Dom, NodeId};
 use ink_doc::{resolve_href, ResourceLoader};
 use quick_xml::events::Event;
@@ -33,21 +34,11 @@ pub struct Navigation {
 
 /// Resolves `href` (with fragment) against `dir`.
 pub fn resolve_with_fragment(dir: &str, href: &str) -> String {
-    let (path, frag) = match href.split_once('#') {
-        Some((p, f)) => (p, Some(f)),
-        None => (href, None),
-    };
+    let (path, frag) = href.split_once('#').map_or((href, None), |(p, f)| (p, Some(f)));
     let base = if path.is_empty() { String::new() } else { resolve_href(dir, path) };
     match frag {
         Some(f) => format!("{base}#{}", ink_doc::percent_decode(f)),
         None => base,
-    }
-}
-
-fn dir_of(p: &str) -> &str {
-    match p.rfind('/') {
-        Some(i) => &p[..=i],
-        None => "",
     }
 }
 

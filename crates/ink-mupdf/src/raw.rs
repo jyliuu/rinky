@@ -21,8 +21,6 @@ pub struct RawChar {
     pub rect: FRect,
     /// Line number on the page.
     pub line: u32,
-    /// Block number on the page.
-    pub block: u32,
 }
 
 /// One outline entry.
@@ -118,7 +116,7 @@ impl RawDoc {
         self.doc.as_ptr()
     }
 
-    fn error(&self, what: &str) -> DocError {
+    fn error(&self, what: impl std::fmt::Display) -> DocError {
         // SAFETY: valid handle.
         let msg = owned(unsafe { ffi::ink_error(self.ptr()) }).unwrap_or_default();
         DocError::Format(format!("{what}: {msg}"))
@@ -172,23 +170,17 @@ impl RawDoc {
         }
     }
 
-    /// Anti-aliasing bits (0 = none, 8 = best).
-    pub fn set_aa(&mut self, bits: u8) {
-        // SAFETY: valid handle.
-        unsafe { ffi::ink_set_aa(self.ptr(), bits.min(8) as c_int) }
-    }
-
     /// Page bounds in page space.
     pub fn page_bound(&mut self, page: usize) -> Result<FRect> {
         if let Some(l) = self.lists.iter().find(|l| l.page == page) {
             return Ok(l.bounds);
         }
-        let mut r = ffi::InkRect::default();
+        let mut r = FRect::default();
         // SAFETY: valid handle and out pointer.
         if unsafe { ffi::ink_page_bound(self.ptr(), page as c_int, &mut r) } < 0 {
-            return Err(self.error(&format!("page {page}")));
+            return Err(self.error(format_args!("page {page}")));
         }
-        Ok(FRect::new(r.x0, r.y0, r.x1, r.y1))
+        Ok(r)
     }
 
     fn list(&mut self, page: usize) -> Result<(*mut ffi::InkList, FRect)> {
@@ -198,17 +190,16 @@ impl RawDoc {
             l.tick = tick;
             return Ok((l.list.as_ptr(), l.bounds));
         }
-        let mut r = ffi::InkRect::default();
+        let mut bounds = FRect::default();
         // SAFETY: valid handle and out pointer.
-        let list = unsafe { ffi::ink_list_new(self.ptr(), page as c_int, &mut r) };
-        let list = NonNull::new(list).ok_or_else(|| self.error(&format!("page {page}")))?;
+        let list = unsafe { ffi::ink_list_new(self.ptr(), page as c_int, &mut bounds) };
+        let list = NonNull::new(list).ok_or_else(|| self.error(format_args!("page {page}")))?;
         while self.lists.len() >= self.max_lists {
             let oldest = self.lists.iter().enumerate().min_by_key(|(_, l)| l.tick).map(|(i, _)| i).unwrap_or(0);
             let old = self.lists.swap_remove(oldest);
             // SAFETY: the list came from this document and is dropped once.
             unsafe { ffi::ink_list_drop(self.ptr(), old.list.as_ptr()) };
         }
-        let bounds = FRect::new(r.x0, r.y0, r.x1, r.y1);
         self.lists.push(CachedList { page, list, bounds, tick });
         Ok((list.as_ptr(), bounds))
     }
@@ -218,106 +209,101 @@ impl RawDoc {
         self.lists.len()
     }
 
-    /// Draws `page` with `ctm` into `dst` (8-bit gray, `area.w * area.h` bytes, white
-    /// background), which covers device pixels `area`.
-    pub fn render(&mut self, page: usize, ctm: &Matrix, area: Rect, dst: &mut [u8]) -> Result<()> {
+    /// Draws `page` with `ctm` into `dst` (8-bit gray, white background), which covers
+    /// device pixels `area`: `area.h` rows of `area.w` bytes, `stride` bytes apart.
+    pub fn render(&mut self, page: usize, ctm: &Matrix, area: Rect, stride: usize, dst: &mut [u8]) -> Result<()> {
         let (w, h) = (area.w as usize, area.h as usize);
         if w == 0 || h == 0 {
             return Ok(());
         }
-        assert!(dst.len() >= w * h, "render buffer too small");
+        let need = (h - 1).checked_mul(stride).and_then(|n| n.checked_add(w));
+        assert!(stride >= w && need.is_some_and(|n| dst.len() >= n), "render buffer too small");
+        let stride = c_int::try_from(stride).map_err(|_| DocError::Format(format!("row stride {stride} too large")))?;
         let (list, _) = self.list(page)?;
-        // SAFETY: list belongs to this document; dst has w*h bytes.
+        // SAFETY: list belongs to this document; dst holds h rows of w bytes, stride apart.
         let rc = unsafe {
-            ffi::ink_render(self.ptr(), list, ctm.m.as_ptr(), area.x, area.y, w as c_int, h as c_int, dst.as_mut_ptr())
+            ffi::ink_render(self.ptr(), list, ctm.m.as_ptr(), area.x, area.y, w as c_int, h as c_int, stride, dst.as_mut_ptr())
         };
         if rc < 0 {
-            return Err(self.error(&format!("render page {page}")));
+            return Err(self.error(format_args!("render page {page}")));
         }
         Ok(())
     }
 
-    /// Structured text of `page` in reading order.
-    pub fn text(&mut self, page: usize) -> Result<Vec<RawChar>> {
-        let (list, _) = self.list(page)?;
-        let mut out: *mut ffi::InkChar = std::ptr::null_mut();
-        let mut n: c_int = 0;
-        // SAFETY: valid handle/list and out pointers.
-        if unsafe { ffi::ink_text(self.ptr(), list, &mut out, &mut n) } < 0 {
-            return Err(self.error(&format!("text of page {page}")));
+    /// The records of a shim call that hands out an array: `call` fills the pointer and the
+    /// count (< 0: error, and the shim left nothing to free), `free` releases the array.
+    ///
+    /// # Safety
+    ///
+    /// `call` must be such a shim call on this document and `free` its matching free.
+    unsafe fn records<T, R>(
+        &self,
+        what: std::fmt::Arguments,
+        call: impl FnOnce(*mut *mut T, *mut c_int) -> c_int,
+        free: unsafe extern "C" fn(*mut T, c_int),
+        map: impl FnMut(&T) -> R,
+    ) -> Result<Vec<R>> {
+        let (mut out, mut n) = (std::ptr::null_mut(), 0);
+        if call(&mut out, &mut n) < 0 {
+            return Err(self.error(what));
         }
-        let chars = if out.is_null() || n <= 0 {
+        let items = if out.is_null() || n <= 0 {
             Vec::new()
         } else {
-            // SAFETY: the shim returned n initialised entries.
-            let slice = unsafe { std::slice::from_raw_parts(out, n as usize) };
-            slice
-                .iter()
-                .map(|c| RawChar {
-                    c: char::from_u32(c.c as u32).unwrap_or('\u{fffd}'),
-                    rect: FRect::new(c.x0, c.y0, c.x1, c.y1),
-                    line: c.line as u32,
-                    block: c.block as u32,
-                })
-                .collect()
+            // SAFETY: the shim returned `n` initialised records at `out`.
+            unsafe { std::slice::from_raw_parts(out, n as usize) }.iter().map(map).collect()
         };
-        // SAFETY: allocated by the shim with malloc.
-        unsafe { ffi::ink_free(out.cast()) };
-        Ok(chars)
+        // SAFETY: the array came from `call` and is freed once, by its own free function.
+        unsafe { free(out, n) };
+        Ok(items)
+    }
+
+    /// Structured text of `page` in reading order.
+    pub fn text(&mut self, page: usize) -> Result<Vec<RawChar>> {
+        let (list, doc) = (self.list(page)?.0, self.ptr());
+        let ch = |c: &ffi::InkChar| RawChar {
+            c: char::from_u32(c.c as u32).unwrap_or('\u{fffd}'),
+            rect: c.rect,
+            line: c.line as u32,
+        };
+        // SAFETY: ink_text on this document and one of its lists, freed with ink_text_free.
+        unsafe {
+            self.records(format_args!("text of page {page}"), |o, n| ffi::ink_text(doc, list, o, n), ffi::ink_text_free, ch)
+        }
     }
 
     /// The outline, depth first.
     pub fn outline(&mut self) -> Result<Vec<RawOutline>> {
-        let mut out: *mut ffi::InkOutlineItem = std::ptr::null_mut();
-        let mut n: c_int = 0;
-        // SAFETY: valid handle and out pointers.
-        if unsafe { ffi::ink_outline(self.ptr(), &mut out, &mut n) } < 0 {
-            return Err(self.error("outline"));
+        let item = |it: &ffi::InkOutlineItem| RawOutline {
+            level: it.level.clamp(0, 255) as u8,
+            page: (it.page >= 0).then_some(it.page as usize),
+            x: it.x,
+            y: it.y,
+            title: owned(it.title).unwrap_or_default(),
+            uri: owned(it.uri),
+        };
+        let doc = self.ptr();
+        // SAFETY: ink_outline on this document, freed with ink_outline_free.
+        unsafe {
+            self.records(format_args!("outline"), |o, n| ffi::ink_outline(doc, o, n), ffi::ink_outline_free, item)
         }
-        let mut items = Vec::new();
-        if !out.is_null() && n > 0 {
-            // SAFETY: n initialised entries.
-            for it in unsafe { std::slice::from_raw_parts(out, n as usize) } {
-                items.push(RawOutline {
-                    level: it.level.clamp(0, 255) as u8,
-                    page: (it.page >= 0).then_some(it.page as usize),
-                    x: it.x,
-                    y: it.y,
-                    title: owned(it.title).unwrap_or_default(),
-                    uri: owned(it.uri),
-                });
-            }
-        }
-        // SAFETY: allocated by the shim; freed once.
-        unsafe { ffi::ink_outline_free(out, n) };
-        Ok(items)
     }
 
     /// Links on `page`.
     pub fn links(&mut self, page: usize) -> Result<Vec<RawLink>> {
-        let mut out: *mut ffi::InkLinkItem = std::ptr::null_mut();
-        let mut n: c_int = 0;
-        // SAFETY: valid handle and out pointers.
-        if unsafe { ffi::ink_links(self.ptr(), page as c_int, &mut out, &mut n) } < 0 {
-            return Err(self.error(&format!("links of page {page}")));
+        let link = |it: &ffi::InkLinkItem| RawLink {
+            rect: it.rect,
+            uri: owned(it.uri).unwrap_or_default(),
+            external: it.external != 0,
+            page: (it.page >= 0).then_some(it.page as usize),
+            x: it.x,
+            y: it.y,
+        };
+        let (doc, at) = (self.ptr(), page as c_int);
+        // SAFETY: ink_links on this document, freed with ink_links_free.
+        unsafe {
+            self.records(format_args!("links of page {page}"), |o, n| ffi::ink_links(doc, at, o, n), ffi::ink_links_free, link)
         }
-        let mut items = Vec::new();
-        if !out.is_null() && n > 0 {
-            // SAFETY: n initialised entries.
-            for it in unsafe { std::slice::from_raw_parts(out, n as usize) } {
-                items.push(RawLink {
-                    rect: FRect::new(it.x0, it.y0, it.x1, it.y1),
-                    uri: owned(it.uri).unwrap_or_default(),
-                    external: it.external != 0,
-                    page: (it.page >= 0).then_some(it.page as usize),
-                    x: it.x,
-                    y: it.y,
-                });
-            }
-        }
-        // SAFETY: allocated by the shim; freed once.
-        unsafe { ffi::ink_links_free(out, n) };
-        Ok(items)
     }
 }
 

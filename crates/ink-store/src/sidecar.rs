@@ -29,7 +29,7 @@
 //! `rinky.json`, then the prototype's `BOOK.rinky` position, then the defaults
 //! are used.
 
-use crate::{load_recovering, os_bytes, os_from_bytes, save_with_backup, LoadSource, Result, StoreError};
+use crate::{load_recovering, os_bytes, os_from_bytes, parse_json, save_with_backup, LoadSource, Recovered, Result, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::ffi::{OsStr, OsString};
@@ -367,57 +367,14 @@ pub struct LoadReport {
     pub errors: Vec<String>,
 }
 
-fn parse_state(b: &[u8]) -> std::result::Result<BookState, String> {
-    serde_json::from_slice(b).map_err(|e| e.to_string())
+/// True if `key` names a typed field of `T` rather than a key its flattened `extra`
+/// keeps: a key in `extra` with such a name would be written twice (serde refuses
+/// duplicate fields), so `save` drops it. Asked of `T` itself: the key alone, set to
+/// `null`, is read into a field or refused by one, or lands in `extra`.
+fn is_field<T: serde::de::DeserializeOwned>(key: &str, extra: impl Fn(&T) -> &Map<String, Value>) -> bool {
+    let probe = Value::Object(Map::from_iter([(key.to_string(), Value::Null)]));
+    serde_json::from_value::<T>(probe).map_or(true, |t| !extra(&t).contains_key(key))
 }
-
-/// JSON keys of the typed fields of [`BookState`] (a key in [`BookState::extra`] with one
-/// of these names would be written twice; `save` drops it). Checked by a test against
-/// the serialized struct.
-pub(crate) const BOOK_STATE_FIELDS: &[&str] = &[
-    "version",
-    "md5",
-    "position",
-    "page",
-    "pages",
-    "percent",
-    "status",
-    "rating",
-    "review",
-    "highlights",
-    "bookmarks",
-    "last_opened",
-    "settings",
-    "plugins",
-    "imported_from",
-];
-
-/// JSON keys of the typed fields of [`BookSettings`] (see [`BOOK_STATE_FIELDS`]).
-pub(crate) const BOOK_SETTINGS_FIELDS: &[&str] = &[
-    "font_px",
-    "font_family",
-    "line_spacing",
-    "margin_x",
-    "margin_top",
-    "margin_bottom",
-    "margin_version",
-    "paragraph_spacing",
-    "paragraph_indent",
-    "font_weight",
-    "justify",
-    "hyphenation",
-    "language",
-    "publisher_styles",
-    "embedded_fonts",
-    "rotation",
-    "night_mode",
-    "flash_every",
-    "zoom",
-    "crop",
-    "contrast",
-    "footer",
-    "header",
-];
 
 fn finite(v: Option<f32>) -> Option<f32> {
     v.filter(|x| x.is_finite())
@@ -448,7 +405,7 @@ pub fn value_depth(v: &Value) -> usize {
 /// Never moved aside or written: it may belong to another format of the same title.
 fn shared_sidecar(book: &Path) -> Option<BookState> {
     let file = legacy_sidecar_path(book);
-    let state = [file.clone(), crate::backup_path(&file)].iter().find_map(|f| std::fs::read(f).ok().and_then(|b| parse_state(&b).ok()))?;
+    let state = [file.clone(), crate::backup_path(&file)].iter().find_map(|f| std::fs::read(f).ok().and_then(|b| parse_json::<BookState>(&b).ok()))?;
     let belongs = match state.md5.as_deref() {
         Some(m) => crate::partial_md5(book).is_ok_and(|own| own == m),
         None => !has_sibling_with_same_sdr(book),
@@ -506,12 +463,15 @@ impl BookState {
     /// moved aside and listed in the report. Only I/O errors (not bad content) are
     /// errors: also a `.sdr` that is a file, or a sidecar that is a directory.
     pub fn load_report(book: &Path) -> Result<LoadReport> {
-        let path = sidecar_path(book);
-        let r = load_recovering(&path, parse_state)?;
+        // Every file but the prototype's is in the `.sdr` folder. A book no reader has saved
+        // has none, and its files are not looked for one by one (each look is a round trip
+        // on the Kindle's FUSE store).
+        let sdr = !std::fs::metadata(sidecar_dir(book)).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        let r = if sdr { load_recovering(&sidecar_path(book), parse_json::<BookState>)? } else { Recovered::default() };
         let (state, source) = match (r.value, r.source) {
             (Some(s), LoadSource::Primary | LoadSource::Temp) => (s, StateSource::Sidecar),
             (Some(s), _) => (s, StateSource::Backup),
-            (None, _) => match shared_sidecar(book) {
+            (None, _) => match sdr.then(|| shared_sidecar(book)).flatten() {
                 Some(s) => (s, StateSource::SharedSidecar),
                 None => match legacy_position(book) {
                     Some(p) => (BookState { position: Some(p), ..BookState::default() }, StateSource::Legacy),
@@ -533,7 +493,7 @@ impl BookState {
         s.version = Self::VERSION;
         s.percent = finite(s.percent);
         let shallow = |_: &String, v: &mut Value| value_depth(v) <= MAX_VALUE_DEPTH;
-        s.extra.retain(|k, v| !BOOK_STATE_FIELDS.contains(&k.as_str()) && shallow(k, v));
+        s.extra.retain(|k, v| !is_field::<BookState>(k, |s| &s.extra) && shallow(k, v));
         s.plugins.retain(|name, p| match p.as_object_mut() {
             Some(values) => {
                 values.retain(shallow);
@@ -545,7 +505,7 @@ impl BookState {
             h.quads.retain(Quad::is_finite);
         }
         let st = &mut s.settings;
-        st.extra.retain(|k, v| !BOOK_SETTINGS_FIELDS.contains(&k.as_str()) && shallow(k, v));
+        st.extra.retain(|k, v| !is_field::<BookSettings>(k, |s| &s.extra) && shallow(k, v));
         if st.crop.is_some_and(|c| c.iter().any(|v| !v.is_finite())) {
             st.crop = None;
         }
@@ -567,8 +527,8 @@ impl BookState {
     pub fn save(&self, book: &Path) -> Result<()> {
         let s = self.sanitized();
         let json = serde_json::to_vec_pretty(&s).map_err(|e| StoreError::Format(e.to_string()))?;
-        parse_state(&json).map_err(|e| StoreError::Invalid(format!("sidecar for {} would not load again: {e}", book.display())))?;
-        save_with_backup(&sidecar_path(book), &json, |b| parse_state(b).is_ok())
+        parse_json::<BookState>(&json).map_err(|e| StoreError::Invalid(format!("sidecar for {} would not load again: {e}", book.display())))?;
+        save_with_backup(&sidecar_path(book), &json, |b| parse_json::<BookState>(b).is_ok())
     }
 
     /// Adds a highlight; one with the same start and end replaces the old one.
@@ -673,16 +633,11 @@ mod tests {
     }
 
     #[test]
-    fn field_lists_match_the_structs() {
+    fn typed_fields_are_told_from_extra_keys() {
         let keys = |v: serde_json::Value| {
             let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
             k.sort();
             k
-        };
-        let sorted = |l: &[&str]| {
-            let mut v: Vec<String> = l.iter().map(|s| s.to_string()).collect();
-            v.sort();
-            v
         };
         let full_settings = BookSettings {
             font_px: Some(1.0),
@@ -710,7 +665,7 @@ mod tests {
             header: Some(crate::settings::HeaderStyle::Chapter),
             extra: Map::new(),
         };
-        assert_eq!(keys(serde_json::to_value(&full_settings).unwrap()), sorted(BOOK_SETTINGS_FIELDS));
+        assert!(keys(serde_json::to_value(&full_settings).unwrap()).iter().all(|k| is_field::<BookSettings>(k, |s| &s.extra)));
         let mut full = BookState {
             version: 2,
             md5: Some("m".into()),
@@ -728,7 +683,10 @@ mod tests {
         full.plugins.insert("p".into(), serde_json::json!(1));
         full.highlights.push(Highlight::default());
         full.bookmarks.push(Bookmark::default());
-        assert_eq!(keys(serde_json::to_value(&full).unwrap()), sorted(BOOK_STATE_FIELDS));
+        assert!(keys(serde_json::to_value(&full).unwrap()).iter().all(|k| is_field::<BookState>(k, |s| &s.extra)));
+        for (key, of_state, of_settings) in [("font_px", false, true), ("version", true, false), ("highlight", false, false), ("", false, false)] {
+            assert_eq!((is_field::<BookState>(key, |s| &s.extra), is_field::<BookSettings>(key, |s| &s.extra)), (of_state, of_settings), "{key}");
+        }
     }
 
     #[test]
@@ -828,6 +786,23 @@ mod tests {
         let mut names: Vec<String> = std::fs::read_dir(sidecar_dir(&epub)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, ["rinky.epub.json", "rinky.json", "rinky.pdf.json"]);
+    }
+
+    /// Without a `.sdr` folder only the prototype's file is read; a `.sdr` that is a file
+    /// is still an error, and an empty folder gives the defaults.
+    #[test]
+    fn a_missing_or_odd_sdr_folder() {
+        let dir = TempDir::new("sidecar-sdr");
+        let book = dir.path().join("s.epub");
+        std::fs::write(dir.path().join("s.epub.rinky"), "1 2 3").unwrap();
+        assert_eq!(BookState::load_report(&book).unwrap().source, StateSource::Legacy);
+        std::fs::write(sidecar_dir(&book), b"not a folder").unwrap();
+        assert!(BookState::load(&book).is_err());
+        std::fs::remove_file(sidecar_dir(&book)).unwrap();
+        std::fs::remove_file(dir.path().join("s.epub.rinky")).unwrap();
+        std::fs::create_dir(sidecar_dir(&book)).unwrap();
+        let r = BookState::load_report(&book).unwrap();
+        assert_eq!((r.state, r.source), (BookState::default(), StateSource::Default));
     }
 
     #[test]

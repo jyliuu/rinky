@@ -39,11 +39,50 @@ impl HostCtx<'_> {
         self.setting(key)?.as_u64()
     }
 
+    /// Stores keyboard answer `text`, trimmed, as setting `key` with the value `value`
+    /// makes of it. A blank answer stores nothing; an `Err` from `value` is shown as a
+    /// toast instead. True when stored.
+    pub fn set_from_input(&mut self, key: &str, text: &str, value: impl FnOnce(&str) -> std::result::Result<Value, String>) -> Result<bool> {
+        let t = text.trim();
+        if t.is_empty() {
+            return Ok(false);
+        }
+        match value(t) {
+            Ok(v) => self.storage()?.set(key, v).map(|_| true),
+            Err(m) => self.toast(&m).map(|_| false),
+        }
+    }
+
     /// Opens a menu of `(label, action)` items (owned or borrowed strings), see
     /// [`UiRequest::Menu`]. Needs the `ui` permission.
     pub fn menu<L: Into<String>, A: Into<String>>(&mut self, id: u32, title: &str, items: impl IntoIterator<Item = (L, A)>) -> Result<()> {
         let items = items.into_iter().map(|(l, a)| (l.into(), a.into())).collect();
         self.ui()?.request(UiRequest::Menu { id, title: title.into(), items });
+        Ok(())
+    }
+
+    /// A toast ([`UiHost::toast`](crate::UiHost::toast)). Needs the `ui` permission.
+    pub fn toast(&mut self, text: &str) -> Result<()> {
+        self.ui()?.toast(text);
+        Ok(())
+    }
+
+    /// Keyboard input ([`UiHost::input`](crate::UiHost::input)). Needs the `ui` permission.
+    pub fn input(&mut self, id: u32, prompt: &str, initial: &str) -> Result<()> {
+        self.ui()?.input(id, prompt, initial);
+        Ok(())
+    }
+
+    /// A dialog ([`UiHost::dialog`](crate::UiHost::dialog)). Needs the `ui` permission.
+    pub fn dialog(&mut self, id: u32, title: &str, body: &str, buttons: &[(&str, &str)]) -> Result<()> {
+        self.ui()?.dialog(id, title, body, buttons);
+        Ok(())
+    }
+
+    /// The Markdown viewer ([`UiHost::view_markdown`](crate::UiHost::view_markdown)).
+    /// Needs the `ui` permission.
+    pub fn view_markdown(&mut self, id: u32, title: &str, markdown: &str) -> Result<()> {
+        self.ui()?.view_markdown(id, title, markdown);
         Ok(())
     }
 }
@@ -108,6 +147,13 @@ impl<J> Requests<J> {
     /// The jobs in flight.
     pub fn jobs(&self) -> impl Iterator<Item = &J> {
         self.0.values().map(|p| &p.job)
+    }
+
+    /// Cancels every request in flight ([`HostCtx::cancel_request`]) and forgets it.
+    pub fn cancel_all(&mut self, cx: &mut HostCtx) {
+        for (id, _) in self.0.drain() {
+            cx.cancel_request(id);
+        }
     }
 
     /// Takes event `ev` of request `id`: `Response` records the status and content type;
@@ -210,6 +256,36 @@ mod tests {
     }
 
     #[test]
+    fn ui_shortcuts_queue_requests_and_need_the_permission() {
+        let (mut ui, mut st) = (UiQueue::default(), MemoryStorage::default());
+        let perms = [Permission::Ui];
+        let mut cx = HostCtx::new(&mut ui, &mut st, &perms);
+        cx.toast("t").unwrap();
+        cx.input(1, "p", "i").unwrap();
+        cx.dialog(2, "d", "b", &[("OK", "ok")]).unwrap();
+        cx.view_markdown(3, "v", "*m*").unwrap();
+        let ids: Vec<Option<u32>> = ui.0.iter().map(UiRequest::id).collect();
+        assert_eq!(ids, [None, Some(1), Some(2), Some(3)]);
+        assert_eq!(ui.0[0], UiRequest::Toast { text: "t".into() });
+        let mut cx = HostCtx::new(&mut ui, &mut st, &[]);
+        assert!(matches!(cx.toast("t"), Err(PluginError::Permission(_))));
+        assert!(matches!(cx.view_markdown(3, "v", "m"), Err(PluginError::Permission(_))));
+    }
+
+    #[test]
+    fn input_answers_become_settings() {
+        let (mut ui, mut st) = (UiQueue::default(), MemoryStorage::default());
+        let perms = [Permission::Ui, Permission::Storage];
+        let mut cx = HostCtx::new(&mut ui, &mut st, &perms);
+        let port = |t: &str| t.parse::<u16>().map(|p| json!(p)).map_err(|_| format!("{t} is not a port"));
+        assert!(!cx.set_from_input("port", "  ", port).unwrap(), "a blank answer stores nothing");
+        assert!(!cx.set_from_input("port", " x ", port).unwrap());
+        assert!(cx.set_from_input("port", " 22 ", port).unwrap());
+        assert_eq!(cx.setting_u64("port"), Some(22));
+        assert_eq!(ui.0, [UiRequest::Toast { text: "x is not a port".into() }]);
+    }
+
+    #[test]
     fn markdown_escape_and_cut() {
         assert_eq!(md_escape("a*b_[c]"), "a\\*b\\_\\[c\\]");
         assert_eq!(md_escape("1. first"), "1\\. first");
@@ -252,5 +328,9 @@ mod tests {
         let (p, answer) = r.event(b, &HttpEvent::Error("timed out".into())).unwrap();
         assert_eq!((p.job, p.status, p.success(), answer), ("b", 0, false, Err("timed out".into())));
         assert_eq!(r.jobs().count(), 0);
+        let c = r.start(&mut cx, Request::get("https://x.org/c"), StreamMode::Chunks, "c").unwrap();
+        r.cancel_all(&mut cx);
+        assert_eq!(r.jobs().count(), 0);
+        assert!(r.event(c, &HttpEvent::Done { body: None }).is_none(), "cancelled requests are forgotten");
     }
 }

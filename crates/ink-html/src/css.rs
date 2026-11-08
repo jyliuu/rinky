@@ -189,13 +189,8 @@ fn tok_of(t: &Token, p: &mut Parser, depth: u32) -> Option<Tok> {
         Token::Delim(c) => Tok::Delim(*c),
         Token::Function(name) => {
             let name = name.to_ascii_lowercase();
-            let args = if depth < MAX_NESTING {
-                p.parse_nested_block(|p| -> Result<Vec<Tok>, cssparser::ParseError<'_, ()>> { Ok(collect_tokens_at(p, depth + 1)) }).unwrap_or_default()
-            } else {
-                // Too deep: the arguments are skipped.
-                let _ = p.parse_nested_block(|_| -> Result<(), cssparser::ParseError<'_, ()>> { Ok(()) });
-                Vec::new()
-            };
+            // Too deep: the arguments are skipped.
+            let args = nested(p, |p| if depth < MAX_NESTING { collect_tokens_at(p, depth + 1) } else { Vec::new() });
             if name == "url" {
                 if let Some(Tok::Str(s)) = args.first() {
                     return Some(Tok::Url(s.clone()));
@@ -209,8 +204,10 @@ fn tok_of(t: &Token, p: &mut Parser, depth: u32) -> Option<Tok> {
     })
 }
 
-fn collect_tokens(p: &mut Parser) -> Vec<Tok> {
-    collect_tokens_at(p, 0)
+/// Runs `f` on the contents of the block whose start `p` just read; the rest of the block
+/// is skipped, and a failure gives `T::default()`.
+fn nested<T: Default>(p: &mut Parser, f: impl FnOnce(&mut Parser) -> T) -> T {
+    p.parse_nested_block(|p| -> Result<T, cssparser::ParseError<'_, ()>> { Ok(f(p)) }).unwrap_or_default()
 }
 
 fn collect_tokens_at(p: &mut Parser, depth: u32) -> Vec<Tok> {
@@ -245,7 +242,7 @@ fn declarations(p: &mut Parser) -> Vec<Declaration> {
                     _ => return Ok(None),
                 };
                 p.expect_colon()?;
-                let mut value = collect_tokens(p);
+                let mut value = collect_tokens_at(p, 0);
                 let mut important = false;
                 let n = value.len();
                 if n >= 2 && value[n - 2] == Tok::Delim('!') && matches!(&value[n - 1], Tok::Ident(i) if i.eq_ignore_ascii_case("important")) {
@@ -311,34 +308,20 @@ fn rules_into(p: &mut Parser, sheet: &mut Stylesheet, depth: u32) {
                             sheet.imports.push(url);
                         }
                     }
-                    ("media", true) => {
-                        let apply = media_applies(&prelude) && depth < MAX_NESTING;
-                        let _ = p.parse_nested_block(|p| -> Result<(), cssparser::ParseError<'_, ()>> {
+                    ("media" | "supports", true) => {
+                        let apply = depth < MAX_NESTING && (name == "supports" || media_applies(&prelude));
+                        nested(p, |p| {
                             if apply {
                                 rules_into(p, sheet, depth + 1);
                             }
-                            Ok(())
-                        });
-                    }
-                    ("supports", true) => {
-                        let _ = p.parse_nested_block(|p| -> Result<(), cssparser::ParseError<'_, ()>> {
-                            if depth < MAX_NESTING {
-                                rules_into(p, sheet, depth + 1);
-                            }
-                            Ok(())
                         });
                     }
                     ("font-face", true) => {
-                        let decls = p
-                            .parse_nested_block(|p| -> Result<Vec<Declaration>, cssparser::ParseError<'_, ()>> { Ok(declarations(p)) })
-                            .unwrap_or_default();
-                        if let Some(ff) = font_face(&decls) {
+                        if let Some(ff) = font_face(&nested(p, declarations)) {
                             sheet.font_faces.push(ff);
                         }
                     }
-                    (_, true) => {
-                        let _ = p.parse_nested_block(|_| -> Result<(), cssparser::ParseError<'_, ()>> { Ok(()) });
-                    }
+                    (_, true) => nested(p, |_| ()),
                     _ => {}
                 }
             }
@@ -349,9 +332,7 @@ fn rules_into(p: &mut Parser, sheet: &mut Stylesheet, depth: u32) {
                     break;
                 }
                 let prelude = p.slice(start..end).to_string();
-                let decls = p
-                    .parse_nested_block(|p| -> Result<Vec<Declaration>, cssparser::ParseError<'_, ()>> { Ok(declarations(p)) })
-                    .unwrap_or_default();
+                let decls = nested(p, declarations);
                 let selectors = parse_selector_list(&prelude);
                 if !selectors.is_empty() && !decls.is_empty() {
                     sheet.rules.push(StyleRule { selectors, decls });
@@ -370,7 +351,7 @@ fn prelude_until_block(p: &mut Parser) -> (cssparser::SourcePosition, bool) {
             Ok(Token::CurlyBracketBlock) => return (end, true),
             Ok(Token::Semicolon) | Err(_) => return (end, false),
             Ok(Token::Function(_)) | Ok(Token::ParenthesisBlock) | Ok(Token::SquareBracketBlock) => {
-                let _ = p.parse_nested_block(|_| -> Result<(), cssparser::ParseError<'_, ()>> { Ok(()) });
+                nested(p, |_| ());
                 end = p.position();
             }
             Ok(_) => end = p.position(),
@@ -381,7 +362,7 @@ fn prelude_until_block(p: &mut Parser) -> (cssparser::SourcePosition, bool) {
 fn import_url(prelude: &str) -> Option<String> {
     let mut input = ParserInput::new(prelude);
     let mut p = Parser::new(&mut input);
-    let first = collect_tokens(&mut p);
+    let first = collect_tokens_at(&mut p, 0);
     let url = match first.first()? {
         Tok::Url(u) | Tok::Str(u) => u.clone(),
         _ => return None,
@@ -636,22 +617,20 @@ impl SelParser<'_> {
         }
         let name = name.to_ascii_lowercase();
         self.skip_ws();
-        let op_start = self.i;
-        let op = match self.peek()? {
-            b']' => {
+        let op: fn(String) -> AttrOp = match (self.peek()?, self.s.get(self.i + 1) == Some(&b'=')) {
+            (b']', _) => {
                 self.i += 1;
                 return Some(AttrSel { name, op: AttrOp::Exists, case_insensitive: false });
             }
-            b'=' => {
-                self.i += 1;
-                "="
-            }
-            b'~' | b'|' | b'^' | b'$' | b'*' if self.s.get(self.i + 1) == Some(&b'=') => {
-                self.i += 2;
-                &self.src[op_start..op_start + 2]
-            }
+            (b'=', _) => AttrOp::Eq,
+            (b'~', true) => AttrOp::Includes,
+            (b'|', true) => AttrOp::DashMatch,
+            (b'^', true) => AttrOp::Prefix,
+            (b'$', true) => AttrOp::Suffix,
+            (b'*', true) => AttrOp::Substring,
             _ => return None,
         };
+        self.i += if self.s[self.i] == b'=' { 1 } else { 2 };
         self.skip_ws();
         let value = match self.peek()? {
             q @ (b'"' | b'\'') => {
@@ -680,15 +659,7 @@ impl SelParser<'_> {
             return None;
         }
         self.i += 1;
-        let op = match op {
-            "=" => AttrOp::Eq(value),
-            "~=" => AttrOp::Includes(value),
-            "|=" => AttrOp::DashMatch(value),
-            "^=" => AttrOp::Prefix(value),
-            "$=" => AttrOp::Suffix(value),
-            _ => AttrOp::Substring(value),
-        };
-        Some(AttrSel { name, op, case_insensitive: ci })
+        Some(AttrSel { name, op: op(value), case_insensitive: ci })
     }
 }
 
@@ -724,21 +695,14 @@ fn unescape(s: &str) -> String {
 }
 
 fn compound_specificity(c: &Compound) -> (u32, u32, u32) {
-    let mut a = c.ids.len() as u32;
-    let mut b = (c.classes.len() + c.attrs.len()) as u32;
-    let mut t = c.tag.is_some() as u32;
-    for p in &c.pseudos {
-        match p {
-            Pseudo::Not(inner) => {
-                let (x, y, z) = compound_specificity(inner);
-                a += x;
-                b += y;
-                t += z;
-            }
-            _ => b += 1,
+    let own = (c.ids.len() as u32, (c.classes.len() + c.attrs.len()) as u32, c.tag.is_some() as u32);
+    c.pseudos.iter().fold(own, |(a, b, t), p| match p {
+        Pseudo::Not(inner) => {
+            let (x, y, z) = compound_specificity(inner);
+            (a + x, b + y, t + z)
         }
-    }
-    (a, b, t)
+        _ => (a, b + 1, t),
+    })
 }
 
 /// Parses one complex selector; `None` when it uses unsupported syntax.
@@ -757,41 +721,24 @@ pub fn parse_selector(src: &str) -> Option<Selector> {
             return None;
         }
         let ws = p.skip_ws();
-        match p.peek() {
+        comb = match p.peek() {
             None => break,
-            Some(b'>') => {
+            Some(c @ (b'>' | b'+' | b'~')) => {
                 p.i += 1;
-                comb = Combinator::Child;
                 p.skip_ws();
+                match c {
+                    b'>' => Combinator::Child,
+                    b'+' => Combinator::NextSibling,
+                    _ => Combinator::SubsequentSibling,
+                }
             }
-            Some(b'+') => {
-                p.i += 1;
-                comb = Combinator::NextSibling;
-                p.skip_ws();
-            }
-            Some(b'~') => {
-                p.i += 1;
-                comb = Combinator::SubsequentSibling;
-                p.skip_ws();
-            }
-            Some(_) if ws => comb = Combinator::Descendant,
+            Some(_) if ws => Combinator::Descendant,
             Some(_) => return None,
-        }
+        };
     }
-    let (mut a, mut b, mut t) = (0, 0, 0);
-    for (_, c) in &left_to_right {
-        let (x, y, z) = compound_specificity(c);
-        a += x;
-        b += y;
-        t += z;
-    }
+    let (a, b, t) = left_to_right.iter().map(|(_, c)| compound_specificity(c)).fold((0, 0, 0), |s, x| (s.0 + x.0, s.1 + x.1, s.2 + x.2));
     // parts right to left; the combinator stored with part i links it to part i+1 (its left).
-    let n = left_to_right.len();
-    let mut parts = Vec::with_capacity(n);
-    for i in (0..n).rev() {
-        let comb_to_left = left_to_right[i].0;
-        parts.push((left_to_right[i].1.clone(), comb_to_left));
-    }
+    let parts = left_to_right.into_iter().rev().map(|(comb, c)| (c, comb)).collect();
     Some(Selector { parts, specificity: (a.min(1023) << 20) | (b.min(1023) << 10) | t.min(1023) })
 }
 
@@ -819,64 +766,46 @@ pub trait SelectorElement: Sized + Copy {
     }
 }
 
+/// `s`, lowercased when `fold`.
+fn folded(s: &str, fold: bool) -> std::borrow::Cow<'_, str> {
+    if fold { s.to_lowercase().into() } else { s.into() }
+}
+
 fn attr_matches(a: &AttrSel, v: Option<&str>) -> bool {
-    let Some(v) = v else { return false };
-    let owned;
-    let v = if a.case_insensitive {
-        owned = v.to_lowercase();
-        owned.as_str()
-    } else {
-        v
-    };
-    let norm = |s: &str| if a.case_insensitive { s.to_lowercase() } else { s.to_string() };
+    let norm = |s| folded(s, a.case_insensitive);
+    let Some(v) = v.map(norm) else { return false };
     match &a.op {
         AttrOp::Exists => true,
         AttrOp::Eq(x) => v == norm(x),
-        AttrOp::Includes(x) => v.split_ascii_whitespace().any(|w| w == norm(x)),
+        AttrOp::Includes(x) => {
+            let x = norm(x);
+            v.split_ascii_whitespace().any(|w| w == x)
+        }
         AttrOp::DashMatch(x) => {
             let x = norm(x);
             v == x || v.starts_with(&format!("{x}-"))
         }
-        AttrOp::Prefix(x) => !x.is_empty() && v.starts_with(&norm(x)),
-        AttrOp::Suffix(x) => !x.is_empty() && v.ends_with(&norm(x)),
-        AttrOp::Substring(x) => !x.is_empty() && v.contains(&norm(x)),
+        AttrOp::Prefix(x) => !x.is_empty() && v.starts_with(&*norm(x)),
+        AttrOp::Suffix(x) => !x.is_empty() && v.ends_with(&*norm(x)),
+        AttrOp::Substring(x) => !x.is_empty() && v.contains(&*norm(x)),
     }
 }
 
 /// True when `e` matches compound `c`.
 pub fn matches_compound<E: SelectorElement>(c: &Compound, e: E) -> bool {
-    if let Some(t) = &c.tag {
-        if !e.local_name().eq_ignore_ascii_case(t) {
-            return false;
-        }
-    }
-    if !c.ids.is_empty() && !c.ids.iter().all(|i| e.id() == Some(i.as_str())) {
-        return false;
-    }
-    if !c.classes.iter().all(|cl| e.has_class(cl)) {
-        return false;
-    }
-    if !c.attrs.iter().all(|a| attr_matches(a, e.attr(&a.name))) {
-        return false;
-    }
-    c.pseudos.iter().all(|p| match p {
-        Pseudo::FirstChild => e.prev_sibling().is_none(),
-        Pseudo::LastChild => e.next_sibling().is_none(),
-        Pseudo::OnlyChild => e.prev_sibling().is_none() && e.next_sibling().is_none(),
-        Pseudo::FirstOfType => {
-            let mut s = e.prev_sibling();
-            while let Some(x) = s {
-                if x.local_name() == e.local_name() {
-                    return false;
-                }
-                s = x.prev_sibling();
-            }
-            true
-        }
-        Pseudo::Root => e.is_root(),
-        Pseudo::Link => e.local_name() == "a" && e.attr("href").is_some(),
-        Pseudo::Not(inner) => !matches_compound(inner, e),
-    })
+    c.tag.as_ref().is_none_or(|t| e.local_name().eq_ignore_ascii_case(t))
+        && c.ids.iter().all(|i| e.id() == Some(i.as_str()))
+        && c.classes.iter().all(|cl| e.has_class(cl))
+        && c.attrs.iter().all(|a| attr_matches(a, e.attr(&a.name)))
+        && c.pseudos.iter().all(|p| match p {
+            Pseudo::FirstChild => e.prev_sibling().is_none(),
+            Pseudo::LastChild => e.next_sibling().is_none(),
+            Pseudo::OnlyChild => e.prev_sibling().is_none() && e.next_sibling().is_none(),
+            Pseudo::FirstOfType => std::iter::successors(e.prev_sibling(), |x| x.prev_sibling()).all(|x| x.local_name() != e.local_name()),
+            Pseudo::Root => e.is_root(),
+            Pseudo::Link => e.local_name() == "a" && e.attr("href").is_some(),
+            Pseudo::Not(inner) => !matches_compound(inner, e),
+        })
 }
 
 /// True when `e` matches selector `s`.
@@ -975,6 +904,27 @@ mod tests {
         assert_eq!(parse_selector("*").unwrap().specificity, 0);
         let a = parse_selector("[lang|=en]").unwrap();
         assert_eq!(a.parts[0].0.attrs[0].op, AttrOp::DashMatch("en".into()));
+        // Every combinator, a descendant after a child combinator, every attribute test.
+        let s = parse_selector("a > b c+d ~ e[x][x=1][x~='2'][x^=3][x$=\\34][x*=\"5\" i]").unwrap();
+        let combs: Vec<Combinator> = s.parts.iter().map(|p| p.1).collect();
+        use Combinator::*;
+        assert_eq!(combs, [SubsequentSibling, NextSibling, Descendant, Child, Descendant]);
+        let ops: Vec<&AttrOp> = s.parts[0].0.attrs.iter().map(|a| &a.op).collect();
+        let v = |s: &str| s.to_string();
+        assert_eq!(
+            ops,
+            [
+                &AttrOp::Exists,
+                &AttrOp::Eq(v("1")),
+                &AttrOp::Includes(v("2")),
+                &AttrOp::Prefix(v("3")),
+                &AttrOp::Suffix(v("4")),
+                &AttrOp::Substring(v("5")),
+            ]
+        );
+        assert!(s.parts[0].0.attrs[5].case_insensitive && !s.parts[0].0.attrs[4].case_insensitive);
+        assert_eq!(s.specificity, (6 << 10) | 5);
+        assert!(parse_selector("a >").is_none() && parse_selector("[x!=1]").is_none() && parse_selector("[x~1]").is_none());
     }
 
     #[test]

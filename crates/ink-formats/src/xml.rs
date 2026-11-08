@@ -6,6 +6,7 @@
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::borrow::Cow;
 
 /// One node of the tree.
 #[derive(Clone, Debug, PartialEq)]
@@ -21,8 +22,6 @@ pub enum Node {
 pub struct Element {
     /// Local name (`section` for `fb:section`).
     pub name: String,
-    /// Prefix of the qualified name, if any (`epub` for `epub:type`-style element names).
-    pub prefix: Option<String>,
     /// Attributes: (local name, qualified name, value).
     pub attrs: Vec<Attr>,
     /// Children in order.
@@ -214,13 +213,6 @@ pub fn escape_text(s: &str) -> String {
     out
 }
 
-/// Escapes an attribute value for XML (double-quoted).
-pub fn escape_attr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    escape_into(&mut out, s, true);
-    out
-}
-
 /// True for characters allowed in XML 1.0 documents.
 pub fn is_xml_char(c: char) -> bool {
     matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
@@ -238,99 +230,38 @@ pub fn is_xml_name(name: &str) -> bool {
 
 /// Replacement text for HTML named entities that XHTML books use without a DTD.
 pub fn html_entity(name: &str) -> Option<&'static str> {
-    const LATIN1: [&str; 96] = [
-        "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml", "copy", "ordf", "laquo", "not",
-        "shy", "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro", "para", "middot", "cedil", "sup1",
-        "ordm", "raquo", "frac14", "frac12", "frac34", "iquest", "Agrave", "Aacute", "Acirc", "Atilde", "Auml",
-        "Aring", "AElig", "Ccedil", "Egrave", "Eacute", "Ecirc", "Euml", "Igrave", "Iacute", "Icirc", "Iuml", "ETH",
-        "Ntilde", "Ograve", "Oacute", "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute", "Ucirc",
-        "Uuml", "Yacute", "THORN", "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig", "ccedil",
-        "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde", "ograve", "oacute",
-        "ocirc", "otilde", "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc", "uuml", "yacute", "thorn", "yuml",
+    // The XML entities come first: quick-xml asks for `amp` and `lt` too.
+    const NAMES: [&str; 159] = [
+        "amp", "lt", "gt", "quot", "apos", "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml",
+        "copy", "ordf", "laquo", "not", "shy", "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro", "para",
+        "middot", "cedil", "sup1", "ordm", "raquo", "frac14", "frac12", "frac34", "iquest", "Agrave", "Aacute", "Acirc",
+        "Atilde", "Auml", "Aring", "AElig", "Ccedil", "Egrave", "Eacute", "Ecirc", "Euml", "Igrave", "Iacute", "Icirc",
+        "Iuml", "ETH", "Ntilde", "Ograve", "Oacute", "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute",
+        "Ucirc", "Uuml", "Yacute", "THORN", "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig",
+        "ccedil", "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde", "ograve",
+        "oacute", "ocirc", "otilde", "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc", "uuml", "yacute", "thorn",
+        "yuml", "mdash", "ndash", "hellip", "lsquo", "rsquo", "sbquo", "ldquo", "rdquo", "bdquo", "lsaquo", "rsaquo",
+        "dagger", "Dagger", "bull", "prime", "Prime", "permil", "euro", "trade", "larr", "rarr", "uarr", "darr", "harr",
+        "minus", "infin", "ne", "le", "ge", "asymp", "ensp", "emsp", "thinsp", "zwnj", "zwj", "lrm", "rlm", "OElig",
+        "oelig", "Scaron", "scaron", "Yuml", "fnof", "circ", "tilde", "alpha", "beta", "gamma", "delta", "pi", "sigma",
+        "omega", "Omega", "loz", "spades", "clubs", "hearts", "diams",
     ];
-    const LATIN1_CHARS: &str = "\u{a0}¡¢£¤¥¦§¨©ª«¬\u{ad}®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ";
-    if let Some(i) = LATIN1.iter().position(|n| *n == name) {
-        let (start, c) = LATIN1_CHARS.char_indices().nth(i)?;
-        return LATIN1_CHARS.get(start..start + c.len_utf8());
-    }
-    Some(match name {
-        "amp" => "&",
-        "lt" => "<",
-        "gt" => ">",
-        "quot" => "\"",
-        "apos" => "'",
-        "mdash" => "—",
-        "ndash" => "–",
-        "hellip" => "…",
-        "lsquo" => "‘",
-        "rsquo" => "’",
-        "sbquo" => "‚",
-        "ldquo" => "“",
-        "rdquo" => "”",
-        "bdquo" => "„",
-        "lsaquo" => "‹",
-        "rsaquo" => "›",
-        "dagger" => "†",
-        "Dagger" => "‡",
-        "bull" => "•",
-        "prime" => "′",
-        "Prime" => "″",
-        "permil" => "‰",
-        "euro" => "€",
-        "trade" => "™",
-        "larr" => "←",
-        "rarr" => "→",
-        "uarr" => "↑",
-        "darr" => "↓",
-        "harr" => "↔",
-        "minus" => "−",
-        "infin" => "∞",
-        "ne" => "≠",
-        "le" => "≤",
-        "ge" => "≥",
-        "asymp" => "≈",
-        "ensp" => "\u{2002}",
-        "emsp" => "\u{2003}",
-        "thinsp" => "\u{2009}",
-        "zwnj" => "\u{200c}",
-        "zwj" => "\u{200d}",
-        "lrm" => "\u{200e}",
-        "rlm" => "\u{200f}",
-        "OElig" => "Œ",
-        "oelig" => "œ",
-        "Scaron" => "Š",
-        "scaron" => "š",
-        "Yuml" => "Ÿ",
-        "fnof" => "ƒ",
-        "circ" => "ˆ",
-        "tilde" => "˜",
-        "alpha" => "α",
-        "beta" => "β",
-        "gamma" => "γ",
-        "delta" => "δ",
-        "pi" => "π",
-        "sigma" => "σ",
-        "omega" => "ω",
-        "Omega" => "Ω",
-        "loz" => "◊",
-        "spades" => "♠",
-        "clubs" => "♣",
-        "hearts" => "♥",
-        "diams" => "♦",
-        _ => return None,
-    })
+    const CHARS: &str = "&<>\"'\u{a0}¡¢£¤¥¦§¨©ª«¬\u{ad}®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ—–…‘’‚“”„‹›†‡•′″‰€™←→↑↓↔−∞≠≤≥≈\u{2002}\u{2003}\u{2009}\u{200c}\u{200d}\u{200e}\u{200f}ŒœŠšŸƒˆ˜αβγδπσωΩ◊♠♣♥♦";
+    let i = NAMES.iter().position(|n| *n == name)?;
+    let (start, c) = CHARS.char_indices().nth(i)?;
+    CHARS.get(start..start + c.len_utf8())
 }
 
-fn qname_parts(raw: &[u8]) -> (Option<String>, String) {
-    let s = String::from_utf8_lossy(raw);
-    match s.split_once(':') {
-        Some((p, l)) => (Some(p.to_string()), l.to_string()),
-        None => (None, s.into_owned()),
+/// The local name of a qualified element name: after the first `:`.
+pub(crate) fn local_name(raw: &[u8]) -> Cow<'_, str> {
+    match String::from_utf8_lossy(raw) {
+        Cow::Borrowed(s) => Cow::Borrowed(s.split_once(':').map_or(s, |(_, l)| l)),
+        Cow::Owned(s) => Cow::Owned(s.split_once(':').map_or(s.as_str(), |(_, l)| l).to_string()),
     }
 }
 
 fn element_of(e: &BytesStart) -> Element {
-    let (prefix, name) = qname_parts(e.name().as_ref());
+    let name = local_name(e.name().as_ref()).into_owned();
     let mut attrs = Vec::new();
     for a in e.attributes().with_checks(false).flatten() {
         let qname = String::from_utf8_lossy(a.key.as_ref()).into_owned();
@@ -341,7 +272,7 @@ fn element_of(e: &BytesStart) -> Element {
         };
         attrs.push(Attr { local, qname, value });
     }
-    Element { name, prefix, attrs, children: Vec::new() }
+    Element { name, attrs, children: Vec::new() }
 }
 
 /// Deepest element nesting kept by [`parse`] (and accepted by [`is_well_formed`]).
@@ -394,7 +325,8 @@ pub fn parse(xml: &str) -> Result<Element, String> {
                     skipped -= 1;
                     continue;
                 }
-                let (_, name) = qname_parts(e.name().as_ref());
+                let q = e.name();
+                let name = local_name(q.as_ref());
                 // Close up to the matching open element (tolerates unclosed children).
                 // The search is bounded by MAX_DEPTH.
                 if let Some(pos) = stack.iter().rposition(|el| el.name == name) {
@@ -642,7 +574,9 @@ mod tests {
     #[test]
     fn escaping_and_entities() {
         assert_eq!(escape_text("a<b&c>\u{1}"), "a&lt;b&amp;c&gt;");
-        assert_eq!(escape_attr("\"x\"\n"), "&quot;x&quot;&#10;");
+        let mut attr = String::new();
+        push_attr(&mut attr, "a", "\"x\"\n");
+        assert_eq!(attr, " a=\"&quot;x&quot;&#10;\"");
         let mut out = String::from("<p");
         push_attr(&mut out, "title", "a\tb & ü\u{0}");
         out.push('>');
@@ -682,6 +616,10 @@ mod tests {
         assert_eq!(html_entity("yuml"), Some("ÿ"));
         assert_eq!(html_entity("mdash"), Some("—"));
         assert_eq!(html_entity("nope"), None);
+        // Names and characters stay aligned across the whole table.
+        for (name, want) in [("amp", "&"), ("apos", "'"), ("shy", "\u{ad}"), ("thorn", "þ"), ("ensp", "\u{2002}"), ("rlm", "\u{200f}"), ("diams", "♦")] {
+            assert_eq!(html_entity(name), Some(want), "{name}");
+        }
         assert!(is_xml_name("mbp:pagebreak") && !is_xml_name("1a") && !is_xml_name("a\"b"));
     }
 

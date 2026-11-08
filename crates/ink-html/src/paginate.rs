@@ -107,8 +107,6 @@ pub struct MapState {
     pub claims: Vec<Claim>,
     /// Set when every chapter is known.
     pub complete: bool,
-    /// Layout generation the map belongs to.
-    pub generation: u64,
     /// The background threads have finished (map complete and the cache file written,
     /// or cancelled).
     pub finished: bool,
@@ -152,23 +150,23 @@ impl MapState {
 
     /// Pages known in the contiguous prefix of chapters, and whether that is all.
     pub fn known_pages(&self) -> (usize, bool) {
-        let mut n = 0;
-        for c in &self.chapters {
-            match c {
-                Some(p) => n += p.keys.len(),
-                None => return (n, false),
-            }
-        }
-        (n, true)
+        let n = self.chapters.iter().map_while(Option::as_ref).map(|c| c.keys.len()).sum();
+        (n, self.chapters.iter().all(Option::is_some))
     }
 
     /// First global page of chapter `i`, when all chapters before it are known.
     pub fn first_page(&self, i: usize) -> Option<usize> {
-        let mut n = 0;
-        for c in &self.chapters[..i] {
-            n += c.as_ref()?.keys.len();
-        }
-        Some(n)
+        self.chapters[..i].iter().map(|c| Some(c.as_ref()?.keys.len())).sum()
+    }
+
+    /// [`MapState::first_page`] of every chapter, in one pass.
+    pub fn first_pages(&self) -> Vec<Option<usize>> {
+        let firsts = self.chapters.iter().scan(Some(0), |next, c| {
+            let first = *next;
+            *next = first.zip(c.as_ref()).map(|(n, c)| n + c.keys.len());
+            Some(first)
+        });
+        firsts.collect()
     }
 
     /// (chapter, local page) of global page `p`, within the known prefix.
@@ -259,17 +257,9 @@ pub fn start_full_layout(book: Arc<Book>, params: Params, fonts: crate::fonts::F
             return;
         }
         let t = std::time::Instant::now();
-        let mut fb = fonts.build();
-        let mut unknown = false;
-        let mut size = |p: &str| {
-            let (s, known) = shared_image_size_known(&book, p);
-            unknown |= !known;
-            s
-        };
-        let mut env = Env { fonts: &mut fb, image_size: &mut size };
-        let lay = layout_chapter(&book, c, &params, &mut env);
+        let (lay, known) = with_shared_env(&book, &mut fonts.build(), |env| layout_chapter(&book, c, &params, env));
         let pages = paginate(&lay, params.content_h);
-        if unknown || sh.cancel.load(Ordering::Relaxed) {
+        if !known || sh.cancel.load(Ordering::Relaxed) {
             log::info!("ink-html: background layout of spine item {c} dropped (image sizes unknown here or cancelled)");
             return;
         }
@@ -415,15 +405,20 @@ pub fn resolve_interest(book: &Book, i: usize, keys: &[(u32, u32)], interest: &I
     }
 }
 
-/// The image size used off the main thread (cached sizes, else the shared loader), and
-/// whether it is known: false when the image is neither in the size cache nor readable
-/// here (no shared loader). A layout made with an unknown size is not the foreground's
-/// layout.
-pub fn shared_image_size_known(book: &Book, path: &str) -> (Option<(u32, u32)>, bool) {
-    match book.image_size(path, book.loader.as_deref().map(|l| l as &dyn ink_doc::ResourceLoader)) {
-        Some(size) => (size, true),
-        None => (None, false),
-    }
+/// Runs `f` with an [`Env`] for a thread off the main thread: image sizes come from the
+/// size cache, else the shared loader. Also returns whether every size was known (false
+/// when an image is neither cached nor readable here); a layout made with an unknown
+/// size is not the foreground's layout.
+fn with_shared_env<R>(book: &Book, fonts: &mut crate::fonts::FontBook, f: impl FnOnce(&mut Env) -> R) -> (R, bool) {
+    let mut known = true;
+    let loader = book.loader.as_deref().map(|l| l as &dyn ink_doc::ResourceLoader);
+    let mut size = |p: &str| {
+        let s = book.image_size(p, loader);
+        known &= s.is_some();
+        s.flatten()
+    };
+    let r = f(&mut Env { fonts, image_size: &mut size });
+    (r, known)
 }
 
 /// The cache file for a book and layout.
@@ -525,7 +520,6 @@ const EVICT_BYTES: usize = 256 * 1024;
 pub struct Worker {
     /// Shared state.
     pub shared: Arc<Shared>,
-    handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// Work the last background thread runs on the shared state when it ends.
@@ -569,7 +563,6 @@ impl Worker {
             m.claims.resize(n, Claim::Free);
         }
         log::info!("ink-html: background pagination of {} spine items on {threads} threads", book.chapters.len());
-        let mut handles = Vec::with_capacity(threads);
         for t in 0..threads {
             let (book, params, fonts, sh, interest) = (book.clone(), params.clone(), fonts.clone(), shared.clone(), interest.clone());
             // Every thread gets the path: whichever ends last writes the file (when the
@@ -587,20 +580,11 @@ impl Worker {
                     lower_priority();
                     paginate_claimed(&book, &params, &fonts, &sh, &interest);
                 });
-            match spawned {
-                Ok(h) => handles.push(h),
-                Err(e) => log::warn!("ink-html: cannot start paginator thread {t}: {e}"),
+            if let Err(e) = spawned {
+                log::warn!("ink-html: cannot start paginator thread {t}: {e}");
             }
         }
-        Worker { shared, handles }
-    }
-
-    /// Stops the threads (waits for the chapters in progress).
-    pub fn stop(&mut self) {
-        self.shared.cancel.store(true, Ordering::Relaxed);
-        for h in self.handles.drain(..) {
-            let _ = h.join();
-        }
+        Worker { shared }
     }
 
     /// Waits until the threads have finished (map complete, cache file written) or
@@ -629,16 +613,9 @@ fn paginate_claimed(book: &Book, params: &Params, fonts: &crate::fonts::FontSour
         }
         let Some(i) = sh.map.lock().unwrap().claim_next() else { return };
         let was_parsed = book.has_chapter(i);
-        let mut unknown = false;
-        let mut size = |p: &str| {
-            let (s, known) = shared_image_size_known(book, p);
-            unknown |= !known;
-            s
-        };
-        let mut env = Env { fonts: &mut fb, image_size: &mut size };
-        let pages = chapter_pages(book, i, params, &mut env);
+        let (pages, known) = with_shared_env(book, &mut fb, |env| chapter_pages(book, i, params, env));
         let mut m = sh.map.lock().unwrap();
-        if unknown {
+        if !known {
             // An image whose size only the foreground can read (the EPUB loader is not
             // shared and the prefill scan missed it): leave the chapter to the
             // foreground instead of storing a layout without the image.
@@ -759,5 +736,10 @@ mod tests {
         assert_eq!(m.locate(2), None);
         assert_eq!(m.first_page(2), None);
         assert_eq!(m.first_page(1), Some(2));
+        assert_eq!(m.first_pages(), vec![Some(0), Some(2), None]);
+        let full = MapState { chapters: vec![chapters[0].clone(), chapters[1].clone(), chapters[0].clone()], ..Default::default() };
+        assert_eq!(full.known_pages(), (4, true));
+        assert_eq!(full.first_pages(), vec![Some(0), Some(2), Some(2)]);
+        assert_eq!((full.first_page(3), full.locate(3)), (Some(4), Some((2, 1))));
     }
 }

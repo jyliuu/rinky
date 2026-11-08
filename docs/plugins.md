@@ -414,7 +414,8 @@ A network plugin with a selection action. Worth reading for these patterns:
 
 ## For screen authors
 
-The hook API is `crate::plugin_host::hooks` (functions taking the screen's `AppCtx`).
+The hook API is `cx.plugins` (the `PluginHost`) and `crate::plugin_host::hooks`
+(functions taking the screen's `AppCtx`).
 The app loop (`app.rs`) already does events, overlay painting, timers, network delivery
 and suspend/resume for every screen:
 
@@ -445,18 +446,18 @@ without and once with the overlay.
 
 | When | Call |
 | --- | --- |
-| after the first page is on the panel | `hooks::on_book_open(cx, doc, &path)`, then `hooks::on_page_change` for that page |
-| `paint` of a new page, after `doc.set_current_page(page)` and before `render_page` (status texts then land in the same update) | `hooks::on_page_change(cx, doc, page)` |
-| a selection was made | `hooks::on_selection(cx, doc, &sel)`; the popup adds `hooks::selection_actions(cx)` |
-| reader menu | add `hooks::reader_menu(cx)` (show `entry.label`) |
+| after the first page is on the panel | `cx.plugins.book_open(doc, &path)`, then `cx.plugins.page_change` for that page |
+| `paint` of a new page, after `doc.set_current_page(page)` and before `render_page` (status texts then land in the same update) | `cx.plugins.page_change(doc, page)` |
+| a selection was made | `cx.plugins.selection(doc, &sel)`; the popup adds `cx.plugins.selection_actions()` |
+| reader menu | add `hooks::entries(cx.plugins, EntryKind::ReaderMenu)` (show `entry.label`) |
 | an entry was picked | `hooks::run_entry(cx, &entry, Some(doc), None)` |
 | a gesture the reader does not use | `if hooks::gesture(cx, &g, Some(doc)) { /* used */ }` |
 | status bar | `hooks::status_text(cx, StatusSlot::Left/Center/Right)` |
-| `on_exit` | `hooks::on_close(cx, doc)` |
+| `on_exit` | `cx.plugins.book_close(doc)` |
 | `AppScreen::document` | return the open book |
 
 Suspend/resume need no reader call (the app loop does them with `document()`);
-`hooks::on_suspend`/`on_resume` exist for screens that sleep on their own and are no-ops
+`cx.plugins.suspend`/`resume` exist for screens that sleep on their own and are no-ops
 when repeated.
 
 ### Library and home (`screens/library`)
@@ -464,7 +465,7 @@ when repeated.
 - The navigation bar items and the overflow menu rows of plugin library entries come
   from `cx.plugins.library_entries()`; saved ids are read with
   `plugin_entries::nav_chosen`. A pick runs `cx.plugins.trigger(plugin, id, None)`.
-- A book's long-press menu adds `hooks::library_actions(cx)`; a pick calls
+- A book's long-press menu adds `hooks::entries(cx.plugins, EntryKind::Library)`; a pick calls
   `hooks::run_entry(cx, &entry, None, Some(&book_path))`.
 
 ### Settings (`screens/settings`)
@@ -480,7 +481,7 @@ when repeated.
   `enabled`, `errors`). Enable/disable (stored in `plugins/disabled.txt`, applied at the
   next start): `plugin_host::set_user_enabled(&paths, name, on)`; on the command line
   `rinky plugins [list|enable NAME|disable NAME]`.
-- Notifications: `cx.plugins.notifications()`, `hooks::unread_notifications(cx)`,
+- Notifications: `cx.plugins.notifications()`, `cx.plugins.unread_notifications()`,
   `cx.plugins.mark_notifications_read()`.
 
 ### Overlay behaviour

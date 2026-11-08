@@ -158,47 +158,31 @@ pub fn write_pdf(pages: &[PdfPage], outline: &[PdfOutline], info: &[(&str, &str)
         }
     }
     if let Some(root) = outline_root {
-        // Parent of each item: the nearest earlier item one level up, else the root.
+        // Parent of each item: the nearest earlier item one level up, else the root (m).
         let m = outline.len();
-        let mut parent = vec![None; m];
-        for k in 0..m {
-            parent[k] = (0..k).rev().find(|&j| outline[j].level < outline[k].level);
+        let up = |k: usize| (0..k).rev().find(|&j| outline[j].level < outline[k].level).unwrap_or(m);
+        let parent: Vec<usize> = (0..m).map(up).collect();
+        let mut kids = vec![Vec::new(); m + 1];
+        for (k, &p) in parent.iter().enumerate() {
+            kids[p].push(k);
         }
-        let children = |p: Option<usize>| -> Vec<usize> { (0..m).filter(|&k| parent[k] == p).collect() };
-        let descendants = |k: usize| -> usize {
-            (k + 1..m).take_while(|&j| outline[j].level > outline[k].level).count()
-        };
-        let top = children(None);
-        objs[root] = format!(
-            "<< /Type /Outlines /First {} 0 R /Last {} 0 R /Count {} >>",
-            item_obj(top[0]),
-            item_obj(*top.last().unwrap_or(&top[0])),
-            m
-        );
-        for k in 0..m {
-            let sibs = children(parent[k]);
+        let ends = |v: &[usize]| format!("/First {} 0 R /Last {} 0 R", item_obj(v[0]), item_obj(v[v.len() - 1]));
+        objs[root] = format!("<< /Type /Outlines {} /Count {m} >>", ends(&kids[m]));
+        for (k, item) in outline.iter().enumerate() {
+            let (p, sibs) = (parent[k], &kids[parent[k]]);
             let pos = sibs.iter().position(|&s| s == k).unwrap_or(0);
-            let mut d = format!(
-                "<< /Title ({}) /Parent {} 0 R /Dest {}",
-                escape(&outline[k].title),
-                parent[k].map(item_obj).unwrap_or(root),
-                dest(outline[k].page, outline[k].top)
-            );
+            let parent_obj = if p == m { root } else { item_obj(p) };
+            let title = escape(&item.title);
+            let mut d = format!("<< /Title ({title}) /Parent {parent_obj} 0 R /Dest {}", dest(item.page, item.top));
             if pos > 0 {
                 let _ = write!(d, " /Prev {} 0 R", item_obj(sibs[pos - 1]));
             }
             if pos + 1 < sibs.len() {
                 let _ = write!(d, " /Next {} 0 R", item_obj(sibs[pos + 1]));
             }
-            let kids = children(Some(k));
-            if !kids.is_empty() {
-                let _ = write!(
-                    d,
-                    " /First {} 0 R /Last {} 0 R /Count {}",
-                    item_obj(kids[0]),
-                    item_obj(*kids.last().unwrap_or(&kids[0])),
-                    descendants(k)
-                );
+            if !kids[k].is_empty() {
+                let descendants = outline[k + 1..].iter().take_while(|o| o.level > item.level).count();
+                let _ = write!(d, " {} /Count {descendants}", ends(&kids[k]));
             }
             d.push_str(" >>");
             objs[item_obj(k)] = d;
@@ -337,54 +321,37 @@ fn crc32(data: &[u8]) -> u32 {
     c ^ 0xffff_ffff
 }
 
+/// Appends `(value, width in bytes)` fields, little-endian.
+fn le(out: &mut Vec<u8>, fields: &[(u32, usize)]) {
+    for &(v, n) in fields {
+        out.extend_from_slice(&v.to_le_bytes()[..n]);
+    }
+}
+
 /// A zip archive with stored (uncompressed) entries, in the given order.
 pub fn write_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut central = Vec::new();
     for (name, data) in entries {
-        let crc = crc32(data);
-        let off = out.len() as u32;
-        let le16 = |v: u16| v.to_le_bytes();
-        let le32 = |v: u32| v.to_le_bytes();
-        let mut local = Vec::new();
-        local.extend_from_slice(&le32(0x0403_4b50));
-        local.extend_from_slice(&le16(20));
-        local.extend_from_slice(&le16(0));
-        local.extend_from_slice(&le16(0)); // stored
-        local.extend_from_slice(&le16(0));
-        local.extend_from_slice(&le16(0x21));
-        local.extend_from_slice(&le32(crc));
-        local.extend_from_slice(&le32(data.len() as u32));
-        local.extend_from_slice(&le32(data.len() as u32));
-        local.extend_from_slice(&le16(name.len() as u16));
-        local.extend_from_slice(&le16(0));
-        local.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(&local);
+        let (len, off, crc, nlen) = (data.len() as u32, out.len() as u32, crc32(data), name.len() as u32);
+        // Shared by both headers: version 20, no flags, stored, time 0, date 0x21, CRC,
+        // compressed and plain size, name length.
+        let common = [(20, 2), (0, 2), (0, 2), (0, 2), (0x21, 2), (crc, 4), (len, 4), (len, 4), (nlen, 2)];
+        le(&mut out, &[(0x0403_4b50, 4)]);
+        le(&mut out, &common);
+        le(&mut out, &[(0, 2)]); // extra length
+        out.extend_from_slice(name.as_bytes());
         out.extend_from_slice(data);
-        central.extend_from_slice(&le32(0x0201_4b50));
-        central.extend_from_slice(&le16(20));
-        central.extend_from_slice(&le16(20));
-        central.extend_from_slice(&le16(0));
-        central.extend_from_slice(&le16(0));
-        central.extend_from_slice(&le16(0));
-        central.extend_from_slice(&le16(0x21));
-        central.extend_from_slice(&le32(crc));
-        central.extend_from_slice(&le32(data.len() as u32));
-        central.extend_from_slice(&le32(data.len() as u32));
-        central.extend_from_slice(&le16(name.len() as u16));
-        central.extend_from_slice(&[0; 12]); // extra, comment, disk, internal attr, external attr (2+2+2+2+4)
-        central.extend_from_slice(&le32(off));
+        le(&mut central, &[(0x0201_4b50, 4), (20, 2)]); // signature, made by version 20
+        le(&mut central, &common);
+        // Extra, comment, disk, internal attributes, external attributes, header offset.
+        le(&mut central, &[(0, 2), (0, 2), (0, 2), (0, 2), (0, 4), (off, 4)]);
         central.extend_from_slice(name.as_bytes());
     }
-    let cd_off = out.len() as u32;
+    let (count, size, cd_off) = (entries.len() as u32, central.len() as u32, out.len() as u32);
     out.extend_from_slice(&central);
-    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    out.extend_from_slice(&[0; 4]);
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
-    out.extend_from_slice(&cd_off.to_le_bytes());
-    out.extend_from_slice(&[0; 2]);
+    // End of central directory: signature, disk numbers, entry counts, size, offset, comment.
+    le(&mut out, &[(0x0605_4b50, 4), (0, 2), (0, 2), (count, 2), (count, 2), (size, 4), (cd_off, 4), (0, 2)]);
     out
 }
 
@@ -415,19 +382,9 @@ fn fill(px: &mut [u8], w: usize, x0: usize, y0: usize, x1: usize, y1: usize, v: 
 fn digit(px: &mut [u8], w: usize, x: usize, y: usize, dw: usize, dh: usize, d: u32) {
     let t = dw / 6;
     let half = dh / 2;
-    // a b c d e f g
-    let segs: [bool; 7] = match d {
-        0 => [true, true, true, true, true, true, false],
-        1 => [false, true, true, false, false, false, false],
-        2 => [true, true, false, true, true, false, true],
-        3 => [true, true, true, true, false, false, true],
-        4 => [false, true, true, false, false, true, true],
-        5 => [true, false, true, true, false, true, true],
-        6 => [true, false, true, true, true, true, true],
-        7 => [true, true, true, false, false, false, false],
-        8 => [true; 7],
-        _ => [true, true, true, true, false, true, true],
-    };
+    // Segments lit per digit, bit 0 = a .. bit 6 = g (anything above 9 draws a 9).
+    const SEGMENTS: [u8; 10] = [0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f];
+    let segs = SEGMENTS[(d as usize).min(9)];
     let rects = [
         (x, y, x + dw, y + t),                         // a
         (x + dw - t, y, x + dw, y + half),             // b
@@ -437,8 +394,8 @@ fn digit(px: &mut [u8], w: usize, x: usize, y: usize, dw: usize, dh: usize, d: u
         (x, y, x + t, y + half),                       // f
         (x, y + half - t / 2, x + dw, y + half + t / 2), // g
     ];
-    for (on, r) in segs.iter().zip(rects) {
-        if *on {
+    for (k, r) in rects.into_iter().enumerate() {
+        if segs >> k & 1 != 0 {
             fill(px, w, r.0, r.1, r.2, r.3, 0);
         }
     }

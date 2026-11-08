@@ -85,12 +85,6 @@ pub fn splash(lines: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The panic hook's on-screen note (`crash_log`: the crash log's file name).
-#[cfg(target_os = "linux")]
-fn show_crash_note(crash_log: &str) {
-    let _ = splash(&["rinky crashed - details in crash log", crash_log]);
-}
-
 /// Settings and paths from `RINKY_HOME` (default `/mnt/us/rinky`).
 pub fn load_settings() -> (Settings, Paths) {
     let paths = Paths { root: home_dir() };
@@ -195,13 +189,9 @@ fn script_steps(path: &Option<PathBuf>) -> anyhow::Result<Option<Vec<ink_device:
     }
 }
 
-fn open_device() -> anyhow::Result<ink_device::Device> {
-    open_device_with(true)
-}
-
-/// `device_sleep`: the device layer handles the power key, cover and inactivity
-/// (screensaver + suspend); `false` delivers `Key::Power` to the caller (spike).
-fn open_device_with(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
+/// The e-reader. `device_sleep`: the device layer handles the power key, cover and
+/// inactivity (screensaver + suspend); `false` delivers `Key::Power` to the caller (spike).
+fn open_device(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
     #[cfg(target_os = "linux")]
     {
         let mut opts = ink_device::ereader::ReaderOptions::default();
@@ -229,7 +219,7 @@ impl ink_device::services::Battery for SimBattery {
 
 fn open_sim_device(s: &SimArgs) -> anyhow::Result<ink_device::Device> {
     if s.kindle {
-        return open_device();
+        return open_device(true);
     }
     let mut device = open_host_device(s)?;
     device.battery = Box::new(SimBattery);
@@ -355,7 +345,10 @@ pub fn main(args: Vec<String>) -> i32 {
         ink_device::trace::spawn_exit_signal_thread(crate::logging::on_exit_signal);
         #[cfg(target_os = "linux")]
         if matches!(cmd, Some("run" | "library")) {
-            crate::logging::set_crash_screen(show_crash_note);
+            // The panic hook's on-screen note, with the crash log's file name.
+            crate::logging::set_crash_screen(|crash_log| {
+                let _ = splash(&["rinky crashed - details in crash log", crash_log]);
+            });
         }
     }
     let code = match run(&args) {
@@ -519,13 +512,10 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
             render_pngs_with(Path::new(&rest[0]), Path::new(&rest[1]), count, &settings)?;
             Ok(0)
         }
-        Some("run") if !rest.is_empty() => {
+        Some(cmd @ ("run" | "library")) if cmd == "library" || !rest.is_empty() => {
+            let route = if cmd == "run" { Route::Reader(PathBuf::from(&rest[0])) } else { Route::Library };
             let (settings, paths) = load_settings();
-            run_app(open_device()?, settings, paths, Route::Reader(PathBuf::from(&rest[0])))
-        }
-        Some("library") => {
-            let (settings, paths) = load_settings();
-            run_app(open_device()?, settings, paths, Route::Library)
+            run_app(open_device(true)?, settings, paths, route)
         }
         Some("sim") => {
             let (rest, s) = parse_sim_args(rest)?;
@@ -613,7 +603,7 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
                     other => anyhow::bail!("unknown spike-suspend option {other}"),
                 }
             }
-            crate::spike::run(open_device_with(false)?, image.as_deref(), limit, suspend)?;
+            crate::spike::run(open_device(false)?, image.as_deref(), limit, suspend)?;
             Ok(0)
         }
         Some("koreader-sync") => koreader_sync(rest),

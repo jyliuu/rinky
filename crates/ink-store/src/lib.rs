@@ -185,6 +185,23 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// JSON `bytes` as a `T`, or the parse error as text (a parser for [`load_recovering`]).
+pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, String> {
+    serde_json::from_slice(bytes).map_err(|e| e.to_string())
+}
+
+/// Runs the SQLite query `sql` with `params` and collects `row` of every result row.
+pub(crate) fn query_all<T, C: FromIterator<T>>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    row: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+) -> Result<C> {
+    let mut st = conn.prepare_cached(sql)?;
+    let rows = st.query_map(params, row)?;
+    Ok(rows.collect::<rusqlite::Result<C>>()?)
+}
+
 /// `path` with `suffix` appended to its file name (`a.json` + `.old` = `a.json.old`).
 pub(crate) fn with_suffix(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
@@ -201,7 +218,7 @@ pub fn backup_path(path: &Path) -> PathBuf {
 pub const BACKUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Where a recovered state file came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LoadSource {
     /// The file itself.
     Primary,
@@ -212,6 +229,7 @@ pub enum LoadSource {
     /// Its `.old` backup (the file was missing or did not parse).
     Backup,
     /// Neither existed or parsed.
+    #[default]
     Missing,
 }
 
@@ -289,7 +307,7 @@ fn newest_temp_copy<T>(path: &Path, not_before: Option<SystemTime>, parse: &impl
 }
 
 /// Result of [`load_recovering`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Recovered<T> {
     /// The parsed value, if any file parsed.
     pub value: Option<T>,

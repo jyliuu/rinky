@@ -134,14 +134,6 @@ impl SettingsPopup {
         self.list.layout(area).into_iter().find(|(i, _)| self.list.rows[*i].action == action).map(|(_, r)| Rect::new(r.x, r.y - self.list.scroll, r.w, r.h))
     }
 
-    /// New rows (and the same title): the whole popup repaints.
-    pub fn set_rows(&mut self, rows: Vec<Row>) {
-        let scroll = self.list.scroll;
-        self.list = SettingsList::new(rows);
-        self.list.scroll = scroll;
-        self.fresh = true;
-    }
-
     /// A new note line: the whole popup repaints when it changed.
     pub fn set_note(&mut self, note: String) {
         if self.note != note {
@@ -213,15 +205,26 @@ impl Widget for SettingsPopup {
     }
 }
 
-/// The invisible layer under an open popup: a tap outside `popup` reports `action`;
-/// every other touch and gesture stops here, so the screen under it does not react.
-/// Draws nothing and refreshes nothing.
+/// The invisible layer under an open popup (or under the control center's panel): a tap
+/// outside `popup` reports `action`. Draws nothing and refreshes nothing; being added
+/// full screen must not refresh the whole screen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PopupCatcher {
     /// The popup's box.
     pub popup: Rect,
     /// Reported by a tap outside it.
     pub action: String,
+    /// Every other touch and gesture stops here, so the screen under it does not react.
+    /// The control center's backdrop ignores them instead: a touch on an empty part of
+    /// the panel then marks nothing dirty.
+    pub modal: bool,
+}
+
+impl PopupCatcher {
+    /// A modal catcher for a popup at `popup` that reports `action`.
+    pub fn new(popup: Rect, action: impl Into<String>) -> Self {
+        PopupCatcher { popup, action: action.into(), modal: true }
+    }
 }
 
 impl Widget for PopupCatcher {
@@ -238,7 +241,7 @@ impl Widget for PopupCatcher {
     fn event(&mut self, ev: &UiEvent, _b: Rect) -> EventResult {
         match ev {
             UiEvent::Gesture(Gesture::Tap { pos }) if !self.popup.contains(*pos) => EventResult::Action(self.action.clone()),
-            UiEvent::Gesture(_) | UiEvent::Touch(_) => EventResult::Handled,
+            UiEvent::Gesture(_) | UiEvent::Touch(_) if self.modal => EventResult::Handled,
             _ => EventResult::Ignored,
         }
     }
@@ -352,7 +355,7 @@ mod tests {
         assert_eq!(p.event(&tap(Point::new(close.x + 40, close.y + 40)), b), EventResult::Action(CLOSE.into()));
         // A tap on the title is taken (modal) and reports nothing.
         assert_eq!(p.event(&tap(Point::new(b.x + 40, b.y + 40)), b), EventResult::Handled);
-        let mut catcher = PopupCatcher { popup: b, action: "x".into() };
+        let mut catcher = PopupCatcher::new(b, "x");
         assert_eq!(catcher.event(&tap(Point::new(5, 5)), Rect::new(0, 0, 1272, 1696)), EventResult::Action("x".into()));
         assert_eq!(catcher.event(&tap(Point::new(b.x + 5, b.y + 5)), Rect::new(0, 0, 1272, 1696)), EventResult::Handled);
         // Too many rows for the area: as tall as the area, the list scrolls.

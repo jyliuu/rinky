@@ -106,11 +106,6 @@ impl SseParser {
         self.max_event_bytes
     }
 
-    /// Changes the limit (takes effect with the next byte).
-    pub fn set_max_event_bytes(&mut self, max: usize) {
-        self.max_event_bytes = max;
-    }
-
     /// True once an event went over the limit. The parser then has freed its buffers and
     /// ignores all further input ([`SseParser::feed`] returns nothing); events completed
     /// before the overflow were returned normally. [`SseParser::finish`] does not clear it.
@@ -273,11 +268,7 @@ pub struct SseReader<R> {
     cancel: Option<CancelToken>,
 }
 
-impl<R> std::fmt::Debug for SseReader<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SseReader").field("parser", &self.parser).field("unparsed", &(self.end - self.start)).field("eof", &self.eof).finish_non_exhaustive()
-    }
-}
+debug_fields!([R] SseReader<R>, "SseReader", |s| "parser": s.parser, "unparsed": s.end - s.start, "eof": s.eof);
 
 impl<R: Read> SseReader<R> {
     /// Wraps a body.
@@ -288,7 +279,7 @@ impl<R: Read> SseReader<R> {
     /// Sets the per-event limit ([`SseParser::max_event_bytes`]; default
     /// [`DEFAULT_MAX_EVENT_BYTES`]).
     pub fn max_event_bytes(mut self, max: usize) -> Self {
-        self.parser.set_max_event_bytes(max);
+        self.parser.max_event_bytes = max;
         self
     }
 
@@ -373,11 +364,7 @@ pub struct EventSource<'a> {
     pub activity: Option<NetActivity>,
 }
 
-impl std::fmt::Debug for EventSource<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EventSource").field("url", &self.request.url).field("last_event_id", &self.last_event_id).field("connections", &self.connections).finish_non_exhaustive()
-    }
-}
+debug_fields!([] EventSource<'_>, "EventSource", |s| "url": s.request.url, "last_event_id": s.last_event_id, "connections": s.connections);
 
 impl<'a> EventSource<'a> {
     /// An event source for `request` (normally a GET). Defaults: 3 s retry, 5 reconnects,

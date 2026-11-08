@@ -14,6 +14,12 @@ struct ink_doc {
 	char err[512];
 };
 
+static ink_rect to_ink(fz_rect r)
+{
+	ink_rect o = { r.x0, r.y0, r.x1, r.y1 };
+	return o;
+}
+
 static void copy_msg(char *dst, size_t len, const char *msg)
 {
 	if (!dst || len == 0)
@@ -160,11 +166,6 @@ int ink_metadata(ink_doc *d, const char *key, char *buf, size_t size)
 	return r < 0 ? 0 : r;
 }
 
-void ink_set_aa(ink_doc *d, int bits)
-{
-	fz_set_aa_level(d->ctx, bits);
-}
-
 int ink_page_bound(ink_doc *d, int page, ink_rect *out)
 {
 	fz_page *p = NULL;
@@ -182,10 +183,7 @@ int ink_page_bound(ink_doc *d, int page, ink_rect *out)
 		caught(d);
 		return -1;
 	}
-	out->x0 = r.x0;
-	out->y0 = r.y0;
-	out->x1 = r.x1;
-	out->y1 = r.y1;
+	*out = to_ink(r);
 	return 0;
 }
 
@@ -196,13 +194,7 @@ ink_list *ink_list_new(ink_doc *d, int page, ink_rect *bounds)
 	{
 		list = fz_new_display_list_from_page_number(d->ctx, d->doc, page);
 		if (bounds)
-		{
-			fz_rect r = fz_bound_display_list(d->ctx, list);
-			bounds->x0 = r.x0;
-			bounds->y0 = r.y0;
-			bounds->x1 = r.x1;
-			bounds->y1 = r.y1;
-		}
+			*bounds = to_ink(fz_bound_display_list(d->ctx, list));
 	}
 	fz_catch(d->ctx)
 	{
@@ -218,19 +210,22 @@ void ink_list_drop(ink_doc *d, ink_list *list)
 		fz_drop_display_list(d->ctx, list);
 }
 
-int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w, int h, unsigned char *dst)
+int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w, int h, int stride, unsigned char *dst)
 {
 	fz_pixmap *pix = NULL;
 	fz_device *dev = NULL;
 	fz_var(pix);
 	fz_var(dev);
-	if (w <= 0 || h <= 0 || !dst)
+	if (w <= 0 || h <= 0 || stride < w || !dst)
 		return 0;
 	fz_try(d->ctx)
 	{
 		fz_irect bbox = fz_make_irect(x, y, x + w, y + h);
 		fz_matrix ctm = fz_make_matrix(m[0], m[1], m[2], m[3], m[4], m[5]);
-		pix = fz_new_pixmap_with_bbox_and_data(d->ctx, fz_device_gray(d->ctx), bbox, NULL, 0, dst);
+		/* As fz_new_pixmap_with_bbox_and_data, with the caller's stride. */
+		pix = fz_new_pixmap_with_data(d->ctx, fz_device_gray(d->ctx), w, h, NULL, 0, stride, dst);
+		pix->x = x;
+		pix->y = y;
 		fz_clear_pixmap_with_value(d->ctx, pix, 255);
 		dev = fz_new_draw_device(d->ctx, fz_identity, pix);
 		fz_run_display_list(d->ctx, list, dev, ctm, fz_rect_from_irect(bbox), NULL);
@@ -252,13 +247,12 @@ int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w
 typedef struct {
 	ink_char *v;
 	int n, cap;
-	int line, block;
+	int line;
 	int oom;
 } char_vec;
 
 static void push_char(char_vec *cv, const fz_stext_char *ch)
 {
-	fz_rect r;
 	if (cv->oom)
 		return;
 	if (cv->n == cv->cap)
@@ -273,14 +267,9 @@ static void push_char(char_vec *cv, const fz_stext_char *ch)
 		cv->v = v;
 		cv->cap = cap;
 	}
-	r = fz_rect_from_quad(ch->quad);
 	cv->v[cv->n].c = ch->c;
-	cv->v[cv->n].x0 = r.x0;
-	cv->v[cv->n].y0 = r.y0;
-	cv->v[cv->n].x1 = r.x1;
-	cv->v[cv->n].y1 = r.y1;
+	cv->v[cv->n].r = to_ink(fz_rect_from_quad(ch->quad));
 	cv->v[cv->n].line = cv->line;
-	cv->v[cv->n].block = cv->block;
 	cv->n++;
 }
 
@@ -298,7 +287,6 @@ static void collect_blocks(char_vec *cv, fz_stext_block *block)
 					push_char(cv, ch);
 				cv->line++;
 			}
-			cv->block++;
 		}
 		else if (block->type == FZ_STEXT_BLOCK_STRUCT && block->u.s.down)
 			collect_blocks(cv, block->u.s.down->first_block);
@@ -339,9 +327,10 @@ int ink_text(ink_doc *d, ink_list *list, ink_char **out, int *n)
 	return 0;
 }
 
-void ink_free(void *p)
+void ink_text_free(ink_char *chars, int n)
 {
-	free(p);
+	(void)n;
+	free(chars);
 }
 
 static char *dup_str(const char *s)
@@ -491,10 +480,7 @@ int ink_links(ink_doc *d, int page, ink_link_item **out, int *n)
 				cap = ncap;
 			}
 			it = &v[count++];
-			it->x0 = l->rect.x0;
-			it->y0 = l->rect.y0;
-			it->x1 = l->rect.x1;
-			it->y1 = l->rect.y1;
+			it->r = to_ink(l->rect);
 			it->uri = dup_str(l->uri);
 			it->external = fz_is_external_link(d->ctx, l->uri);
 			it->page = -1;

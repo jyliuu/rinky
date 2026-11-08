@@ -105,7 +105,8 @@ fn anchors_in(chunk: &[u8]) -> Vec<usize> {
     out
 }
 
-fn part_name(i: usize) -> String {
+/// File name of chapter `i` (MOBI 6 and KF8).
+pub(crate) fn part_name(i: usize) -> String {
     format!("part{i:04}.xhtml")
 }
 

@@ -104,7 +104,7 @@ impl<'a> PaintCx<'a> {
     }
 
     /// Draws a shaped run inside the current clip (and inside `extra` when given).
-    fn put_run(&mut self, run: &ink_text::TextRun, x: f32, baseline: f32, value: u8, extra: Option<Rect>) -> f32 {
+    pub(crate) fn put_run(&mut self, run: &ink_text::TextRun, x: f32, baseline: f32, value: u8, extra: Option<Rect>) -> f32 {
         let clip = match (self.clip(), extra) {
             (Some(a), Some(b)) => Some(a.intersect(&b)),
             (a, b) => a.or(b),
@@ -123,7 +123,8 @@ impl<'a> PaintCx<'a> {
     /// Draws `text` centred in `r` at `px` (shaped: kerning, ligatures, fallback faces),
     /// cut with "…" when wider than `r`; inside the [`PaintCx::clip`].
     pub fn text_centered(&mut self, r: Rect, text: &str, px: f32, style: Style, value: u8) {
-        let run = self.fit_run(text, px, style, r.w as f32);
+        let run = self.fonts.shape(style, px, text);
+        let run = self.fit(run, text, style, r.w as f32);
         self.put_centered(r, &run, style, value);
     }
 
@@ -134,20 +135,13 @@ impl<'a> PaintCx<'a> {
         self.put_run(run, x, baseline, value, None);
     }
 
-    /// `text` shaped, or its [`PaintCx::ellipsize`]d form when wider than `max`.
-    fn fit_run(&mut self, text: &str, px: f32, style: Style, max: f32) -> ink_text::TextRun {
-        let run = self.fonts.shape(style, px, text);
-        self.fit(run, text, style, max)
-    }
-
     /// `run` (`text` shaped in `style`), or the shaped [`PaintCx::ellipsize`]d text when
     /// `run` is wider than `max`.
     fn fit(&mut self, run: ink_text::TextRun, text: &str, style: Style, max: f32) -> ink_text::TextRun {
         if run.width <= max {
             return run;
         }
-        let cut = self.cut_to_fit(text, run.px, style, max);
-        self.fonts.shape(style, run.px, &cut)
+        self.cut_to_fit(text, &run, style, max).1
     }
 
     /// Like [`PaintCx::draw_text_end`], but also nothing is drawn outside `clip` (for
@@ -189,46 +183,80 @@ impl<'a> PaintCx<'a> {
     /// Draws `text` left-aligned in `r` (vertically centred), cut with "…" when too wide;
     /// inside the [`PaintCx::clip`].
     pub fn text_left(&mut self, r: Rect, text: &str, px: f32, style: Style, value: u8) {
-        let baseline = self.baseline_in(r, px, style);
-        let run = self.fit_run(text, px, style, r.w as f32);
+        let run = self.fonts.shape(style, px, text);
+        self.put_left(r, run, text, style, value);
+    }
+
+    /// [`PaintCx::text_left`] of `run`, `text` already shaped in `style`.
+    pub(crate) fn put_left(&mut self, r: Rect, run: ink_text::TextRun, text: &str, style: Style, value: u8) {
+        let baseline = self.baseline_in(r, run.px, style);
+        let run = self.fit(run, text, style, r.w as f32);
         self.put_run(&run, r.x as f32, baseline, value, None);
     }
 
     /// `text` shortened with "…" to fit `max` pixels, cut at a grapheme boundary.
     ///
-    /// The cut is found by galloping then bisecting over grapheme boundaries, so it costs
-    /// a few shapings of prefixes about as long as the result (a 2000-char text cut to
-    /// one line shapes about 12 short prefixes, not 2000 ever shorter copies).
+    /// The cut is found by galloping then bisecting over grapheme boundaries from where
+    /// the shaped `text` says it is, so it usually costs two shapings of prefixes about as
+    /// long as the result (a 2000-char text cut to one line does not shape 2000 ever
+    /// shorter copies).
     pub fn ellipsize(&mut self, text: &str, px: f32, style: Style, max: f32) -> String {
-        if self.fonts.shaped_width(style, px, text) <= max {
+        let run = self.fonts.shape(style, px, text);
+        if run.width <= max {
             return text.to_string();
         }
-        self.cut_to_fit(text, px, style, max)
+        self.cut_to_fit(text, &run, style, max).0
     }
 
-    /// [`PaintCx::ellipsize`] of a `text` known to be wider than `max`.
-    fn cut_to_fit(&mut self, text: &str, px: f32, style: Style, max: f32) -> String {
+    /// [`PaintCx::ellipsize`] of a `text` (shaped: `run`) known to be wider than `max`,
+    /// with its shaped run.
+    fn cut_to_fit(&mut self, text: &str, run: &ink_text::TextRun, style: Style, max: f32) -> (String, ink_text::TextRun) {
         use unicode_segmentation::UnicodeSegmentation;
         // Candidate cuts: ends of the proper prefixes, shortest first.
         let ends: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).filter(|i| *i > 0).collect();
+        // The last candidate whose glyphs end left of `max` less about an ellipsis.
+        let room = max - run.px * 0.75;
+        let over = run.glyphs.iter().find(|g| g.x + g.advance > room).map_or(text.len(), |g| g.cluster);
+        let guess = ends.partition_point(|e| *e <= over).saturating_sub(1);
         let cand = |k: usize| format!("{}…", text[..ends[k]].trim_end());
-        let mut fits = |k: usize| self.fonts.shaped_width(style, px, &cand(k)) <= max;
-        if ends.is_empty() || !fits(0) {
-            return "…".into();
-        }
-        // Widths grow with the prefix: find the last k that fits. `lo` fits, `hi` does not
-        // (or is past the end).
-        let n = ends.len();
-        let (mut lo, mut step) = (0usize, 1usize);
-        let mut hi = n;
-        while lo + step < n {
-            if fits(lo + step) {
-                lo += step;
-                step *= 2;
-            } else {
-                hi = lo + step;
-                break;
+        // The candidate that fits last, shaped (see below: it is the cut).
+        let mut fit = None;
+        let mut fits = |k: usize| {
+            let c = cand(k);
+            let r = self.fonts.shape(style, run.px, &c);
+            let ok = r.width <= max;
+            if ok {
+                fit = Some((c, r));
             }
+            ok
+        };
+        // Widths grow with the prefix: find the last k that fits. `lo` fits, `hi` does not
+        // (or is past the end); `lo` only moves to a candidate that fits.
+        let n = ends.len();
+        let (mut lo, mut hi, mut step) = (guess, n, 1usize);
+        if n == 0 {
+            return ("…".into(), self.fonts.shape(style, run.px, "…"));
+        } else if fits(guess) {
+            while lo + step < n {
+                if fits(lo + step) {
+                    lo += step;
+                    step *= 2;
+                } else {
+                    hi = lo + step;
+                    break;
+                }
+            }
+        } else {
+            hi = guess;
+            lo = loop {
+                let k = hi.saturating_sub(step);
+                if fits(k) {
+                    break k;
+                } else if k == 0 {
+                    return ("…".into(), self.fonts.shape(style, run.px, "…"));
+                }
+                (hi, step) = (k, step * 2);
+            };
         }
         while hi - lo > 1 {
             let mid = lo + (hi - lo) / 2;
@@ -238,7 +266,7 @@ impl<'a> PaintCx<'a> {
                 hi = mid;
             }
         }
-        cand(lo)
+        fit.expect("lo fits")
     }
 
     /// Draws an icon centred in `r` (a square of `side`, at most as large as `r`).
@@ -435,17 +463,6 @@ impl WidgetTree {
     /// Bounds of a widget.
     pub fn bounds(&self, id: WidgetId) -> Option<Rect> {
         self.node(id).map(|n| n.bounds)
-    }
-
-    /// Moves or resizes a widget (marks it dirty; the old area is cleared).
-    pub fn set_bounds(&mut self, id: WidgetId, r: Rect) {
-        let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) else { return };
-        if n.bounds != r && n.widget.adds_damage() {
-            self.exposed.push((n.bounds, n.widget.refresh_class()));
-        }
-        n.bounds = r;
-        n.mark(n.widget.refresh_class());
-        n.full = true;
     }
 
     /// Marks a widget for a full repaint with at least `class`.
@@ -686,10 +703,9 @@ impl Label {
         Label { centered: false, ..Label::new(text, px) }
     }
 
-    /// The same label in `style`.
-    pub fn styled(mut self, style: Style) -> Self {
-        self.style = style;
-        self
+    setters! {
+        /// The same label in `style`.
+        styled(style: Style) => style = style;
     }
 }
 
@@ -757,31 +773,11 @@ impl Button {
         Button { kind: ButtonKind::Text, ..Button::new(label, action) }
     }
 
-    /// With an icon.
-    pub fn with_icon(mut self, icon: Icon) -> Self {
-        self.icon = Some(icon);
-        self
-    }
-
-    /// With a look.
-    pub fn with_kind(mut self, kind: ButtonKind) -> Self {
-        self.kind = kind;
-        self
-    }
-
-    /// Disabled.
-    pub fn disabled(mut self) -> Self {
-        self.enabled = false;
-        self
-    }
-
-    /// The effective look (`inverted` makes any button filled).
-    pub fn effective_kind(&self) -> ButtonKind {
-        if self.inverted {
-            ButtonKind::Filled
-        } else {
-            self.kind
-        }
+    setters! {
+        /// With an icon.
+        with_icon(icon: Icon) => icon = Some(icon);
+        /// Disabled.
+        disabled() => enabled = false;
     }
 }
 
@@ -802,13 +798,35 @@ pub(crate) fn follow_press<T: Copy + PartialEq>(t: &Touch, pressed: &mut Option<
     }
 }
 
-/// [`follow_press`] for a widget that shows pressed as a whole (a button, a card, an
-/// icon): `inside` tells whether the finger is on it; it takes every touch-down.
-pub(crate) fn follow_press_on(t: &Touch, pressed: &mut bool, inside: bool) -> (EventResult, bool) {
-    let mut p = pressed.then_some(());
-    let res = follow_press(t, &mut p, inside.then_some(()), true);
-    *pressed = p.is_some();
-    res
+/// The events of a widget in `b` that shows pressed as a whole (a button, a card, an
+/// icon) and reports `action` on a tap: [`follow_press`] for its touches (it takes every
+/// touch-down), the action for a tap; `None` for any other event. `changed` records a
+/// change of `pressed`.
+pub(crate) fn press_or_tap(ev: &UiEvent, b: Rect, pressed: &mut bool, changed: &mut bool, action: &str) -> Option<EventResult> {
+    match ev {
+        UiEvent::Touch(t) => {
+            let mut p = pressed.then_some(());
+            let (res, c) = follow_press(t, &mut p, b.contains(t.pos).then_some(()), true);
+            *pressed = p.is_some();
+            *changed |= c;
+            Some(res)
+        }
+        UiEvent::Gesture(Gesture::Tap { .. }) => {
+            *changed |= std::mem::take(pressed);
+            Some(EventResult::Action(action.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// What a widget answers to an event it has no use for: it takes gestures (nothing under
+/// it reacts to them) and ignores everything else.
+pub(crate) fn take_gestures(ev: &UiEvent) -> EventResult {
+    if matches!(ev, UiEvent::Gesture(_)) {
+        EventResult::Handled
+    } else {
+        EventResult::Ignored
+    }
 }
 
 /// The refresh class of a widget with press feedback: DU while pressed (fast black and
@@ -893,7 +911,8 @@ pub fn paint_button(cx: &mut PaintCx, b: Rect, label: &str, icon: Option<Icon>, 
 
 impl Widget for Button {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let kind = self.effective_kind();
+        // `inverted` makes any button filled.
+        let kind = if self.inverted { ButtonKind::Filled } else { self.kind };
         paint_button(cx, b, &self.label, self.icon, kind, self.enabled, self.pressed);
     }
 
@@ -904,18 +923,7 @@ impl Widget for Button {
                 _ => EventResult::Ignored,
             };
         }
-        match ev {
-            UiEvent::Touch(t) => {
-                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
-                self.changed |= changed;
-                res
-            }
-            UiEvent::Gesture(Gesture::Tap { .. }) => {
-                self.changed |= std::mem::take(&mut self.pressed);
-                EventResult::Action(self.action.clone())
-            }
-            _ => EventResult::Ignored,
-        }
+        press_or_tap(ev, b, &mut self.pressed, &mut self.changed, &self.action).unwrap_or(EventResult::Ignored)
     }
 
     fn refresh_class(&self) -> RefreshClass {

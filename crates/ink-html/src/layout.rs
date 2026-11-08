@@ -26,7 +26,7 @@ use std::sync::Arc;
 pub const NO_LINK: u32 = u32::MAX;
 
 /// A run of text drawn at one position.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextRun {
     /// Left edge (page pixels).
     pub x: f32,
@@ -160,8 +160,6 @@ pub struct ChapterLayout {
 /// What a chapter layout depends on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
-    /// Page width.
-    pub page_w: f32,
     /// Page content height.
     pub content_h: f32,
     /// Left margin.
@@ -177,7 +175,7 @@ impl Params {
     pub fn new(s: &LayoutSettings) -> Self {
         let content_w = (s.width as f32 - s.margin_left - s.margin_right).max(50.0);
         let content_h = (s.height as f32 - s.margin_top - s.margin_bottom).max(50.0);
-        Params { page_w: s.width as f32, content_h, left: s.margin_left, content_w, settings: s.clone() }
+        Params { content_h, left: s.margin_left, content_w, settings: s.clone() }
     }
 }
 
@@ -361,18 +359,23 @@ struct Piece {
 }
 
 /// An unbreakable box: text between two break opportunities.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct WordBox {
     /// Byte range of the content (without trailing spaces).
     start: usize,
     end: usize,
-    /// Byte end including trailing spaces.
-    end_ws: usize,
     width: f32,
     space: f32,
     forced: bool,
     /// The line may end here with a hyphen (soft hyphen or dictionary split).
     hyphen: bool,
+}
+
+impl WordBox {
+    /// The box cut at byte `cut` into a head `head` wide and the rest `rest` wide.
+    fn split(&self, cut: usize, head: f32, hyphen: bool, rest: f32) -> (WordBox, WordBox) {
+        (WordBox { start: self.start, end: cut, width: head, space: 0.0, forced: false, hyphen }, WordBox { start: cut, width: rest, ..*self })
+    }
 }
 
 struct Line {
@@ -545,7 +548,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         book_lang: Option<String>,
         stop: Option<StopAt>,
     ) -> (ChapterLayout, bool) {
-        let dir_end = chapter_path.rfind('/').map(|i| i + 1).unwrap_or(0);
         let mut has_block_desc = vec![false; dom.nodes.len()];
         // Post-order: an element has block descendants if a child is block-level or has some.
         for &n in dom.preorder.iter().rev() {
@@ -562,7 +564,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             p,
             dom,
             styles,
-            chapter_dir: &chapter_path[..dir_end],
+            chapter_dir: crate::book::dir_of(chapter_path),
             chapter_path,
             book_lang,
             out: ChapterLayout::default(),
@@ -652,26 +654,23 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut box_w = (w - ml - mr).max(10.0);
         let image = is_image(self.dom.name(id));
         let is_table = st.display == Display::Table;
-        if let Len::Px(_) | Len::Pct(_) = st.width {
-            if !image {
-                let want = st.width.resolve(w, box_w) + if is_table { 0.0 } else { pl + pr + b.left + b.right };
-                let want = want.min(box_w);
-                if st.margin.left.is_auto() && st.margin.right.is_auto() {
-                    box_x += (box_w - want) / 2.0;
-                } else if st.margin.left.is_auto() {
-                    box_x += box_w - want;
-                }
-                box_w = want;
+        if !st.width.is_auto() && !image {
+            let want = st.width.resolve(w, box_w) + if is_table { 0.0 } else { pl + pr + b.left + b.right };
+            let want = want.min(box_w);
+            if st.margin.left.is_auto() && st.margin.right.is_auto() {
+                box_x += (box_w - want) / 2.0;
+            } else if st.margin.left.is_auto() {
+                box_x += box_w - want;
             }
+            box_w = want;
         }
-        if let Len::Px(_) | Len::Pct(_) = st.max_width {
-            let mw = st.max_width.resolve(w, box_w);
-            if mw < box_w && !image {
-                if st.margin.left.is_auto() && st.margin.right.is_auto() {
-                    box_x += (box_w - mw) / 2.0;
-                }
-                box_w = mw;
+        // An `auto` maximum resolves to the box width: no change.
+        let mw = st.max_width.resolve(w, box_w);
+        if mw < box_w && !image {
+            if st.margin.left.is_auto() && st.margin.right.is_auto() {
+                box_x += (box_w - mw) / 2.0;
             }
+            box_w = mw;
         }
         self.add_margin(mt);
         let framed_top = b.top > 0.0 || pt > 0.0;
@@ -707,7 +706,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         self.y += pb + b.bottom;
         let box_bottom = self.y;
-        self.push_border(b, box_x, box_w, box_top, box_bottom, box_bottom - box_top);
+        self.out.decor.extend(border_rects(b, box_x, box_w, box_top, box_bottom, box_bottom - box_top));
         self.add_margin(mb);
         if !self.in_cell {
             match st.break_after {
@@ -724,24 +723,6 @@ impl<'a, 'e> Flow<'a, 'e> {
                     }
                 }
             }
-        }
-    }
-
-    /// The border rectangles of a box from `top` to `bottom` (`h`: the height of the
-    /// side borders).
-    fn push_border(&mut self, b: Edges<f32>, x: f32, w: f32, top: f32, bottom: f32, h: f32) {
-        let mut add = |x, y, w, h| self.out.decor.push(RectRun { x, y, w, h, gray: 0 });
-        if b.top > 0.0 {
-            add(x, top, w, b.top);
-        }
-        if b.bottom > 0.0 {
-            add(x, bottom - b.bottom, w, b.bottom);
-        }
-        if b.left > 0.0 {
-            add(x, top, b.left, h);
-        }
-        if b.right > 0.0 {
-            add(x + w - b.right, top, b.right, h);
         }
     }
 
@@ -850,10 +831,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    fn resolve_src(&self, raw: &str) -> String {
-        resolve_href(self.chapter_dir, raw)
-    }
-
     /// Size of an image element in device px for a containing width `w`.
     fn image_box(&mut self, id: NodeId, w: f32, max_h: f32) -> Option<(String, f32, f32)> {
         let e = self.dom.element(id)?;
@@ -867,7 +844,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             if raw.starts_with("data:") {
                 return None;
             }
-            let src = self.resolve_src(raw);
+            let src = resolve_href(self.chapter_dir, raw);
             let (iw, ih) = (self.env.image_size)(&src)?;
             (src, iw as f32, ih as f32)
         };
@@ -878,33 +855,21 @@ impl<'a, 'e> Flow<'a, 'e> {
         let aspect = ih / iw;
         let mut dw = iw * scale;
         let mut dh = ih * scale;
-        match (st.width, st.height) {
-            (Len::Px(_) | Len::Pct(_), Len::Px(_) | Len::Pct(_)) => {
-                dw = st.width.resolve(w, dw);
-                dh = st.height.resolve(max_h, dh);
-            }
-            (Len::Px(_) | Len::Pct(_), _) => {
-                dw = st.width.resolve(w, dw);
-                dh = dw * aspect;
-            }
-            (_, Len::Px(_) | Len::Pct(_)) => {
-                dh = st.height.resolve(max_h, dh);
-                dw = dh / aspect;
-            }
-            _ => {}
+        let (dw0, dh0) = (st.width.resolve(w, dw), st.height.resolve(max_h, dh));
+        // A size given on one axis only keeps the aspect ratio.
+        match (st.width.is_auto(), st.height.is_auto()) {
+            (false, false) => (dw, dh) = (dw0, dh0),
+            (false, true) => (dw, dh) = (dw0, dw0 * aspect),
+            (true, false) => (dw, dh) = (dh0 / aspect, dh0),
+            (true, true) => {}
         }
-        let max_w = match st.max_width {
-            Len::Auto => w,
-            m => m.resolve(w, w).min(w),
-        };
+        // `auto` maxima resolve to the available size.
+        let max_w = st.max_width.resolve(w, w).min(w);
         if dw > max_w {
             dh *= max_w / dw;
             dw = max_w;
         }
-        let max_hh = match st.max_height {
-            Len::Auto => max_h,
-            m => m.resolve(max_h, max_h).min(max_h),
-        };
+        let max_hh = st.max_height.resolve(max_h, max_h).min(max_h);
         if dh > max_hh {
             dw *= max_hh / dh;
             dh = max_hh;
@@ -1154,11 +1119,7 @@ impl<'a, 'e> Flow<'a, 'e> {
 
     /// Width of the bytes `start..end` of a paragraph.
     fn width(&mut self, p: &Para, start: usize, end: usize) -> f32 {
-        let mut total = 0.0;
-        for r in p.runs(start, end) {
-            total += self.run_width(p, r);
-        }
-        total
+        p.runs(start, end).map(|r| self.run_width(p, r)).sum()
     }
 
     /// Lays out an inline run as one paragraph owned by block `owner`.
@@ -1262,7 +1223,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 0.0
             };
             let hyphen = trimmed.ends_with(SOFT_HYPHEN);
-            boxes.push(WordBox { start: prev, end, end_ws: b, width, space, forced, hyphen });
+            boxes.push(WordBox { start: prev, end, width, space, forced, hyphen });
             prev = b;
         }
         // Lines.
@@ -1368,18 +1329,14 @@ impl<'a, 'e> Flow<'a, 'e> {
                 best = Some((cut, acc));
             }
             let (cut, wdt) = best?;
-            let a = WordBox { start: bx.start, end: cut, end_ws: cut, width: wdt + hyph_w, space: 0.0, forced: false, hyphen: true };
-            let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: (bx.width - wdt).max(0.0), space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
-            return Some((a, b));
+            return Some(bx.split(cut, wdt + hyph_w, true, (bx.width - wdt).max(0.0)));
         }
         for &pt in points.iter().rev() {
             let cut = bx.start + pt;
             let wdt = self.width(p, bx.start, cut);
             if wdt + hyph_w <= avail {
                 let rest = self.width(p, cut, bx.end);
-                let a = WordBox { start: bx.start, end: cut, end_ws: cut, width: wdt + hyph_w, space: 0.0, forced: false, hyphen: true };
-                let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: rest, space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
-                return Some((a, b));
+                return Some(bx.split(cut, wdt + hyph_w, true, rest));
             }
         }
         None
@@ -1403,10 +1360,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         } else {
             (bx.width - wdt).max(0.0)
         };
-        Some((
-            WordBox { start: bx.start, end: c, end_ws: c, width: wdt, space: 0.0, forced: false, hyphen: false },
-            WordBox { start: c, end: bx.end, end_ws: bx.end_ws, width: rest, space: bx.space, forced: bx.forced, hyphen: bx.hyphen },
-        ))
+        Some(bx.split(c, wdt, false, rest))
     }
 
     /// Positions one line, emits its draw items and its slice.
@@ -1508,17 +1462,11 @@ impl<'a, 'e> Flow<'a, 'e> {
                 if c == '▪' {
                     self.out.items.push(Draw::Rect(RectRun { x: mx, y, w: sz, h: sz, gray: 0 }));
                 } else {
-                    for r in [
-                        RectRun { x: mx, y, w: sz, h: t, gray: 0 },
-                        RectRun { x: mx, y: y + sz - t, w: sz, h: t, gray: 0 },
-                        RectRun { x: mx, y, w: t, h: sz, gray: 0 },
-                        RectRun { x: mx + sz - t, y, w: t, h: sz, gray: 0 },
-                    ] {
-                        self.out.items.push(Draw::Rect(r));
-                    }
+                    self.out.items.extend(border_rects(Edges::all(t), mx, sz, y, y + sz, sz).map(Draw::Rect));
                 }
             } else {
-                self.out.items.push(Draw::Text(TextRun {
+                // Black, undecorated, outside the DOM text and links.
+                let run = TextRun {
                     x: mx,
                     baseline,
                     face,
@@ -1526,18 +1474,13 @@ impl<'a, 'e> Flow<'a, 'e> {
                     text: m,
                     width: mw,
                     node: NONE,
-                    start: 0,
-                    len: 0,
                     link: NO_LINK,
-                    underline: false,
-                    strike: false,
-                    gray: 0,
-                    letter_spacing: 0.0,
                     deco_w: mw,
                     line_top: top,
                     line_bottom: bottom,
-                    hyphenated: false,
-                }));
+                    ..Default::default()
+                };
+                self.out.items.push(Draw::Text(run));
             }
             if !outside {
                 x0 += mw + gap;
@@ -1720,16 +1663,12 @@ impl<'a, 'e> Flow<'a, 'e> {
                     cmin[col] = cmin[col].max(mn);
                     cmax[col] = cmax[col].max(mx);
                 } else if col + span <= ncols {
-                    let have: f32 = cmin[col..col + span].iter().sum();
-                    if mn > have {
-                        for v in &mut cmin[col..col + span] {
-                            *v += (mn - have) / span as f32;
-                        }
-                    }
-                    let havex: f32 = cmax[col..col + span].iter().sum();
-                    if mx > havex {
-                        for v in &mut cmax[col..col + span] {
-                            *v += (mx - havex) / span as f32;
+                    // A spanning cell spreads what its columns lack evenly over them.
+                    for (widths, need) in [(&mut cmin, mn), (&mut cmax, mx)] {
+                        let cols = &mut widths[col..col + span];
+                        let have: f32 = cols.iter().sum();
+                        if need > have {
+                            cols.iter_mut().for_each(|v| *v += (need - have) / span as f32);
                         }
                     }
                 }
@@ -1787,7 +1726,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             for (lay, cx, cw, c) in sub {
                 self.append_drawn(lay, row_top);
                 // Cell borders span the full row height.
-                self.push_border(self.st(c).border, cx, cw, row_top, row_top + row_h, row_h);
+                self.out.decor.extend(border_rects(self.st(c).border, cx, cw, row_top, row_top + row_h, row_h));
             }
             self.y = row_top + row_h;
             self.push_slice(row_top, self.y, key, first_item);
@@ -1831,38 +1770,24 @@ impl<'a, 'e> Flow<'a, 'e> {
     /// Lays out a table cell in its own flow (y from 0).
     fn cell_layout(&mut self, cell: NodeId, x: f32, w: f32) -> ChapterLayout {
         let st = self.st(cell);
-        let saved = (
-            std::mem::take(&mut self.out),
-            self.y,
-            self.margin,
-            self.neg_margin,
-            self.force_break,
-            self.keep_next,
-            self.first_line_pending,
-            self.marker.take(),
-            self.in_cell,
-        );
-        self.y = 0.0;
-        self.margin = 0.0;
-        self.neg_margin = 0.0;
-        self.first_line_pending = true;
-        self.in_cell = true;
         let (pad, b) = (st.padding.resolve(w), st.border);
         let (pl, pr, pt, pb) = (pad.left + b.left, pad.right + b.right, pad.top + b.top, pad.bottom + b.bottom);
-        self.y = pt;
+        // The flow state the cell's flow replaces, put back after it.
+        let saved = (
+            std::mem::take(&mut self.out),
+            std::mem::replace(&mut self.y, pt),
+            std::mem::take(&mut self.margin),
+            std::mem::take(&mut self.neg_margin),
+            self.force_break,
+            self.keep_next,
+            std::mem::replace(&mut self.first_line_pending, true),
+            self.marker.take(),
+            std::mem::replace(&mut self.in_cell, true),
+        );
         self.block_children(cell, x + pl, (w - pl - pr).max(10.0));
         self.y += pb;
-        let mut lay = std::mem::take(&mut self.out);
-        lay.height = self.y;
-        self.out = saved.0;
-        self.y = saved.1;
-        self.margin = saved.2;
-        self.neg_margin = saved.3;
-        self.force_break = saved.4;
-        self.keep_next = saved.5;
-        self.first_line_pending = saved.6;
-        self.marker = saved.7;
-        self.in_cell = saved.8;
+        let lay = ChapterLayout { height: self.y, ..std::mem::take(&mut self.out) };
+        (self.out, self.y, self.margin, self.neg_margin, self.force_break, self.keep_next, self.first_line_pending, self.marker, self.in_cell) = saved;
         lay
     }
 
@@ -1905,6 +1830,19 @@ impl<'a, 'e> Flow<'a, 'e> {
         max = max.max(line);
         (min.min(w), max)
     }
+}
+
+/// The rectangles of a box border from `top` to `bottom` (`h`: the height of the side
+/// borders): top, bottom, left and right, leaving out sides of width 0.
+fn border_rects(b: Edges<f32>, x: f32, w: f32, top: f32, bottom: f32, h: f32) -> impl Iterator<Item = RectRun> {
+    let r = |x, y, w, h| RectRun { x, y, w, h, gray: 0 };
+    let sides = [
+        (b.top, r(x, top, w, b.top)),
+        (b.bottom, r(x, bottom - b.bottom, w, b.bottom)),
+        (b.left, r(x, top, b.left, h)),
+        (b.right, r(x + w - b.right, top, b.right, h)),
+    ];
+    sides.into_iter().filter(|(width, _)| *width > 0.0).map(|(_, r)| r)
 }
 
 /// Height of an inline image above the baseline (`sa`: the line's strut ascent).

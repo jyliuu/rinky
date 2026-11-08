@@ -66,7 +66,7 @@ mod device {
     use crate::clock::{stamp, TimeZone};
     use crate::font;
     use crate::geom::{Point, Rect, Rotation};
-    use crate::input::{InputEvent, PowerEvent, TouchPhase};
+    use crate::input::{InputEvent, PowerEvent, TouchContact, TouchPhase};
     use crate::journal::{Entry, Journal};
     use crate::ereader::{self, fb, input, kindle::LipcServices, system, ReaderOptions};
     use crate::lipc::Lipc;
@@ -103,6 +103,31 @@ mod device {
 
     fn open_full() -> Result<Device> {
         ereader::open(ReaderOptions::default())
+    }
+
+    /// A screen-sized canvas with [`page`] drawn on it, shown with a full refresh.
+    fn show(dev: &mut Device, title: &str, lines: &[String]) -> Result<Canvas> {
+        let size = dev.screen.size();
+        let mut c = Canvas::new(size.w as usize, size.h as usize);
+        page(&mut c, title, lines);
+        dev.screen.update_all(&c, RefreshClass::Gc16)?;
+        Ok(c)
+    }
+
+    /// The contacts of an event that lifted (a tap ended).
+    fn lifts(ev: &InputEvent) -> Vec<TouchContact> {
+        let InputEvent::Touch(f) = ev else { return Vec::new() };
+        f.contacts.iter().filter(|c| matches!(c.phase, TouchPhase::Up | TouchPhase::DownUp)).copied().collect()
+    }
+
+    /// A lift in the top right corner of a `w` wide screen: the test pages' exit.
+    fn is_exit(c: &TouchContact, w: u32) -> bool {
+        c.x > w as i32 * 3 / 4 && c.y < 150
+    }
+
+    fn usage() -> Result<i32> {
+        say!("{USAGE}");
+        Ok(2)
     }
 
     fn kobo() -> bool {
@@ -152,10 +177,7 @@ mod device {
                 write: flag(rest, "--write"),
                 ntp: opt(rest, "--ntp").map(str::to_string),
             })) as i32),
-            _ => {
-                say!("{USAGE}");
-                Ok(2)
-            }
+            _ => usage(),
         }
     }
 
@@ -213,10 +235,7 @@ mod device {
 
     fn events(limit: Duration) -> Result<()> {
         let mut dev = open_full()?;
-        let size = dev.screen.size();
-        let mut c = Canvas::new(size.w as usize, size.h as usize);
-        page(&mut c, "device events", &["every event is logged".into(), format!("for {} s", limit.as_secs())]);
-        dev.screen.update_all(&c, RefreshClass::Gc16)?;
+        show(&mut dev, "device events", &["every event is logged".into(), format!("for {} s", limit.as_secs())])?;
         out!("{} events: started", stamp());
         let start = Instant::now();
         while start.elapsed() < limit {
@@ -230,30 +249,24 @@ mod device {
 
     fn touch(limit: Duration) -> Result<()> {
         let mut dev = open_full()?;
-        let size = dev.screen.size();
-        let mut c = Canvas::new(size.w as usize, size.h as usize);
-        page(&mut c, "touch test", &["taps are marked and logged".into(), "top right corner: exit".into()]);
-        dev.screen.update_all(&c, RefreshClass::Gc16)?;
+        let mut c = show(&mut dev, "touch test", &["taps are marked and logged".into(), "top right corner: exit".into()])?;
         out!("{} touch: started", stamp());
         let start = Instant::now();
         let mut n = 0;
         while start.elapsed() < limit {
             let Some(ev) = dev.input.next_event(Some(Duration::from_millis(500)))? else { continue };
-            if let InputEvent::Touch(f) = &ev {
-                for ct in &f.contacts {
-                    if matches!(ct.phase, TouchPhase::Up | TouchPhase::DownUp) {
-                        n += 1;
-                        out!("{} tap {n} at {},{} ({:?})", stamp(), ct.x, ct.y, ct.phase);
-                        if ct.x > size.w as i32 * 3 / 4 && ct.y < 150 {
-                            out!("{} touch: exit", stamp());
-                            return Ok(());
-                        }
-                        let r = mark(&mut c, Point::new(ct.x, ct.y), n);
-                        dev.screen.update(&c, r, RefreshClass::Du)?;
-                    }
-                }
-            } else {
+            if !matches!(ev, InputEvent::Touch(_)) {
                 out!("{} event: {}", stamp(), describe(&ev));
+            }
+            for ct in lifts(&ev) {
+                n += 1;
+                out!("{} tap {n} at {},{} ({:?})", stamp(), ct.x, ct.y, ct.phase);
+                if is_exit(&ct, c.width as u32) {
+                    out!("{} touch: exit", stamp());
+                    return Ok(());
+                }
+                let r = mark(&mut c, Point::new(ct.x, ct.y), n);
+                dev.screen.update(&c, r, RefreshClass::Du)?;
             }
         }
         Ok(())
@@ -296,14 +309,12 @@ mod device {
             let mut n = 0;
             while start.elapsed() < per {
                 let Some(ev) = dev.input.next_event(Some(Duration::from_millis(500)))? else { continue };
-                if let InputEvent::Touch(f) = ev {
-                    for ct in f.contacts.iter().filter(|c| matches!(c.phase, TouchPhase::Up | TouchPhase::DownUp)) {
-                        n += 1;
-                        let l = rot.from_panel(Point::new(ct.x, ct.y), space_panel);
-                        out!("{} rotate {rot:?}: tap {n} panel {},{} -> logical {},{}", stamp(), ct.x, ct.y, l.x, l.y);
-                        let r = mark(&mut c, l, n);
-                        dev.screen.update(&c, r, RefreshClass::Du)?;
-                    }
+                for ct in lifts(&ev) {
+                    n += 1;
+                    let l = rot.from_panel(Point::new(ct.x, ct.y), space_panel);
+                    out!("{} rotate {rot:?}: tap {n} panel {},{} -> logical {},{}", stamp(), ct.x, ct.y, l.x, l.y);
+                    let r = mark(&mut c, l, n);
+                    dev.screen.update(&c, r, RefreshClass::Du)?;
                 }
             }
         }
@@ -347,10 +358,7 @@ mod device {
                 out!("night {v}: grayscale {} (exits now; the flag is restored on exit)", s.grayscale()?);
                 Ok(0)
             }
-            _ => {
-                say!("{USAGE}");
-                Ok(2)
-            }
+            _ => usage(),
         }
     }
 
@@ -423,11 +431,11 @@ mod device {
         while start.elapsed() < limit {
             let Some(ev) = dev.input.next_event(Some(Duration::from_secs(1)))? else { continue };
             match &ev {
-                InputEvent::Touch(f) => {
-                    for ct in f.contacts.iter().filter(|c| matches!(c.phase, TouchPhase::Up | TouchPhase::DownUp)) {
+                InputEvent::Touch(_) => {
+                    for ct in lifts(&ev) {
                         taps += 1;
                         out!("{} tap at {},{}", stamp(), ct.x, ct.y);
-                        if ct.x > size.w as i32 * 3 / 4 && ct.y < 150 {
+                        if is_exit(&ct, size.w) {
                             out!("{} sleep: exit", stamp());
                             return Ok(());
                         }
@@ -466,18 +474,17 @@ mod device {
         };
         let mut plugs = 0usize;
         let mut dev = open_full()?;
-        let size = dev.screen.size();
-        let mut c = Canvas::new(size.w as usize, size.h as usize);
+        let w = dev.screen.size().w;
         let plan_text: Vec<&str> = plan.iter().map(|d| if *d { "drive mode" } else { "charge only" }).collect();
-        page(&mut c, "USB test", &[format!("cable {:?}", dev.usb.cable()), format!("on plug: {}", plan_text.join(", then "))]);
-        dev.screen.update_all(&c, RefreshClass::Gc16)?;
+        let lines = [format!("cable {:?}", dev.usb.cable()), format!("on plug: {}", plan_text.join(", then "))];
+        show(&mut dev, "USB test", &lines)?;
         out!("{} usb: started, cable {:?}, state {:?}", stamp(), dev.usb.cable(), dev.usb.state());
         let start = Instant::now();
         while start.elapsed() < limit {
             let Some(ev) = dev.input.next_event(Some(Duration::from_secs(1)))? else { continue };
             out!("{} event: {}", stamp(), describe(&ev));
             match ev {
-                InputEvent::Touch(f) if f.contacts.iter().any(|c| c.x > size.w as i32 * 3 / 4 && c.y < 150 && matches!(c.phase, TouchPhase::Up | TouchPhase::DownUp)) => {
+                InputEvent::Touch(_) if lifts(&ev).iter().any(|c| is_exit(c, w)) => {
                     out!("{} usb: exit", stamp());
                     return Ok(());
                 }
@@ -490,15 +497,13 @@ mod device {
                     } else {
                         dev.usb.set_charge_only(true)?;
                         out!("{} usb: charge only chosen (state {:?})", stamp(), dev.usb.state());
-                        page(&mut c, "USB test", &["charge only".into(), "the files stay on the e-reader".into()]);
-                        dev.screen.update_all(&c, RefreshClass::Gc16)?;
+                        show(&mut dev, "USB test", &["charge only".into(), "the files stay on the e-reader".into()])?;
                     }
                 }
                 InputEvent::Usb(false) => out!("{} usb: unplugged", stamp()),
                 InputEvent::Power(PowerEvent::LibraryRescan) => {
                     out!("{} usb: library rescan signal", stamp());
-                    page(&mut c, "USB test", &["back from USB drive mode".into(), "library rescan requested".into()]);
-                    dev.screen.update_all(&c, RefreshClass::Gc16)?;
+                    show(&mut dev, "USB test", &["back from USB drive mode".into(), "library rescan requested".into()])?;
                 }
                 _ => {}
             }
@@ -517,23 +522,12 @@ mod device {
                 Ok(None)
             }
         };
+        let essid = || args.get(1).ok_or_else(|| DeviceError::Backend(format!("{} needs ESSID", args[0])));
         match args.first().map(String::as_str) {
             Some("status") | None => out!("{:?}", Wifi::state(w.as_ref())?),
-            Some("scan") => {
-                for n in w.scan()? {
-                    out!("{n:?}");
-                }
-            }
-            Some("list") => {
-                for n in w.scan_list()? {
-                    out!("{n:?}");
-                }
-            }
-            Some("profiles") => {
-                for p in w.profiles()? {
-                    out!("{p:?}");
-                }
-            }
+            Some("scan") => w.scan()?.iter().for_each(|n| out!("{n:?}")),
+            Some("list") => w.scan_list()?.iter().for_each(|n| out!("{n:?}")),
+            Some("profiles") => w.profiles()?.iter().for_each(|p| out!("{p:?}")),
             Some("enable") => {
                 let on = args.get(1).map(String::as_str) == Some("1");
                 w.set_enabled(on)?;
@@ -552,25 +546,22 @@ mod device {
                 out!("airplane {}", w.airplane_mode()?);
             }
             Some("connect") => {
-                let essid = args.get(1).ok_or_else(|| DeviceError::Backend("connect needs ESSID".into()))?;
+                let essid = essid()?;
                 let t = Instant::now();
                 w.connect(essid, password()?.as_deref())?;
                 out!("connected to {essid} in {} ms: {:?}", t.elapsed().as_millis(), Wifi::state(w.as_ref())?);
             }
             Some("create") => {
-                let essid = args.get(1).ok_or_else(|| DeviceError::Backend("create needs ESSID".into()))?;
+                let essid = essid()?;
                 w.create_profile(essid, password()?.as_deref())?;
                 out!("profile {essid} saved");
             }
             Some("delete") => {
-                let essid = args.get(1).ok_or_else(|| DeviceError::Backend("delete needs ESSID".into()))?;
+                let essid = essid()?;
                 w.delete_profile(essid)?;
                 out!("profile {essid} deleted");
             }
-            Some(_) => {
-                say!("{USAGE}");
-                return Ok(2);
-            }
+            Some(_) => return usage(),
         }
         Ok(0)
     }
@@ -634,10 +625,7 @@ mod device {
                 c.set_time(std::time::UNIX_EPOCH + Duration::from_secs(secs))?;
                 out!("clock set: {}", c.local_now().format());
             }
-            Some(_) => {
-                say!("{USAGE}");
-                return Ok(2);
-            }
+            Some(_) => return usage(),
         }
         Ok(0)
     }
@@ -664,38 +652,32 @@ mod device {
         Ok(())
     }
 
-    fn crash(args: &[String]) -> Result<i32> {
+    /// Shows a test page saying what happens in `--after` seconds (default 10), keeps
+    /// processing input until then and returns the open device: the caller then crashes
+    /// or hangs with it (and its journaled settings) still in place.
+    fn count_down(args: &[String], test: &str, what: &str, check: &str) -> Result<Device> {
         let after = Duration::from_secs(opt(args, "--after").and_then(|v| v.parse().ok()).unwrap_or(10));
         let mut dev = open_full()?;
         if flag(args, "--night") {
             dev.screen.set_night_mode(true)?;
         }
-        let size = dev.screen.size();
-        let mut c = Canvas::new(size.w as usize, size.h as usize);
-        page(&mut c, "crash test", &[format!("rinky aborts in {} s", after.as_secs()), "the launcher must bring the framework back".into(), format!("night mode {}", dev.screen.night_mode())]);
-        dev.screen.update_all(&c, RefreshClass::Gc16)?;
+        let night = format!("night mode {}", dev.screen.night_mode());
+        show(&mut dev, &format!("{test} test"), &[format!("rinky {what} in {} s", after.as_secs()), check.into(), night])?;
         let start = Instant::now();
         while start.elapsed() < after {
             let _ = dev.input.next_event(Some(Duration::from_millis(500)))?;
         }
+        Ok(dev)
+    }
+
+    fn crash(args: &[String]) -> Result<i32> {
+        let _dev = count_down(args, "crash", "aborts", "the launcher must bring the framework back")?;
         out!("{} crash: abort()", stamp());
         std::process::abort();
     }
 
     fn hang(args: &[String]) -> Result<i32> {
-        let after = Duration::from_secs(opt(args, "--after").and_then(|v| v.parse().ok()).unwrap_or(10));
-        let mut dev = open_full()?;
-        if flag(args, "--night") {
-            dev.screen.set_night_mode(true)?;
-        }
-        let size = dev.screen.size();
-        let mut c = Canvas::new(size.w as usize, size.h as usize);
-        page(&mut c, "hang test", &[format!("rinky stops in {} s", after.as_secs()), "the watchdog must notice".into(), format!("night mode {}", dev.screen.night_mode())]);
-        dev.screen.update_all(&c, RefreshClass::Gc16)?;
-        let start = Instant::now();
-        while start.elapsed() < after {
-            let _ = dev.input.next_event(Some(Duration::from_millis(500)))?;
-        }
+        let _dev = count_down(args, "hang", "stops", "the watchdog must notice")?;
         out!("{} hang: no more input processing (heartbeat stops)", stamp());
         loop {
             std::thread::sleep(Duration::from_secs(3600));

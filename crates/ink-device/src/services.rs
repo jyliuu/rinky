@@ -102,21 +102,9 @@ pub trait Power {
     fn defer_suspend(&mut self, _duration: Duration) -> Result<()> {
         unsupported("defer suspend")
     }
-    /// Stops (`true`) or allows (`false`) the screensaver timeout.
-    fn prevent_screensaver(&mut self, _prevent: bool) -> Result<()> {
-        unsupported("prevent screensaver")
-    }
-    /// Asks powerd to go to the screensaver now, as if the power key was pressed.
-    fn request_screensaver(&mut self) -> Result<()> {
-        unsupported("screensaver request")
-    }
     /// powerd's state name (`active`, `screenSaver`, `readyToSuspend`, ...).
     fn state(&self) -> Result<String> {
         unsupported("power state")
-    }
-    /// Arms the RTC to wake the device after `after` while suspended.
-    fn rtc_wakeup(&mut self, _after: Duration) -> Result<()> {
-        unsupported("rtc wakeup")
     }
     /// Suspends the kernel now (without powerd), optionally arming the RTC to wake after
     /// `wake_after`. Returns after resume, or with an error when the kernel refuses
@@ -266,10 +254,6 @@ pub trait Usb {
     /// Charge only for the current cable (no export).
     fn set_charge_only(&mut self, _on: bool) -> Result<()> {
         unsupported("usb charge only")
-    }
-    /// Drive-mode state.
-    fn drive_mode(&self) -> Result<crate::usb::DriveModeState> {
-        unsupported("usb drive mode")
     }
 }
 

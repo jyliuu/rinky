@@ -120,18 +120,8 @@ pub struct OpdsPlugin {
 }
 
 impl Default for OpdsPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn failed(e: impl std::fmt::Display) -> PluginError {
-    PluginError::Failed(e.to_string())
-}
-
-impl OpdsPlugin {
     /// The plugin.
-    pub fn new() -> Self {
+    fn default() -> Self {
         OpdsPlugin {
             manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Ui, Permission::Storage, Permission::Network]),
             inflight: Requests::default(),
@@ -141,7 +131,13 @@ impl OpdsPlugin {
             new_url: None,
         }
     }
+}
 
+fn failed(e: impl std::fmt::Display) -> PluginError {
+    PluginError::Failed(e.to_string())
+}
+
+impl OpdsPlugin {
     /// The saved catalogs.
     pub fn catalogs(cx: &mut HostCtx) -> Vec<Catalog> {
         let Some(Value::Array(list)) = cx.setting("catalogs") else { return Vec::new() };
@@ -235,7 +231,7 @@ impl OpdsPlugin {
             items.push((format!("Download {ext}{size}{price}"), format!("d{j}")));
         }
         if items.is_empty() {
-            cx.ui()?.toast("This entry has no download");
+            cx.toast("This entry has no download")?;
         }
         items.push(("< Back".into(), "back".into()));
         let title = match &e.authors[..] {
@@ -260,8 +256,7 @@ impl OpdsPlugin {
             return Err(err);
         }
         let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-        cx.ui()?.toast(&format!("Downloading {name}..."));
-        Ok(())
+        cx.toast(&format!("Downloading {name}..."))
     }
 
     fn search(&mut self, cx: &mut HostCtx, terms: &str) -> Result<()> {
@@ -288,10 +283,7 @@ impl OpdsPlugin {
                 self.stack.pop();
                 self.show_feed(cx)
             }
-            "search" => {
-                cx.ui()?.input(IN_SEARCH, "Search the catalog", "");
-                Ok(())
-            }
+            "search" => cx.input(IN_SEARCH, "Search the catalog", ""),
             "next" => match self.stack.last().and_then(|f| f.next_url()).map(str::to_string) {
                 Some(u) => self.fetch_feed(cx, &u, false),
                 None => self.show_feed(cx),
@@ -306,7 +298,7 @@ impl OpdsPlugin {
                     let href = nav.href.clone();
                     self.fetch_feed(cx, &href, true)
                 } else {
-                    cx.ui()?.toast("Nothing to open here");
+                    cx.toast("Nothing to open here")?;
                     self.show_feed(cx)
                 }
             }
@@ -332,7 +324,7 @@ impl OpdsPlugin {
                     }
                     Err(e) => {
                         log::warn!("opds: {url}: {e}");
-                        cx.ui()?.toast(&format!("Cannot load the catalog: {e}"));
+                        cx.toast(&format!("Cannot load the catalog: {e}"))?;
                         self.show_feed(cx)
                     }
                 }
@@ -348,7 +340,7 @@ impl OpdsPlugin {
                         self.fetch_feed(cx, &u, true)
                     }
                     None => {
-                        cx.ui()?.toast("This catalog has no usable search");
+                        cx.toast("This catalog has no usable search")?;
                         self.show_feed(cx)
                     }
                 }
@@ -358,8 +350,7 @@ impl OpdsPlugin {
                 if let Err(why) = body {
                     let _ = std::fs::remove_file(&part);
                     log::warn!("opds: download {} failed: {why}", target.display());
-                    cx.ui()?.toast(&format!("Download failed: {why}"));
-                    return Ok(());
+                    return cx.toast(&format!("Download failed: {why}"));
                 }
                 // Never replace a book that appeared meanwhile.
                 let target = if target.exists() {
@@ -405,10 +396,7 @@ impl Plugin for OpdsPlugin {
         match id {
             CATALOGS => match result {
                 "" => Ok(()),
-                "add" => {
-                    cx.ui()?.input(IN_URL, "Catalog URL", "https://");
-                    Ok(())
-                }
+                "add" => cx.input(IN_URL, "Catalog URL", "https://"),
                 "remove" => {
                     let list = Self::catalogs(cx);
                     cx.menu(REMOVE, "Remove which catalog?", list.into_iter().enumerate().map(|(i, c)| (c.title, format!("r{i}"))))
@@ -427,7 +415,7 @@ impl Plugin for OpdsPlugin {
                     if i < list.len() {
                         let c = list.remove(i);
                         Self::save_catalogs(cx, &list)?;
-                        cx.ui()?.toast(&format!("Removed {}", c.title));
+                        cx.toast(&format!("Removed {}", c.title))?;
                     }
                 }
                 self.show_catalogs(cx)
@@ -437,11 +425,10 @@ impl Plugin for OpdsPlugin {
                 let valid = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).is_some_and(|rest| !rest.is_empty());
                 if valid {
                     self.new_url = Some(url.to_string());
-                    cx.ui()?.input(IN_TITLE, "Catalog name", "");
-                    Ok(())
+                    cx.input(IN_TITLE, "Catalog name", "")
                 } else {
                     if !url.is_empty() && url != "https://" {
-                        cx.ui()?.toast("The URL must start with http:// or https://");
+                        cx.toast("The URL must start with http:// or https://")?;
                     }
                     self.show_catalogs(cx)
                 }
@@ -492,8 +479,7 @@ impl Plugin for OpdsPlugin {
                 let _ = std::fs::remove_file(&*part);
                 cx.cancel_request(id);
                 self.inflight.remove(id);
-                cx.ui()?.toast(&format!("Download failed: {msg}"));
-                return Ok(());
+                return cx.toast(&format!("Download failed: {msg}"));
             }
             *bytes += data.len() as u64;
             return Ok(());

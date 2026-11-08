@@ -68,13 +68,14 @@ impl Entry {
 /// Parses `raw` (one field of type `kind`); `None` when the markup is none of the
 /// known styles or yields no sense.
 pub fn parse(kind: char, raw: &str) -> Option<Entry> {
-    let e = match kind {
+    let mut e = match kind {
         'h' if raw.contains("class=\"se1") || raw.contains("class=\"msDict") => apple(raw),
         'h' if raw.starts_with("<p>") => gcide(raw),
         'x' if raw.contains("<blockquote>") => xdxf(raw),
         _ => return None,
     };
-    e.filter(|e| e.groups.iter().any(|g| !g.senses.is_empty()))
+    e.groups.retain(|g| !g.senses.is_empty());
+    (!e.groups.is_empty()).then_some(e)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -161,28 +162,31 @@ fn label(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
-fn push_section(e: &mut Entry, s: Section) {
-    if !s.lines.is_empty() && !e.sections.contains(&s) {
-        e.sections.push(s);
+impl Entry {
+    /// Adds a finished section unless it is empty or already there.
+    fn push_section(&mut self, s: Option<Section>) {
+        if let Some(s) = s.filter(|s| !s.lines.is_empty() && !self.sections.contains(s)) {
+            self.sections.push(s);
+        }
+    }
+
+    /// Adds a sense to the last group (a first group without a part of speech if none).
+    fn push_sense(&mut self, s: Sense) {
+        if self.groups.is_empty() {
+            self.groups.push(Group::default());
+        }
+        self.groups.last_mut().expect("pushed").senses.push(s);
+    }
+
+    fn last_sense(&mut self) -> Option<&mut Sense> {
+        self.groups.last_mut().and_then(|g| g.senses.last_mut())
     }
 }
 
 // ---------------------------------------------------------------------------------------
 // Apple (NOAD)
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Slot {
-    None,
-    Pron,
-    Pos,
-    Def,
-    Example,
-    Label,
-    Term,
-    Line,
-}
-
-fn apple(raw: &str) -> Option<Entry> {
+fn apple(raw: &str) -> Entry {
     let mut e = Entry::default();
     // Open elements: their classes.
     let mut stack: Vec<String> = Vec::new();
@@ -199,19 +203,14 @@ fn apple(raw: &str) -> Option<Entry> {
                 if cls.contains(&"se1") {
                     e.groups.push(Group::default());
                 } else if cls.contains(&"msDict") && in_sg {
-                    if e.groups.is_empty() {
-                        e.groups.push(Group::default());
-                    }
                     let sub = cls.contains(&"t_subsense") || has(&stack, "msDict");
-                    e.groups.last_mut().expect("pushed").senses.push(Sense { sub, ..Sense::default() });
+                    e.push_sense(Sense { sub, ..Sense::default() });
                 } else if cls.contains(&"eg") && in_sg {
-                    if let Some(s) = e.groups.last_mut().and_then(|g| g.senses.last_mut()) {
+                    if let Some(s) = e.last_sense() {
                         s.examples.push(String::new());
                     }
                 } else if cls.contains(&"x_xo0") && !in_sg {
-                    if let Some(s) = section.take() {
-                        push_section(&mut e, s);
-                    }
+                    e.push_section(section.take());
                     section = Some(Section::default());
                 } else if let (true, Some(sec)) = (cls.contains(&"x_xo1"), section.as_mut()) {
                     sec.lines.push((String::new(), String::new()));
@@ -225,83 +224,47 @@ fn apple(raw: &str) -> Option<Entry> {
                 stack.pop();
             }
             Tok::Text(text) => {
-                let slot = if has(&stack, "x_xoLblBlk") {
-                    Slot::Label
-                } else if section.is_some() && has(&stack, "x_xo0") {
+                if has(&stack, "x_xoLblBlk") {
+                    if let Some(s) = section.as_mut() {
+                        s.label.push_str(&text);
+                    }
+                } else if let (true, Some(s)) = (has(&stack, "x_xo0"), section.as_mut()) {
                     // Sections keep their punctuation (`gp`): `late 16th century: from …`.
-                    if has(&stack, "hsb") {
-                        Slot::None
-                    } else if has(&stack, "l") && !has(&stack, "msDict") {
-                        Slot::Term
-                    } else {
-                        Slot::Line
+                    if !has(&stack, "hsb") {
+                        if s.lines.is_empty() {
+                            s.lines.push((String::new(), String::new()));
+                        }
+                        let l = s.lines.last_mut().expect("pushed");
+                        let term = has(&stack, "l") && !has(&stack, "msDict");
+                        if term { &mut l.0 } else { &mut l.1 }.push_str(&text);
                     }
                 } else if has(&stack, "se1") && !has(&stack, "msDict") && (has(&stack, "posg") || has(&stack, "x_xdh")) && !has(&stack, "sn") {
                     // The part of speech is often in a `gp` span itself.
-                    Slot::Pos
+                    if let Some(g) = e.groups.last_mut() {
+                        g.pos.push_str(&text);
+                    }
                 } else if has(&stack, "gp") || has(&stack, "sn") || has(&stack, "hsb") {
-                    Slot::None
+                    // Punctuation, sense numbers and syllable dots: not text of a slot.
                 } else if has(&stack, "hg") {
                     if has(&stack, "ph") && in_head_pron {
-                        Slot::Pron
-                    } else {
-                        Slot::None
-                    }
-                } else if has(&stack, "msDict") {
-                    if has(&stack, "eg") {
-                        Slot::Example
-                    } else {
-                        Slot::Def
-                    }
-                } else {
-                    Slot::None
-                };
-                match slot {
-                    Slot::None => {}
-                    Slot::Pron => {
                         if !pron.is_empty() && !pron.ends_with(", ") {
                             pron.push_str(", ");
                         }
                         pron.push_str(text.trim());
                     }
-                    Slot::Pos => {
-                        if let Some(g) = e.groups.last_mut() {
-                            g.pos.push_str(&text);
-                        }
-                    }
-                    Slot::Def | Slot::Example => {
-                        if let Some(s) = e.groups.last_mut().and_then(|g| g.senses.last_mut()) {
-                            match (slot, s.examples.last_mut()) {
-                                (Slot::Example, Some(x)) => x.push_str(&text),
-                                _ => s.def.push_str(&text),
-                            }
-                        }
-                    }
-                    Slot::Label => {
-                        if let Some(s) = section.as_mut() {
-                            s.label.push_str(&text);
-                        }
-                    }
-                    Slot::Term | Slot::Line => {
-                        if let Some(s) = section.as_mut() {
-                            if s.lines.is_empty() {
-                                s.lines.push((String::new(), String::new()));
-                            }
-                            let l = s.lines.last_mut().expect("pushed");
-                            if slot == Slot::Term {
-                                l.0.push_str(&text)
-                            } else {
-                                l.1.push_str(&text)
-                            }
+                } else if has(&stack, "msDict") {
+                    let example = has(&stack, "eg");
+                    if let Some(s) = e.last_sense() {
+                        match (example, s.examples.last_mut()) {
+                            (true, Some(x)) => x.push_str(&text),
+                            _ => s.def.push_str(&text),
                         }
                     }
                 }
             }
         }
     }
-    if let Some(s) = section.take() {
-        push_section(&mut e, s);
-    }
+    e.push_section(section.take());
     e.pron = Some(trim_joins(&pron)).filter(|p| !p.is_empty());
     for g in &mut e.groups {
         g.pos = squash(&g.pos);
@@ -311,13 +274,12 @@ fn apple(raw: &str) -> Option<Entry> {
         }
         g.senses.retain(|s| !s.def.is_empty() || !s.examples.is_empty());
     }
-    e.groups.retain(|g| !g.senses.is_empty());
     for s in &mut e.sections {
         s.label = label(&s.label);
         s.lines = s.lines.iter().map(|(t, l)| (squash(t), squash(l))).filter(|(t, l)| !t.is_empty() || !l.is_empty()).collect();
     }
     e.sections.retain(|s| !s.lines.is_empty());
-    Some(e)
+    e
 }
 
 // ---------------------------------------------------------------------------------------
@@ -384,7 +346,7 @@ fn strip_number(s: &str) -> &str {
     }
 }
 
-fn xdxf(raw: &str) -> Option<Entry> {
+fn xdxf(raw: &str) -> Entry {
     let mut e = Entry::default();
     let mut section: Option<Section> = None;
     let mut first_head = true;
@@ -433,9 +395,7 @@ fn xdxf(raw: &str) -> Option<Entry> {
             }
             first_head = false;
             if !pos.is_empty() {
-                if let Some(s) = section.take() {
-                    push_section(&mut e, s);
-                }
+                e.push_section(section.take());
                 match e.groups.last_mut() {
                     Some(g) if g.senses.is_empty() => g.pos = pos,
                     _ => e.groups.push(Group { pos, senses: Vec::new() }),
@@ -449,17 +409,12 @@ fn xdxf(raw: &str) -> Option<Entry> {
         }
         match depth {
             1 => {
-                if let Some(s) = section.take() {
-                    push_section(&mut e, s);
-                }
-                if e.groups.is_empty() {
-                    e.groups.push(Group::default());
-                }
+                e.push_section(section.take());
                 let def = strip_number(&text).trim_start_matches('•').trim().to_string();
-                e.groups.last_mut().expect("pushed").senses.push(Sense { def, ..Sense::default() });
+                e.push_sense(Sense { def, ..Sense::default() });
             }
             2 if section.is_none() => {
-                let Some(s) = e.groups.last_mut().and_then(|g| g.senses.last_mut()) else { continue };
+                let Some(s) = e.last_sense() else { continue };
                 match text.strip_prefix('•') {
                     Some(x) => s.examples.push(x.trim().to_string()),
                     None => s.notes.push(text),
@@ -472,9 +427,7 @@ fn xdxf(raw: &str) -> Option<Entry> {
                 let head = text.split_once(':').filter(|(l, _)| is_label && !l.is_empty());
                 match head {
                     Some((l, r)) => {
-                        if let Some(s) = section.take() {
-                            push_section(&mut e, s);
-                        }
+                        e.push_section(section.take());
                         let mut s = Section { label: label(l), lines: Vec::new() };
                         if !r.trim().is_empty() {
                             s.lines.push((String::new(), r.trim().to_string()));
@@ -486,7 +439,7 @@ fn xdxf(raw: &str) -> Option<Entry> {
                         match section.as_mut() {
                             Some(s) => s.lines.push((String::new(), l)),
                             None => {
-                                if let Some(s) = e.groups.last_mut().and_then(|g| g.senses.last_mut()) {
+                                if let Some(s) = e.last_sense() {
                                     s.notes.push(l);
                                 }
                             }
@@ -496,11 +449,8 @@ fn xdxf(raw: &str) -> Option<Entry> {
             }
         }
     }
-    if let Some(s) = section.take() {
-        push_section(&mut e, s);
-    }
-    e.groups.retain(|g| !g.senses.is_empty());
-    Some(e)
+    e.push_section(section.take());
+    e
 }
 
 // ---------------------------------------------------------------------------------------
@@ -628,7 +578,7 @@ fn gcide_head(s: &str) -> (String, Vec<String>) {
     (squash(&text), groups)
 }
 
-fn gcide(raw: &str) -> Option<Entry> {
+fn gcide(raw: &str) -> Entry {
     let mut e = Entry::default();
     let mut compounds = Section { label: "Compounds".into(), lines: Vec::new() };
     let mut origin = Section { label: "Origin".into(), lines: Vec::new() };
@@ -669,14 +619,11 @@ fn gcide(raw: &str) -> Option<Entry> {
         }
         if let Some(n) = num {
             let def = para.text[para.text.find(n).map_or(0, |i| i + n.len())..].trim().to_string();
-            if e.groups.is_empty() {
-                e.groups.push(Group::default());
-            }
-            e.groups.last_mut().expect("pushed").senses.push(Sense { def, ..Sense::default() });
+            e.push_sense(Sense { def, ..Sense::default() });
             continue;
         }
         if para.lead_i && para.lead_b.is_none() {
-            if let Some(s) = e.groups.last_mut().and_then(|g| g.senses.last_mut()) {
+            if let Some(s) = e.last_sense() {
                 s.examples.push(para.text.clone());
                 continue;
             }
@@ -684,7 +631,7 @@ fn gcide(raw: &str) -> Option<Entry> {
         if let Some(b) = &para.lead_b {
             // `(b) To flee …`: part of the sense above.
             if b.starts_with('(') {
-                if let Some(s) = e.groups.last_mut().and_then(|g| g.senses.last_mut()) {
+                if let Some(s) = e.last_sense() {
                     s.notes.push(para.text.clone());
                     continue;
                 }
@@ -712,18 +659,17 @@ fn gcide(raw: &str) -> Option<Entry> {
             }
             continue;
         }
-        if let Some(s) = e.groups.last_mut().and_then(|g| g.senses.last_mut()) {
+        if let Some(s) = e.last_sense() {
             s.notes.push(para.text.clone());
         }
     }
     for s in [compounds, syn, origin] {
-        push_section(&mut e, s);
+        e.push_section(Some(s));
     }
     for g in &mut e.groups {
         g.senses.retain(|s| !s.def.is_empty());
     }
-    e.groups.retain(|g| !g.senses.is_empty());
-    Some(e)
+    e
 }
 
 #[cfg(test)]

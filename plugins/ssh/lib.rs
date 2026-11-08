@@ -407,17 +407,13 @@ pub struct SshPlugin {
 }
 
 impl Default for SshPlugin {
+    /// The plugin with the Kindle's paths.
     fn default() -> Self {
-        Self::new()
+        Self::with_system(Paths::kindle(), Box::new(RealSystem))
     }
 }
 
 impl SshPlugin {
-    /// The plugin with the Kindle's paths.
-    pub fn new() -> Self {
-        Self::with_system(Paths::kindle(), Box::new(RealSystem))
-    }
-
     /// The plugin with other paths and a fake [`System`] (tests).
     pub fn with_system(paths: Paths, sys: Box<dyn System>) -> Self {
         SshPlugin {
@@ -551,27 +547,20 @@ impl SshPlugin {
     /// Adds the firewall rule when missing; true when this call added it.
     fn open_firewall(&mut self, port: u16) -> bool {
         let ipt = self.paths.iptables_program();
-        match self.sys.run(&ipt, &firewall_args("-C", port)) {
-            Ok(true) => false,
-            Ok(false) => match self.sys.run(&ipt, &firewall_args("-A", port)) {
-                Ok(true) => {
-                    log::info!("ssh: firewall: accepting tcp port {port}");
-                    true
-                }
-                Ok(false) => {
-                    log::warn!("ssh: iptables could not add the rule for port {port}");
-                    false
-                }
-                Err(e) => {
-                    log::warn!("ssh: iptables: {e}");
-                    false
-                }
-            },
+        let added = match self.sys.run(&ipt, &firewall_args("-C", port)) {
+            Ok(true) => return false,
+            Ok(false) => self.sys.run(&ipt, &firewall_args("-A", port)),
             Err(e) => {
                 log::warn!("ssh: iptables not available ({e}); not changing the firewall");
-                false
+                return false;
             }
+        };
+        match &added {
+            Ok(true) => log::info!("ssh: firewall: accepting tcp port {port}"),
+            Ok(false) => log::warn!("ssh: iptables could not add the rule for port {port}"),
+            Err(e) => log::warn!("ssh: iptables: {e}"),
         }
+        matches!(added, Ok(true))
     }
 
     fn close_firewall(&mut self, port: u16) {
@@ -663,7 +652,7 @@ impl SshPlugin {
             } else {
                 addrs.iter().map(|(l, ip)| format!("{ip}:{} ({l})", s.port)).collect::<Vec<_>>().join(", ")
             };
-            format!("Running on {at} · {}", keys_text(s.keys))
+            format!("Running on {at} · {} key{}", s.keys, if s.keys == 1 { "" } else { "s" })
         } else if let Some(f) = &self.failure {
             f.message.clone()
         } else {
@@ -775,13 +764,6 @@ fn on_off(b: bool) -> &'static str {
     }
 }
 
-fn keys_text(n: usize) -> String {
-    match n {
-        1 => "1 key".into(),
-        n => format!("{n} keys"),
-    }
-}
-
 impl Drop for SshPlugin {
     /// Fallback for an exit without `on_exit`.
     fn drop(&mut self) {
@@ -836,23 +818,19 @@ impl Plugin for SshPlugin {
                 }
                 "port" => {
                     let port = Self::port(cx);
-                    cx.ui()?.input(IN_PORT, "SSH port (1-65535)", &port.to_string());
-                    Ok(())
+                    cx.input(IN_PORT, "SSH port (1-65535)", &port.to_string())
                 }
                 "no_password" if cx.setting_bool("no_password", false) => {
                     Self::set(cx, "no_password", json!(false));
                     self.restart_if_running(cx, "Login without password is off");
                     self.show_menu(cx)
                 }
-                "no_password" => {
-                    cx.ui()?.dialog(
-                        DLG_NO_PASSWORD,
-                        "Login without password",
-                        "Anyone who can reach the Kindle over Wi-Fi or USB gets a root shell, with any password or none. Turn it on only to add your key, and off again afterwards.",
-                        &[("Cancel", "cancel"), ("Turn on", "on")],
-                    );
-                    Ok(())
-                }
+                "no_password" => cx.dialog(
+                    DLG_NO_PASSWORD,
+                    "Login without password",
+                    "Anyone who can reach the Kindle over Wi-Fi or USB gets a root shell, with any password or none. Turn it on only to add your key, and off again afterwards.",
+                    &[("Cancel", "cancel"), ("Turn on", "on")],
+                ),
                 "autostart" => {
                     let on = !cx.setting_bool("autostart", false);
                     Self::set(cx, "autostart", json!(on));
@@ -861,8 +839,7 @@ impl Plugin for SshPlugin {
                 "help" => {
                     let port = self.server.as_ref().map_or_else(|| Self::port(cx), |s| s.port);
                     let md = self.help_markdown(port);
-                    cx.ui()?.view_markdown(VIEW_HELP, "How to log in", &md);
-                    Ok(())
+                    cx.view_markdown(VIEW_HELP, "How to log in", &md)
                 }
                 _ => Ok(()),
             },

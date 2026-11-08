@@ -259,6 +259,19 @@ fn opds2_huge_paging_numbers_do_not_overflow() {
 }
 
 #[test]
+fn opds2_cover_and_thumbnail_ties_go_to_the_first_image() {
+    let img = |n: u32, w: u32| format!(r#"{{"href":"/i{n}.jpg","type":"image/jpeg","width":{w},"height":{w}}}"#);
+    let json = format!(r#"{{"metadata":{{"title":"T"}},"publications":[{{"metadata":{{"title":"B"}},"images":[{},{},{},{}]}}]}}"#, img(1, 10), img(2, 90), img(3, 90), img(4, 10));
+    let f = parse_opds2(&json, "http://h/").unwrap();
+    let e = &f.entries[0];
+    assert_eq!(e.cover().unwrap().href, "http://h/i2.jpg");
+    assert_eq!(e.thumbnail().unwrap().href, "http://h/i1.jpg");
+    let one = parse_opds2(&format!(r#"{{"publications":[{{"images":[{}]}}]}}"#, img(5, 10)), "http://h/").unwrap();
+    assert_eq!(one.entries[0].cover().unwrap().href, "http://h/i5.jpg");
+    assert!(one.entries[0].links.iter().all(|l| !THUMBNAIL_RELS.contains(&l.rel.as_str())), "one image is no thumbnail");
+}
+
+#[test]
 fn templates() {
     assert_eq!(fill_template("http://h/s?q={searchTerms}&p={startPage?}&l={language}", "x y"), "http://h/s?q=x%20y&p=&l=*");
     assert_eq!(fill_template("http://h/s?q={searchTerms}&i={startIndex}&c={count?}", "x"), "http://h/s?q=x&i=1&c=");

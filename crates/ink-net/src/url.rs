@@ -20,19 +20,10 @@ pub struct Parts<'a> {
     pub fragment: Option<&'a str>,
 }
 
+/// Length of the scheme: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` before a `:`.
 fn scheme_len(s: &str) -> Option<usize> {
-    let b = s.as_bytes();
-    if b.first().is_none_or(|c| !c.is_ascii_alphabetic()) {
-        return None;
-    }
-    for (i, &c) in b.iter().enumerate().skip(1) {
-        match c {
-            b':' => return Some(i),
-            c if c.is_ascii_alphanumeric() || c == b'+' || c == b'-' || c == b'.' => {}
-            _ => return None,
-        }
-    }
-    None
+    let i = s.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))?;
+    (s[i..].starts_with(':') && s.starts_with(|c: char| c.is_ascii_alphabetic())).then_some(i)
 }
 
 /// Splits a URI reference into its components.
@@ -107,23 +98,13 @@ fn merge(base: &Parts<'_>, rel_path: &str) -> String {
 }
 
 fn compose(scheme: Option<&str>, authority: Option<&str>, path: &str, query: Option<&str>, fragment: Option<&str>) -> String {
-    let mut s = String::new();
-    if let Some(sc) = scheme {
-        s.push_str(sc);
-        s.push(':');
-    }
-    if let Some(a) = authority {
-        s.push_str("//");
-        s.push_str(a);
-    }
-    s.push_str(path);
-    if let Some(q) = query {
-        s.push('?');
-        s.push_str(q);
-    }
-    if let Some(f) = fragment {
-        s.push('#');
-        s.push_str(f);
+    // Each component with the delimiters around it (RFC 3986 section 5.3).
+    let parts = [(scheme, "", ":"), (authority, "//", ""), (Some(path), "", ""), (query, "?", ""), (fragment, "#", "")];
+    let mut s = String::with_capacity(parts.iter().map(|(p, a, b)| p.map_or(0, |p| a.len() + p.len() + b.len())).sum());
+    for (part, before, after) in parts {
+        if let Some(p) = part {
+            s.extend([before, p, after]);
+        }
     }
     s
 }
@@ -142,21 +123,12 @@ pub fn resolve(base: &str, reference: &str) -> String {
         return compose(r.scheme, r.authority, &remove_dot_segments(r.path), r.query, r.fragment);
     }
     let b = parse(base);
-    let (authority, path, query);
-    if r.authority.is_some() {
-        authority = r.authority;
-        path = remove_dot_segments(r.path);
-        query = r.query;
-    } else {
-        authority = b.authority;
-        if r.path.is_empty() {
-            path = b.path.to_string();
-            query = r.query.or(b.query);
-        } else {
-            path = if r.path.starts_with('/') { remove_dot_segments(r.path) } else { remove_dot_segments(&merge(&b, r.path)) };
-            query = r.query;
-        }
-    }
+    let (authority, path, query) = match (r.authority, r.path) {
+        (Some(_), p) => (r.authority, remove_dot_segments(p), r.query),
+        (None, "") => (b.authority, b.path.to_string(), r.query.or(b.query)),
+        (None, p) if p.starts_with('/') => (b.authority, remove_dot_segments(p), r.query),
+        (None, p) => (b.authority, remove_dot_segments(&merge(&b, p)), r.query),
+    };
     compose(b.scheme, authority, &path, query, r.fragment)
 }
 
