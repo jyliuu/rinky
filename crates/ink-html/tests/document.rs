@@ -548,3 +548,60 @@ fn page_map_layout_has_the_full_layouts_page_starts() {
         }
     }
 }
+
+/// Notes the way books really write them: the popup text is the note's own content,
+/// without the number the book prints before it, the punctuation after that number,
+/// or a backlink before or after the text; paragraphs stay apart.
+#[test]
+fn note_content_like_koreader() {
+    let text = r##"<p>A<a href="n.xhtml#fn57">57</a> B<a href="n.xhtml#fn58">58</a> C<a href="n.xhtml#fn59">59</a>
+        D<a href="n.xhtml#fn60">60</a> E<a href="n.xhtml#en61">61</a> F<a href="n.xhtml#fn62">62</a>
+        G<a href="n.xhtml#fn63">63</a> H<a href="n.xhtml#fn64">64</a> I<a href="n.xhtml#fn65">65</a>
+        J<a epub:type="noteref" href="#fn66" id="r66">66</a> K<a href="n.xhtml#fn67">67</a> L<a href="n.xhtml#fn68">68</a>.</p>
+        <aside epub:type="footnote" id="fn66"><p><a href="#r66">66</a>) Aside note,</p><p>second paragraph.</p></aside>"##;
+    let notes = r##"<p id="fn57"><a href="a.xhtml#ref57">57</a>. The text of note 57.</p>
+        <p id="fn58">The text of note 58. <a href="a.xhtml#ref58">[58]</a></p>
+        <div class="calibre_note" id="fn59"><p><a href="a.xhtml#ref59">59</a>.</p><p>Calibre note, its number in a paragraph of its own.</p></div>
+        <p id="fn60"><sup><a href="a.xhtml#ref60">[60]</a></sup>: First paragraph of note 60.</p>
+        <p>Second paragraph of note 60, no id of its own.</p>
+        <h2>Next part</h2>
+        <section epub:type="endnotes" role="doc-endnotes"><ol>
+          <li id="en61"><p>List endnote 61. <a href="a.xhtml#r61" role="doc-backlink">↩︎</a></p></li>
+          <li id="fn62"><p>List endnote 62, a sibling. <a href="a.xhtml#r62">Back</a></p></li>
+        </ol></section>
+        <p><a id="fn63"></a><a href="a.xhtml#r63">63.</a> Mobi note with an empty anchor.</p>
+        <a id="fn64"></a><p>64. Anchor before the paragraph.</p>
+        <p id="fn65">65 <a href="a.xhtml#r65">↑</a> Bare number, then an arrow backlink.</p>
+        <div class="footnotes"><p id="fn67"><span class="num">67.</span> In a list of notes.</p><p id="fn68">68. The next one.</p></div>
+        "##;
+    let n = notes_of(text, notes);
+    let by = |t: &str| n.iter().find(|(l, _)| l == t).map(|(_, n)| n.clone()).unwrap_or_else(|| panic!("{t} in {n:?}"));
+    let text = |t: &str| by(t).text;
+
+    // The number as a backlink, then a period: neither stays.
+    assert_eq!(text("57"), "The text of note 57.");
+    assert_eq!(by("57").label.as_deref(), Some("57"));
+    // A numbered backlink after the text goes.
+    assert_eq!(text("58"), "The text of note 58.");
+    // The number alone in the first paragraph: that paragraph is gone.
+    assert_eq!(text("59"), "Calibre note, its number in a paragraph of its own.");
+    // A note of two paragraphs without a container: the following paragraph belongs
+    // to it (up to the heading).
+    assert_eq!(text("60"), "First paragraph of note 60.\nSecond paragraph of note 60, no id of its own.");
+    // One <li> of an endnotes list, not the whole list; the backlink goes.
+    assert_eq!(text("61"), "List endnote 61.");
+    assert_eq!(by("61").kind, NoteKind::Endnote);
+    assert_eq!(text("62"), "List endnote 62, a sibling.");
+    // An empty anchor in the paragraph, or before it.
+    assert_eq!(text("63"), "Mobi note with an empty anchor.");
+    assert_eq!(text("64"), "Anchor before the paragraph.");
+    assert_eq!(text("65"), "65 Bare number, then an arrow backlink.");
+    // An EPUB 3 aside of two paragraphs, its number then a bracket.
+    assert_eq!(text("66"), "Aside note,\nsecond paragraph.");
+    assert_eq!(by("66").kind, NoteKind::Footnote);
+    // Notes side by side in a footnotes container: just the one.
+    assert_eq!(text("67"), "In a list of notes.");
+    assert_eq!(by("67").kind, NoteKind::Footnote);
+    assert_eq!(text("68"), "The next one.");
+}
+

@@ -291,13 +291,15 @@ pub struct Note {
     pub kind: NoteKind,
     /// Where the note text starts.
     pub position: Position,
-    /// The note text (for a popup), without its leading number or backlink: the text
-    /// of [`Note::spans`] joined.
+    /// The note text (for a popup), without its leading number, the punctuation after
+    /// that number, or backlinks: the text of [`Note::spans`] joined. Paragraphs are
+    /// separated by `\n`.
     pub text: String,
     /// The note's own number or mark as the book prints it before the text (`12`, `*`),
     /// without brackets or a trailing dot; `None` when the note has none.
     pub label: Option<String>,
-    /// [`Note::text`] with its inline formatting (italic, bold), white space collapsed.
+    /// [`Note::text`] with its inline formatting (italic, bold), white space collapsed;
+    /// a span may end with the `\n` of a paragraph break.
     pub spans: Vec<NoteSpan>,
 }
 
