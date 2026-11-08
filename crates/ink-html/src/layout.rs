@@ -385,27 +385,49 @@ struct Line {
 }
 
 /// A paragraph (or one chunk of a giant paragraph) being broken into lines: its display
-/// text, the source of each char, the byte offset of each char and its segments.
+/// text, the source of each char, where its multi-byte chars are and its segments.
 struct Para<'p> {
     text: &'p str,
     src: &'p [CharSrc],
-    char_at: Vec<usize>,
+    /// (char index, byte offset) just after each multi-byte char. Between two of them
+    /// (and before the first) the text is ASCII, so char and byte indices advance
+    /// together: plain ASCII text needs no table and no search.
+    wide: Vec<(u32, u32)>,
     segs: &'p [Seg],
 }
 
 impl<'p> Para<'p> {
     fn new(text: &'p str, src: &'p [CharSrc], segs: &'p [Seg]) -> Self {
-        Para { text, src, char_at: text.char_indices().map(|(b, _)| b).collect(), segs }
+        let mut wide = Vec::new();
+        if !text.is_ascii() {
+            for (ci, (b, c)) in text.char_indices().enumerate() {
+                if !c.is_ascii() {
+                    wide.push((ci as u32 + 1, (b + c.len_utf8()) as u32));
+                }
+            }
+        }
+        Para { text, src, wide, segs }
     }
 
     /// Index of the char at byte `b` (or of the first char after it).
     fn char_index(&self, b: usize) -> usize {
-        self.char_at.partition_point(|&x| x < b)
+        let b = b.min(self.text.len());
+        // The last multi-byte char ending at or before `b`; ASCII from there on, up to
+        // the next multi-byte char (a byte inside it counts that char as before `b`).
+        let k = self.wide.partition_point(|&(_, wb)| wb as usize <= b);
+        let (ci, wb) = if k == 0 { (0, 0) } else { (self.wide[k - 1].0 as usize, self.wide[k - 1].1 as usize) };
+        let i = ci + (b - wb);
+        match self.wide.get(k) {
+            Some(&(next, _)) => i.min(next as usize),
+            None => i,
+        }
     }
 
     /// Byte offset of char `i` (the text length past the end).
     fn byte(&self, i: usize) -> usize {
-        self.char_at.get(i).copied().unwrap_or(self.text.len())
+        let k = self.wide.partition_point(|&(wi, _)| wi as usize <= i);
+        let b = if k == 0 { i } else { self.wide[k - 1].1 as usize + (i - self.wide[k - 1].0 as usize) };
+        b.min(self.text.len())
     }
 
     /// The segment of the char at byte `b`.
@@ -426,7 +448,7 @@ impl<'p> Para<'p> {
             while j < stop && self.src[j].seg == seg {
                 j += 1;
             }
-            let run = (seg, self.char_at[i], self.byte(j).min(end));
+            let run = (seg, self.byte(i), self.byte(j).min(end));
             i = j;
             Some(run)
         })
@@ -1954,5 +1976,20 @@ mod tests {
         assert_eq!(marker_text(ListStyle::UpperRoman, 14), "XIV.");
         assert_eq!(marker_text(ListStyle::LowerAlpha, 28), "ab.");
         assert_eq!(marker_text(ListStyle::Disc, 1), "•");
+    }
+
+    #[test]
+    fn para_char_and_byte_indices_match_a_full_table() {
+        let texts = ["", "plain words", "é", "café au lait", "“Quoted”—and ‘more’.", "Съешь же ещё", "a😀b\u{ad}c\u{fffc}", "😀😀x"];
+        for text in texts {
+            let para = Para::new(text, &[], &[]);
+            let at: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+            for b in 0..=text.len() + 2 {
+                assert_eq!(para.char_index(b), at.partition_point(|&x| x < b), "char_index({b}) of {text:?}");
+            }
+            for i in 0..=at.len() + 2 {
+                assert_eq!(para.byte(i), at.get(i).copied().unwrap_or(text.len()), "byte({i}) of {text:?}");
+            }
+        }
     }
 }
