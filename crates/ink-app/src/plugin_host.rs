@@ -1000,11 +1000,11 @@ pub fn cli(args: &[String], compiled: Vec<Box<dyn Plugin>>, settings: &Settings,
 /// Which registry a [`PluginEntry`] comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
-    /// A reader menu item ([`hooks::reader_menu`]).
+    /// A reader menu item ([`PluginHost::menu_items`]).
     ReaderMenu,
-    /// A selection popup action ([`hooks::selection_actions`]).
+    /// A selection popup action ([`PluginHost::selection_actions`]).
     Selection,
-    /// A library long-press action on a book ([`hooks::library_actions`]).
+    /// A library long-press action on a book ([`PluginHost::library_actions`]).
     Library,
     /// A plugin settings page ([`hooks::settings_pages`]).
     Settings,
@@ -1028,7 +1028,8 @@ pub struct PluginEntry {
 /// `screens/settings`) and for the app loop. Every function takes the screen's
 /// [`AppCtx`]; documents are passed as `&mut dyn Document`.
 ///
-/// Screens call the lifecycle and registry functions. Events, overlay painting, timers,
+/// Screens call the lifecycle methods on `cx.plugins` ([`PluginHost::book_open`],
+/// [`PluginHost::page_change`], ...) and these registry functions. Events, overlay painting, timers,
 /// network delivery and the power key are done by the app loop ([`hooks::app_handle`],
 /// [`hooks::app_paint`], [`hooks::app_timeout`]); a screen only implements
 /// `AppScreen::document` so plugins see its open book. Screens must not call
@@ -1036,65 +1037,14 @@ pub struct PluginEntry {
 pub mod hooks {
     use super::{EntryKind, PluginEntry, PluginHost};
     use crate::router::{AppCtx, AppScreen};
-    use ink_doc::{Document, Selection};
+    use ink_doc::Document;
     use ink_plugin::registry::StatusSlot;
     use ink_device::{Canvas, Rect, RefreshClass, Rotation, Screen, Size};
     use ink_ui::{Damage, Gesture, PaintCx, UiEvent};
     use std::path::Path;
     use std::time::Duration;
 
-    // -- Lifecycle (reader) ---------------------------------------------------------------
-
-    /// The reader opened `path` and laid it out (in `on_enter`).
-    pub fn on_book_open(cx: &mut AppCtx, doc: &mut dyn Document, path: &Path) {
-        cx.plugins.book_open(doc, path);
-    }
-
-    /// The reader shows `page` (0-based), after `doc.set_current_page(page)`.
-    pub fn on_page_change(cx: &mut AppCtx, doc: &mut dyn Document, page: usize) {
-        cx.plugins.page_change(doc, page);
-    }
-
-    /// The user made a selection (before the popup opens; the popup lists
-    /// [`selection_actions`]).
-    pub fn on_selection(cx: &mut AppCtx, doc: &mut dyn Document, sel: &Selection) {
-        cx.plugins.selection(doc, sel);
-    }
-
-    /// The device goes to sleep. The app loop already calls this on
-    /// `PowerEvent::GoingToScreenSaver` (with `AppScreen::document`); a second call
-    /// before [`on_resume`] does nothing.
-    pub fn on_suspend(cx: &mut AppCtx, doc: Option<&mut dyn Document>) {
-        cx.plugins.suspend(doc);
-    }
-
-    /// The device woke up. The app loop already calls this on
-    /// `PowerEvent::OutOfScreenSaver`; a call without a preceding suspend does nothing.
-    pub fn on_resume(cx: &mut AppCtx, doc: Option<&mut dyn Document>) {
-        cx.plugins.resume(doc);
-    }
-
-    /// The reader closes the book (in `on_exit`).
-    pub fn on_close(cx: &mut AppCtx, doc: &mut dyn Document) {
-        cx.plugins.book_close(doc);
-    }
-
     // -- Registries -----------------------------------------------------------------------
-
-    /// Reader menu entries, in the plugins' order.
-    pub fn reader_menu(cx: &AppCtx) -> Vec<PluginEntry> {
-        entries(cx.plugins, EntryKind::ReaderMenu)
-    }
-
-    /// Selection popup entries.
-    pub fn selection_actions(cx: &AppCtx) -> Vec<PluginEntry> {
-        entries(cx.plugins, EntryKind::Selection)
-    }
-
-    /// Entries for a book's long-press menu in the library.
-    pub fn library_actions(cx: &AppCtx) -> Vec<PluginEntry> {
-        entries(cx.plugins, EntryKind::Library)
-    }
 
     /// Plugin settings pages (list them under "Plugins").
     pub fn settings_pages(cx: &AppCtx) -> Vec<PluginEntry> {
@@ -1147,11 +1097,6 @@ pub mod hooks {
     /// Status-bar text of the plugin widgets in `slot` (empty when none).
     pub fn status_text(cx: &AppCtx, slot: StatusSlot) -> String {
         cx.plugins.status_line(slot)
-    }
-
-    /// Unread plugin notifications (for a badge).
-    pub fn unread_notifications(cx: &AppCtx) -> usize {
-        cx.plugins.unread_notifications()
     }
 
     // -- App loop -------------------------------------------------------------------------
