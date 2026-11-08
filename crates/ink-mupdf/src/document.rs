@@ -453,23 +453,13 @@ impl Inner {
 
 /// Pages shown on spread screen `view`.
 fn spread_pages(view: usize, pages: usize, cover_alone: bool) -> Vec<usize> {
-    let (a, single) = if cover_alone {
-        if view == 0 {
-            (0, true)
-        } else {
-            (2 * view - 1, false)
-        }
-    } else {
-        (2 * view, false)
+    // First page and how many pages the screen holds (cover alone: page 0 by itself).
+    let (a, n) = match (cover_alone, view) {
+        (true, 0) => (0, 1),
+        (true, v) => (2 * v - 1, 2),
+        (false, v) => (2 * v, 2),
     };
-    if a >= pages {
-        return Vec::new();
-    }
-    if single || a + 1 >= pages {
-        vec![a]
-    } else {
-        vec![a, a + 1]
-    }
+    (a..a.saturating_add(n).min(pages)).collect()
 }
 
 fn split_even(b: FRect, cols: usize) -> Vec<FRect> {
@@ -726,29 +716,15 @@ impl MupdfDocument {
         match self.plan {
             // At most MAX_SCREENS (tile_cap); saturating in case MuPDF reports absurd counts.
             Plan::Tiles { .. } => self.pages.saturating_mul(self.plan.per_page()),
-            Plan::Spread { cover_alone, .. } => {
-                if self.pages == 0 {
-                    0
-                } else if cover_alone {
-                    1 + self.pages / 2
-                } else {
-                    self.pages.div_ceil(2)
-                }
-            }
+            // One past the screen of the last page.
+            Plan::Spread { .. } => self.pages.checked_sub(1).map_or(0, |last| self.first_screen_of(last) + 1),
         }
     }
 
     /// Document pages shown on `screen`.
     pub fn pages_of_screen(&self, screen: usize) -> Vec<usize> {
         match self.plan {
-            Plan::Tiles { .. } => {
-                let p = screen / self.plan.per_page();
-                if p < self.pages {
-                    vec![p]
-                } else {
-                    Vec::new()
-                }
-            }
+            Plan::Tiles { .. } => Some(screen / self.plan.per_page()).filter(|&p| p < self.pages).into_iter().collect(),
             Plan::Spread { cover_alone, .. } => spread_pages(screen, self.pages, cover_alone),
         }
     }
@@ -1269,5 +1245,24 @@ impl Document for MupdfDocument {
 
     fn set_selection(&mut self, sel: Selection) {
         self.selection = Some(sel);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spread_pages_pair_up_after_the_cover() {
+        let none = Vec::<usize>::new();
+        assert_eq!(spread_pages(0, 5, true), vec![0]);
+        assert_eq!(spread_pages(1, 5, true), vec![1, 2]);
+        assert_eq!(spread_pages(2, 5, true), vec![3, 4]);
+        assert_eq!(spread_pages(3, 5, true), none);
+        assert_eq!(spread_pages(2, 4, true), vec![3]);
+        assert_eq!(spread_pages(0, 5, false), vec![0, 1]);
+        assert_eq!(spread_pages(2, 5, false), vec![4]);
+        assert_eq!(spread_pages(3, 5, false), none);
+        assert_eq!(spread_pages(0, 0, true), none);
     }
 }
