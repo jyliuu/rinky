@@ -695,21 +695,14 @@ fn unescape(s: &str) -> String {
 }
 
 fn compound_specificity(c: &Compound) -> (u32, u32, u32) {
-    let mut a = c.ids.len() as u32;
-    let mut b = (c.classes.len() + c.attrs.len()) as u32;
-    let mut t = c.tag.is_some() as u32;
-    for p in &c.pseudos {
-        match p {
-            Pseudo::Not(inner) => {
-                let (x, y, z) = compound_specificity(inner);
-                a += x;
-                b += y;
-                t += z;
-            }
-            _ => b += 1,
+    let own = (c.ids.len() as u32, (c.classes.len() + c.attrs.len()) as u32, c.tag.is_some() as u32);
+    c.pseudos.iter().fold(own, |(a, b, t), p| match p {
+        Pseudo::Not(inner) => {
+            let (x, y, z) = compound_specificity(inner);
+            (a + x, b + y, t + z)
         }
-    }
-    (a, b, t)
+        _ => (a, b + 1, t),
+    })
 }
 
 /// Parses one complex selector; `None` when it uses unsupported syntax.
@@ -773,27 +766,28 @@ pub trait SelectorElement: Sized + Copy {
     }
 }
 
+/// `s`, lowercased when `fold`.
+fn folded(s: &str, fold: bool) -> std::borrow::Cow<'_, str> {
+    if fold { s.to_lowercase().into() } else { s.into() }
+}
+
 fn attr_matches(a: &AttrSel, v: Option<&str>) -> bool {
-    let Some(v) = v else { return false };
-    let owned;
-    let v = if a.case_insensitive {
-        owned = v.to_lowercase();
-        owned.as_str()
-    } else {
-        v
-    };
-    let norm = |s: &str| if a.case_insensitive { s.to_lowercase() } else { s.to_string() };
+    let norm = |s| folded(s, a.case_insensitive);
+    let Some(v) = v.map(norm) else { return false };
     match &a.op {
         AttrOp::Exists => true,
         AttrOp::Eq(x) => v == norm(x),
-        AttrOp::Includes(x) => v.split_ascii_whitespace().any(|w| w == norm(x)),
+        AttrOp::Includes(x) => {
+            let x = norm(x);
+            v.split_ascii_whitespace().any(|w| w == x)
+        }
         AttrOp::DashMatch(x) => {
             let x = norm(x);
             v == x || v.starts_with(&format!("{x}-"))
         }
-        AttrOp::Prefix(x) => !x.is_empty() && v.starts_with(&norm(x)),
-        AttrOp::Suffix(x) => !x.is_empty() && v.ends_with(&norm(x)),
-        AttrOp::Substring(x) => !x.is_empty() && v.contains(&norm(x)),
+        AttrOp::Prefix(x) => !x.is_empty() && v.starts_with(&*norm(x)),
+        AttrOp::Suffix(x) => !x.is_empty() && v.ends_with(&*norm(x)),
+        AttrOp::Substring(x) => !x.is_empty() && v.contains(&*norm(x)),
     }
 }
 
