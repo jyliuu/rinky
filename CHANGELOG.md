@@ -25,21 +25,19 @@ All notable changes to rinky are listed here. The format is based on
   Kindle's `My Clippings.txt`, so Readwise and similar tools read them; *Export all
   highlights* then puts every book in one `exports/My Clippings.txt`. Over SSH,
   `rinky export-highlights --format clippings|json` does the same.
+
 ### Changed
 - Books finish counting their pages sooner after opening and after a font-size change,
   and rinky uses about 35 MB less memory while reading: each font is now read once and
   shared, where the page counter read it again for itself.
-### Changed
 - AZW3 books whose cover page is an SVG around one picture (Calibre's usual cover)
   open several times faster: the picture is decoded straight to its size on screen.
 - The library takes in new books about twice as fast: the cover thumbnail of each book
   is made with much less work.
-### Changed
 - A book opened for the first time shows its first page without waiting for the
   pages after it to be counted.
 - The library shows its books at once when rinky starts and reads the book folders
   in the background; books added or removed meanwhile show up a moment later.
-### Changed
 - Reading settings (Aa): a tap on a control no longer redraws the whole sheet when the
   finger goes down and again when it lifts, so the sheet answers taps sooner. The
   sheet also opens faster.
