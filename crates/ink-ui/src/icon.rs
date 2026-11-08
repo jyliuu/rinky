@@ -40,6 +40,10 @@ pub enum Icon {
     Rotate,
     /// Wi-Fi arcs.
     Wifi,
+    /// Wi-Fi arcs, the outer two dashed (connecting).
+    WifiConnecting,
+    /// Wi-Fi arcs struck through (off, or no network).
+    WifiOff,
     /// Battery outline.
     Battery,
     /// Check mark.
@@ -104,7 +108,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every icon (for the gallery).
-    pub const ALL: [Icon; 45] = [
+    pub const ALL: [Icon; 47] = [
         Icon::Back,
         Icon::Forward,
         Icon::Up,
@@ -120,6 +124,8 @@ impl Icon {
         Icon::Night,
         Icon::Rotate,
         Icon::Wifi,
+        Icon::WifiConnecting,
+        Icon::WifiOff,
         Icon::Battery,
         Icon::Check,
         Icon::Plus,
@@ -244,6 +250,26 @@ impl Icon {
                     path.arc(cx, cy, r * s, -PI * 0.75, -PI * 0.25, w);
                 }
                 path.circle(cx, cy, 1.8 * s);
+            }
+            Icon::WifiConnecting => {
+                let (cx, cy) = p(12.0, 19.0);
+                path.arc(cx, cy, 5.0 * s, -PI * 0.75, -PI * 0.25, w);
+                // The outer arcs in three dashes each.
+                for r in [10.0, 15.0] {
+                    for i in 0..3 {
+                        let a = -PI * 0.75 + i as f32 * PI * 0.2;
+                        path.arc(cx, cy, r * s, a, a + PI * 0.1, w);
+                    }
+                }
+                path.circle(cx, cy, 1.8 * s);
+            }
+            Icon::WifiOff => {
+                let (cx, cy) = p(12.0, 19.0);
+                for r in [5.0, 10.0, 15.0] {
+                    path.arc(cx, cy, r * s, -PI * 0.75, -PI * 0.25, w);
+                }
+                path.circle(cx, cy, 1.8 * s);
+                poly(&mut path, &[(4.0, 3.0), (20.0, 21.0)]);
             }
             Icon::Battery => {
                 let (x, y) = p(2.0, 7.0);
