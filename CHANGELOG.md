@@ -10,6 +10,9 @@ All notable changes to rinky are listed here. The format is based on
 - The hide-keyboard key puts the keyboard away in a plugin's chat (Insightful) and
   other plugin text boxes. It used to open the keyboard again at once, so the screen
   only flickered.
+- In the library, the hide-keyboard and Enter keys of the search and collection name
+  keyboards no longer also tap what lies under them once the keyboard is gone (the
+  hide key opened Settings from the navigation bar).
 
 ## [0.6.0] - 2026-11-08
 

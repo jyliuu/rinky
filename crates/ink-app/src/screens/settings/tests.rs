@@ -294,6 +294,33 @@ fn wifi_join_with_password_from_the_keyboard() {
     assert!(f.profiles.iter().any(|p| p.essid == "Office"));
 }
 
+/// The hide key and Enter close the password keyboard on the key's lift; the tap that
+/// lift makes is the same press and must not join the network listed under the key.
+#[test]
+fn password_keyboard_keys_do_not_tap_the_network_under_them() {
+    // A long list of open networks under the keyboard: a stray tap would join one.
+    let nets: Vec<WifiNetwork> = std::iter::once(WifiNetwork { essid: "Office".into(), signal: 2, secured: true, known: false })
+        .chain((0..14).map(|i| WifiNetwork { essid: format!("Open{i:02}"), signal: 3, secured: false, known: false }))
+        .collect();
+    let rows = wifi_rows(&ink_device::NetStatus::NoNetwork, false, &nets);
+    let kb = Keyboard::new();
+    let keys = kb.layout.key_rects(kb.keys_area(Keyboard::bottom_rect(PORTRAIT)));
+    let key = |a: KeyAction| tap_at(keys.iter().find(|(_, k)| k.action == a).unwrap().0);
+    let open = format!("{}{}", main_tap("page:wifi"), tap_row(rows, "net:0"));
+    let setup = |f: &mut FakeState| {
+        f.networks = nets.clone();
+        f.password = Some("xyz".into());
+    };
+    // Hide: back to the list, nothing joined.
+    let r = run_with("wifi-hide", &format!("{open}{}shot hidden\n", key(KeyAction::Close)), Settings::default(), true, setup);
+    assert_eq!(r.fake.borrow().connects, vec![], "the hide key joins nothing");
+    // Enter: only the network the password is for.
+    let r = run_with("wifi-enter", &format!("{open}{}shot joined\n", type_and_enter("xyz")), Settings::default(), true, setup);
+    let f = r.fake.borrow();
+    let tries: Vec<_> = f.connects.iter().map(|(e, p)| (e.as_str(), p.as_deref())).collect();
+    assert_eq!(tries, vec![("Office", Some("xyz"))]);
+}
+
 #[test]
 fn saved_network_with_a_wrong_password_asks_for_it_again() {
     // Home is saved but its saved password is wrong (b-verify finding): the failed

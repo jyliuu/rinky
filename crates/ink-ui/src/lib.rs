@@ -61,7 +61,7 @@ pub use dialog::{BottomSheet, Dialog, Menu, Popup, Scrim, Toast};
 pub use gesture::{Corner, Direction, DoubleTapMode, Gesture, GestureRecognizer, ScreenSpace, Touch, TouchKind, LONG_PRESS};
 pub use icon::{Icon, IconView};
 pub use input::TextInput;
-pub use keyboard::{KeyAction, Keyboard, KeyboardLayout};
+pub use keyboard::{ClosingTap, KeyAction, Keyboard, KeyboardLayout};
 pub use list::{paint_cover, Card, CardKind, Cover, List, ListItem, ScrollView};
 pub use refresh::{Damage, RefreshScheduler};
 pub use scrollbar::ScrollBar;

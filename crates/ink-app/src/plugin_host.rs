@@ -2836,9 +2836,9 @@ pub struct PluginUi {
     pub notification_time: Duration,
     /// Keyboard languages of the input panel (`ui.keyboard_layouts`; first = default).
     pub keyboard_layouts: Vec<String>,
-    /// Drop the next gesture: a keyboard key closed its layer on the lift of a touch,
-    /// and the tap that lift makes belongs to that key, not to the layer under it.
-    drop_gesture: bool,
+    /// The tap of a keyboard key's lift that closed its layer: it belongs to that key,
+    /// not to the layer under it.
+    closing_tap: ink_ui::ClosingTap,
 }
 
 impl Default for PluginUi {
@@ -2850,7 +2850,7 @@ impl Default for PluginUi {
             toast_time: Duration::from_millis(2500),
             notification_time: Duration::from_secs(4),
             keyboard_layouts: vec!["en".into()],
-            drop_gesture: false,
+            closing_tap: ink_ui::ClosingTap::default(),
         }
     }
 }
@@ -3089,10 +3089,8 @@ impl PluginUi {
     /// `(plugin, request id, result)`.
     pub fn handle(&mut self, ev: &UiEvent, screen: Size) -> (bool, Vec<(String, u32, String)>) {
         self.close_expired();
-        match ev {
-            UiEvent::Touch(t) if t.kind == ink_ui::TouchKind::Down => self.drop_gesture = false,
-            UiEvent::Gesture(_) if std::mem::take(&mut self.drop_gesture) => return (true, Vec::new()),
-            _ => {}
+        if self.closing_tap.drop(ev) {
+            return (true, Vec::new());
         }
         // Per-contact touches go only to an open keyboard (it types on them); other
         // layers work on gestures.
@@ -3231,7 +3229,7 @@ impl PluginUi {
                 // A key (hide, Enter) closed the keyboard on its lift: the tap gesture
                 // that follows is the same press and must not reach the layer below
                 // (over a chat view it hit the input bar and opened the keyboard again).
-                self.drop_gesture = matches!(ev, UiEvent::Touch(_));
+                self.closing_tap.arm(ev);
             }
             if let Some(id) = id {
                 answers.push((plugin, id, r));
