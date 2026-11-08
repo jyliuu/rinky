@@ -59,11 +59,7 @@ pub fn invert(canvas: &mut Canvas, rects: &[Rect]) {
 pub fn frame(canvas: &mut Canvas, rects: &[Rect]) {
     const T: i32 = 3;
     for r in rects {
-        let r = Rect::new(r.x - T - 1, r.y - 1, r.w + 2 * (T as u32 + 1), r.h + 2);
-        canvas.fill_rect(r.x, r.y, r.w as i32, T, 0);
-        canvas.fill_rect(r.x, r.bottom() - T, r.w as i32, T, 0);
-        canvas.fill_rect(r.x, r.y, T, r.h as i32, 0);
-        canvas.fill_rect(r.right() - T, r.y, T, r.h as i32, 0);
+        canvas.stroke_rect(Rect::new(r.x - T - 1, r.y - 1, r.w + 2 * (T as u32 + 1), r.h + 2), T, 0);
     }
 }
 

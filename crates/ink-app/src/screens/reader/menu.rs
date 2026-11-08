@@ -210,11 +210,7 @@ const DOCK_PX: f32 = 28.0;
 
 /// The label of a dock entry `room` px wide: whole, or ellipsized.
 pub fn dock_caption(cx: &mut PaintCx, label: &str, room: f32) -> String {
-    if cx.text_width(Style::Regular, DOCK_PX, label) <= room {
-        label.to_string()
-    } else {
-        cx.ellipsize(label, DOCK_PX, Style::Regular, room)
-    }
+    cx.ellipsize(label, DOCK_PX, Style::Regular, room)
 }
 
 /// A plugin entry of the menu's dock: an icon over a short label, no outline. Reports
