@@ -128,6 +128,9 @@ pub struct Book {
     pub fonts: HashMap<String, Arc<Vec<u8>>>,
     /// A loader usable from any thread, when the format provides one.
     pub loader: Option<Arc<dyn ResourceLoader + Send + Sync>>,
+    /// A loader for image sizes only, usable from any thread, for a format whose
+    /// `loader` is not shared (stylesheets missing from `sheets` stay unread then).
+    pub image_loader: Option<Arc<dyn ResourceLoader + Send + Sync>>,
     /// Image sizes by resolved path.
     pub images: Mutex<HashMap<String, ImageSize>>,
     /// Rule sets by the list of sheets a chapter uses.
@@ -413,10 +416,17 @@ impl Book {
 
     /// [`Book::new`] for spine items at `paths` whose sources `source` reads when they
     /// are first needed. Only the heads of the items are read now (for their
-    /// stylesheets), as far as `source` can read a head alone.
-    pub fn new_lazy(meta: Metadata, paths: Vec<String>, source: Arc<dyn SpineSource>, loader: &dyn ResourceLoader) -> Self {
+    /// stylesheets), as far as `source` can read a head alone. `images` reads image
+    /// sizes on any thread ([`Book::image_loader`]).
+    pub fn new_lazy(
+        meta: Metadata,
+        paths: Vec<String>,
+        source: Arc<dyn SpineSource>,
+        loader: &dyn ResourceLoader,
+        images: Option<Arc<dyn ResourceLoader + Send + Sync>>,
+    ) -> Self {
         let chapters = paths.into_iter().enumerate().map(|(i, path)| (path, OnceLock::new(), Some((source.clone(), i)))).collect();
-        Self::build(meta, chapters, loader)
+        Book { image_loader: images, ..Self::build(meta, chapters, loader) }
     }
 
     fn build(meta: Metadata, chapters: Vec<(String, OnceLock<String>, Source)>, loader: &dyn ResourceLoader) -> Self {
@@ -496,6 +506,7 @@ impl Book {
             font_faces,
             fonts,
             loader: loader.shared(),
+            image_loader: None,
             images: Mutex::new(HashMap::new()),
             rulesets: Mutex::new(HashMap::new()),
             doms: Mutex::new(HashMap::new()),
@@ -511,6 +522,12 @@ impl Book {
         let size = loader?.read(path).ok().and_then(|b| crate::images::intrinsic_size(&b));
         self.images.lock().unwrap().insert(path.to_string(), size);
         Some(size)
+    }
+
+    /// The loader image sizes are read through on any thread: [`Book::loader`], else
+    /// [`Book::image_loader`].
+    pub fn size_loader(&self) -> Option<&dyn ResourceLoader> {
+        self.loader.as_deref().or(self.image_loader.as_deref()).map(|l| l as &dyn ResourceLoader)
     }
 
     /// Index of the chapter with DocFragment number `n`.
@@ -651,7 +668,7 @@ mod tests {
         let eager = Book::new(Metadata::default(), items.clone(), &m);
         let source = Arc::new(Counting(items.iter().map(|(_, h)| h.clone()).collect(), Default::default()));
         let paths = items.into_iter().map(|(p, _)| p).collect();
-        let lazy = Book::new_lazy(Metadata::default(), paths, source.clone(), &m);
+        let lazy = Book::new_lazy(Metadata::default(), paths, source.clone(), &m, None);
         let keys = |b: &Book| {
             let mut k: Vec<String> = b.sheets.keys().cloned().collect();
             k.sort();

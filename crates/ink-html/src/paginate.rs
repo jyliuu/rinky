@@ -411,7 +411,7 @@ pub fn resolve_interest(book: &Book, i: usize, keys: &[(u32, u32)], interest: &I
 /// size is not the foreground's layout.
 fn with_shared_env<R>(book: &Book, fonts: &mut crate::fonts::FontBook, f: impl FnOnce(&mut Env) -> R) -> (R, bool) {
     let mut known = true;
-    let loader = book.loader.as_deref().map(|l| l as &dyn ink_doc::ResourceLoader);
+    let loader = book.size_loader();
     let mut size = |p: &str| {
         let s = book.image_size(p, loader);
         known &= s.is_some();

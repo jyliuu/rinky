@@ -118,9 +118,16 @@ impl HtmlDocument {
     /// [`HtmlDocument::new`] for spine items at `paths` that `source` reads when they
     /// are first needed (the first page reads only its own spine item, the background
     /// paginator the others). Fails when no spine item has content, which reads the
-    /// items in order up to the first one with content.
-    pub fn new_lazy(meta: Metadata, paths: Vec<String>, source: Arc<dyn SpineSource>, resources: Box<dyn ResourceLoader>) -> Result<Self> {
-        let book = Book::new_lazy(meta, paths, source, resources.as_ref());
+    /// items in order up to the first one with content. `images` reads image sizes on
+    /// the paginator threads (see [`Book::image_loader`]).
+    pub fn new_lazy(
+        meta: Metadata,
+        paths: Vec<String>,
+        source: Arc<dyn SpineSource>,
+        resources: Box<dyn ResourceLoader>,
+        images: Option<Arc<dyn ResourceLoader + Send + Sync>>,
+    ) -> Result<Self> {
+        let book = Book::new_lazy(meta, paths, source, resources.as_ref(), images);
         if book.chapters.iter().all(|c| c.html().trim().is_empty()) {
             return Err(DocError::Format("no readable chapters in spine".into()));
         }
@@ -426,7 +433,7 @@ impl HtmlDocument {
         let l = Arc::new(LaidOut { lay, pages, complete });
         self.keep_laid(c, l.clone());
         if !complete {
-            if self.book.loader.is_none() {
+            if self.book.size_loader().is_none() {
                 // The thread cannot read images through this loader: sizes first.
                 let ch = &self.book.chapters[c];
                 for v in crate::book::scan_image_refs(ch.html()) {
@@ -1031,7 +1038,7 @@ impl Document for HtmlDocument {
                 // A partial map: the threads go on with the missing chapters while the
                 // foreground lays out (and checks) the chapter in view.
                 if !complete && target_known && n > 1 {
-                    if self.book.loader.is_none() {
+                    if self.book.size_loader().is_none() {
                         self.prefill_image_sizes();
                     }
                     self.worker = Some(Worker::start(self.book.clone(), self.params.clone().unwrap(), self.font_sources.clone(), self.shared.clone(), cache_path.clone(), self.interest.clone()));
@@ -1068,7 +1075,7 @@ impl Document for HtmlDocument {
         }
         self.cache_hit = hit;
         if !hit {
-            if self.book.loader.is_none() {
+            if self.book.size_loader().is_none() {
                 self.prefill_image_sizes();
             }
             // The chapter in view first (claimed before the threads start, so they leave
@@ -2077,6 +2084,52 @@ mod tests {
         assert!(doc.cache_hit() && doc.page_count().complete && doc.page_count().pages == total);
         drop(doc);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Spine items from memory.
+    struct Items(Vec<String>);
+
+    impl SpineSource for Items {
+        fn read(&self, i: usize) -> String {
+            self.0[i].clone()
+        }
+    }
+
+    /// A loader that cannot be shared with other threads (as an EPUB's zip).
+    struct Local(ink_doc::MemoryLoader);
+
+    impl ResourceLoader for Local {
+        fn read(&self, path: &str) -> Result<Vec<u8>> {
+            self.0.read(path)
+        }
+    }
+
+    /// With an image loader the threads read image sizes themselves: no scan of every
+    /// spine item for images first, and the same pages.
+    #[test]
+    fn image_loader_replaces_the_image_scan() {
+        let mut png = Vec::new();
+        image::GrayImage::new(40, 300).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let mut m = ink_doc::MemoryLoader::default();
+        m.0.insert("t/a.png".into(), png);
+        let text = "<p>Some words in a paragraph.</p>".repeat(40);
+        let items: Vec<String> = (0..4).map(|i| format!("<html><body><h1>{i}</h1>{text}<img src=\"a.png\"/>{text}</body></html>")).collect();
+        let paths: Vec<String> = (0..4).map(|i| format!("t/c{i}.xhtml")).collect();
+        let settings = LayoutSettings::for_screen(600, 800);
+        let open = |images: Option<Arc<dyn ResourceLoader + Send + Sync>>| {
+            let source = Arc::new(Items(items.clone()));
+            let mut d = HtmlDocument::new_lazy(Metadata::default(), paths.clone(), source, Box::new(Local(m.clone())), images).unwrap();
+            d.set_layout(&settings).unwrap();
+            assert!(d.wait_paginated(Duration::from_secs(60)));
+            let pages: Vec<String> = (0..d.page_count().pages).map(|p| d.position_of_page(p).unwrap().to_string()).collect();
+            let scanned = d.image_refs.borrow().is_some();
+            (scanned, pages)
+        };
+        let (scanned, without) = open(None);
+        assert!(scanned);
+        let (scanned, with) = open(Some(Arc::new(m.clone())));
+        assert!(!scanned);
+        assert_eq!(with, without);
     }
 
     /// Small books of three formats; the big ones are in the ignored test below.

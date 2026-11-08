@@ -795,7 +795,10 @@ pub fn open_book(path: &Path, zip: Option<ZipArchive<File>>) -> Result<BookDocum
     let paths = spine_paths(&pkg);
     let spine = Arc::new(LazySpine::new(path, loader, &paths));
     let files = Box::new(SpineFiles(spine.clone()));
-    let doc = HtmlDocument::new_lazy(info.metadata.clone(), paths, spine, files)?;
+    // Image sizes through the same handles on the paginator threads: nothing has to
+    // scan every spine item for images first.
+    let images: Arc<dyn ResourceLoader + Send + Sync> = Arc::new(SpineFiles(spine.clone()));
+    let doc = HtmlDocument::new_lazy(info.metadata.clone(), paths, spine, files, Some(images))?;
     step("styles+fonts", t);
     Ok(BookDocument::new(doc, info, toc, page_list))
 }
