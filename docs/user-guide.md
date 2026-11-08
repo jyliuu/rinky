@@ -275,6 +275,28 @@ While rinky runs it stops the Amazon background services it does not use (cloud 
 usage reporting, audio, Bluetooth) and starts them again when you exit. Power
 management, Wi-Fi, USB and battery protection keep running.
 
+### Wi-Fi
+
+Turn Wi-Fi on with the *Wi-Fi* button of the control center or in *Settings > Wi-Fi*,
+where you can also scan, join a network (with the on-screen keyboard for its password)
+and forget saved networks. On a Kobo the networks Nickel knows are known to rinky too.
+
+With Wi-Fi on, rinky joins the strongest saved network in range by itself: at once
+when Wi-Fi is turned on or the e-reader wakes up, then every so often (from 15 seconds
+up to 5 minutes apart) while none is found. A network that fails to join is skipped
+for 10 minutes. rinky remembers that Wi-Fi was on: it turns it on again when it
+starts and after a wake (a Kobo turns Wi-Fi off while it sleeps). Turning Wi-Fi off
+yourself stays off. On a Kindle, airplane mode turns Wi-Fi off, and leaving it turns
+Wi-Fi on again only when it was on before.
+
+A short message says "Connected to *network*" when Wi-Fi connects, "Couldn't connect
+to *network*" when joining fails (once an hour for the same network), and "No saved
+network found" when none is in range after a wake or start (once, until Wi-Fi
+connects or is turned off). The Wi-Fi icon of the status bars shows arcs when connected,
+dashed arcs while connecting, and struck-through arcs when Wi-Fi is off or not
+connected. rinky counts Wi-Fi as connected only when the e-reader has an address on
+the network.
+
 ### Settings
 
 Open *Settings* from the navigation bar, or *More > Settings* in the reader. It is one

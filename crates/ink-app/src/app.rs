@@ -102,6 +102,37 @@ pub struct App {
     /// back: the next frame's GC16 damage is shown as GL16 (`Change::Pop`), so a screen
     /// that draws all again on reveal as on entry (with GC16) does not flash.
     revealed_part: bool,
+    /// The last network status reported (toasts only on a change).
+    net_shown: Option<ink_device::NetStatus>,
+    /// The network last connected to and when the connection ended.
+    net_lost: Option<(String, Instant)>,
+    /// "No saved network found" was told since Wi-Fi last connected or went off (it
+    /// is told once, not after every wake while no saved network is around).
+    net_none_told: bool,
+    /// The last "Couldn't connect" told and when (the automatic joins retry a failed
+    /// network every 10 minutes; one toast per [`FAILED_QUIET`]).
+    net_failed_told: Option<(String, Instant)>,
+}
+
+/// A failed join of the same network is told again only after this long.
+pub const FAILED_QUIET: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// A connection back to the same network this soon after it ended gets no toast.
+pub const RECONNECT_QUIET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The toast for network event `e` after status `shown`: a new connection, a failed
+/// join, or a search after a start that found nothing. `None` for everything else (a
+/// repeated status, a search going on).
+pub fn network_toast(shown: Option<&ink_device::NetStatus>, e: &ink_device::NetEvent) -> Option<String> {
+    use ink_device::{NetEvent, NetStatus};
+    match e {
+        NetEvent::Status(NetStatus::Connected { essid, .. }) if shown.and_then(NetStatus::connected_to) != Some(essid.as_str()) => {
+            Some(if essid.is_empty() { "Connected to Wi-Fi".into() } else { format!("Connected to {essid}") })
+        }
+        NetEvent::Status(NetStatus::NoNetwork) if shown == Some(&NetStatus::Connecting { essid: None }) => Some("No saved network found".into()),
+        NetEvent::JoinFailed(essid) => Some(format!("Couldn't connect to {essid}")),
+        _ => None,
+    }
 }
 
 /// How far (logical pixels) a touch that starts in the top or bottom edge zone must
@@ -255,6 +286,8 @@ impl App {
             }
         }
         crate::screens::settings::apply_device_settings(&mut device, &settings, &paths);
+        // The network worker starts: Wi-Fi on again when it was on last time.
+        device.wifi.start_network(settings.device.wifi_was_on);
         let device_rotation = device.screen.rotation();
         let size = device.screen.size();
         let space = ScreenSpace { panel: device.screen.panel_size(), rotation: device.screen.rotation() };
@@ -288,6 +321,64 @@ impl App {
             battery_log,
             shown,
             revealed_part: false,
+            net_shown: None,
+            net_lost: None,
+            net_none_told: false,
+            net_failed_told: None,
+        }
+    }
+
+    /// Tells about the network worker's news in a toast ("Connected to Home", "Couldn't
+    /// connect to Home", "No saved network found"; one per change, none while asleep)
+    /// and keeps what must outlive the process ("Wi-Fi was on", for the next start).
+    fn network_event(&mut self, e: &ink_device::NetEvent) {
+        let awake = self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake;
+        let now = Instant::now();
+        // The same network back within a few seconds (wifid rejoins by itself after a
+        // drop): nothing to tell.
+        let blip = match (e, &self.net_lost) {
+            (ink_device::NetEvent::Status(ink_device::NetStatus::Connected { essid, .. }), Some((lost, at))) => {
+                lost == essid && now.duration_since(*at) < RECONNECT_QUIET
+            }
+            _ => false,
+        };
+        // Told already: no saved network around (until a connection or Wi-Fi off), or
+        // the same network failing again within the hour.
+        let repeat = match e {
+            ink_device::NetEvent::Status(ink_device::NetStatus::NoNetwork) => self.net_none_told,
+            ink_device::NetEvent::JoinFailed(essid) => {
+                self.net_failed_told.as_ref().is_some_and(|(f, at)| f == essid && now.duration_since(*at) < FAILED_QUIET)
+            }
+            _ => false,
+        };
+        if let Some(text) = network_toast(self.net_shown.as_ref(), e).filter(|_| awake && !blip && !repeat) {
+            log::info!("wifi: toast {text:?}");
+            crate::export::toast(&mut self.plugins, text);
+            match e {
+                ink_device::NetEvent::Status(ink_device::NetStatus::NoNetwork) => self.net_none_told = true,
+                ink_device::NetEvent::JoinFailed(essid) => self.net_failed_told = Some((essid.clone(), now)),
+                _ => {}
+            }
+        }
+        if let ink_device::NetEvent::Status(ink_device::NetStatus::Connected { .. } | ink_device::NetStatus::Off) = e {
+            self.net_none_told = false;
+        }
+        if let ink_device::NetEvent::Status(s) = e {
+            if let Some(was) = self.net_shown.as_ref().and_then(|s| s.connected_to()) {
+                if s.connected_to() != Some(was) {
+                    self.net_lost = Some((was.to_string(), now));
+                }
+            }
+            self.net_shown = Some(s.clone());
+        }
+        if let ink_device::NetEvent::WasOn(on) = e {
+            if self.settings.device.wifi_was_on != *on {
+                log::info!("wifi: was on {on} (kept in the settings)");
+                let mut s = self.settings_update.take().unwrap_or_else(|| self.settings.clone());
+                s.device.wifi_was_on = *on;
+                self.settings_update = Some(s);
+                self.take_settings_update();
+            }
         }
     }
 
@@ -308,17 +399,22 @@ impl App {
     /// showed when the screensaver or a resume changed it behind the app's back.
     fn on_power(&mut self, p: &PowerEvent) {
         match p {
-            PowerEvent::GoingToScreenSaver => self.note_battery(false),
+            PowerEvent::GoingToScreenSaver => {
+                self.note_battery(false);
+                self.device.wifi.set_awake(false);
+            }
             PowerEvent::OutOfScreenSaver => {
                 self.note_battery(true);
                 self.repaint_after_wake = true;
-                // Carried somewhere else while asleep: look for networks there.
-                self.device.wifi.look_for_networks();
+                // Wi-Fi back on (a Kobo turns it off to sleep), or a network looked for
+                // where the device was carried while asleep.
+                self.device.wifi.set_awake(true);
             }
             // The charge dropped a point: when it did tells the rate best.
             PowerEvent::BatteryLevel(_) if self.awake() => self.note_battery(true),
-            // wifid lost the connection: look for a saved network in range.
-            PowerEvent::WifiState(s) if !matches!(s.as_str(), "CONNECTED" | "PENDING") => self.device.wifi.look_for_networks(),
+            // wifid's connection state changed: the network worker probes the link.
+            PowerEvent::WifiState(s) => self.device.wifi.link_changed(s),
+            PowerEvent::Network(e) => self.network_event(e),
             _ => {}
         }
         if matches!(p, PowerEvent::GoingToScreenSaver | PowerEvent::OutOfScreenSaver | PowerEvent::Resuming) {
@@ -693,6 +789,74 @@ mod edge_tests {
         assert_eq!(out.last(), Some(&tap2));
         let mut e = EarlyEdgeSwipe::default();
         assert_eq!(e.filter(vec![t(TouchKind::Down, 600, 800, 800), t(TouchKind::Move, 600, 1000, 800)], h).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    use ink_device::{NetEvent, NetStatus};
+
+    #[test]
+    fn toasts_tell_each_change_once() {
+        let home = NetStatus::Connected { essid: "Home".into(), signal: Some(3) };
+        let searching = NetStatus::Connecting { essid: None };
+        let t = |shown: Option<&NetStatus>, e: NetEvent| network_toast(shown, &e);
+        assert_eq!(t(Some(&searching), NetEvent::Status(home.clone())).as_deref(), Some("Connected to Home"));
+        assert_eq!(t(None, NetEvent::Status(home.clone())).as_deref(), Some("Connected to Home"));
+        // The signal changed: the same connection, no toast.
+        assert_eq!(t(Some(&home), NetEvent::Status(NetStatus::Connected { essid: "Home".into(), signal: Some(5) })), None);
+        assert_eq!(t(Some(&home), NetEvent::Status(NetStatus::Connected { essid: "Cafe".into(), signal: None })).as_deref(), Some("Connected to Cafe"));
+        assert_eq!(t(Some(&searching), NetEvent::Status(NetStatus::NoNetwork)).as_deref(), Some("No saved network found"));
+        // After a failed background join the failure toasted already.
+        assert_eq!(t(Some(&NetStatus::Connecting { essid: Some("Home".into()) }), NetEvent::Status(NetStatus::NoNetwork)), None);
+        assert_eq!(t(Some(&home), NetEvent::JoinFailed("Office".into())).as_deref(), Some("Couldn't connect to Office"));
+        assert_eq!(t(Some(&home), NetEvent::Status(searching.clone())), None);
+        assert_eq!(t(Some(&home), NetEvent::Status(NetStatus::Off)), None);
+        assert_eq!(t(None, NetEvent::Scanned(Ok(3))), None);
+        assert_eq!(t(None, NetEvent::Status(NetStatus::Connected { essid: String::new(), signal: None })).as_deref(), Some("Connected to Wi-Fi"));
+    }
+
+    #[test]
+    fn wifi_was_on_is_kept_in_the_settings() {
+        let dir = std::env::temp_dir().join(format!("ink-app-wifi-was-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (device, _probe) = ink_device::headless::open(ink_device::headless::HeadlessOptions::default());
+        let paths = Paths { root: dir.join("home") };
+        let mut app = App::new(device, Settings::default(), paths.clone());
+        app.network_event(&NetEvent::WasOn(true));
+        assert!(app.settings.device.wifi_was_on);
+        assert!(Settings::load(&paths.settings()).unwrap().device.wifi_was_on);
+        app.network_event(&NetEvent::WasOn(false));
+        assert!(!Settings::load(&paths.settings()).unwrap().device.wifi_was_on);
+        // A short drop and rejoin of the same network: remembered as lost, no new toast.
+        let home = NetStatus::Connected { essid: "Home".into(), signal: None };
+        app.network_event(&NetEvent::Status(home.clone()));
+        app.network_event(&NetEvent::Status(NetStatus::Connecting { essid: None }));
+        assert_eq!(app.net_lost.as_ref().map(|(e, _)| e.as_str()), Some("Home"));
+        app.network_event(&NetEvent::Status(home.clone()));
+        assert_eq!(app.net_shown.as_ref().and_then(NetStatus::connected_to), Some("Home"));
+        // "No saved network found" once, not after every wake; again after a connection.
+        let searching = NetStatus::Connecting { essid: None };
+        assert!(!app.net_none_told);
+        app.network_event(&NetEvent::Status(searching.clone()));
+        app.network_event(&NetEvent::Status(NetStatus::NoNetwork));
+        assert!(app.net_none_told, "told");
+        app.network_event(&NetEvent::Status(home.clone()));
+        assert!(!app.net_none_told, "a connection: told again next time");
+        app.network_event(&NetEvent::Status(searching.clone()));
+        app.network_event(&NetEvent::Status(NetStatus::NoNetwork));
+        assert!(app.net_none_told);
+        app.network_event(&NetEvent::Status(NetStatus::Off));
+        assert!(!app.net_none_told, "Wi-Fi off: told again after it is turned on");
+        // A failed join is told once an hour per network.
+        app.network_event(&NetEvent::JoinFailed("Cafe".into()));
+        let told = app.net_failed_told.clone();
+        assert_eq!(told.as_ref().map(|(e, _)| e.as_str()), Some("Cafe"));
+        app.network_event(&NetEvent::JoinFailed("Cafe".into()));
+        assert_eq!(app.net_failed_told, told, "the second failure is not told");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

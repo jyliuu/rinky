@@ -328,7 +328,9 @@ pub fn open(opts: ReaderOptions) -> Result<Device> {
     if let Some(dir) = opts.heartbeat.as_ref().and_then(|p| p.parent()) {
         let _ = std::fs::create_dir_all(dir);
     }
-    let input = Box::new(input::ReaderInput::open(shared.clone(), lipc.clone(), opts.sys.clone(), loop_opts)?);
+    let mut input = Box::new(input::ReaderInput::open(shared.clone(), lipc.clone(), opts.sys.clone(), loop_opts)?);
+    // The network worker's events wake the input loop.
+    let net_queue = input.net_queue();
     let (model, page_wave) = {
         let sh = shared.borrow();
         (sh.screen.model.name.to_string(), sh.screen.page_wave())
@@ -338,14 +340,20 @@ pub fn open(opts: ReaderOptions) -> Result<Device> {
     let screen = Box::new(ReaderScreen(shared.clone()));
     Ok(match platform {
         Platform::Kindle => {
-            let svc = kindle::LipcServices::new(opts.lipc, Some(shared), opts.sys);
+            let mut svc = kindle::LipcServices::new(opts.lipc, Some(shared), opts.sys);
+            if let Some(q) = net_queue {
+                svc = svc.with_network(q);
+            }
             // Light levels and Wi-Fi state for the control center, read once off the UI
             // thread after start-up (the first book page comes first).
             svc.refresh_after(Duration::from_secs(3));
             with_services(info, screen, input, Box::new(clock), svc)
         }
         Platform::Kobo => {
-            let svc = kobo::KoboServices::new(Some(shared), opts.sys, clock.clone());
+            let mut svc = kobo::KoboServices::new(Some(shared), opts.sys, clock.clone());
+            if let Some(q) = net_queue {
+                svc = svc.with_network(q);
+            }
             with_services(info, screen, input, Box::new(clock), svc)
         }
     })

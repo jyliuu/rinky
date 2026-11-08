@@ -13,13 +13,13 @@ use crate::services::{Battery, BatteryState, Light, Power, Usb, UsbState, Wifi, 
 use crate::sleep::SleepState;
 use crate::sysfs::SysRoot;
 use crate::usb::{DriveModeState, UsbCable};
-use crate::services::WIFI_WAKE_SETTLE;
-use crate::wifi::{self, AutoJoin, WifiProfile};
+use crate::netman::{self, link, Cmd, NetBackend, NetHandle, NetQueue, NetStatus, Probe};
+use crate::wifi::{self, WifiProfile};
 use crate::{DeviceError, Result};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub(super) const POWERD: &str = "com.lab126.powerd";
@@ -51,99 +51,118 @@ fn scan_now(lipc: &Lipc, poll: Duration) -> Result<Vec<WifiNetwork>> {
     Ok(wifi::networks_from_scan(&lipc.hash_get(WIFID, "scanList")?))
 }
 
-/// How often the auto-join thread checks a scan or a join in progress (each check is a
-/// `lipc-get-prop` process; nobody waits for these).
-const AUTO_JOIN_POLL: Duration = Duration::from_secs(1);
-
-/// Starts the thread that joins a saved network in range whenever the radio is on but
-/// not connected ([`AutoJoin`]). With Amazon's framework stopped, wifid does not do this
-/// by itself: a Kindle carried to another saved network stayed offline.
-///
-/// While connected (or with the radio off) the thread sleeps until it is woken: by a
-/// wake from sleep, Wi-Fi turned on, or wifid reporting a lost connection
-/// ([`Wifi::look_for_networks`]). It reads nothing meanwhile.
-fn start_auto_join(lipc: Lipc) -> Option<mpsc::Sender<()>> {
-    let (tx, rx) = mpsc::channel::<()>();
-    let r = std::thread::Builder::new().name("wifi-join".into()).spawn(move || {
-        let mut policy = AutoJoin::default();
-        let mut wait = Some(WIFI_WAKE_SETTLE);
-        loop {
-            let woken = match wait {
-                Some(w) => rx.recv_timeout(w),
-                None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-            };
-            match woken {
-                Ok(()) => {
-                    // The old network rejoins by itself when it is in range; look after
-                    // that.
-                    std::thread::sleep(WIFI_WAKE_SETTLE);
-                    while rx.try_recv().is_ok() {}
-                    policy.reset();
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-            wait = auto_join_once(&lipc, &mut policy);
-        }
-    });
-    match r {
-        Ok(_) => Some(tx),
-        Err(e) => {
-            log::warn!("wifi: cannot start the auto-join thread: {e}");
-            None
-        }
+/// Turns the radio on or off: both cmd's radio switch and wifid, as KOReader does.
+fn set_radio(lipc: &Lipc, on: bool) -> Result<()> {
+    if on {
+        lipc.set_int(CMD, "wirelessEnable", 1)?;
+        lipc.set_int(WIFID, "enable", 1)
+    } else {
+        lipc.set_int(WIFID, "enable", 0)?;
+        lipc.set_int(CMD, "wirelessEnable", 0)
     }
 }
 
-/// One look: scans when the radio is on but not connected and joins the strongest saved
-/// network found. Returns the wait before the next look; `None` waits to be woken.
-fn auto_join_once(lipc: &Lipc, policy: &mut AutoJoin) -> Option<Duration> {
-    // Two reads, not read_wifi_state's four: the network name and signal are not needed.
-    let enabled = lipc.get_int(WIFID, "enable").map(|v| v != 0);
-    let state = lipc.get_str(WIFID, "cmState");
-    let s = match (enabled, state) {
-        (Ok(enabled), Ok(state)) => WifiState { enabled, state, essid: None, signal: None },
-        (Err(e), _) | (_, Err(e)) => {
-            log::warn!("wifi: auto-join state: {e}");
-            return Some(policy.next_wait());
+/// The radio is on: wifid enabled and cmd's radio switch on.
+fn radio_on(lipc: &Lipc) -> bool {
+    lipc.get_int(WIFID, "enable").is_ok_and(|v| v != 0) && lipc.get_int(CMD, "wirelessEnable").is_ok_and(|v| v != 0)
+}
+
+/// Saves a wifid profile (`password` `None` = open network) and waits until wifid lists
+/// it.
+fn create_profile(lipc: &Lipc, essid: &str, password: Option<&str>) -> Result<()> {
+    let h = wifi::profile_hash(essid, password)?;
+    log::info!("wifi: createProfile {}", crate::lipc::redacted(&h));
+    lipc.hash_set(WIFID, "createProfile", &h)?;
+    // wifid can answer before profileData lists the new profile (seen on the emulator
+    // under load): wait for it, so a list or connect right after sees it.
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(5) {
+        if lipc.hash_get(WIFID, "profileData").is_ok_and(|h| wifi::profiles_from(&h).iter().any(|p| p.essid == essid)) {
+            return Ok(());
         }
-    };
-    if !s.searching() {
-        policy.reset();
-        return None;
+        std::thread::sleep(Duration::from_millis(250));
     }
-    let nets = match scan_now(lipc, AUTO_JOIN_POLL) {
-        Ok(n) => n,
-        Err(e) => {
-            log::warn!("wifi: auto-join scan: {e}");
-            return Some(policy.next_wait());
+    log::warn!("wifi: profile {essid:?} created but not listed after 5 s");
+    Ok(())
+}
+
+/// Starts joining `essid` (a profile is created first for a new network or a new
+/// password): `cmd ensureConnection wifi:ESSID`, which returns at once.
+fn start_join(lipc: &Lipc, essid: &str, password: Option<&str>) -> Result<()> {
+    let known = lipc.hash_get(WIFID, "profileData").map(|h| wifi::profiles_from(&h).iter().any(|p| p.essid == essid))?;
+    if password.is_some() || !known {
+        create_profile(lipc, essid, password)?;
+    }
+    lipc.set_str(CMD, "ensureConnection", &format!("wifi:{essid}"))
+}
+
+/// The Kindle's Wi-Fi interface.
+const WLAN: &str = "wlan0";
+
+/// The Kindle's [`NetBackend`] for the network worker: wifid joins and runs DHCP; the
+/// link is read from sysfs and `getifaddrs` (connected), with wifid's `currentEssid`
+/// for the network's name. With Amazon's framework stopped wifid neither scans nor
+/// joins by itself, so the worker does both.
+struct KindleNet {
+    lipc: Lipc,
+    sys: SysRoot,
+    /// The radio as last read or set (only rinky switches it while it runs).
+    radio: Option<bool>,
+}
+
+impl NetBackend for KindleNet {
+    fn radio_on(&mut self) -> bool {
+        let on = radio_on(&self.lipc);
+        self.radio = Some(on);
+        on
+    }
+
+    fn set_radio(&mut self, on: bool) -> Result<()> {
+        self.radio = Some(on);
+        set_radio(&self.lipc, on)
+    }
+
+    fn probe(&mut self) -> Probe {
+        let radio = match self.radio {
+            Some(r) => r,
+            None => self.radio_on(),
+        };
+        if !radio {
+            return Probe::default();
         }
-    };
-    let Some(net) = policy.pick(&nets, Instant::now()) else {
-        log::info!("wifi: auto-join: no saved network among {} found", nets.len());
-        return Some(policy.next_wait());
-    };
-    let essid = net.essid.clone();
-    log::info!("wifi: auto-join: joining saved network {essid:?}");
-    let joined = lipc.set_str(CMD, "ensureConnection", &format!("wifi:{essid}")).is_ok() && {
-        let end = Instant::now() + Duration::from_secs(30);
-        loop {
-            std::thread::sleep(AUTO_JOIN_POLL);
-            match lipc.get_str(WIFID, "cmState").as_deref() {
-                Ok("CONNECTED") => break true,
-                _ if Instant::now() >= end => break false,
-                _ => {}
-            }
+        let sys = self.sys.path("/sys");
+        let state = link::operstate(&sys, WLAN);
+        if !link::may_be_associated(state.as_deref()) {
+            // sysfs says plainly there is no association: no lipc process (this runs
+            // every 10 s while no network is found).
+            return Probe { radio, ..Probe::default() };
         }
-    };
-    if joined {
-        log::info!("wifi: auto-join: connected to {essid:?}");
-        policy.reset();
-        None
-    } else {
-        log::warn!("wifi: auto-join: {essid:?} did not connect; skipped for {} min", AutoJoin::SKIP_FAILED.as_secs() / 60);
-        policy.failed(&essid, Instant::now());
-        Some(policy.next_wait())
+        let address = if sys.join("class/net").join(WLAN).exists() {
+            link::has_address(&sys, WLAN)
+        } else {
+            // A model whose interface is not wlan0: wifid's word, as before the worker.
+            self.lipc.get_str(WIFID, "cmState").is_ok_and(|s| s == "CONNECTED")
+        };
+        let current = self.lipc.hash_get(WIFID, "currentEssid").ok().and_then(|h| wifi::current_from(&h));
+        let signal = address
+            .then(|| self.lipc.get_str(WIFID, "signalStrength").ok().and_then(|s| wifi::parse_signal(&s)))
+            .flatten()
+            .or_else(|| current.as_ref().filter(|c| c.connected).map(|c| c.signal));
+        Probe {
+            radio,
+            address,
+            associated: address || state.as_deref() == Some("up") || current.as_ref().is_some_and(|c| c.connected),
+            essid: current.map(|c| c.essid).filter(|e| !e.is_empty()),
+            signal,
+        }
+    }
+
+    fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
+        scan_now(&self.lipc, Duration::from_millis(250))
+    }
+
+    fn join(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
+        start_join(&self.lipc, essid, password)
     }
 }
 
@@ -151,7 +170,9 @@ fn auto_join_once(lipc: &Lipc, policy: &mut AutoJoin) -> Option<Duration> {
 fn read_wifi_state(lipc: &Lipc) -> Result<WifiState> {
     let state = lipc.get_str(WIFID, "cmState")?;
     let current = lipc.hash_get(WIFID, "currentEssid").ok().and_then(|h| wifi::current_from(&h));
-    let essid = current.as_ref().map(|c| c.essid.clone()).filter(|s| !s.is_empty());
+    // currentEssid also names a network wifid only tries to join: a name only when
+    // connected.
+    let essid = current.as_ref().filter(|c| c.connected && state == "CONNECTED").map(|c| c.essid.clone()).filter(|s| !s.is_empty());
     let signal = lipc
         .get_str(WIFID, "signalStrength")
         .ok()
@@ -211,8 +232,10 @@ pub struct LipcServices {
     fl_max: Cell<Option<u32>>,
     cache: Arc<StateCache>,
     live: Arc<LiveWriter>,
-    /// Wakes the auto-join thread (none without the input loop).
-    auto_join: Option<mpsc::Sender<()>>,
+    /// The network worker (none without the input loop: `rinky device`).
+    net: Option<NetHandle>,
+    /// Wi-Fi was on when airplane mode was turned on: leaving it turns Wi-Fi on again.
+    wifi_before_airplane: Arc<AtomicBool>,
 }
 
 impl LipcServices {
@@ -262,15 +285,19 @@ impl Default for LipcServices {
 impl LipcServices {
     /// Services over `lipc`; `shared` connects them to a running input loop.
     pub(crate) fn new(lipc: Lipc, shared: Option<Rc<RefCell<Shared>>>, sys: SysRoot) -> Self {
-        let auto_join = shared.is_some().then(|| start_auto_join(lipc.clone())).flatten();
-        LipcServices { lipc, shared: SharedHandle(shared), sys, fl_max: Cell::new(None), cache: Arc::default(), live: Arc::default(), auto_join }
+        LipcServices { lipc, shared: SharedHandle(shared), sys, fl_max: Cell::new(None), cache: Arc::default(), live: Arc::default(), net: None, wifi_before_airplane: Arc::default() }
     }
 
-    /// Has the auto-join thread look now (after [`WIFI_WAKE_SETTLE`]), scanning often again.
-    fn nudge_auto_join(&self) {
-        if let Some(tx) = &self.auto_join {
-            let _ = tx.send(());
-        }
+    /// Starts the network worker; its events go to `queue` (the input loop's).
+    pub(crate) fn with_network(mut self, queue: Arc<NetQueue>) -> Self {
+        let backend = KindleNet { lipc: self.lipc.clone(), sys: self.sys.clone(), radio: None };
+        self.net = netman::spawn(Box::new(backend), queue);
+        self
+    }
+
+    /// Sends `cmd` to the network worker; false without one.
+    fn net_send(&self, cmd: Cmd) -> bool {
+        self.net.as_ref().is_some_and(|n| n.send(cmd))
     }
 
     /// A slow value: the one in `slot` when cached reads are on and it is known, else
@@ -531,27 +558,52 @@ impl Power for LipcServices {
 
 impl Wifi for LipcServices {
     fn state(&self) -> Result<WifiState> {
+        if let Some(st) = self.net.as_ref().and_then(NetHandle::status) {
+            return Ok(st.to_state());
+        }
         self.cached(|k| &mut k.wifi, || read_wifi_state(&self.lipc))
+    }
+
+    fn status(&self) -> Result<NetStatus> {
+        match self.net.as_ref().and_then(NetHandle::status) {
+            Some(st) => Ok(st),
+            None => Wifi::state(self).map(|s| NetStatus::from_state(&s)),
+        }
     }
 
     fn set_enabled(&mut self, on: bool) -> Result<()> {
         self.remember(|k| (k.wifi, k.airplane) = (None, None));
-        // As KOReader: both cmd's radio switch and wifid.
-        if on {
-            self.lipc.set_int(CMD, "wirelessEnable", 1)?;
-            self.lipc.set_int(WIFID, "enable", 1)?;
-            self.nudge_auto_join();
-            Ok(())
-        } else {
-            self.lipc.set_int(WIFID, "enable", 0)?;
-            self.lipc.set_int(CMD, "wirelessEnable", 0)
+        if self.net_send(if on { Cmd::Enable } else { Cmd::Disable }) {
+            return Ok(());
         }
+        set_radio(&self.lipc, on)
     }
 
-    fn look_for_networks(&mut self) {
-        // The state read before is stale now.
+    fn start_network(&mut self, restore: bool) {
+        self.net_send(Cmd::Boot { restore });
+    }
+
+    fn set_awake(&mut self, awake: bool) {
+        self.net_send(Cmd::Awake(awake));
+    }
+
+    fn link_changed(&mut self, state: &str) {
         self.remember(|k| k.wifi = None);
-        self.nudge_auto_join();
+        self.net_send(Cmd::Link(state.to_string()));
+    }
+
+    fn connect_in_background(&mut self, essid: &str, password: Option<&str>) -> Result<bool> {
+        if self.net_send(Cmd::Connect { essid: essid.to_string(), password: password.map(str::to_string) }) {
+            return Ok(true);
+        }
+        self.connect(essid, password).map(|()| false)
+    }
+
+    fn scan_in_background(&mut self) -> Result<bool> {
+        if self.net_send(Cmd::Scan) {
+            return Ok(true);
+        }
+        self.scan().map(|_| false)
     }
 
     fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
@@ -563,11 +615,7 @@ impl Wifi for LipcServices {
     }
 
     fn connect(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
-        let known = self.profiles()?.iter().any(|p| p.essid == essid);
-        if password.is_some() || !known {
-            self.create_profile(essid, password)?;
-        }
-        self.lipc.set_str(CMD, "ensureConnection", &format!("wifi:{essid}"))?;
+        start_join(&self.lipc, essid, password)?;
         self.wait_for(&format!("connect to {essid}"), Duration::from_secs(30), || {
             let st = self.lipc.get_str(WIFID, "cmState")?;
             if st != "CONNECTED" {
@@ -588,20 +636,7 @@ impl Wifi for LipcServices {
     }
 
     fn create_profile(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
-        let h = wifi::profile_hash(essid, password)?;
-        log::info!("wifi: createProfile {}", crate::lipc::redacted(&h));
-        self.lipc.hash_set(WIFID, "createProfile", &h)?;
-        // wifid can answer before profileData lists the new profile (seen on the
-        // emulator under load): wait for it, so a list or connect right after sees it.
-        let t = Instant::now();
-        while t.elapsed() < Duration::from_secs(5) {
-            if self.profiles().is_ok_and(|ps| ps.iter().any(|p| p.essid == essid)) {
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        log::warn!("wifi: profile {essid:?} created but not listed after 5 s");
-        Ok(())
+        create_profile(&self.lipc, essid, password)
     }
 
     fn delete_profile(&mut self, essid: &str) -> Result<()> {
@@ -619,10 +654,23 @@ impl Wifi for LipcServices {
 
     fn set_airplane_mode(&mut self, on: bool) -> Result<()> {
         self.remember(|k| (k.wifi, k.airplane) = (None, None));
-        if let Ok(v) = self.lipc.get_int(CMD, "wirelessEnable") {
+        let before = self.lipc.get_int(CMD, "wirelessEnable");
+        if let Ok(v) = before {
             self.journal(Entry::lipc_int(CMD, "wirelessEnable", v));
         }
-        self.lipc.set_int(CMD, "wirelessEnable", (!on) as i64)
+        if on && before.is_ok_and(|v| v != 0) {
+            let radio = self.net.as_ref().and_then(NetHandle::status).is_some_and(|s| s.radio_on());
+            self.wifi_before_airplane.store(radio, Ordering::Relaxed);
+        }
+        self.lipc.set_int(CMD, "wirelessEnable", (!on) as i64)?;
+        // The worker keeps the radio as it was told: airplane mode turns Wi-Fi off, and
+        // leaving it turns Wi-Fi on only when it was on before (else it stays off).
+        if on {
+            self.net_send(Cmd::Disable);
+        } else if self.wifi_before_airplane.swap(false, Ordering::Relaxed) {
+            self.net_send(Cmd::Enable);
+        }
+        Ok(())
     }
 }
 

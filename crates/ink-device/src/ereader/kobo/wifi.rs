@@ -36,6 +36,23 @@ static STATE: Mutex<Option<(Instant, WifiState)>> = Mutex::new(None);
 const STATE_FOR: Duration = Duration::from_secs(10);
 /// The radio is being turned on ([`start_in_background`]).
 static STARTING: AtomicBool = AtomicBool::new(false);
+/// The device is suspending ([`hold_off`]): [`start`] refuses.
+static HELD_OFF: AtomicBool = AtomicBool::new(false);
+
+/// While `held` (from before the Wi-Fi is turned off for a suspend until the wake),
+/// [`start`] and [`prepare`] fail at once: the network worker may still run a command
+/// queued before the suspend (a wake, the user's on), and must not power the radio
+/// again after the suspend turned it off.
+pub fn hold_off(held: bool) {
+    HELD_OFF.store(held, Ordering::SeqCst);
+}
+
+fn check_held_off() -> Result<()> {
+    if HELD_OFF.load(Ordering::SeqCst) {
+        return Err(DeviceError::Backend("Wi-Fi: not while suspending".into()));
+    }
+    Ok(())
+}
 
 fn changed() {
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -204,9 +221,11 @@ impl WifiEnv {
 
 /// The interface exists and is up (or is being brought up).
 pub fn is_up() -> bool {
-    if STARTING.load(Ordering::Relaxed) {
-        return true;
-    }
+    STARTING.load(Ordering::Relaxed) || iface_up()
+}
+
+/// The interface exists and is up (`IFF_UP`).
+pub fn iface_up() -> bool {
     std::fs::read_to_string(format!("/sys/class/net/{}/flags", env().interface))
         .ok()
         .and_then(|f| u32::from_str_radix(f.trim().trim_start_matches("0x"), 16).ok())
@@ -218,9 +237,11 @@ fn wpa_running() -> bool {
 }
 
 /// Powers the radio, loads the driver, brings the interface up and starts
-/// `wpa_supplicant` (which joins a known network by itself).
-fn start() -> Result<()> {
+/// `wpa_supplicant` (which joins a known network by itself). Each step is skipped when
+/// it was done already (a radio left on by Nickel).
+pub fn start() -> Result<()> {
     let _g = lock();
+    check_held_off()?;
     changed();
     let e = env();
     log::info!("wifi: on ({} on {}, {})", e.module, e.interface, e.platform);
@@ -264,6 +285,26 @@ fn start() -> Result<()> {
     }
     pause(if e.module == "moal" { 2000 } else { 1000 });
     run("ifconfig", &[&e.interface, "up"])?;
+    start_wpa(e)
+}
+
+/// The radio was found on at start-up (the interface up): starts `wpa_supplicant` when
+/// it is not running, without powering the radio or loading the driver again (on
+/// MediaTek that pokes the chip, which could drop a connection Nickel left).
+pub fn prepare() -> Result<()> {
+    let g = lock();
+    check_held_off()?;
+    changed();
+    let e = env();
+    if !iface_up() {
+        drop(g);
+        return start();
+    }
+    start_wpa(e)
+}
+
+/// Starts `wpa_supplicant` on the interface unless it runs.
+fn start_wpa(e: &WifiEnv) -> Result<()> {
     if !wpa_running() {
         let driver = if matches!(e.module.as_str(), "moal" | "wlan_drv_gen4m") { "nl80211" } else { "wext" };
         let (conf, extra): (&str, &[&str]) =
@@ -348,9 +389,14 @@ fn release_ip(e: &WifiEnv) {
     }
 }
 
-/// Gets an address (blocks up to 30 s).
-fn obtain_ip() -> Result<()> {
+/// Gets an address (blocks up to 30 s). Not with the interface down: the radio was
+/// turned off meanwhile (before a suspend), and a DHCP client would stay behind.
+pub fn obtain_ip() -> Result<()> {
     changed();
+    check_held_off()?;
+    if !iface_up() {
+        return Err(DeviceError::Backend("DHCP: the interface is down".into()));
+    }
     let e = env();
     release_ip(e);
     if std::path::Path::new("/sbin/dhcpcd").exists() {
@@ -425,7 +471,32 @@ fn read_state() -> WifiState {
         .flatten()
         .and_then(|t| t.lines().find_map(|l| l.strip_prefix("RSSI=")).and_then(|v| v.trim().parse().ok()))
         .map(bars);
-    WifiState { enabled: true, state: state.into(), essid: essid.filter(|_| state != "NA"), signal }
+    WifiState { enabled: true, state: state.into(), essid: essid.filter(|_| state == "CONNECTED"), signal }
+}
+
+/// What the network worker needs to know about the link: the interface, the address
+/// (sysfs and `getifaddrs`), and `wpa_supplicant`'s association.
+pub fn probe() -> crate::netman::Probe {
+    use crate::netman::{link, Probe};
+    if !iface_up() {
+        return Probe::default();
+    }
+    let e = env();
+    let sys = std::path::Path::new("/sys");
+    if !link::may_be_associated(link::operstate(sys, &e.interface).as_deref()) {
+        // Not associated, sysfs says: no wpa_cli (this runs every 10 s while no
+        // network is found).
+        return Probe { radio: true, ..Probe::default() };
+    }
+    let address = link::has_address(sys, &e.interface);
+    let kv = status(e);
+    let associated = get(&kv, "wpa_state") == Some("COMPLETED");
+    let signal = address
+        .then(|| e.wpa(&["signal_poll"]).ok())
+        .flatten()
+        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("RSSI=")).and_then(|v| v.trim().parse().ok()))
+        .map(bars);
+    Probe { radio: true, address, associated, essid: get(&kv, "ssid").map(str::to_string).filter(|s| !s.is_empty()), signal }
 }
 
 /// Parses `wpa_cli scan_results` (`bssid / frequency / signal level / flags / ssid`),
@@ -548,15 +619,19 @@ pub fn network_id(essid: &str) -> Result<Option<i64>> {
 
 /// Joins saved network `id`, waits for the association (20 s) and gets an address.
 pub fn connect(id: i64) -> Result<()> {
-    changed();
-    let e = env();
-    e.wpa(&["select_network", &id.to_string()])?;
+    select(id)?;
     let r = wait_associated(Duration::from_secs(20));
     // select_network disables the others; enable them again (in memory only) so
     // wpa_supplicant and Nickel still join them later.
-    let _ = e.wpa(&["enable_network", "all"]);
+    let _ = env().wpa(&["enable_network", "all"]);
     r?;
     obtain_ip()
+}
+
+/// Has `wpa_supplicant` join saved network `id` (returns at once).
+pub fn select(id: i64) -> Result<()> {
+    changed();
+    env().wpa(&["select_network", &id.to_string()]).map(|_| ())
 }
 
 /// Waits until `wpa_supplicant` is associated.

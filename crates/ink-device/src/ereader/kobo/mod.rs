@@ -19,12 +19,14 @@ use crate::battery;
 use crate::screensaver::Screensaver;
 use crate::services::{Battery, BatteryState, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
 use crate::sleep::{Resume, SleepState};
+use crate::netman::{self, Cmd, NetBackend, NetHandle, NetQueue, NetStatus, Probe};
 use crate::sysfs::SysRoot;
 use crate::usb::UsbCable;
 use crate::wifi::WifiProfile;
 use crate::{DeviceError, Result};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 const WHITE: &str = "/sys/class/backlight/mxc_msp430.0/brightness";
@@ -68,11 +70,15 @@ pub(crate) fn ntx_io(cmd: libc::c_ulong, arg: libc::c_int) -> Result<()> {
 /// Kobo; on the Tolino emulator its write failed with EINVAL every time), then `0` back.
 /// (A MediaTek Kobo must not suspend while charging: [`Model::suspend_on_charger`].)
 pub fn suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(String)) -> Result<Resume> {
+    // Always: stop() waits for a radio start in progress (the network worker), which
+    // the interface flags do not show yet, and does nothing when the radio is off.
+    // From here to the wake no start runs (a command the worker had queued).
+    wifi::hold_off(true);
     if wifi::is_up() {
         log("wifi: turning off before suspend".into());
-        if let Err(e) = wifi::stop() {
-            log(format!("wifi: {e}"));
-        }
+    }
+    if let Err(e) = wifi::stop() {
+        log(format!("wifi: {e}"));
     }
     if let Err(e) = sys.write("/sys/power/state-extended", "1") {
         log(format!("state-extended 1: {e}"));
@@ -85,6 +91,7 @@ pub fn suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(St
     if r.is_ok() {
         std::thread::sleep(Duration::from_millis(100));
     }
+    wifi::hold_off(false);
     r
 }
 
@@ -101,6 +108,60 @@ pub struct KoboServices {
     ioctl_level: Rc<Cell<Option<u32>>>,
     /// Sets the clock after Wi-Fi connects.
     clock: DeviceClock,
+    /// The network worker (none without the input loop: `rinky device`).
+    net: Option<NetHandle>,
+}
+
+/// The Kobo's [`NetBackend`] for the network worker: the radio, `wpa_supplicant` and
+/// DHCP of [`wifi`].
+struct KoboNet {
+    clock: DeviceClock,
+}
+
+impl NetBackend for KoboNet {
+    fn radio_on(&mut self) -> bool {
+        wifi::iface_up()
+    }
+
+    fn set_radio(&mut self, on: bool) -> Result<()> {
+        if on {
+            wifi::start()
+        } else {
+            wifi::stop()
+        }
+    }
+
+    fn prepare(&mut self) -> Result<()> {
+        wifi::prepare()
+    }
+
+    fn probe(&mut self) -> Probe {
+        wifi::probe()
+    }
+
+    fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
+        wifi::scan()
+    }
+
+    fn join(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
+        let id = match (password, wifi::network_id(essid)?) {
+            (None, Some(id)) => id,
+            _ => wifi::save_network(essid, password)?,
+        };
+        wifi::select(id)
+    }
+
+    fn needs_dhcp(&self) -> bool {
+        true
+    }
+
+    fn obtain_ip(&mut self) -> Result<()> {
+        wifi::obtain_ip()
+    }
+
+    fn on_connected(&mut self) {
+        self.clock.sync_in_background();
+    }
 }
 
 impl std::fmt::Debug for KoboServices {
@@ -124,7 +185,19 @@ impl KoboServices {
             mixer,
             ioctl_level: Rc::new(Cell::new(nickel_level)),
             clock,
+            net: None,
         }
+    }
+
+    /// Starts the network worker; its events go to `queue` (the input loop's).
+    pub(crate) fn with_network(mut self, queue: Arc<NetQueue>) -> Self {
+        self.net = netman::spawn(Box::new(KoboNet { clock: self.clock.clone() }), queue);
+        self
+    }
+
+    /// Sends `cmd` to the network worker; false without one.
+    fn net_send(&self, cmd: Cmd) -> bool {
+        self.net.as_ref().is_some_and(|n| n.send(cmd))
     }
 
 }
@@ -216,12 +289,25 @@ impl Power for KoboServices {
 
 impl Wifi for KoboServices {
     fn state(&self) -> Result<WifiState> {
-        Ok(wifi::state())
+        match self.net.as_ref().and_then(NetHandle::status) {
+            Some(st) => Ok(st.to_state()),
+            None => Ok(wifi::state()),
+        }
+    }
+
+    fn status(&self) -> Result<NetStatus> {
+        match self.net.as_ref().and_then(NetHandle::status) {
+            Some(st) => Ok(st),
+            None => Ok(NetStatus::from_state(&wifi::state())),
+        }
     }
 
     /// On: returns at once; the radio comes up, joins a saved network and syncs the
-    /// clock on a thread.
+    /// clock on a thread (the network worker, or one of its own without it).
     fn set_enabled(&mut self, on: bool) -> Result<()> {
+        if self.net_send(if on { Cmd::Enable } else { Cmd::Disable }) {
+            return Ok(());
+        }
         if on {
             let clock = self.clock.clone();
             wifi::start_in_background(move || clock.sync_in_background());
@@ -231,26 +317,26 @@ impl Wifi for KoboServices {
         }
     }
 
-    /// wpa_supplicant joins a saved network it finds by itself (and scans now and then
-    /// while it has none); a scan right after the wake makes that happen sooner.
-    fn look_for_networks(&mut self) {
-        // Suspend turns the radio off ([`suspend`]); this matters only when it stayed on.
-        if !wifi::is_up() {
-            return;
+    fn start_network(&mut self, restore: bool) {
+        self.net_send(Cmd::Boot { restore });
+    }
+
+    fn set_awake(&mut self, awake: bool) {
+        self.net_send(Cmd::Awake(awake));
+    }
+
+    fn connect_in_background(&mut self, essid: &str, password: Option<&str>) -> Result<bool> {
+        if self.net_send(Cmd::Connect { essid: essid.to_string(), password: password.map(str::to_string) }) {
+            return Ok(true);
         }
-        let r = std::thread::Builder::new().name("wifi-wake".into()).spawn(|| {
-            std::thread::sleep(crate::services::WIFI_WAKE_SETTLE);
-            let s = wifi::state();
-            if s.searching() {
-                log::info!("wifi: not connected after wake ({}): scanning", s.state);
-                if let Err(e) = wifi::request_scan() {
-                    log::warn!("wifi: scan after wake: {e}");
-                }
-            }
-        });
-        if let Err(e) = r {
-            log::warn!("wifi: cannot start the wake scan: {e}");
+        self.connect(essid, password).map(|()| false)
+    }
+
+    fn scan_in_background(&mut self) -> Result<bool> {
+        if self.net_send(Cmd::Scan) {
+            return Ok(true);
         }
+        self.scan().map(|_| false)
     }
 
     fn scan(&mut self) -> Result<Vec<WifiNetwork>> {

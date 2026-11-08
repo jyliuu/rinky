@@ -57,11 +57,32 @@ All notable changes to rinky are listed here. The format is based on
   memory while reading, with no slower page turns.
 - Zooming a PDF or comic page with a pinch shows the zoomed page at once, a little
   coarse, and sharpens it a moment after your fingers lift.
+- Wi-Fi connects by itself more reliably and says what it is doing. rinky remembers
+  that Wi-Fi was on and turns it on again when it starts and after the e-reader wakes
+  up (on a Kobo, which turns Wi-Fi off to sleep, it stayed off until you turned it on
+  again). It looks for a saved network at once after a wake or turning Wi-Fi on,
+  then less often while none is found.
+- A short message tells you when Wi-Fi connects ("Connected to Home"), when joining a
+  network fails ("Couldn't connect to Home", once an hour for the same network) and
+  when no saved network is in range after a wake or start ("No saved network found",
+  once until Wi-Fi connects or is turned off).
+- The Wi-Fi icon in the status bars changes as soon as the connection does, and has
+  three looks: connected, connecting, and off or not connected (before, it showed
+  nothing unless connected). Settings › Wi-Fi and the control center's Wi-Fi button
+  follow the connection too ("Connecting to Home…", "Connected to Home"), and joining
+  a network or scanning no longer freezes the screen.
 
 ### Fixed
 - Reading settings (Aa): a preset or a font size step now also refreshes the preview
   and the other controls it changes (the size, the preset chips, Justify), which
   could stay showing the old values on the screen.
+- rinky said it was connected to a network it was only trying to join. It now counts
+  Wi-Fi as connected only once the e-reader has an address on the network.
+- Kobo: a network joined later (after a wake, or on coming into range) got no
+  address, and a connection Nickel left half set up when rinky started stayed
+  unusable. rinky now gets the address whenever Wi-Fi is joined without one.
+- Kindle: with Wi-Fi on but no network joined, rinky did not look for saved networks
+  when wifid reported "pending", which it does in that state.
 
 ## [0.5.3] - 2026-11-07
 

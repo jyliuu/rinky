@@ -22,6 +22,7 @@ use crate::input::{Input, InputEvent, Key, KeyEvent, PowerEvent, Timestamp, Touc
 use crate::journal::Entry;
 use crate::light::AmberScheduler;
 use crate::lipc::{EventHub, Lipc};
+use crate::netman::NetQueue;
 use crate::screen::RefreshClass;
 use crate::sleep::{Resume, SleepController, SleepPlatform, SleepState};
 use crate::sysfs::SysRoot;
@@ -34,6 +35,7 @@ use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 const EVIOCGRAB: u32 = 0x4004_4590;
@@ -373,6 +375,8 @@ pub struct ReaderInput {
     sys: SysRoot,
     opts: LoopOptions,
     hub: Option<(EventHub, OwnedFd)>,
+    /// The network worker's events and the pipe that wakes the poll for them.
+    net: Option<(Arc<NetQueue>, OwnedFd)>,
     uevent: Option<OwnedFd>,
     udc: Option<File>,
     queue: VecDeque<InputEvent>,
@@ -541,6 +545,7 @@ impl ReaderInput {
             lipc: lipc.clone(),
             sys,
             hub: None,
+            net: None,
             uevent: open_uevent_socket(),
             udc: None,
             queue: VecDeque::new(),
@@ -1082,6 +1087,27 @@ impl ReaderInput {
         Ok(())
     }
 
+    /// The queue the network worker ([`crate::netman::spawn`]) sends its events to; they
+    /// come out of [`Input::next_event`] as [`PowerEvent::Network`].
+    pub fn net_queue(&mut self) -> Option<Arc<NetQueue>> {
+        if let Some((q, _)) = &self.net {
+            return Some(q.clone());
+        }
+        let (rd, wr) = make_pipe()?;
+        let q = NetQueue::new(move || {
+            let _ = (&wr).write_all(&[1]);
+        });
+        self.net = Some((q.clone(), rd));
+        Some(q)
+    }
+
+    /// Moves the network worker's events into the queue (and empties its pipe).
+    fn take_net_events(&mut self) {
+        let Some((q, rd)) = &self.net else { return };
+        drain_fd(rd.as_raw_fd());
+        self.queue.extend(q.take().into_iter().map(|e| InputEvent::Power(PowerEvent::Network(e))));
+    }
+
     fn next_deadline(&self, caller: Option<Instant>, now: Instant) -> Instant {
         let mut d = now + MAX_POLL;
         if let Some(c) = caller {
@@ -1116,6 +1142,7 @@ impl Input for ReaderInput {
             self.requests(now);
             self.timers(now);
             self.heartbeat(now);
+            self.take_net_events();
             if let Some(ev) = self.queue.pop_front() {
                 return Ok(Some(ev));
             }
@@ -1140,6 +1167,7 @@ impl Input for ReaderInput {
                 raw(self.uevent.as_ref().map(|f| f.as_raw_fd()), libc::POLLIN),
                 raw(self.udc.as_ref().map(|f| f.as_raw_fd()), libc::POLLPRI | libc::POLLERR),
                 raw(stop_fd, libc::POLLIN),
+                raw(self.net.as_ref().map(|(_, rd)| rd.as_raw_fd()), libc::POLLIN),
             ];
             let ms = wait.as_millis().min(i32::MAX as u128) as i32;
             // SAFETY: fds is a valid array of pollfd.

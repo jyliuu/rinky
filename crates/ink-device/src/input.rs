@@ -137,6 +137,9 @@ pub enum PowerEvent {
     TimeChanged(i64),
     /// Wi-Fi connection manager state changed (`CONNECTED`, `PENDING`, `NA`, ...).
     WifiState(String),
+    /// The network worker's news ([`crate::netman`]): status changes, failed joins,
+    /// finished scans, "Wi-Fi was on" to keep.
+    Network(crate::netman::NetEvent),
     /// Any other event from a subscribed lipc publisher (`com.lab126.wifid`, `cmd`,
     /// `volumd`, `hal`), with the publisher's full name.
     Lipc {

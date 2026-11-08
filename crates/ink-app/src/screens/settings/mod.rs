@@ -238,7 +238,7 @@ use crate::screens::common::paint_cx;
 use crate::router::{AppCtx, AppScreen, ScreenRegistry, Transition};
 use crate::plugin_host::{self, hooks, PluginEntry};
 use crate::update;
-use ink_device::{Device, Key, Rect, RefreshClass, Rotation, Size, WifiNetwork, WifiState};
+use ink_device::{Device, Key, NetEvent, NetStatus, PowerEvent, Rect, RefreshClass, Rotation, Size, WifiNetwork};
 use ink_store::export::ExportFormat;
 use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::{Paths, Settings};
@@ -719,34 +719,47 @@ pub fn plugin_title(name: &str) -> String {
 
 /// The Wi-Fi page: switches, saved networks, then the networks found (signal bars, a
 /// lock on secured ones, a check on the connected one).
-pub fn wifi_rows(state: &WifiState, airplane: bool, networks: &[WifiNetwork]) -> Vec<Row> {
-    let line = match (&state.essid, state.signal) {
-        (Some(e), Some(s)) => format!("Connected to {e} (signal {s}/5)"),
-        (Some(e), None) => format!("Connected to {e}"),
-        (None, _) if state.enabled => "Not connected".to_string(),
-        (None, _) => "Off".to_string(),
-    };
+pub fn wifi_rows(state: &NetStatus, airplane: bool, networks: &[WifiNetwork]) -> Vec<Row> {
+    let line = wifi_line(state);
     let mut rows = vec![
         Row::header("Connection"),
-        Row::toggle("Wi-Fi", state.enabled, "wifi").icon(Icon::Wifi).subtitle(line),
+        Row::toggle("Wi-Fi", state.radio_on(), "wifi").icon(Icon::Wifi).subtitle(line),
         Row::toggle("Airplane mode", airplane, "airplane").icon(Icon::Globe),
         Row::nav(Icon::Bookmark, "Saved networks", "page:saved"),
         Row::header("Networks"),
     ];
     if networks.is_empty() {
-        rows.push(Row::note(if state.enabled { "No networks listed. Tap Scan." } else { "Turn Wi-Fi on to see networks." }));
+        rows.push(Row::note(if state.radio_on() { "No networks listed. Tap Scan." } else { "Turn Wi-Fi on to see networks." }));
     }
+    let joining = match state {
+        NetStatus::Connecting { essid } => essid.as_deref(),
+        _ => None,
+    };
     for (i, n) in networks.iter().enumerate() {
-        let connected = state.essid.as_deref() == Some(n.essid.as_str());
+        let connected = state.connected_to() == Some(n.essid.as_str());
         let mut row = Row::choice(n.essid.clone(), connected, format!("net:{i}")).lead(Lead::Signal(n.signal)).lock(n.secured);
         if connected {
             row = row.subtitle("Connected");
+        } else if joining == Some(n.essid.as_str()) {
+            row = row.subtitle("Connecting…");
         } else if n.known {
             row = row.subtitle("Saved");
         }
         rows.push(row);
     }
     rows
+}
+
+/// What the network is doing, in one line (the Wi-Fi row, the Wi-Fi page).
+pub fn wifi_line(state: &NetStatus) -> String {
+    match state {
+        NetStatus::Connected { essid, signal: Some(s) } => format!("Connected to {essid} (signal {s}/5)"),
+        NetStatus::Connected { essid, signal: None } => format!("Connected to {essid}"),
+        NetStatus::Connecting { essid: Some(e) } => format!("Connecting to {e}…"),
+        NetStatus::Connecting { essid: None } => "Looking for saved networks…".into(),
+        NetStatus::NoNetwork => "Not connected".into(),
+        NetStatus::Off => "Off".into(),
+    }
 }
 
 /// The Plugins page: plugin settings pages (`(label, plugin)`), the plugins with their
@@ -985,6 +998,10 @@ pub struct SettingsScreen {
     keyboard: Option<WidgetId>,
     input: Option<WidgetId>,
     networks: Vec<WifiNetwork>,
+    /// A join started here runs in the background (the network's events end it).
+    pending_join: Option<String>,
+    /// A scan started here runs in the background.
+    scanning: bool,
     release: Option<update::Release>,
     /// An update was installed and the launcher runs it when rinky exits: the next timer
     /// ends rinky (after the status line said so). The installed version.
@@ -1193,10 +1210,13 @@ impl SettingsScreen {
             _ => "Not available".into(),
         };
         let airplane = s.wifi.airplane_mode().unwrap_or(false);
-        let wifi = match s.wifi.state() {
+        let wifi = match s.wifi.status() {
             _ if airplane => "Airplane mode".into(),
-            Ok(st) if !st.enabled => "Off".into(),
-            Ok(st) => st.essid.unwrap_or_else(|| "Not connected".into()),
+            Ok(NetStatus::Connected { essid, .. }) => essid,
+            Ok(NetStatus::Connecting { essid: Some(e) }) => format!("Connecting to {e}…"),
+            Ok(NetStatus::Connecting { essid: None }) => "Connecting…".into(),
+            Ok(NetStatus::NoNetwork) => "Not connected".into(),
+            Ok(NetStatus::Off) => "Off".into(),
             Err(_) => "Not available".into(),
         };
         let device = match s.battery.state() {
@@ -1268,7 +1288,7 @@ impl SettingsScreen {
 
     fn build_wifi(&mut self, cx: &mut AppCtx, content: Rect) {
         let wifi = &mut cx.services.wifi;
-        let state = match wifi.state() {
+        let state = match wifi.status() {
             Ok(s) => s,
             Err(e) => {
                 let text = format!("Wi-Fi is not available: {e}");
@@ -1681,10 +1701,17 @@ impl SettingsScreen {
         }
     }
 
+    /// Joins `essid`: in the background when the device can (the page then follows the
+    /// network's events), else waiting here. False when it failed at once.
     fn connect(&mut self, essid: &str, password: Option<&str>, cx: &mut AppCtx) -> anyhow::Result<bool> {
         self.say_now(&format!("Connecting to {essid}…"), cx)?;
-        match cx.services.wifi.connect(essid, password) {
-            Ok(()) => {
+        match cx.services.wifi.connect_in_background(essid, password) {
+            Ok(true) => {
+                self.pending_join = Some(essid.to_string());
+                self.status_text = format!("Connecting to {essid}…");
+                Ok(true)
+            }
+            Ok(false) => {
                 self.status_text = format!("Connected to {essid}");
                 Ok(true)
             }
@@ -1692,6 +1719,50 @@ impl SettingsScreen {
                 self.set_status(format!("Cannot connect to {essid}: {e}"));
                 Ok(false)
             }
+        }
+    }
+
+    /// The network worker's news: the Wi-Fi rows show it, a join or scan started here
+    /// ends.
+    fn network_event(&mut self, e: &NetEvent, cx: &mut AppCtx) {
+        let shows_wifi = matches!(self.page, Page::Main | Page::Wifi);
+        match e {
+            NetEvent::Status(st) => {
+                if let (Some(j), Some(c)) = (&self.pending_join, st.connected_to()) {
+                    if j == c {
+                        self.status_text = format!("Connected to {c}");
+                        self.pending_join = None;
+                    }
+                }
+                if shows_wifi {
+                    self.rebuild = Some(RefreshClass::Gl16);
+                }
+            }
+            NetEvent::JoinFailed(essid) if self.pending_join.as_deref() == Some(essid.as_str()) => {
+                self.pending_join = None;
+                let text = format!("Couldn't connect to {essid}");
+                let secured = self.networks.iter().any(|n| n.essid == *essid && n.secured);
+                if secured && self.page == Page::Wifi {
+                    // The saved password may be wrong (a failed join keeps the profile):
+                    // ask for it again instead of retrying the saved one forever.
+                    self.go(Page::Join(essid.clone()), cx);
+                }
+                self.set_status(text);
+            }
+            NetEvent::Scanned(r) => {
+                if self.page == Page::Wifi {
+                    self.networks = cx.services.wifi.scan_list().unwrap_or_default();
+                    self.rebuild = Some(RefreshClass::Gl16);
+                }
+                if std::mem::take(&mut self.scanning) {
+                    self.status_text = match r {
+                        Ok(n) => format!("{n} network{} found", if *n == 1 { "" } else { "s" }),
+                        Err(e) => format!("Scan failed: {e}"),
+                    };
+                    self.log_status();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1791,14 +1862,19 @@ impl SettingsScreen {
             }
             "scan" => {
                 self.say_now("Scanning…", cx)?;
-                let r = cx.services.wifi.scan();
-                self.go(Page::Wifi, cx);
-                match r {
-                    Ok(n) => {
-                        self.status_text = format!("{} network{} found", n.len(), if n.len() == 1 { "" } else { "s" });
-                        self.networks = n;
+                match cx.services.wifi.scan_in_background() {
+                    // The page follows when the scan ends (NetEvent::Scanned).
+                    Ok(true) => self.scanning = true,
+                    Ok(false) => {
+                        self.go(Page::Wifi, cx);
+                        self.networks = cx.services.wifi.scan_list().unwrap_or_default();
+                        let n = self.networks.len();
+                        self.status_text = format!("{n} network{} found", if n == 1 { "" } else { "s" });
                     }
-                    Err(e) => self.status_text = format!("Scan failed: {e}"),
+                    Err(e) => {
+                        self.go(Page::Wifi, cx);
+                        self.status_text = format!("Scan failed: {e}");
+                    }
                 }
             }
             "net" => {
@@ -2114,6 +2190,10 @@ impl AppScreen for SettingsScreen {
     fn handle(&mut self, ev: &UiEvent, cx: &mut AppCtx) -> anyhow::Result<Transition> {
         if matches!(ev, UiEvent::Quit) {
             return Ok(Transition::Exit);
+        }
+        if let UiEvent::Power(PowerEvent::Network(e)) = ev {
+            self.network_event(e, cx);
+            return Ok(Transition::None);
         }
         // The status line showed "Restarting rinky…": the launcher starts the new version.
         if let (Some(v), UiEvent::Timer(_)) = (&self.restarting, ev) {

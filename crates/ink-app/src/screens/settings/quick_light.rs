@@ -37,7 +37,7 @@ use crate::screens::common::paint_cx;
 use crate::router::{AppCtx, Route, Transition};
 use ink_device::clock::DateTime;
 use ink_device::light::{AmberMode, AmberSchedule, AmberScheduler, DayTime};
-use ink_device::{Clock, Light, Rect, RefreshClass, Rotation, Size};
+use ink_device::{Clock, Light, NetStatus, Rect, RefreshClass, Rotation, Size};
 use ink_store::prefs::{label, CONTROL_BUTTONS};
 use ink_text::Style;
 use ink_ui::controls::paint_round_button;
@@ -1009,13 +1009,15 @@ impl ControlCenterScreen {
                 t
             }
             "wifi" => {
-                let wifi = cx.services.wifi.state().ok();
+                let wifi = cx.services.wifi.status().ok();
                 let airplane = cx.services.wifi.airplane_mode().ok();
-                let wifi_on = wifi.as_ref().is_some_and(|w| w.enabled) && airplane != Some(true);
+                let wifi_on = wifi.as_ref().is_some_and(NetStatus::radio_on) && airplane != Some(true);
                 let state = match &wifi {
                     None => "Not available".to_string(),
-                    Some(w) if wifi_on => w.essid.clone().unwrap_or_else(|| "On".into()),
-                    Some(_) => "Off".into(),
+                    Some(_) if !wifi_on => "Off".into(),
+                    Some(NetStatus::Connected { essid, .. }) => essid.clone(),
+                    Some(NetStatus::Connecting { .. }) => "Connecting…".into(),
+                    Some(_) => "Not connected".into(),
                 };
                 Tile::new(Glyph::Icon(Icon::Wifi), caption, state, Some(wifi_on), a)
             }
@@ -1458,9 +1460,23 @@ impl ControlCenterScreen {
             return;
         }
         if let Some(hint) = &tile.needs_wifi {
-            if !cx.services.wifi.state().is_ok_and(|w| w.enabled) {
-                self.set_status(hint.clone());
-                return;
+            match cx.services.wifi.status() {
+                Ok(NetStatus::Connected { .. }) => {}
+                // Not connected yet: the plugin's request would only fail.
+                Ok(NetStatus::Connecting { .. }) => {
+                    self.set_status("Wi-Fi is still connecting");
+                    return;
+                }
+                Ok(NetStatus::NoNetwork) => {
+                    self.set_status("Wi-Fi is not connected");
+                    return;
+                }
+                Ok(NetStatus::Off) => {
+                    self.set_status(hint.clone());
+                    return;
+                }
+                // A backend that cannot tell: let the plugin try.
+                Err(_) => {}
             }
         }
         if cx.plugins.trigger(plugin, id, None) {
@@ -1475,9 +1491,9 @@ impl ControlCenterScreen {
         log::info!("control center: button {name}");
         match name {
             "wifi" => {
-                let on = cx.services.wifi.state().is_ok_and(|w| w.enabled) && cx.services.wifi.airplane_mode().ok() != Some(true);
+                let on = cx.services.wifi.status().is_ok_and(|w| w.radio_on()) && cx.services.wifi.airplane_mode().ok() != Some(true);
                 match cx.services.wifi.set_enabled(!on) {
-                    Ok(()) => self.set_status(if on { "Wi-Fi off" } else { "Wi-Fi on" }),
+                    Ok(()) => self.set_status(if on { "Wi-Fi off" } else { "Turning Wi-Fi on…" }),
                     Err(e) => self.set_status(format!("Wi-Fi: {e}")),
                 }
                 self.refresh_tiles(cx);
@@ -1640,6 +1656,14 @@ impl crate::router::AppScreen for ControlCenterScreen {
         }
         match ev {
             UiEvent::Quit => return Ok(Transition::Exit),
+            // The Wi-Fi tile shows what the network does now.
+            UiEvent::Power(ink_device::PowerEvent::Network(ink_device::NetEvent::Status(_))) => {
+                // Not under an open picker (the tile would draw over it).
+                if self.picker.is_none() {
+                    self.refresh_tiles_where(cx, |n| n == "wifi");
+                }
+                return Ok(Transition::None);
+            }
             UiEvent::Key(k) if k.pressed && matches!(k.key, ink_device::Key::Power | ink_device::Key::Back) => {
                 return Ok(Transition::Pop)
             }

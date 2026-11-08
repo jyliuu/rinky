@@ -188,7 +188,7 @@ fn bars_keep_their_rows_and_slots_apart() {
         minutes_left_chapter: Some(12),
         book_title: long.clone(),
         chapter_title: Some(long.clone()),
-        device: DeviceStatus { clock: "12:34".into(), battery: Some((57, false)), wifi: Some(true), light: Some(12) },
+        device: DeviceStatus { clock: "12:34".into(), battery: Some((57, false)), wifi: Some(ink_device::NetStatus::Connected { essid: "Home".into(), signal: Some(4) }), light: Some(12) },
         ..FooterInfo::default()
     };
     let mut bars = ink_store::prefs::StatusBars::default();

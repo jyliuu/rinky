@@ -320,7 +320,7 @@ fn sample_info(clock: String) -> FooterInfo {
         author: "Frank Herbert".into(),
         chapter_title: Some("Book One: Dune".into()),
         bookmarked: true,
-        device: DeviceStatus { clock, battery: Some((76, false)), wifi: Some(true), light: Some(12) },
+        device: DeviceStatus { clock, battery: Some((76, false)), wifi: Some(ink_device::NetStatus::Connected { essid: String::new(), signal: None }), light: Some(12) },
         ..FooterInfo::default()
     }
 }
