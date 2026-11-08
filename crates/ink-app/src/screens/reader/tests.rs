@@ -1766,3 +1766,37 @@ fn idle_reader_prefetches_the_page_in_the_direction_of_the_last_turn() {
     assert!(h.reader.prefetch_at.is_none());
     let _ = std::fs::remove_dir_all(src.parent().unwrap());
 }
+
+/// The page drawn ahead waits for the event loop to go idle: input moves the timer on,
+/// and nothing is drawn while a finger is down or the menu is open.
+#[test]
+fn prefetch_waits_for_no_input_no_finger_and_no_overlay() {
+    let src = tmp("prefetch-idle-src").join("comic.cbz");
+    std::fs::write(&src, ink_mupdf::testgen::fixture_cbz(12)).unwrap();
+    let mut h = Harness::new("prefetch-idle", src.to_str().unwrap());
+    let p = providers();
+    let backdate = |h: &mut Harness| *h.reader.prefetch_at.as_mut().expect("a prefetch is pending") -= PREFETCH_IDLE * 2;
+    // A finger goes down after the timer ran out: the timer moves on and waits.
+    backdate(&mut h);
+    h.frame(400, 636, 848, TouchPhase::Down);
+    assert!(h.reader.prefetch_at.is_some_and(|d| d > Instant::now()), "input moved the timer on");
+    backdate(&mut h);
+    assert!(h.reader.prefetch_due().is_none(), "no prefetch while the finger is down");
+    h.handle_event(&UiEvent::Timer(0), &p);
+    assert!(h.reader.prefetch_at.is_some(), "nothing drawn under the finger");
+    // It lifts: a tap in the middle opens the menu, and the menu holds the prefetch back.
+    h.frame(60, 636, 848, TouchPhase::Up);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Menu));
+    backdate(&mut h);
+    assert!(h.reader.prefetch_due().is_none(), "no prefetch under the menu");
+    h.handle_event(&UiEvent::Timer(0), &p);
+    assert!(h.reader.prefetch_at.is_some(), "nothing drawn under the menu");
+    // The menu closes: the page after is drawn once the reader rested.
+    h.key(Key::Back);
+    assert_eq!(h.kind(), None);
+    assert!(h.reader.prefetch_at.is_some_and(|d| d > Instant::now()));
+    h.rest_for_prefetch();
+    assert!(h.reader.prefetch_at.is_none());
+    assert!(!h.prefetch(1), "page 2 was drawn ahead");
+    let _ = std::fs::remove_dir_all(src.parent().unwrap());
+}

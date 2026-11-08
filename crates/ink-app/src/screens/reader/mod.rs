@@ -676,8 +676,11 @@ pub struct ReaderScreen {
     /// The way the last page turn went (+1 next, -1 previous): the page expected next.
     turn_dir: i64,
     /// When the page after the one shown is drawn ahead ([`ReaderScreen::prefetch_next`]):
-    /// set when a page is drawn, once no input came for [`PREFETCH_IDLE`].
+    /// set when a page is drawn and moved on by every input, so it comes once no input
+    /// came for [`PREFETCH_IDLE`]. Waits while a finger is down or an overlay is open.
     prefetch_at: Option<Instant>,
+    /// A finger is on the panel (a touch went down and has not lifted yet).
+    touching: bool,
 }
 
 /// The sidecar gets the position once the page has rested this long. Page turns do no
@@ -754,6 +757,7 @@ impl ReaderScreen {
             jumped: false,
             turn_dir: 1,
             prefetch_at: None,
+            touching: false,
         }
     }
 
@@ -925,6 +929,13 @@ impl ReaderScreen {
     /// When the unsaved position is due to be written.
     fn position_due(&self) -> Option<Instant> {
         self.position_unsaved.map(|(first, last)| (last + POSITION_SAVE_IDLE).min(first + POSITION_SAVE_MAX))
+    }
+
+    /// When the page after the one shown is drawn ahead: not while a finger is down (a
+    /// hold or a drag would stall behind the render) or an overlay is open (its taps
+    /// would); the timer comes back once both are gone.
+    fn prefetch_due(&self) -> Option<Instant> {
+        self.prefetch_at.filter(|_| !self.touching && self.overlay.is_none())
     }
 
     /// Draws the page after the one shown, in the direction of the last turn, into the
@@ -2265,8 +2276,15 @@ impl AppScreen for ReaderScreen {
         if matches!(ev, UiEvent::Power(_)) || self.position_due().is_some_and(|d| Instant::now() >= d) {
             self.flush_position();
         }
-        if matches!(ev, UiEvent::Timer(_)) && self.prefetch_at.is_some_and(|d| Instant::now() >= d) {
-            self.prefetch_next();
+        // The page drawn ahead waits for the loop to go idle: input moves it on.
+        match ev {
+            UiEvent::Touch(t) => {
+                self.touching = !matches!(t.kind, ink_ui::TouchKind::Up | ink_ui::TouchKind::Cancel);
+                self.prefetch_at = self.prefetch_at.map(|_| Instant::now() + PREFETCH_IDLE);
+            }
+            UiEvent::Gesture(_) | UiEvent::Key(_) => self.prefetch_at = self.prefetch_at.map(|_| Instant::now() + PREFETCH_IDLE),
+            UiEvent::Timer(_) if self.prefetch_due().is_some_and(|d| Instant::now() >= d) => self.prefetch_next(),
+            _ => {}
         }
         // Plugin dialogs, menus, viewers and keyboards got the event first in the app
         // loop (plugin_host::hooks::app_handle).
@@ -2282,9 +2300,11 @@ impl AppScreen for ReaderScreen {
             t
         };
         // A screen pushed over the reader (settings, statistics, light) gets the timer
-        // and power events: write the position now.
+        // and power events: write the position now. It also gets the lift of a finger
+        // that went down here.
         if matches!(t, Ok(Transition::Push(_))) {
             self.flush_position();
+            self.touching = false;
         }
         t
     }
@@ -2320,7 +2340,7 @@ impl AppScreen for ReaderScreen {
         // Bars drawn while pagination counts: look again for the end of the count.
         let counting = (self.counting_shown && !self.status_bars_hidden && self.overlay.is_none()).then_some(COUNTING_POLL);
         // The next page drawn ahead once the shown one rested.
-        let prefetch = self.prefetch_at.map(|d| d.saturating_duration_since(Instant::now()));
+        let prefetch = self.prefetch_due().map(|d| d.saturating_duration_since(Instant::now()));
         let expiry = self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout());
         // aa: debounce; statusbar: minute tick; position save; selection edge; page count; prefetch
         expiry.into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting).chain(prefetch).min()
