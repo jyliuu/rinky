@@ -177,19 +177,14 @@ pub fn split_check(label: &str) -> (bool, &str) {
     }
 }
 
-/// Width of the column the check icon sits in (icon side + gap), reserved on every row
-/// when any row of the menu is checked.
-pub fn check_gutter() -> i32 {
-    48 + crate::theme::space(2)
-}
-
 impl Widget for Menu {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         let t = cx.theme;
         fill_round_rect(cx.canvas, b, t.radius_lg, t.bg);
         stroke_round_rect(cx.canvas, b, t.radius_lg, t.border_px as f32, t.fg);
         let rows = split_rows(b, &vec![self.row_h; self.items.len()]);
-        let gutter = if self.items.iter().any(|(l, _)| split_check(l).0) { check_gutter() } else { 0 };
+        // The check icon's column (icon side + gap), on every row when any is checked.
+        let gutter = if self.items.iter().any(|(l, _)| split_check(l).0) { 48 + crate::theme::space(2) } else { 0 };
         for (i, (r, (label, _))) in rows.iter().zip(&self.items).enumerate() {
             let (checked, label) = split_check(label);
             if i > 0 {

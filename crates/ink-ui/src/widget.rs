@@ -757,15 +757,6 @@ impl Button {
         self.enabled = false;
         self
     }
-
-    /// The effective look (`inverted` makes any button filled).
-    pub fn effective_kind(&self) -> ButtonKind {
-        if self.inverted {
-            ButtonKind::Filled
-        } else {
-            self.kind
-        }
-    }
 }
 
 /// Follows press feedback for a touch ([`Touch::press_target`]) on a widget whose part
@@ -876,7 +867,8 @@ pub fn paint_button(cx: &mut PaintCx, b: Rect, label: &str, icon: Option<Icon>, 
 
 impl Widget for Button {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let kind = self.effective_kind();
+        // `inverted` makes any button filled.
+        let kind = if self.inverted { ButtonKind::Filled } else { self.kind };
         paint_button(cx, b, &self.label, self.icon, kind, self.enabled, self.pressed);
     }
 

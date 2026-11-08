@@ -391,14 +391,16 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
-    /// English keyboard (globe key cycles English, Danish, German, French).
+    /// English keyboard (the globe key cycles every language of [`LANGUAGES`]).
     pub fn new() -> Self {
-        Self::with_languages(&LANGUAGES)
+        Self::with_language_list(&LANGUAGES.map(String::from))
     }
 
-    /// A keyboard for `languages` (unknown ones are skipped), starting with the first.
-    pub fn with_languages(languages: &[&str]) -> Self {
-        let mut langs: Vec<String> = languages.iter().filter(|l| KeyboardLayout::letters(l).is_some()).map(|l| l.to_string()).collect();
+    /// A keyboard for the language codes in `langs` (e.g. the `ui.keyboard_layouts`
+    /// setting): unknown names are skipped, an empty list gives English; the first is
+    /// the default and the globe key cycles them in order.
+    pub fn with_language_list(langs: &[String]) -> Self {
+        let mut langs: Vec<String> = langs.iter().filter(|l| KeyboardLayout::letters(l).is_some()).cloned().collect();
         if langs.is_empty() {
             langs.push("en".into());
         }
@@ -417,14 +419,6 @@ impl Keyboard {
             full: false,
             bounds: Rect::default(),
         }
-    }
-
-    /// A keyboard for the language codes in `langs` (e.g. the `ui.keyboard_layouts`
-    /// setting): unknown names are skipped, an empty list gives English; the first is
-    /// the default and the globe key cycles them in order.
-    pub fn with_language_list(langs: &[String]) -> Self {
-        let v: Vec<&str> = langs.iter().map(String::as_str).collect();
-        Self::with_languages(&v)
     }
 
     /// The current language code.
