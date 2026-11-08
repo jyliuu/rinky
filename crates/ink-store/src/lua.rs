@@ -385,22 +385,18 @@ impl Parser<'_> {
         }
     }
 
+    /// At `bracket` `=`* `bracket` (a long bracket's opener or closer): the number of `=`.
+    /// Nothing is consumed.
+    fn level_at(&self, bracket: u8) -> Option<usize> {
+        let eq = self.s.get(self.i + 1..)?.iter().take_while(|&&c| c == b'=').count();
+        (self.peek() == Some(bracket) && self.s.get(self.i + 1 + eq) == Some(&bracket)).then_some(eq)
+    }
+
     /// At `[` `=`* `[`: consumes the opener and returns the level (number of `=`).
     fn long_bracket_level(&mut self) -> Option<usize> {
-        if self.peek() != Some(b'[') {
-            return None;
-        }
-        let mut j = self.i + 1;
-        while self.s.get(j) == Some(&b'=') {
-            j += 1;
-        }
-        if self.s.get(j) == Some(&b'[') {
-            let level = j - self.i - 1;
-            self.i = j + 1;
-            Some(level)
-        } else {
-            None
-        }
+        let level = self.level_at(b'[')?;
+        self.i += level + 2;
+        Some(level)
     }
 
     /// Body of a long string or comment after its opener; returns the bytes with line
@@ -412,17 +408,9 @@ impl Parser<'_> {
         loop {
             match self.peek() {
                 None => return Err(self.err(format!("unfinished long {what}"))),
-                Some(b']') => {
-                    let mut j = self.i + 1;
-                    while self.s.get(j) == Some(&b'=') {
-                        j += 1;
-                    }
-                    if j - self.i - 1 == level && self.s.get(j) == Some(&b']') {
-                        self.i = j + 1;
-                        return Ok(out);
-                    }
-                    out.push(b']');
-                    self.i += 1;
+                Some(b']') if self.level_at(b']') == Some(level) => {
+                    self.i += level + 2;
+                    return Ok(out);
                 }
                 Some(b'\r' | b'\n') => {
                     self.skip_newline();
