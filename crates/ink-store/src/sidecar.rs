@@ -129,6 +129,15 @@ pub(crate) fn lenient_status<'de, D: serde::Deserializer<'de>>(d: D) -> std::res
     Ok(v.as_str().and_then(ReadingStatus::from_koreader).unwrap_or_default())
 }
 
+/// Reads an optional value leniently: a value of the wrong type (`"columns": "2"`,
+/// `"rtl": 1`, a number out of range) reads as unset instead of making the whole file
+/// unreadable. For keys added after files were written, which may hold anything a
+/// screen or another tool put under that name while it was an unknown key.
+pub(crate) fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> std::result::Result<Option<T>, D::Error> {
+    let v = Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
+}
+
 /// A rectangle on a fixed-layout page in page points (MuPDF page space: origin at the
 /// top left, y down). Same fields and JSON as `ink_doc::Quad`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -285,20 +294,20 @@ pub struct BookSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crop: Option<[f32; 4]>,
     /// Fixed layout: white margins cropped automatically (detected on each page).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub crop_auto: Option<bool>,
     /// Fixed layout: text columns read one after the other (1 = off).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub columns: Option<u8>,
     /// Fixed layout: contrast factor (1 = none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contrast: Option<f32>,
     /// Fixed layout: two pages side by side, `auto` (comics in landscape), `always` or
     /// `never`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub spreads: Option<String>,
     /// Fixed layout: pages run right to left (manga).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub rtl: Option<bool>,
     /// Reading progress in the bottom margin.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1021,6 +1030,15 @@ mod tests {
         std::fs::write(sidecar_path(&book), r#"{"version":2,"settings":{"columns":2,"contrast":1.25}}"#).unwrap();
         let old = BookState::load(&book).unwrap().settings;
         assert_eq!((old.columns, old.contrast, old.rtl), (Some(2), Some(1.25), None));
+        // Something else kept under one of the new names while it was an unknown key
+        // reads as unset; the rest of the file (the position) still loads.
+        let odd = r#"{"version":2,"position":"page:7","settings":{"columns":"two","rtl":1,"spreads":true,"crop_auto":null,"font_px":30}}"#;
+        std::fs::write(sidecar_path(&book), odd).unwrap();
+        let r = BookState::load_report(&book).unwrap();
+        assert!(r.set_aside.is_empty(), "{:?}", r.set_aside);
+        let st = r.state;
+        assert_eq!(st.position.as_deref(), Some("page:7"));
+        assert_eq!((st.settings.columns, st.settings.rtl, st.settings.spreads, st.settings.crop_auto, st.settings.font_px), (None, None, None, None, Some(30.0)));
     }
 
     #[test]
