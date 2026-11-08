@@ -4,6 +4,12 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- AZW3 books whose cover page is an SVG around one picture (Calibre's usual cover)
+  open several times faster: the picture is decoded straight to its size on screen.
+
 ## [0.5.3] - 2026-11-07
 
 ### Changed

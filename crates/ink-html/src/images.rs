@@ -57,6 +57,9 @@ pub fn decode_scaled(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<
     }
     if is_svg(bytes) {
         let tree = usvg::Tree::from_data(bytes, &svg_options(resolve)).ok()?;
+        if let Some(img) = svg_raster_only(&tree, w, h) {
+            return Some(img);
+        }
         return Some(render_svg_tree(&tree, w, h));
     }
     let (sw, sh) = intrinsic_size(bytes)?;
@@ -369,6 +372,82 @@ pub fn resize_gray(src: &GrayImage, w: u32, h: u32) -> GrayImage {
         }
     }
     GrayImage::from_raw(w, h, out).expect("size")
+}
+
+/// An SVG that only shows one raster image (a cover page: `<svg><image .../></svg>`,
+/// with or without a viewBox, sizes or `preserveAspectRatio`) drawn by decoding the
+/// image straight into its place in the `w` x `h` box. resvg would decode it at full
+/// size and resample it with a bicubic filter, seconds on a Kindle. `None` when the
+/// SVG draws anything else, or the image is transformed, clipped, masked, filtered or
+/// translucent: resvg renders those.
+fn svg_raster_only(tree: &usvg::Tree, w: u32, h: u32) -> Option<GrayImage> {
+    let s = tree.size();
+    let (fx, fy) = (w as f32 / s.width().max(1.0), h as f32 / s.height().max(1.0));
+    let canvas = tiny_skia::Rect::from_xywh(0.0, 0.0, s.width(), s.height())?;
+    let mut found = None;
+    if !only_one_image(tree.root(), canvas, &mut found) {
+        return None;
+    }
+    let image = found?;
+    let bytes = match image.kind() {
+        usvg::ImageKind::JPEG(b) | usvg::ImageKind::PNG(b) | usvg::ImageKind::GIF(b) | usvg::ImageKind::WEBP(b) => b,
+        usvg::ImageKind::SVG(_) => return None,
+    };
+    let t = image.abs_transform();
+    if !image.is_visible() || t.kx != 0.0 || t.ky != 0.0 || t.sx <= 0.0 || t.sy <= 0.0 {
+        return None;
+    }
+    let r = image.abs_bounding_box();
+    let (x0, y0) = ((r.left() * fx).round(), (r.top() * fy).round());
+    let (x1, y1) = ((r.right() * fx).round(), (r.bottom() * fy).round());
+    let (dw, dh) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+    if dw > 8000.0 || dh > 8000.0 {
+        return None;
+    }
+    let img = decode_scaled(bytes, dw as u32, dh as u32, None)?;
+    let mut out = GrayImage::from_pixel(w, h, image::Luma([255]));
+    image::imageops::replace(&mut out, &img, x0 as i64, y0 as i64);
+    Some(out)
+}
+
+/// True when `g` and its descendants draw nothing but at most one image (stored in
+/// `found`) with plain groups: full opacity, normal blending, no mask or filter, and
+/// no clip other than a rectangle covering the whole `canvas` (an image with
+/// `preserveAspectRatio="... slice"` gets one).
+fn only_one_image<'a>(g: &'a usvg::Group, canvas: tiny_skia::Rect, found: &mut Option<&'a usvg::Image>) -> bool {
+    let plain = g.opacity() == usvg::Opacity::ONE
+        && g.blend_mode() == usvg::BlendMode::Normal
+        && g.mask().is_none()
+        && g.filters().is_empty();
+    if !plain || g.clip_path().is_some_and(|c| !clip_covers(c, g.abs_transform(), canvas)) {
+        return false;
+    }
+    g.children().iter().all(|n| match n {
+        usvg::Node::Group(c) => only_one_image(c, canvas, found),
+        usvg::Node::Image(i) => found.replace(i).is_none(),
+        usvg::Node::Path(_) | usvg::Node::Text(_) => false,
+    })
+}
+
+/// True when the clip path is one axis-aligned rectangle that contains `canvas`, so
+/// clipping to it changes nothing on the canvas.
+fn clip_covers(clip: &usvg::ClipPath, abs: tiny_skia::Transform, canvas: tiny_skia::Rect) -> bool {
+    let [usvg::Node::Path(p)] = clip.root().children() else { return false };
+    if clip.clip_path().is_some() || clip.root().transform() != tiny_skia::Transform::identity() {
+        return false;
+    }
+    let data = p.data();
+    let b = data.bounds();
+    let corner = |q: &tiny_skia::Point| (q.x == b.left() || q.x == b.right()) && (q.y == b.top() || q.y == b.bottom());
+    if data.points().len() != 4 || !data.points().iter().all(corner) {
+        return false;
+    }
+    let ts = abs.pre_concat(clip.transform());
+    if ts.kx != 0.0 || ts.ky != 0.0 {
+        return false;
+    }
+    let Some(r) = b.transform(ts) else { return false };
+    r.left() <= canvas.left() && r.top() <= canvas.top() && r.right() >= canvas.right() && r.bottom() >= canvas.bottom()
 }
 
 fn render_svg_tree(tree: &usvg::Tree, w: u32, h: u32) -> GrayImage {
@@ -732,5 +811,48 @@ mod tests {
         let row: Vec<u8> = (0..50).map(|x| r.get_pixel(x, 0).0[0]).collect();
         assert!(row.windows(2).all(|w| w[0] <= w[1]), "{row:?}");
         assert!(row[0] < 8 && row[49] > 247, "{row:?}");
+    }
+
+    /// A 40 x 60 gray PNG (a diagonal ramp with a dark frame), served as `a.png`.
+    fn svg_tree(markup: &str) -> usvg::Tree {
+        let px = GrayImage::from_fn(40, 60, |x, y| image::Luma([if x < 2 || y < 2 { 0 } else { (x * 3 + y * 2) as u8 }]));
+        let png = encode(&DynamicImage::ImageLuma8(px), ImageFormat::Png);
+        let res: HrefResolver<'static> = Arc::new(move |href: &str| (href == "a.png").then(|| png.clone()));
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" {markup}</svg>"#);
+        usvg::Tree::from_data(svg.as_bytes(), &svg_options(Some(res))).unwrap()
+    }
+
+    #[test]
+    fn single_image_svgs_decode_the_image_where_resvg_draws_it() {
+        let cases = [
+            // The KF8 cover flow (Calibre): percent sizes, a viewBox, the image filling it.
+            (r#"width="100%" height="100%" viewBox="0 0 40 60" preserveAspectRatio="xMidYMid meet"><image width="40" height="60" xlink:href="a.png"/>"#, 80, 120),
+            (r#"width="40" height="60"><image href="a.png"/>"#, 40, 60),
+            (r#"viewBox="0 0 100 60"><image width="100" height="60" href="a.png"/>"#, 200, 120),
+            (r#"viewBox="0 0 100 60"><image width="100" height="60" preserveAspectRatio="xMinYMid meet" href="a.png"/>"#, 100, 60),
+            (r#"viewBox="0 0 100 60"><image width="100" height="60" preserveAspectRatio="xMidYMid slice" href="a.png"/>"#, 100, 60),
+            (r#"viewBox="0 0 40 60"><title>Cover</title><g transform="translate(5 10)"><image width="30" height="40" href="a.png"/></g>"#, 80, 120),
+            (r#"viewBox="0 0 40 60"><image width="40" height="60" preserveAspectRatio="none" href="a.png"/>"#, 120, 90),
+        ];
+        for (markup, w, h) in cases {
+            let tree = svg_tree(markup);
+            let fast = svg_raster_only(&tree, w, h).unwrap_or_else(|| panic!("not a single image: {markup}"));
+            let d = mean_diff(&fast, &render_svg_tree(&tree, w, h));
+            assert!(d < 1.5, "{markup}: mean difference {d}");
+        }
+    }
+
+    #[test]
+    fn svgs_with_more_than_one_plain_image_go_to_resvg() {
+        for markup in [
+            r#"viewBox="0 0 40 60"><image width="40" height="60" href="a.png"/><rect width="5" height="5"/>"#,
+            r#"viewBox="0 0 40 60"><image width="40" height="60" href="a.png"/><image width="10" height="10" href="a.png"/>"#,
+            r#"viewBox="0 0 40 60"><image width="40" height="60" opacity="0.5" href="a.png"/>"#,
+            r#"viewBox="0 0 40 60"><g transform="rotate(10)"><image width="40" height="60" href="a.png"/></g>"#,
+            r#"viewBox="0 0 40 60"><clipPath id="c"><circle r="20"/></clipPath><image clip-path="url(#c)" width="40" height="60" href="a.png"/>"#,
+            r#"viewBox="0 0 40 60"><image width="40" height="60" href="missing.png"/>"#,
+        ] {
+            assert!(svg_raster_only(&svg_tree(markup), 80, 120).is_none(), "{markup}");
+        }
     }
 }
