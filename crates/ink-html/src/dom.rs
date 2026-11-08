@@ -525,9 +525,7 @@ fn expand_tabs(s: &str) -> String {
         if ch == '\t' {
             let delta = 8 - (x & 7);
             x += delta;
-            for _ in 0..delta {
-                out.push(' ');
-            }
+            out.extend(std::iter::repeat_n(' ', delta));
         } else {
             out.push(ch);
             x += 1;

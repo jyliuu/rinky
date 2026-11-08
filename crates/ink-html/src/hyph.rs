@@ -46,15 +46,9 @@ fn dictionary_code(tag: &str) -> Option<HLang> {
     let primary = t.split('-').next().unwrap_or("");
     let alias = match primary {
         "en" => "en-us",
-        "de" => {
-            if t.contains("ch") {
-                "de-ch-1901"
-            } else if t.contains("1901") {
-                "de-1901"
-            } else {
-                "de-1996"
-            }
-        }
+        "de" if t.contains("ch") => "de-ch-1901",
+        "de" if t.contains("1901") => "de-1901",
+        "de" => "de-1996",
         "no" => "nb",
         "el" => "el-monoton",
         "sr" => "sr-cyrl",

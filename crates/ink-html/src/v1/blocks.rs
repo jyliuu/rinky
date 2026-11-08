@@ -90,12 +90,7 @@ fn is_block_tag(name: &[u8]) -> bool {
 
 fn heading_level(name: &[u8]) -> Option<u8> {
     match name {
-        b"h1" => Some(1),
-        b"h2" => Some(2),
-        b"h3" => Some(3),
-        b"h4" => Some(4),
-        b"h5" => Some(5),
-        b"h6" => Some(6),
+        [b'h', d @ b'1'..=b'6'] => Some(d - b'0'),
         _ => None,
     }
 }

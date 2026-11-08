@@ -60,13 +60,7 @@ pub fn decode_attr(raw: &str) -> String {
                 };
                 code.and_then(char::from_u32).map(|c| c.to_string())
             } else {
-                crate::dom::named_entity(name).map(|(a, b)| {
-                    let mut s = a.to_string();
-                    if let Some(b) = b {
-                        s.push(b);
-                    }
-                    s
-                })
+                crate::dom::named_entity(name).map(|(a, b)| std::iter::once(a).chain(b).collect())
             };
             if let Some(d) = decoded {
                 out.push_str(&d);
