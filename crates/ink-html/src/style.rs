@@ -9,32 +9,47 @@ use crate::css::{self, Declaration, Selector, SelectorElement, Stylesheet, Tok};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// `display`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum Display {
-    /// `inline` (also `ruby`, `run-in`, unknown values).
-    #[default]
-    Inline,
-    /// `inline-block` (laid out as an inline atom of text here).
-    InlineBlock,
-    /// `block` (also `flex`, `grid`, `flow-root`).
-    Block,
-    /// `list-item`.
-    ListItem,
-    /// `table` / `inline-table`.
-    Table,
-    /// `table-row-group`, `table-header-group`, `table-footer-group`.
-    TableRowGroup,
-    /// `table-row`.
-    TableRow,
-    /// `table-cell`.
-    TableCell,
-    /// `table-caption`.
-    TableCaption,
-    /// `table-column`, `table-column-group` (not rendered).
-    TableColumn,
-    /// `none`.
-    None,
+/// Declares a CSS keyword enum (`#[derive(Default)]` on the variant marked
+/// `#[default]`) whose variants each list the keywords that select them, and
+/// `from_keyword` mapping a lowercase keyword to its variant.
+macro_rules! keyword_enum {
+    ($(#[$m:meta])* $name:ident { $($(#[$vm:meta])* $variant:ident = $($kw:literal)|+,)+ }) => {
+        $(#[$m])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+        pub enum $name {
+            $($(#[$vm])* #[doc = concat!($("`", $kw, "` "),+)] $variant,)+
+        }
+
+        impl $name {
+            /// The variant a lowercase keyword selects.
+            pub fn from_keyword(k: &str) -> Option<Self> {
+                Some(match k {
+                    $($($kw)|+ => $name::$variant,)+
+                    _ => return None,
+                })
+            }
+        }
+    };
+}
+
+keyword_enum! {
+    /// `display` (the first keyword of two-value forms such as `block flow`).
+    Display {
+        #[default]
+        Inline = "inline" | "ruby" | "run-in" | "contents",
+        /// Laid out as an inline atom of text.
+        InlineBlock = "inline-block" | "inline-flex" | "inline-grid",
+        Block = "block" | "flex" | "grid" | "flow-root" | "-webkit-box" | "box",
+        ListItem = "list-item",
+        Table = "table" | "inline-table",
+        TableRowGroup = "table-row-group" | "table-header-group" | "table-footer-group",
+        TableRow = "table-row",
+        TableCell = "table-cell",
+        TableCaption = "table-caption",
+        /// Not rendered.
+        TableColumn = "table-column" | "table-column-group",
+        None = "none",
+    }
 }
 
 impl Display {
@@ -44,20 +59,16 @@ impl Display {
     }
 }
 
-/// `white-space`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum WhiteSpace {
-    /// `normal`.
-    #[default]
-    Normal,
-    /// `nowrap`.
-    NoWrap,
-    /// `pre-line`.
-    PreLine,
-    /// `pre`.
-    Pre,
-    /// `pre-wrap` / `break-spaces`.
-    PreWrap,
+keyword_enum! {
+    /// `white-space`.
+    WhiteSpace {
+        #[default]
+        Normal = "normal",
+        NoWrap = "nowrap",
+        PreLine = "pre-line",
+        Pre = "pre",
+        PreWrap = "pre-wrap" | "break-spaces",
+    }
 }
 
 impl WhiteSpace {
@@ -79,18 +90,15 @@ impl WhiteSpace {
     }
 }
 
-/// `text-align`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum TextAlign {
-    /// `left` / `start`.
-    #[default]
-    Left,
-    /// `right` / `end`.
-    Right,
-    /// `center`.
-    Center,
-    /// `justify`.
-    Justify,
+keyword_enum! {
+    /// `text-align`.
+    TextAlign {
+        #[default]
+        Left = "left" | "start",
+        Right = "right" | "end",
+        Center = "center" | "-webkit-center",
+        Justify = "justify",
+    }
 }
 
 /// `vertical-align` (inline boxes).
@@ -113,70 +121,55 @@ pub enum VAlign {
     Raise(f32),
 }
 
-/// `list-style-type`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum ListStyle {
-    /// `disc`.
-    #[default]
-    Disc,
-    /// `circle`.
-    Circle,
-    /// `square`.
-    Square,
-    /// `decimal`.
-    Decimal,
-    /// `decimal-leading-zero`.
-    DecimalLeadingZero,
-    /// `lower-alpha` / `lower-latin`.
-    LowerAlpha,
-    /// `upper-alpha` / `upper-latin`.
-    UpperAlpha,
-    /// `lower-roman`.
-    LowerRoman,
-    /// `upper-roman`.
-    UpperRoman,
-    /// `lower-greek`.
-    LowerGreek,
-    /// `none`.
-    None,
+keyword_enum! {
+    /// `list-style-type`.
+    ListStyle {
+        #[default]
+        Disc = "disc",
+        Circle = "circle",
+        Square = "square",
+        Decimal = "decimal",
+        DecimalLeadingZero = "decimal-leading-zero",
+        LowerAlpha = "lower-alpha" | "lower-latin",
+        UpperAlpha = "upper-alpha" | "upper-latin",
+        LowerRoman = "lower-roman",
+        UpperRoman = "upper-roman",
+        LowerGreek = "lower-greek",
+        None = "none",
+    }
 }
 
-/// `page-break-*` / `break-*`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum PageBreak {
-    /// `auto`.
-    #[default]
-    Auto,
-    /// `always`, `page`, `left`, `right`.
-    Always,
-    /// `avoid`.
-    Avoid,
+keyword_enum! {
+    /// `page-break-*` / `break-*` (other keywords are `auto`).
+    PageBreak {
+        #[default]
+        Auto = "auto",
+        Always = "always" | "page" | "left" | "right" | "recto" | "verso",
+        Avoid = "avoid" | "avoid-page",
+    }
 }
 
-/// `text-transform`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum TextTransform {
-    /// `none`.
-    #[default]
-    None,
-    /// `uppercase`.
-    Upper,
-    /// `lowercase`.
-    Lower,
-    /// `capitalize`.
-    Capitalize,
+keyword_enum! {
+    /// `text-transform` (other keywords are `none`).
+    TextTransform {
+        #[default]
+        None = "none",
+        Upper = "uppercase",
+        Lower = "lowercase",
+        Capitalize = "capitalize",
+    }
 }
 
-/// `hyphens`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum Hyphens {
-    /// `none`.
-    None,
-    /// `manual` (soft hyphens only).
-    Manual,
-    /// `auto` (the user's hyphenation setting decides).
-    #[default]
-    Auto,
+keyword_enum! {
+    /// `hyphens`.
+    Hyphens {
+        None = "none",
+        /// Soft hyphens only.
+        Manual = "manual",
+        /// The user's hyphenation setting decides.
+        #[default]
+        Auto = "auto" | "explicit",
+    }
 }
 
 /// A length that may depend on the containing block width.
@@ -974,12 +967,8 @@ impl Cascade {
                 }
             }
             "text-align" => {
-                s.text_align = match kw.as_deref() {
-                    Some("left" | "start") => TextAlign::Left,
-                    Some("right" | "end") => TextAlign::Right,
-                    Some("center" | "-webkit-center") => TextAlign::Center,
-                    Some("justify") => TextAlign::Justify,
-                    _ => s.text_align,
+                if let Some(a) = kw.as_deref().and_then(TextAlign::from_keyword) {
+                    s.text_align = a;
                 }
             }
             "text-indent" => {
@@ -1108,11 +1097,7 @@ impl Cascade {
                 }
             }
             "page-break-before" | "break-before" | "page-break-after" | "break-after" => {
-                let b = match kw.as_deref() {
-                    Some("always" | "page" | "left" | "right" | "recto" | "verso") => PageBreak::Always,
-                    Some("avoid" | "avoid-page") => PageBreak::Avoid,
-                    _ => PageBreak::Auto,
-                };
+                let b = kw.as_deref().and_then(PageBreak::from_keyword).unwrap_or_default();
                 if d.name.ends_with("before") {
                     s.break_before = b;
                 } else {
@@ -1139,7 +1124,7 @@ impl Cascade {
                 for t in v {
                     if let Tok::Ident(k) = t {
                         let k = k.to_ascii_lowercase();
-                        if let Some(ls) = list_style(&k) {
+                        if let Some(ls) = ListStyle::from_keyword(&k) {
                             s.list_style = ls;
                         } else if k == "inside" {
                             s.list_inside = true;
@@ -1150,14 +1135,7 @@ impl Cascade {
                 }
             }
             "list-style-position" => s.list_inside = matches!(kw.as_deref(), Some("inside")),
-            "text-transform" => {
-                s.text_transform = match kw.as_deref() {
-                    Some("uppercase") => TextTransform::Upper,
-                    Some("lowercase") => TextTransform::Lower,
-                    Some("capitalize") => TextTransform::Capitalize,
-                    _ => TextTransform::None,
-                }
-            }
+            "text-transform" => s.text_transform = kw.as_deref().and_then(TextTransform::from_keyword).unwrap_or_default(),
             "text-decoration" | "text-decoration-line" => {
                 let words: Vec<String> = v.iter().filter_map(|t| if let Tok::Ident(k) = t { Some(k.to_ascii_lowercase()) } else { None }).collect();
                 if words.iter().any(|w| w == "none") {
@@ -1173,11 +1151,8 @@ impl Cascade {
                 }
             }
             "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens" | "adobe-hyphenate" => {
-                s.hyphens = match kw.as_deref() {
-                    Some("none") => Hyphens::None,
-                    Some("manual") => Hyphens::Manual,
-                    Some("auto" | "explicit") => Hyphens::Auto,
-                    _ => s.hyphens,
+                if let Some(h) = kw.as_deref().and_then(Hyphens::from_keyword) {
+                    s.hyphens = h;
                 }
             }
             "letter-spacing" | "word-spacing" => {
@@ -1252,53 +1227,16 @@ fn inherit_prop(s: &mut ComputedStyle, p: &ComputedStyle, name: &str) {
     }
 }
 
-fn list_style(k: &str) -> Option<ListStyle> {
-    Some(match k {
-        "disc" => ListStyle::Disc,
-        "circle" => ListStyle::Circle,
-        "square" => ListStyle::Square,
-        "decimal" => ListStyle::Decimal,
-        "decimal-leading-zero" => ListStyle::DecimalLeadingZero,
-        "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
-        "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
-        "lower-roman" => ListStyle::LowerRoman,
-        "upper-roman" => ListStyle::UpperRoman,
-        "lower-greek" => ListStyle::LowerGreek,
-        "none" => ListStyle::None,
-        _ => return None,
-    })
-}
-
 /// `display` keyword.
 pub fn parse_display(v: &[Tok]) -> Option<Display> {
-    let k = ident(v)?;
-    // `display: block flow` and similar two-value forms: first keyword decides.
-    Some(match k.as_str() {
-        "inline" | "ruby" | "run-in" | "contents" => Display::Inline,
-        "inline-block" | "inline-flex" | "inline-grid" => Display::InlineBlock,
-        "block" | "flex" | "grid" | "flow-root" | "-webkit-box" | "box" => Display::Block,
-        "list-item" => Display::ListItem,
-        "table" | "inline-table" => Display::Table,
-        "table-row-group" | "table-header-group" | "table-footer-group" => Display::TableRowGroup,
-        "table-row" => Display::TableRow,
-        "table-cell" => Display::TableCell,
-        "table-caption" => Display::TableCaption,
-        "table-column" | "table-column-group" => Display::TableColumn,
-        "none" => Display::None,
-        _ => return None,
-    })
+    Display::from_keyword(&ident(v)?)
 }
 
 fn parse_white_space(v: &[Tok], parent: WhiteSpace) -> Option<WhiteSpace> {
-    Some(match ident(v)?.as_str() {
-        "normal" => WhiteSpace::Normal,
-        "nowrap" => WhiteSpace::NoWrap,
-        "pre" => WhiteSpace::Pre,
-        "pre-wrap" | "break-spaces" => WhiteSpace::PreWrap,
-        "pre-line" => WhiteSpace::PreLine,
-        "inherit" => parent,
-        _ => return None,
-    })
+    match ident(v)?.as_str() {
+        "inherit" => Some(parent),
+        k => WhiteSpace::from_keyword(k),
+    }
 }
 
 /// A color as a gray level for e-ink (0 = black, 255 = white).
