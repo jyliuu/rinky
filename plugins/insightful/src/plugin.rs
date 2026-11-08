@@ -408,38 +408,31 @@ impl InsightfulPlugin {
         if let Some(id) = r.request {
             cx.cancel_request(id);
         }
-        if let Some(c) = self.chat_mut(&r.chat) {
-            c.usage.merge(&r.usage);
-            c.updated = chat::now();
-        }
-        self.save();
-        Self::record_stats(cx, &r.usage);
         if self.chat.as_deref() == Some(r.chat.as_str()) {
             self.retry_blocked = !retryable(&msg);
             self.error = Some(msg);
         }
-        self.notify_if_hidden(cx, &r.chat, "Insightful couldn't answer")?;
-        self.refresh(cx, &r.chat)
-    }
-
-    /// A toast when a run ends while its chat is not on screen.
-    fn notify_if_hidden(&mut self, cx: &mut HostCtx, id: &str, text: &str) -> Result<()> {
-        if !self.viewer_open || self.list || self.chat.as_deref() != Some(id) {
-            cx.toast(text)?;
-        }
-        Ok(())
+        self.end_run(cx, r, None, "Insightful couldn't answer")
     }
 
     fn finish_answer(&mut self, cx: &mut HostCtx, text: String) -> Result<()> {
         let r = self.run.take().expect("run");
+        self.end_run(cx, r, Some(text), "Insightful answered")
+    }
+
+    /// Ends run `r`: the answer (if any) and the usage go into its chat, which is saved
+    /// and counted in the statistics; `note` is a toast when the chat is not on screen.
+    fn end_run(&mut self, cx: &mut HostCtx, r: Run, answer: Option<String>, note: &str) -> Result<()> {
         if let Some(c) = self.chat_mut(&r.chat) {
-            c.messages.push(Message::answer(text, &r.profile.model, r.usage));
+            c.messages.extend(answer.map(|t| Message::answer(t, &r.profile.model, r.usage)));
             c.usage.merge(&r.usage);
             c.updated = chat::now();
         }
         self.save();
         Self::record_stats(cx, &r.usage);
-        self.notify_if_hidden(cx, &r.chat, "Insightful answered")?;
+        if !self.viewer_open || self.list || self.chat.as_deref() != Some(r.chat.as_str()) {
+            cx.toast(note)?;
+        }
         self.refresh(cx, &r.chat)
     }
 
