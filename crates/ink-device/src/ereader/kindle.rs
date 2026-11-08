@@ -234,6 +234,8 @@ pub struct LipcServices {
     live: Arc<LiveWriter>,
     /// The network worker (none without the input loop: `rinky device`).
     net: Option<NetHandle>,
+    /// Wi-Fi was on when airplane mode was turned on: leaving it turns Wi-Fi on again.
+    wifi_before_airplane: Arc<AtomicBool>,
 }
 
 impl LipcServices {
@@ -283,7 +285,7 @@ impl Default for LipcServices {
 impl LipcServices {
     /// Services over `lipc`; `shared` connects them to a running input loop.
     pub(crate) fn new(lipc: Lipc, shared: Option<Rc<RefCell<Shared>>>, sys: SysRoot) -> Self {
-        LipcServices { lipc, shared: SharedHandle(shared), sys, fl_max: Cell::new(None), cache: Arc::default(), live: Arc::default(), net: None }
+        LipcServices { lipc, shared: SharedHandle(shared), sys, fl_max: Cell::new(None), cache: Arc::default(), live: Arc::default(), net: None, wifi_before_airplane: Arc::default() }
     }
 
     /// Starts the network worker; its events go to `queue` (the input loop's).
@@ -670,13 +672,22 @@ impl Wifi for LipcServices {
 
     fn set_airplane_mode(&mut self, on: bool) -> Result<()> {
         self.remember(|k| (k.wifi, k.airplane) = (None, None));
-        if let Ok(v) = self.lipc.get_int(CMD, "wirelessEnable") {
+        let before = self.lipc.get_int(CMD, "wirelessEnable");
+        if let Ok(v) = before {
             self.journal(Entry::lipc_int(CMD, "wirelessEnable", v));
+        }
+        if on && before.is_ok_and(|v| v != 0) {
+            let radio = self.net.as_ref().and_then(NetHandle::status).is_some_and(|s| s.radio_on());
+            self.wifi_before_airplane.store(radio, Ordering::Relaxed);
         }
         self.lipc.set_int(CMD, "wirelessEnable", (!on) as i64)?;
         // The worker keeps the radio as it was told: airplane mode turns Wi-Fi off, and
-        // leaving it turns Wi-Fi on.
-        self.net_send(if on { Cmd::Disable } else { Cmd::Enable });
+        // leaving it turns Wi-Fi on only when it was on before (else it stays off).
+        if on {
+            self.net_send(Cmd::Disable);
+        } else if self.wifi_before_airplane.swap(false, Ordering::Relaxed) {
+            self.net_send(Cmd::Enable);
+        }
         Ok(())
     }
 }

@@ -247,7 +247,8 @@ when Wi-Fi is turned on or the e-reader wakes up, then every so often (from 15 s
 up to 5 minutes apart) while none is found. A network that fails to join is skipped
 for 10 minutes. rinky remembers that Wi-Fi was on: it turns it on again when it
 starts and after a wake (a Kobo turns Wi-Fi off while it sleeps). Turning Wi-Fi off
-yourself stays off.
+yourself stays off. On a Kindle, airplane mode turns Wi-Fi off, and leaving it turns
+Wi-Fi on again only when it was on before.
 
 A short message says "Connected to *network*" when Wi-Fi connects, "Couldn't connect
 to *network*" when joining fails, and "No saved network found" when none is in range
