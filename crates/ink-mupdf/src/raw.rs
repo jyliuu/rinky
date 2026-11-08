@@ -175,12 +175,12 @@ impl RawDoc {
         if let Some(l) = self.lists.iter().find(|l| l.page == page) {
             return Ok(l.bounds);
         }
-        let mut r = ffi::InkRect::default();
+        let mut r = FRect::default();
         // SAFETY: valid handle and out pointer.
         if unsafe { ffi::ink_page_bound(self.ptr(), page as c_int, &mut r) } < 0 {
             return Err(self.error(&format!("page {page}")));
         }
-        Ok(FRect::new(r.x0, r.y0, r.x1, r.y1))
+        Ok(r)
     }
 
     fn list(&mut self, page: usize) -> Result<(*mut ffi::InkList, FRect)> {
@@ -190,9 +190,9 @@ impl RawDoc {
             l.tick = tick;
             return Ok((l.list.as_ptr(), l.bounds));
         }
-        let mut r = ffi::InkRect::default();
+        let mut bounds = FRect::default();
         // SAFETY: valid handle and out pointer.
-        let list = unsafe { ffi::ink_list_new(self.ptr(), page as c_int, &mut r) };
+        let list = unsafe { ffi::ink_list_new(self.ptr(), page as c_int, &mut bounds) };
         let list = NonNull::new(list).ok_or_else(|| self.error(&format!("page {page}")))?;
         while self.lists.len() >= self.max_lists {
             let oldest = self.lists.iter().enumerate().min_by_key(|(_, l)| l.tick).map(|(i, _)| i).unwrap_or(0);
@@ -200,7 +200,6 @@ impl RawDoc {
             // SAFETY: the list came from this document and is dropped once.
             unsafe { ffi::ink_list_drop(self.ptr(), old.list.as_ptr()) };
         }
-        let bounds = FRect::new(r.x0, r.y0, r.x1, r.y1);
         self.lists.push(CachedList { page, list, bounds, tick });
         Ok((list.as_ptr(), bounds))
     }
@@ -247,7 +246,7 @@ impl RawDoc {
                 .iter()
                 .map(|c| RawChar {
                     c: char::from_u32(c.c as u32).unwrap_or('\u{fffd}'),
-                    rect: FRect::new(c.x0, c.y0, c.x1, c.y1),
+                    rect: c.rect,
                     line: c.line as u32,
                 })
                 .collect()
@@ -297,7 +296,7 @@ impl RawDoc {
             // SAFETY: n initialised entries.
             for it in unsafe { std::slice::from_raw_parts(out, n as usize) } {
                 items.push(RawLink {
-                    rect: FRect::new(it.x0, it.y0, it.x1, it.y1),
+                    rect: it.rect,
                     uri: owned(it.uri).unwrap_or_default(),
                     external: it.external != 0,
                     page: (it.page >= 0).then_some(it.page as usize),

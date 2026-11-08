@@ -3,6 +3,7 @@
 
 #![allow(missing_docs)]
 
+use crate::geom::FRect;
 use std::os::raw::{c_char, c_float, c_int, c_uchar, c_void};
 
 /// Opaque `ink_doc`.
@@ -17,23 +18,12 @@ pub struct InkList {
     _private: [u8; 0],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct InkRect {
-    pub x0: c_float,
-    pub y0: c_float,
-    pub x1: c_float,
-    pub y1: c_float,
-}
-
+/// `ink_char`; `ink_rect` is [`FRect`] (four floats, `repr(C)`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InkChar {
     pub c: c_int,
-    pub x0: c_float,
-    pub y0: c_float,
-    pub x1: c_float,
-    pub y1: c_float,
+    pub rect: FRect,
     pub line: c_int,
 }
 
@@ -49,10 +39,7 @@ pub struct InkOutlineItem {
 
 #[repr(C)]
 pub struct InkLinkItem {
-    pub x0: c_float,
-    pub y0: c_float,
-    pub x1: c_float,
-    pub y1: c_float,
+    pub rect: FRect,
     pub external: c_int,
     pub page: c_int,
     pub x: c_float,
@@ -70,8 +57,8 @@ extern "C" {
     pub fn ink_authenticate(d: *mut InkDoc, password: *const c_char) -> c_int;
     pub fn ink_page_count(d: *mut InkDoc) -> c_int;
     pub fn ink_metadata(d: *mut InkDoc, key: *const c_char, buf: *mut c_char, size: usize) -> c_int;
-    pub fn ink_page_bound(d: *mut InkDoc, page: c_int, out: *mut InkRect) -> c_int;
-    pub fn ink_list_new(d: *mut InkDoc, page: c_int, bounds: *mut InkRect) -> *mut InkList;
+    pub fn ink_page_bound(d: *mut InkDoc, page: c_int, out: *mut FRect) -> c_int;
+    pub fn ink_list_new(d: *mut InkDoc, page: c_int, bounds: *mut FRect) -> *mut InkList;
     pub fn ink_list_drop(d: *mut InkDoc, list: *mut InkList);
     pub fn ink_render(
         d: *mut InkDoc,

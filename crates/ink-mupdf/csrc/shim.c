@@ -14,6 +14,12 @@ struct ink_doc {
 	char err[512];
 };
 
+static ink_rect to_ink(fz_rect r)
+{
+	ink_rect o = { r.x0, r.y0, r.x1, r.y1 };
+	return o;
+}
+
 static void copy_msg(char *dst, size_t len, const char *msg)
 {
 	if (!dst || len == 0)
@@ -177,10 +183,7 @@ int ink_page_bound(ink_doc *d, int page, ink_rect *out)
 		caught(d);
 		return -1;
 	}
-	out->x0 = r.x0;
-	out->y0 = r.y0;
-	out->x1 = r.x1;
-	out->y1 = r.y1;
+	*out = to_ink(r);
 	return 0;
 }
 
@@ -191,13 +194,7 @@ ink_list *ink_list_new(ink_doc *d, int page, ink_rect *bounds)
 	{
 		list = fz_new_display_list_from_page_number(d->ctx, d->doc, page);
 		if (bounds)
-		{
-			fz_rect r = fz_bound_display_list(d->ctx, list);
-			bounds->x0 = r.x0;
-			bounds->y0 = r.y0;
-			bounds->x1 = r.x1;
-			bounds->y1 = r.y1;
-		}
+			*bounds = to_ink(fz_bound_display_list(d->ctx, list));
 	}
 	fz_catch(d->ctx)
 	{
@@ -253,7 +250,6 @@ typedef struct {
 
 static void push_char(char_vec *cv, const fz_stext_char *ch)
 {
-	fz_rect r;
 	if (cv->oom)
 		return;
 	if (cv->n == cv->cap)
@@ -268,12 +264,8 @@ static void push_char(char_vec *cv, const fz_stext_char *ch)
 		cv->v = v;
 		cv->cap = cap;
 	}
-	r = fz_rect_from_quad(ch->quad);
 	cv->v[cv->n].c = ch->c;
-	cv->v[cv->n].x0 = r.x0;
-	cv->v[cv->n].y0 = r.y0;
-	cv->v[cv->n].x1 = r.x1;
-	cv->v[cv->n].y1 = r.y1;
+	cv->v[cv->n].r = to_ink(fz_rect_from_quad(ch->quad));
 	cv->v[cv->n].line = cv->line;
 	cv->n++;
 }
@@ -484,10 +476,7 @@ int ink_links(ink_doc *d, int page, ink_link_item **out, int *n)
 				cap = ncap;
 			}
 			it = &v[count++];
-			it->x0 = l->rect.x0;
-			it->y0 = l->rect.y0;
-			it->x1 = l->rect.x1;
-			it->y1 = l->rect.y1;
+			it->r = to_ink(l->rect);
 			it->uri = dup_str(l->uri);
 			it->external = fz_is_external_link(d->ctx, l->uri);
 			it->page = -1;

@@ -23,7 +23,7 @@ typedef struct { float x0, y0, x1, y1; } ink_rect;
 /* One character of structured text, in page space (points, y down). */
 typedef struct {
 	int c;              /* Unicode code point */
-	float x0, y0, x1, y1; /* bounding box of the character quad */
+	ink_rect r;         /* bounding box of the character quad */
 	int line;           /* line number on the page, 0-based, in MuPDF's reading order */
 } ink_char;
 
@@ -38,7 +38,7 @@ typedef struct {
 
 /* One link on a page. */
 typedef struct {
-	float x0, y0, x1, y1; /* hot area in page space */
+	ink_rect r;         /* hot area in page space */
 	int external;       /* 1 = URL, 0 = inside the document */
 	int page;           /* internal target page (0-based), -1 if unresolved */
 	float x, y;         /* internal target point */
