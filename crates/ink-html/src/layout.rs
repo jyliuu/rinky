@@ -378,8 +378,10 @@ impl WordBox {
     }
 }
 
+/// A line of a paragraph: its boxes are `start..end` of the paragraph's line boxes.
 struct Line {
-    boxes: Vec<WordBox>,
+    start: usize,
+    end: usize,
     forced: bool,
     first: bool,
 }
@@ -1213,19 +1215,24 @@ impl<'a, 'e> Flow<'a, 'e> {
         let para = Para::new(text, src, segs);
         // Break opportunities.
         let wraps = ost.white_space.wraps() || keep_spaces;
-        let mut ops: Vec<(usize, Break)> = break_opportunities(text).into_iter().filter(|(b, k)| wraps || *k == Break::Mandatory || *b == text.len()).collect();
+        let mut ops: Vec<(usize, Break)> = break_opportunities(text);
+        if !wraps {
+            ops.retain(|(b, k)| *k == Break::Mandatory || *b == text.len());
+        }
         // Allow breaks around images.
-        for (ci, c) in text.char_indices() {
-            if c == OBJ {
-                ops.push((ci, Break::Allowed));
-                ops.push((ci + c.len_utf8(), Break::Allowed));
+        if text.contains(OBJ) {
+            for (ci, c) in text.char_indices() {
+                if c == OBJ {
+                    ops.push((ci, Break::Allowed));
+                    ops.push((ci + c.len_utf8(), Break::Allowed));
+                }
             }
         }
         ops.retain(|(b, _)| *b > 0);
         ops.sort_by_key(|o| (o.0, o.1 == Break::Allowed));
         ops.dedup_by_key(|o| o.0);
         // Boxes.
-        let mut boxes: Vec<WordBox> = Vec::new();
+        let mut boxes: Vec<WordBox> = Vec::with_capacity(ops.len());
         let mut prev = 0usize;
         for (b, kind) in ops {
             let seg_text = &text[prev..b];
@@ -1253,29 +1260,35 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.first_line_pending = false;
         let hyph_ok = self.p.settings.hyphenate;
         let mut lines: Vec<Line> = Vec::new();
-        let mut cur: Vec<WordBox> = Vec::new();
+        // The boxes of every line, in order; the current line is `kept[cur..]`.
+        let mut kept: Vec<WordBox> = Vec::with_capacity(boxes.len());
+        let mut cur = 0usize;
         let mut cur_w = 0.0f32;
         let mut queue: std::collections::VecDeque<WordBox> = boxes.into();
         while let Some(bx) = queue.pop_front() {
             let first_line = lines.is_empty();
             let avail = if first_line { w - indent.max(0.0) } else { w };
-            let gap = cur.last().map(|b: &WordBox| b.space).unwrap_or(0.0);
+            let empty = kept.len() == cur;
+            let gap = if empty { 0.0 } else { kept[kept.len() - 1].space };
             let need = cur_w + gap + bx.width;
-            if wraps && cur.is_empty() && need > avail + 0.01 && bx.width > 0.0 {
+            if wraps && empty && need > avail + 0.01 && bx.width > 0.0 {
                 // Alone at the start of a line and still too wide (a long URL or word):
                 // hyphenate or cut it.
                 if let Some((a, b)) = self.split_box(&para, &bx, avail, hyph_ok).or_else(|| self.cut_box(&para, &bx, avail)) {
-                    lines.push(Line { boxes: vec![a], forced: false, first: first_line });
+                    kept.push(a);
+                    lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+                    cur = kept.len();
                     queue.push_front(b);
                     continue;
                 }
             }
-            if cur.is_empty() || need <= avail + 0.01 {
+            if empty || need <= avail + 0.01 {
                 cur_w = need;
                 let forced = bx.forced;
-                cur.push(bx);
+                kept.push(bx);
                 if forced {
-                    lines.push(Line { boxes: std::mem::take(&mut cur), forced: true, first: first_line });
+                    lines.push(Line { start: cur, end: kept.len(), forced: true, first: first_line });
+                    cur = kept.len();
                     cur_w = 0.0;
                 }
                 continue;
@@ -1283,25 +1296,27 @@ impl<'a, 'e> Flow<'a, 'e> {
             // Does not fit: try to hyphenate it into the remaining space.
             let remaining = avail - cur_w - gap;
             if let Some((a, b)) = self.split_box(&para, &bx, remaining, hyph_ok) {
-                cur.push(a);
-                lines.push(Line { boxes: std::mem::take(&mut cur), forced: false, first: first_line });
+                kept.push(a);
+                lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+                cur = kept.len();
                 cur_w = 0.0;
                 queue.push_front(b);
                 continue;
             }
-            lines.push(Line { boxes: std::mem::take(&mut cur), forced: false, first: first_line });
+            lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+            cur = kept.len();
             cur_w = 0.0;
             // On a line of its own next (cut there when still too wide).
             queue.push_front(bx);
         }
-        if !cur.is_empty() {
+        if kept.len() > cur {
             let first = lines.is_empty();
-            lines.push(Line { boxes: cur, forced: true, first });
+            lines.push(Line { start: cur, end: kept.len(), forced: true, first });
         }
         let n_lines = lines.len();
-        for (li, line) in lines.into_iter().enumerate() {
+        for (li, line) in lines.iter().enumerate() {
             let last = li + 1 == n_lines;
-            self.place_line(owner, &para, line, x, w, indent, last);
+            self.place_line(owner, &para, line, &kept[line.start..line.end], x, w, indent, last);
         }
     }
 
@@ -1387,7 +1402,7 @@ impl<'a, 'e> Flow<'a, 'e> {
 
     /// Positions one line, emits its draw items and its slice.
     #[allow(clippy::too_many_arguments)]
-    fn place_line(&mut self, owner: NodeId, p: &Para, line: Line, x: f32, w: f32, indent: f32, last: bool) {
+    fn place_line(&mut self, owner: NodeId, p: &Para, line: &Line, boxes: &[WordBox], x: f32, w: f32, indent: f32, last: bool) {
         let (text, src, segs) = (p.text, p.src, p.segs);
         let ost = self.st(owner);
         // Vertical metrics: the block's strut plus every piece.
@@ -1398,11 +1413,11 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut asc = sa + half;
         let mut desc = lh - asc;
         // (piece, x offset, a hyphen is drawn after it)
-        let mut placed: Vec<(Piece, f32, bool)> = Vec::new();
-        let n_boxes = line.boxes.len();
+        let n_boxes = boxes.len();
+        let mut placed: Vec<(Piece, f32, bool)> = Vec::with_capacity(n_boxes);
         let mut pen = 0.0f32;
         let mut spaces = 0usize;
-        for (bi, b) in line.boxes.iter().enumerate() {
+        for (bi, b) in boxes.iter().enumerate() {
             for run in p.runs(b.start, b.end) {
                 let pc = Piece { seg: run.0, start: run.1, end: run.2, width: self.run_width(p, run) };
                 let seg = &segs[pc.seg as usize];
@@ -1511,7 +1526,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         // Box ends (all but the last box's) for justification: a box with a space after
         // it widens that space. Each box counts its own space (an empty box, such as the
         // space after an inline image, ends where the box before it ends).
-        let mut gaps = line.boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
+        let mut gaps = boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
         let mut add = 0.0f32;
         let mut key: Option<(u32, u32)> = None;
         for (pc, off, hyphen) in placed {
@@ -1536,7 +1551,12 @@ impl<'a, 'e> Flow<'a, 'e> {
                 }
                 &SegKind::Text { face, px } => {
                     let raw = &text[pc.start..pc.end];
-                    let mut shown: String = raw.chars().filter(|&c| c != SOFT_HYPHEN && c != '\n').collect();
+                    let mut shown = String::with_capacity(raw.len() + usize::from(hyphen));
+                    if raw.contains([SOFT_HYPHEN, '\n']) {
+                        shown.extend(raw.chars().filter(|&c| c != SOFT_HYPHEN && c != '\n'));
+                    } else {
+                        shown.push_str(raw);
+                    }
                     if hyphen {
                         shown.push('-');
                     }
