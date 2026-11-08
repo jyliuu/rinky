@@ -311,6 +311,12 @@ impl PluginManager {
         self.slots.iter().map(|s| (s.manifest.name.clone(), s.enabled)).collect()
     }
 
+    /// Names of the loaded plugins that are disabled, borrowed (no allocation; the
+    /// host asks after every plugin call).
+    pub fn disabled(&self) -> impl Iterator<Item = &str> + '_ {
+        self.slots.iter().filter(|s| !s.enabled).map(|s| s.manifest.name.as_str())
+    }
+
     /// Details of every loaded plugin.
     pub fn info(&self) -> Vec<PluginInfo> {
         self.slots.iter().map(|s| PluginInfo { manifest: s.manifest.clone(), kind: s.plugin.kind(), enabled: s.enabled, errors: s.errors }).collect()
@@ -521,6 +527,7 @@ mod tests {
         mgr.load(vec![counter("a", false)]);
         mgr.load_disabled(vec![counter("b", false), counter("a", false)]);
         assert_eq!(mgr.list(), vec![("a".to_string(), true), ("b".to_string(), false)]);
+        assert_eq!(mgr.disabled().collect::<Vec<_>>(), vec!["b"]);
         assert_eq!(mgr.registry.menu_items.len(), 1, "b's on_load did not run");
         assert_eq!(mgr.info()[1].errors, 0);
         assert_eq!(mgr.errors.len(), 1, "only the duplicate a: {:?}", mgr.errors);
