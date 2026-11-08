@@ -829,22 +829,11 @@ impl Cascade {
 
     /// `border` / `border-top` style shorthands: (width, visible).
     fn border_parts(&self, v: &[Tok], font: f32) -> (Option<f32>, Option<bool>) {
-        let mut w = None;
-        let mut visible = None;
+        let (mut w, mut visible) = (None, None);
         for t in v {
-            if let Tok::Ident(k) = t {
-                let k = k.to_ascii_lowercase();
-                match k.as_str() {
-                    "none" | "hidden" => visible = Some(false),
-                    "solid" | "dotted" | "dashed" | "double" | "groove" | "ridge" | "inset" | "outset" => visible = Some(true),
-                    _ => {
-                        if let Some(x) = self.border_width(t, font) {
-                            w = Some(x);
-                        }
-                    }
-                }
-            } else if let Some(x) = self.border_width(t, font) {
-                w = Some(x);
+            match border_style(t) {
+                Some(on) => visible = Some(on),
+                None => w = self.border_width(t, font).or(w),
             }
         }
         (w, visible)
@@ -944,13 +933,8 @@ impl Cascade {
                 }
             }
             "border-style" => {
-                let styles: Vec<bool> = v
-                    .iter()
-                    .filter_map(|t| match t {
-                        Tok::Ident(k) => Some(!matches!(k.to_ascii_lowercase().as_str(), "none" | "hidden")),
-                        _ => None,
-                    })
-                    .collect();
+                // Any word but `none` and `hidden` draws the side.
+                let styles: Vec<bool> = v.iter().filter(|t| matches!(t, Tok::Ident(_))).map(|t| border_style(t) != Some(false)).collect();
                 if let Some(on) = Edges::from_values(&styles) {
                     let def = 3.0 * self.ctx.px_scale();
                     s.border = s.border.zip(on, |cur, on| if !on { 0.0 } else if cur > 0.0 { cur } else { def });
@@ -1011,17 +995,12 @@ impl Cascade {
             "list-style-position" => s.list_inside = matches!(kw.as_deref(), Some("inside")),
             "text-transform" => s.text_transform = kw.as_deref().and_then(TextTransform::from_keyword).unwrap_or_default(),
             "text-decoration" | "text-decoration-line" => {
-                let words: Vec<String> = v.iter().filter_map(|t| if let Tok::Ident(k) = t { Some(k.to_ascii_lowercase()) } else { None }).collect();
-                if words.iter().any(|w| w == "none") {
-                    s.underline = false;
-                    s.line_through = false;
+                let has = |w: &str| v.iter().any(|t| matches!(t, Tok::Ident(k) if k.eq_ignore_ascii_case(w)));
+                if has("none") {
+                    (s.underline, s.line_through) = (false, false);
                 } else {
-                    if words.iter().any(|w| w == "underline") {
-                        s.underline = true;
-                    }
-                    if words.iter().any(|w| w == "line-through") {
-                        s.line_through = true;
-                    }
+                    s.underline |= has("underline");
+                    s.line_through |= has("line-through");
                 }
             }
             "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens" | "adobe-hyphenate" => set(&mut s.hyphens, kw.as_deref().and_then(Hyphens::from_keyword)),
@@ -1075,6 +1054,16 @@ fn set<T>(slot: &mut T, v: Option<T>) {
 fn family(v: &[Tok]) -> Option<Arc<[String]>> {
     let f = css::family_names(v);
     (!f.is_empty()).then(|| Arc::from(f))
+}
+
+/// Whether a `border-style` keyword draws the border; `None` for other tokens.
+fn border_style(t: &Tok) -> Option<bool> {
+    let Tok::Ident(k) = t else { return None };
+    match k.to_ascii_lowercase().as_str() {
+        "none" | "hidden" => Some(false),
+        "solid" | "dotted" | "dashed" | "double" | "groove" | "ridge" | "inset" | "outset" => Some(true),
+        _ => None,
+    }
 }
 
 fn ident(v: &[Tok]) -> Option<String> {
