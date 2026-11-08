@@ -158,47 +158,31 @@ pub fn write_pdf(pages: &[PdfPage], outline: &[PdfOutline], info: &[(&str, &str)
         }
     }
     if let Some(root) = outline_root {
-        // Parent of each item: the nearest earlier item one level up, else the root.
+        // Parent of each item: the nearest earlier item one level up, else the root (m).
         let m = outline.len();
-        let mut parent = vec![None; m];
-        for k in 0..m {
-            parent[k] = (0..k).rev().find(|&j| outline[j].level < outline[k].level);
+        let up = |k: usize| (0..k).rev().find(|&j| outline[j].level < outline[k].level).unwrap_or(m);
+        let parent: Vec<usize> = (0..m).map(up).collect();
+        let mut kids = vec![Vec::new(); m + 1];
+        for (k, &p) in parent.iter().enumerate() {
+            kids[p].push(k);
         }
-        let children = |p: Option<usize>| -> Vec<usize> { (0..m).filter(|&k| parent[k] == p).collect() };
-        let descendants = |k: usize| -> usize {
-            (k + 1..m).take_while(|&j| outline[j].level > outline[k].level).count()
-        };
-        let top = children(None);
-        objs[root] = format!(
-            "<< /Type /Outlines /First {} 0 R /Last {} 0 R /Count {} >>",
-            item_obj(top[0]),
-            item_obj(*top.last().unwrap_or(&top[0])),
-            m
-        );
-        for k in 0..m {
-            let sibs = children(parent[k]);
+        let ends = |v: &[usize]| format!("/First {} 0 R /Last {} 0 R", item_obj(v[0]), item_obj(v[v.len() - 1]));
+        objs[root] = format!("<< /Type /Outlines {} /Count {m} >>", ends(&kids[m]));
+        for (k, item) in outline.iter().enumerate() {
+            let (p, sibs) = (parent[k], &kids[parent[k]]);
             let pos = sibs.iter().position(|&s| s == k).unwrap_or(0);
-            let mut d = format!(
-                "<< /Title ({}) /Parent {} 0 R /Dest {}",
-                escape(&outline[k].title),
-                parent[k].map(item_obj).unwrap_or(root),
-                dest(outline[k].page, outline[k].top)
-            );
+            let parent_obj = if p == m { root } else { item_obj(p) };
+            let title = escape(&item.title);
+            let mut d = format!("<< /Title ({title}) /Parent {parent_obj} 0 R /Dest {}", dest(item.page, item.top));
             if pos > 0 {
                 let _ = write!(d, " /Prev {} 0 R", item_obj(sibs[pos - 1]));
             }
             if pos + 1 < sibs.len() {
                 let _ = write!(d, " /Next {} 0 R", item_obj(sibs[pos + 1]));
             }
-            let kids = children(Some(k));
-            if !kids.is_empty() {
-                let _ = write!(
-                    d,
-                    " /First {} 0 R /Last {} 0 R /Count {}",
-                    item_obj(kids[0]),
-                    item_obj(*kids.last().unwrap_or(&kids[0])),
-                    descendants(k)
-                );
+            if !kids[k].is_empty() {
+                let descendants = outline[k + 1..].iter().take_while(|o| o.level > item.level).count();
+                let _ = write!(d, " {} /Count {descendants}", ends(&kids[k]));
             }
             d.push_str(" >>");
             objs[item_obj(k)] = d;
