@@ -15,7 +15,7 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Direction, Gesture, TouchKind};
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{follow_press, follow_press_on, look_damage, press_class, EventResult, PaintCx, Widget};
+use crate::widget::{follow_press, look_damage, press_class, press_or_tap, take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Canvas, Rect, RefreshClass};
 use ink_text::Style;
@@ -47,40 +47,19 @@ impl ListItem {
         ListItem { title: title.into(), subtitle: None, detail: None, icon: None, action: action.into(), checked: None, cover: None, progress: None }
     }
 
-    /// With a subtitle.
-    pub fn subtitle(mut self, s: impl Into<String>) -> Self {
-        self.subtitle = Some(s.into());
-        self
-    }
-
-    /// With a detail text.
-    pub fn detail(mut self, s: impl Into<String>) -> Self {
-        self.detail = Some(s.into());
-        self
-    }
-
-    /// With an icon.
-    pub fn icon(mut self, i: Icon) -> Self {
-        self.icon = Some(i);
-        self
-    }
-
-    /// With a check mark state.
-    pub fn checked(mut self, c: bool) -> Self {
-        self.checked = Some(c);
-        self
-    }
-
-    /// With a book cover on the left.
-    pub fn cover(mut self, c: Cover) -> Self {
-        self.cover = Some(c);
-        self
-    }
-
-    /// With reading progress (0..=1).
-    pub fn progress(mut self, p: f32) -> Self {
-        self.progress = Some(p);
-        self
+    setters! {
+        /// With a subtitle.
+        subtitle(s: impl Into<String>) => subtitle = Some(s.into());
+        /// With a detail text.
+        detail(s: impl Into<String>) => detail = Some(s.into());
+        /// With an icon.
+        icon(i: Icon) => icon = Some(i);
+        /// With a check mark state.
+        checked(c: bool) => checked = Some(c);
+        /// With a book cover on the left.
+        cover(c: Cover) => cover = Some(c);
+        /// With reading progress (0..=1).
+        progress(p: f32) => progress = Some(p);
     }
 }
 
@@ -132,13 +111,11 @@ pub fn paint_cover(cx: &mut PaintCx, r: Rect, cover: &Cover) -> Rect {
                     break;
                 }
                 // A word wider than the cover (no break point) is set smaller to fit.
-                let mut lpx = px;
-                let mut w = cx.text_width(Style::Bold, lpx, &l);
-                if w > inner.w as f32 {
-                    lpx = (px * inner.w as f32 / w).floor().max(10.0);
-                    w = cx.text_width(Style::Bold, lpx, &l);
+                let mut run = cx.fonts.shape(Style::Bold, px, &l);
+                if run.width > inner.w as f32 {
+                    run = cx.fonts.shape(Style::Bold, (px * inner.w as f32 / run.width).floor().max(10.0), &l);
                 }
-                cx.draw_text_clipped(Style::Bold, lpx, inner.x as f32 + (inner.w as f32 - w).max(0.0) / 2.0, y, &l, t.fg, inner);
+                cx.put_run(&run, inner.x as f32 + (inner.w as f32 - run.width).max(0.0) / 2.0, y, t.fg, Some(inner));
                 y += px * 1.2;
             }
             r
@@ -193,34 +170,17 @@ impl Card {
         Card { title: title.into(), subtitle: None, body: None, cover: None, progress: None, action: action.into(), kind: CardKind::Outlined, pressed: false, changed: false }
     }
 
-    /// With a subtitle.
-    pub fn subtitle(mut self, s: impl Into<String>) -> Self {
-        self.subtitle = Some(s.into());
-        self
-    }
-
-    /// With body text.
-    pub fn body(mut self, s: impl Into<String>) -> Self {
-        self.body = Some(s.into());
-        self
-    }
-
-    /// With a cover.
-    pub fn cover(mut self, c: Cover) -> Self {
-        self.cover = Some(c);
-        self
-    }
-
-    /// With progress.
-    pub fn progress(mut self, p: f32) -> Self {
-        self.progress = Some(p);
-        self
-    }
-
-    /// With a look.
-    pub fn kind(mut self, k: CardKind) -> Self {
-        self.kind = k;
-        self
+    setters! {
+        /// With a subtitle.
+        subtitle(s: impl Into<String>) => subtitle = Some(s.into());
+        /// With body text.
+        body(s: impl Into<String>) => body = Some(s.into());
+        /// With a cover.
+        cover(c: Cover) => cover = Some(c);
+        /// With progress.
+        progress(p: f32) => progress = Some(p);
+        /// With a look.
+        kind(k: CardKind) => kind = k;
     }
 
     /// The cover rectangle inside `b` (2:3, the card's height minus padding).
@@ -281,25 +241,9 @@ impl Widget for Card {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        if self.action.is_empty() {
-            return match ev {
-                UiEvent::Gesture(_) => EventResult::Handled,
-                _ => EventResult::Ignored,
-            };
-        }
-        match ev {
-            UiEvent::Touch(t) => {
-                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
-                self.changed |= changed;
-                res
-            }
-            UiEvent::Gesture(Gesture::Tap { .. }) => {
-                self.changed |= std::mem::take(&mut self.pressed);
-                EventResult::Action(self.action.clone())
-            }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
-        }
+        // Without an action taps are only consumed.
+        let res = if self.action.is_empty() { None } else { press_or_tap(ev, b, &mut self.pressed, &mut self.changed, &self.action) };
+        res.unwrap_or_else(|| take_gestures(ev))
     }
 
     fn refresh_class(&self) -> RefreshClass {
@@ -487,8 +431,7 @@ impl Widget for List {
                 Direction::Up | Direction::Left => self.turn(b, 1),
                 Direction::Down | Direction::Right => self.turn(b, -1),
             },
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 
@@ -666,13 +609,9 @@ impl Widget for ScrollView {
                 _ => self.touch_child,
             };
         }
-        match target {
-            Some((i, r)) => match self.children[i].0.event(ev, r) {
-                EventResult::Ignored if matches!(ev, UiEvent::Gesture(_)) => EventResult::Handled,
-                res => res,
-            },
-            None if matches!(ev, UiEvent::Gesture(_)) => EventResult::Handled,
-            None => EventResult::Ignored,
+        match target.map(|(i, r)| self.children[i].0.event(ev, r)) {
+            Some(EventResult::Ignored) | None => take_gestures(ev),
+            Some(res) => res,
         }
     }
 

@@ -10,14 +10,15 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Gesture, TouchKind};
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{press_class, take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Point, Rect, RefreshClass};
 use ink_text::hyphen::{hyphenator_for, Hyphenator};
 use ink_text::linebreak::wrap;
 use ink_text::Style;
 
-/// An on/off switch with a label on its left.
+/// An on/off switch with a label on its left. It keeps the default GL16 refresh: the off
+/// state has a gray track, which DU would show white.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toggle {
     /// Caption.
@@ -77,11 +78,6 @@ impl Widget for Toggle {
             }
             _ => EventResult::Ignored,
         }
-    }
-
-    fn refresh_class(&self) -> RefreshClass {
-        // The off state has a gray track, which DU would show white; the switch is small.
-        RefreshClass::Gl16
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
@@ -246,17 +242,12 @@ impl Widget for Slider {
                 self.value = self.snap(self.value + d * step);
                 self.report()
             }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        if self.dragging {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.dragging)
     }
 }
 
@@ -306,34 +297,17 @@ impl ProgressBar {
         ProgressBar { kind: ProgressKind::Thin, ..ProgressBar::new(value) }
     }
 
-    /// Black and white only (see [`ProgressBar::two_level`]).
-    pub fn two_level(mut self) -> Self {
-        self.two_level = true;
-        self
-    }
-
-    /// With chapter marks (fractions).
-    pub fn with_marks(mut self, marks: Vec<f32>) -> Self {
-        self.marks = marks;
-        self
-    }
-
-    /// With a label on the right.
-    pub fn with_label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-
-    /// Reserves the label column for `widest` (see [`ProgressBar::label_slot`]).
-    pub fn with_label_slot(mut self, widest: impl Into<String>) -> Self {
-        self.label_slot = Some(widest.into());
-        self
-    }
-
-    /// With a caption above the bar.
-    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
-        self.caption = Some(caption.into());
-        self
+    setters! {
+        /// Black and white only (see [`ProgressBar::two_level`]).
+        two_level() => two_level = true;
+        /// With chapter marks (fractions).
+        with_marks(marks: Vec<f32>) => marks = marks;
+        /// With a label on the right.
+        with_label(label: impl Into<String>) => label = Some(label.into());
+        /// Reserves the label column for `widest` (see [`ProgressBar::label_slot`]).
+        with_label_slot(widest: impl Into<String>) => label_slot = Some(widest.into());
+        /// With a caption above the bar.
+        with_caption(caption: impl Into<String>) => caption = Some(caption.into());
     }
 
     /// Track thickness for `kind` in a box `h` tall.
@@ -358,10 +332,9 @@ impl Widget for ProgressBar {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         let t = cx.theme;
         let small = t.caption.px;
-        let text_w = match &self.label {
-            Some(l) => cx.text_width(Style::Bold, small, l).ceil() as u32,
-            None => 0,
-        };
+        // The label is shaped once: for its width and to draw it.
+        let label = self.label.as_ref().map(|l| (l, cx.fonts.shape(Style::Bold, small, l)));
+        let text_w = label.as_ref().map_or(0, |(_, run)| run.width.ceil() as u32);
         let slot_w = match (&self.label, &self.label_slot) {
             (Some(_), Some(w)) => cx.text_width(Style::Bold, small, w).ceil() as u32,
             _ => 0,
@@ -386,12 +359,12 @@ impl Widget for ProgressBar {
         } else {
             self.paint_gray(cx, area, bar, h, done);
         }
-        if let Some(l) = &self.label {
+        if let Some((l, run)) = label {
             // Right-aligned in the column when a slot is reserved.
             let col_w = label_w.saturating_sub(space(2) as u32);
             let off = if self.label_slot.is_some() { col_w.saturating_sub(text_w + 4) } else { 0 };
             let r = Rect::new(bar.right() + space(2) + off as i32, area.y, col_w - off.min(col_w), area.h);
-            cx.text_left(r, l, small, Style::Bold, t.fg);
+            cx.put_left(r, run, l, Style::Bold, t.fg);
         }
     }
 }
@@ -437,13 +410,7 @@ impl ProgressBar {
         let t = cx.theme;
         let line = 2.min(h as i32);
         match self.kind {
-            ProgressKind::Thick => {
-                let bw = t.border_px.max(2);
-                cx.canvas.fill_rect(bar.x, bar.y, bar.w as i32, bw, t.fg);
-                cx.canvas.fill_rect(bar.x, bar.bottom() - bw, bar.w as i32, bw, t.fg);
-                cx.canvas.fill_rect(bar.x, bar.y, bw, h as i32, t.fg);
-                cx.canvas.fill_rect(bar.right() - bw, bar.y, bw, h as i32, t.fg);
-            }
+            ProgressKind::Thick => cx.canvas.stroke_rect(bar, t.border_px.max(2), t.fg),
             ProgressKind::Thin => cx.canvas.fill_rect(bar.x, bar.y + (h as i32 - line) / 2, bar.w as i32, line, t.fg),
         }
         cx.canvas.fill_rect(bar.x, bar.y, done.min(bar.w) as i32, h as i32, t.fg);
@@ -473,10 +440,9 @@ impl RingProgress {
         RingProgress { value, label: Some(format!("{}%", (unit(value) * 100.0).round() as u32)) }
     }
 
-    /// Without the label.
-    pub fn bare(mut self) -> Self {
-        self.label = None;
-        self
+    setters! {
+        /// Without the label.
+        bare() => label = None;
     }
 
     /// Square badge rectangle `side` big in the bottom-right corner of `cover`, inset by
@@ -540,10 +506,9 @@ impl Segmented {
         Segmented { options: options.iter().map(|s| s.to_string()).collect(), selected: 0, action: action.into() }
     }
 
-    /// With `i` selected.
-    pub fn with_selected(mut self, i: usize) -> Self {
-        self.selected = i;
-        self
+    setters! {
+        /// With `i` selected.
+        with_selected(i: usize) => selected = i;
     }
 
     /// Segment rectangles inside `b`.
@@ -582,12 +547,7 @@ impl Widget for Segmented {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else {
-            return match ev {
-                UiEvent::Gesture(_) => EventResult::Handled,
-                _ => EventResult::Ignored,
-            };
-        };
+        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else { return take_gestures(ev) };
         select_tapped(&self.cells(b), *pos, &mut self.selected, &self.action)
     }
 }
@@ -639,10 +599,9 @@ impl Chips {
         }
     }
 
-    /// Only one chip on at a time.
-    pub fn single(mut self) -> Self {
-        self.single = true;
-        self
+    setters! {
+        /// Only one chip on at a time.
+        single() => single = true;
     }
 
     /// With chip `i` selected.
@@ -700,12 +659,7 @@ impl Widget for Chips {
     }
 
     fn event(&mut self, ev: &UiEvent, _b: Rect) -> EventResult {
-        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else {
-            return match ev {
-                UiEvent::Gesture(_) => EventResult::Handled,
-                _ => EventResult::Ignored,
-            };
-        };
+        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else { return take_gestures(ev) };
         let Some(i) = self.rects.iter().position(|r| r.contains(*pos)) else { return EventResult::Handled };
         if self.single {
             if self.chips[i].selected {
@@ -824,10 +778,9 @@ impl TextBlock {
         self
     }
 
-    /// With an alignment.
-    pub fn aligned(mut self, align: Align) -> Self {
-        self.align = align;
-        self
+    setters! {
+        /// With an alignment.
+        aligned(align: Align) => align = align;
     }
 
     /// Lines as (text, ends with a hyphen) for a width (for tests and measuring).
