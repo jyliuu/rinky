@@ -11,7 +11,7 @@
 //! - TOC from the NCX index (tag 6 = position as fragment + offset).
 
 use super::header::{decode, MobiHeader};
-use super::mobi6::{ncx, nest};
+use super::mobi6::{ncx, nest, part_name};
 use super::{base32, index, Converted, Mobi, Resources};
 use crate::book::Target;
 use crate::util::{be32, find_bytes as find};
@@ -236,10 +236,6 @@ pub fn anchor_at(parts: &[Part], pos: usize) -> Option<(usize, Anchor)> {
         block = &block[..lt];
     }
     Some((pn, Anchor::Top))
-}
-
-fn part_name(i: usize) -> String {
-    format!("part{i:04}.xhtml")
 }
 
 /// Rewrites `kindle:` URIs in `s`.
