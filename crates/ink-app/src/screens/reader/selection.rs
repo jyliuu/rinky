@@ -300,15 +300,12 @@ pub fn span_select(doc: &mut dyn ink_doc::Document, size: Size, anchor_page: usi
             SpanEnd::PageEnd => (anchor.first, e),
         };
         vec![(page, from, to)]
-    } else if page > anchor_page {
-        let mut v = vec![(anchor_page, anchor.first, e)];
-        v.extend((anchor_page + 1..page).map(|p| (p, s, e)));
-        v.push((page, s, end_last));
-        v
     } else {
-        let mut v = vec![(page, end_first, e)];
-        v.extend((page + 1..anchor_page).map(|p| (p, s, e)));
-        v.push((anchor_page, s, anchor.last));
+        // (page, point) of the earlier and the later end.
+        let ((p0, from), (p1, to)) = if page > anchor_page { ((anchor_page, anchor.first), (page, end_last)) } else { ((page, end_first), (anchor_page, anchor.last)) };
+        let mut v = vec![(p0, from, e)];
+        v.extend((p0 + 1..p1).map(|p| (p, s, e)));
+        v.push((p1, s, to));
         v
     };
     let parts: Vec<Selection> = segs.into_iter().filter_map(|(p, from, to)| doc.select(p, from, to).ok().flatten()).collect();
@@ -368,11 +365,7 @@ pub fn edge_word(doc: &mut dyn ink_doc::Document, page: usize, size: Size, forwa
     let at = if forward { page_start() } else { page_end(size) };
     let ch = doc.select(page, at, at).ok().flatten().and_then(|s| if forward { s.rects.first().copied() } else { s.rects.last().copied() });
     let word = ch.and_then(|r| word_hit(doc, page, Point::new(r.x + r.w as i32 / 2, r.y + r.h as i32 / 2)));
-    match word {
-        Some(w) => SpanEnd::Word(w),
-        None if forward => SpanEnd::PageStart,
-        None => SpanEnd::PageEnd,
-    }
+    word.map_or(if forward { SpanEnd::PageStart } else { SpanEnd::PageEnd }, SpanEnd::Word)
 }
 
 /// The text lines of `page` as `(top, bottom)` bands, top to bottom (overlapping rects
