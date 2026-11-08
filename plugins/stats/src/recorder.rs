@@ -119,23 +119,19 @@ pub struct StatsPlugin {
 }
 
 impl Default for StatsPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StatsPlugin {
     /// The plugin as compiled into the app: wall clock, database next to the plugin
     /// folder (`<root>/statistics.sqlite3`, found from the data directory).
-    pub fn new() -> Self {
+    fn default() -> Self {
         let mut manifest = PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Storage]);
         manifest.description = "Reading statistics: time per page, book and day".into();
         StatsPlugin { manifest, clock: Box::new(crate::unix_now), db_path: None, tx: None, cur: None }
     }
+}
 
+impl StatsPlugin {
     /// A plugin writing to `db_path` with `clock` (tests).
     pub fn with(db_path: PathBuf, clock: ClockFn) -> Self {
-        StatsPlugin { db_path: Some(db_path), clock, ..Self::new() }
+        StatsPlugin { db_path: Some(db_path), clock, ..Self::default() }
     }
 
     fn send(&mut self, cx: &mut HostCtx, cmd: Cmd) {
@@ -192,8 +188,13 @@ impl StatsPlugin {
         self.send(cx, Cmd::Pages(recs));
     }
 
-    /// Writes what is buffered, ends the session and waits for the worker.
-    fn end(&mut self, cx: &mut HostCtx, now: u64) {
+    /// Writes what is buffered, ends the session and waits for the worker; nothing
+    /// without a book.
+    fn end(&mut self, cx: &mut HostCtx) {
+        if self.cur.is_none() {
+            return;
+        }
+        let now = (self.clock)();
         self.close_page(now);
         self.flush(cx);
         if self.tx.is_none() {
@@ -219,11 +220,9 @@ impl Plugin for StatsPlugin {
     }
 
     fn on_book_open(&mut self, cx: &mut HostCtx) -> Result<()> {
+        self.end(cx);
+        self.cur = None;
         let now = (self.clock)();
-        if self.cur.is_some() {
-            self.end(cx, now);
-            self.cur = None;
-        }
         let doc = cx.document()?;
         let Some(md5) = doc.book_id() else {
             log::info!("stats: book without an id, not recorded");
@@ -263,10 +262,7 @@ impl Plugin for StatsPlugin {
     }
 
     fn on_suspend(&mut self, cx: &mut HostCtx) -> Result<()> {
-        if self.cur.is_some() {
-            let now = (self.clock)();
-            self.end(cx, now);
-        }
+        self.end(cx);
         Ok(())
     }
 
@@ -284,11 +280,8 @@ impl Plugin for StatsPlugin {
     }
 
     fn on_close(&mut self, cx: &mut HostCtx) -> Result<()> {
-        if self.cur.is_some() {
-            let now = (self.clock)();
-            self.end(cx, now);
-            self.cur = None;
-        }
+        self.end(cx);
+        self.cur = None;
         Ok(())
     }
 }

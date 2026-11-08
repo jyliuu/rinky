@@ -109,17 +109,13 @@ pub struct UsbNetPlugin {
 }
 
 impl Default for UsbNetPlugin {
+    /// The plugin on the real device.
     fn default() -> Self {
-        Self::new()
+        Self::with_gadget(UsbNet::system())
     }
 }
 
 impl UsbNetPlugin {
-    /// The plugin on the real device.
-    pub fn new() -> Self {
-        Self::with_gadget(UsbNet::system())
-    }
-
     /// The plugin with this gadget (tests use a fake configfs).
     pub fn with_gadget(net: UsbNet) -> Self {
         UsbNetPlugin { manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Ui, Permission::Storage]), net, on: None, error: None, started: false }
@@ -172,11 +168,11 @@ impl UsbNetPlugin {
                     cx.storage()?.set("mtp_udc", json!(udc))?;
                 }
                 self.refresh();
-                cx.ui()?.toast(&format!("USB network on: {KINDLE_IP}"));
+                cx.toast(&format!("USB network on: {KINDLE_IP}"))?;
             }
             Err(e) => {
                 self.refresh();
-                cx.ui()?.toast(&format!("USB network: {e}"));
+                cx.toast(&format!("USB network: {e}"))?;
                 self.error = Some(e);
             }
         }
@@ -194,10 +190,10 @@ impl UsbNetPlugin {
                 if mtp.is_some() {
                     cx.storage()?.set("mtp_udc", Value::Null)?;
                 }
-                cx.ui()?.toast("USB network off");
+                cx.toast("USB network off")?;
             }
             Err(e) => {
-                cx.ui()?.toast(&format!("USB network: {e}"));
+                cx.toast(&format!("USB network: {e}"))?;
                 self.error = Some(e);
             }
         }
@@ -270,7 +266,7 @@ impl Plugin for UsbNetPlugin {
                 cx.storage()?.set("autostart", json!(auto))?;
                 self.show_menu(cx)?;
             }
-            (MENU, "help") => cx.ui()?.view_markdown(HELP, "How to connect a computer", HELP_TEXT),
+            (MENU, "help") => cx.view_markdown(HELP, "How to connect a computer", HELP_TEXT)?,
             // Back from the help page: the settings page again.
             (HELP, "closed") => self.show_menu(cx)?,
             _ => {}

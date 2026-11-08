@@ -13,7 +13,7 @@
 
 use ink_net::url::encode_component;
 pub use ink_plugin::kit::{cut_at, md_escape, squeeze};
-use ink_plugin::serde_json::{json, Map, Value};
+use ink_plugin::serde_json::{json, Value};
 use std::path::Path;
 
 /// Summaries kept in the cache file.
@@ -96,17 +96,18 @@ fn nonempty(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// The summary in `v` (a REST answer or a cache entry, whose page type is under
+/// `kind`); `None` without a title.
+fn summary_of(v: &Value, url: Option<String>, kind: &str) -> Option<Summary> {
+    let title = nonempty(v, "title")?;
+    Some(Summary { title, description: nonempty(v, "description"), extract: nonempty(v, "extract").unwrap_or_default(), url, kind: nonempty(v, kind).unwrap_or_else(|| "standard".into()) })
+}
+
 /// Parses a REST summary body.
 pub fn parse_summary(body: &[u8]) -> Result<Summary, String> {
     let v: Value = ink_plugin::serde_json::from_slice(body).map_err(|e| format!("bad summary JSON: {e}"))?;
-    let title = nonempty(&v, "title").ok_or("the summary has no title")?;
-    Ok(Summary {
-        title,
-        description: nonempty(&v, "description"),
-        extract: nonempty(&v, "extract").unwrap_or_default(),
-        url: v.pointer("/content_urls/desktop/page").and_then(Value::as_str).map(str::to_string),
-        kind: nonempty(&v, "type").unwrap_or_else(|| "standard".into()),
-    })
+    let url = v.pointer("/content_urls/desktop/page").and_then(Value::as_str).map(str::to_string);
+    Ok(summary_of(&v, url, "type").ok_or("the summary has no title")?)
 }
 
 /// Parses a search API body into `(title, plain snippet)`, best match first.
@@ -211,17 +212,19 @@ fn limited(text: &str) -> (String, bool) {
     (cut[..end].to_string(), true)
 }
 
+/// The article cut by [`limited`], each non-blank line written by `head` (with the
+/// heading level 2 to 6) or by `para`; the flag says it was cut.
+fn blocks(text: &str, head: impl Fn(usize, &str) -> String, para: impl Fn(&str) -> String) -> (String, bool) {
+    let (text, cut) = limited(text);
+    let out = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| heading(l).map_or_else(|| para(l), |(level, h)| head(level.min(5) + 1, h))).collect();
+    (out, cut)
+}
+
 /// The text of the full view: Markdown with `##` headings (`:::top` first, so a viewer
 /// that already shows a loading text starts at the top).
 pub fn article_markdown(text: &str, url: Option<&str>) -> String {
-    let (text, cut) = limited(text);
-    let mut md = String::from(":::top\n\n");
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        match heading(line) {
-            Some((level, h)) => md.push_str(&format!("{} {}\n\n", "#".repeat(level.min(5) + 1), md_escape(h))),
-            None => md.push_str(&format!("{}\n\n", md_escape(line))),
-        }
-    }
+    let (body, cut) = blocks(text, |n, h| format!("{} {}\n\n", "#".repeat(n), md_escape(h)), |l| format!("{}\n\n", md_escape(l)));
+    let mut md = format!(":::top\n\n{body}");
     if cut {
         md.push_str("*The article is cut here.*\n\n");
     }
@@ -239,17 +242,12 @@ pub fn html_escape(s: &str) -> String {
 /// A small HTML book of the article for the library: title, description, headings and
 /// paragraphs, and the source line (the text is CC BY-SA).
 pub fn article_html(lang: &str, title: &str, description: Option<&str>, text: &str, url: &str) -> String {
-    let (text, cut) = limited(text);
+    let (body, cut) = blocks(text, |n, t| format!("<h{n}>{}</h{n}>\n", html_escape(t)), |l| format!("<p>{}</p>\n", html_escape(l)));
     let mut h = format!("<!DOCTYPE html>\n<html lang=\"{lang}\">\n<head><meta charset=\"utf-8\"><title>{t}</title></head>\n<body>\n<h1>{t}</h1>\n", t = html_escape(title));
     if let Some(d) = description {
         h.push_str(&format!("<p><i>{}</i></p>\n", html_escape(d)));
     }
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        match heading(line) {
-            Some((level, t)) => h.push_str(&format!("<h{n}>{}</h{n}>\n", html_escape(t), n = level.min(5) + 1)),
-            None => h.push_str(&format!("<p>{}</p>\n", html_escape(line))),
-        }
-    }
+    h.push_str(&body);
     if cut {
         h.push_str("<p><i>The article is cut here.</i></p>\n");
     }
@@ -297,14 +295,7 @@ impl Cache {
                     .filter_map(|e| {
                         let lang = nonempty(e, "lang").filter(|l| valid_lang(l))?;
                         let key = nonempty(e, "key")?;
-                        let s = Summary {
-                            title: nonempty(e, "title")?,
-                            description: nonempty(e, "description"),
-                            extract: nonempty(e, "extract").unwrap_or_default(),
-                            url: nonempty(e, "url"),
-                            kind: nonempty(e, "kind").unwrap_or_else(|| "standard".into()),
-                        };
-                        Some((lang, key, s))
+                        Some((lang, key, summary_of(e, nonempty(e, "url"), "kind")?))
                     })
                     .take(CACHE_SIZE)
                     .collect()
@@ -319,19 +310,10 @@ impl Cache {
             .entries
             .iter()
             .map(|(lang, key, s)| {
-                let mut m = Map::new();
-                m.insert("lang".into(), json!(lang));
-                m.insert("key".into(), json!(key));
-                m.insert("title".into(), json!(s.title));
-                if let Some(d) = &s.description {
-                    m.insert("description".into(), json!(d));
-                }
-                m.insert("extract".into(), json!(s.extract));
-                if let Some(u) = &s.url {
-                    m.insert("url".into(), json!(u));
-                }
-                m.insert("kind".into(), json!(s.kind));
-                Value::Object(m)
+                let mut m = json!({"lang": lang, "key": key, "title": s.title, "description": s.description, "extract": s.extract, "url": s.url, "kind": s.kind});
+                // No description or address: the key is left out.
+                m.as_object_mut().expect("object").retain(|_, v| !v.is_null());
+                m
             })
             .collect();
         let part = path.with_extension("json.part");

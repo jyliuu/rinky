@@ -224,14 +224,8 @@ pub struct CalibrePlugin {
 }
 
 impl Default for CalibrePlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CalibrePlugin {
     /// The plugin.
-    pub fn new() -> Self {
+    fn default() -> Self {
         CalibrePlugin {
             manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Ui, Permission::Storage, Permission::Network]),
             conn: None,
@@ -241,7 +235,9 @@ impl CalibrePlugin {
             menu_status: None,
         }
     }
+}
 
+impl CalibrePlugin {
     /// The connection state.
     pub fn status(&self) -> &Status {
         &self.status
@@ -297,8 +293,7 @@ impl CalibrePlugin {
             .map_err(|e| ink_plugin::PluginError::Failed(format!("cannot start the calibre thread: {e}")))?;
         self.status = if host.is_empty() { Status::Searching } else { Status::Connecting(host.clone()) };
         self.conn = Some(Conn { rx, cancel, host });
-        cx.ui()?.toast(&self.status.text());
-        Ok(())
+        cx.toast(&self.status.text())
     }
 
     /// Asks the worker to stop (it sends a parting NOOP and ends within about a second).
@@ -434,7 +429,7 @@ impl CalibrePlugin {
             Event::Connected { calibre_version } => {
                 log::info!("calibre: connected to {host} (calibre {calibre_version})");
                 self.status = Status::Connected { host: host.clone(), this: 0, total: 0 };
-                cx.ui()?.toast(&format!("Connected to calibre on {host}"));
+                cx.toast(&format!("Connected to calibre on {host}"))?;
             }
             Event::Library(name) => log::info!("calibre: library {name:?}"),
             Event::Receiving { this, total, .. } => {
@@ -444,9 +439,9 @@ impl CalibrePlugin {
             }
             Event::Received { this, total, title, .. } => {
                 self.unscanned += 1;
-                cx.ui()?.toast(&format!("Received {title} ({this}/{total})"));
+                cx.toast(&format!("Received {title} ({this}/{total})"))?;
             }
-            Event::ReceiveFailed { title, why } => cx.ui()?.toast(&format!("Could not receive {title}: {why}")),
+            Event::ReceiveFailed { title, why } => cx.toast(&format!("Could not receive {title}: {why}"))?,
             Event::BatchDone { .. } => {
                 if self.status != Status::Disconnecting {
                     self.status = Status::Connected { host, this: 0, total: 0 };
@@ -507,37 +502,25 @@ impl Plugin for CalibrePlugin {
                 }
                 "server" => {
                     let cur = Self::setting(cx, "server");
-                    cx.ui()?.input(IN_SERVER, "calibre address (host:port)", &cur);
-                    Ok(())
+                    cx.input(IN_SERVER, "calibre address (host:port)", &cur)
                 }
                 "auto" => {
                     cx.storage()?.set("server", Value::Null)?;
                     self.show_menu(cx)
                 }
-                "password" => {
-                    cx.ui()?.input(IN_PASSWORD, "calibre password", "");
-                    Ok(())
-                }
+                "password" => cx.input(IN_PASSWORD, "calibre password", ""),
                 "nopassword" => {
                     cx.storage()?.set("password", Value::Null)?;
                     self.show_menu(cx)
                 }
                 "dir" => {
                     let cur = Self::books_dir(cx);
-                    cx.ui()?.input(IN_DIR, "Books folder", &cur.to_string_lossy());
-                    Ok(())
+                    cx.input(IN_DIR, "Books folder", &cur.to_string_lossy())
                 }
                 _ => Ok(()),
             },
             IN_SERVER => {
-                let t = result.trim();
-                if !t.is_empty() {
-                    if parse_server(t).is_some() {
-                        cx.storage()?.set("server", json!(t))?;
-                    } else {
-                        cx.ui()?.toast("Write the address as host:port, for example 192.168.1.20:9090");
-                    }
-                }
+                cx.set_from_input("server", result, |t| parse_server(t).map(|_| json!(t)).ok_or_else(|| "Write the address as host:port, for example 192.168.1.20:9090".into()))?;
                 self.show_menu(cx)
             }
             IN_PASSWORD => {
@@ -554,14 +537,8 @@ impl Plugin for CalibrePlugin {
                 self.connect(cx)
             }
             IN_DIR => {
-                let t = result.trim();
-                if !t.is_empty() {
-                    if t.starts_with('/') {
-                        cx.storage()?.set("books_dir", json!(t.trim_end_matches('/')))?;
-                    } else {
-                        cx.ui()?.toast("The books folder must be a full path, for example /mnt/us/Books");
-                    }
-                }
+                let full = |t: &str| Some(json!(t.trim_end_matches('/'))).filter(|_| t.starts_with('/'));
+                cx.set_from_input("books_dir", result, |t| full(t).ok_or_else(|| "The books folder must be a full path, for example /mnt/us/Books".into()))?;
                 self.show_menu(cx)
             }
             _ => Ok(()),

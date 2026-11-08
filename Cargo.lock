@@ -813,6 +813,7 @@ dependencies = [
 name = "ink-stats"
 version = "0.5.3"
 dependencies = [
+ "ink-device",
  "ink-doc",
  "ink-plugin",
  "ink-store",
@@ -863,6 +864,7 @@ dependencies = [
 name = "insightful"
 version = "0.5.3"
 dependencies = [
+ "ink-device",
  "ink-doc",
  "ink-net",
  "ink-plugin",

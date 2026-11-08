@@ -36,7 +36,7 @@ impl Env {
         let mut store = MemoryStorage { dir: dir.join("data"), ..Default::default() };
         store.settings.insert("server".into(), json!(server.url("/kosync")));
         Env {
-            plugin: KoSyncPlugin::new().with_clock(move || c.get()),
+            plugin: KoSyncPlugin::default().with_clock(move || c.get()),
             ui: UiQueue::default(),
             store,
             worker: NetWorker::new(Arc::new(UreqClient::new())),
@@ -114,7 +114,7 @@ fn progress_strings_follow_koreader() {
 #[test]
 fn control_tile_is_registered_with_the_old_sync_tile_look() {
     let mut reg = ink_plugin::Registry::default();
-    KoSyncPlugin::new().on_load(&mut ink_plugin::Registrar { plugin: NAME, registry: &mut reg }).unwrap();
+    KoSyncPlugin::default().on_load(&mut ink_plugin::Registrar { plugin: NAME, registry: &mut reg }).unwrap();
     let t = reg.control_tiles.iter().find(|t| t.id == "sync_now").expect("tile");
     assert_eq!((t.label.as_str(), t.icon.as_str(), t.state.as_str()), ("Sync progress", "sync", "Reading progress"));
     assert_eq!(t.needs_wifi.as_deref(), Some("Turn on Wi-Fi to sync"));
