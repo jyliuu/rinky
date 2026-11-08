@@ -255,10 +255,18 @@ type Run = (usize, usize, bool);
 /// The runs of nonzero coverage of `cov`, a mask `w` wide.
 fn runs(cov: &[u8], w: usize) -> Vec<Run> {
     let mut out: Vec<Run> = Vec::new();
-    for (i, &a) in cov.iter().enumerate().filter(|(_, a)| **a != 0) {
-        match out.last_mut() {
-            Some(r) if r.1 == i && r.2 == (a == 255) && i % w != 0 => r.1 += 1,
-            _ => out.push((i, i + 1, a == 255)),
+    if w == 0 {
+        return out;
+    }
+    // Row by row, each run found with a scan for its first and its last pixel.
+    for (row0, row) in (0..).step_by(w).zip(cov.chunks_exact(w)) {
+        let mut x = 0;
+        while let Some(s) = row[x..].iter().position(|&a| a != 0) {
+            let s = x + s;
+            let full = row[s] == 255;
+            let n = row[s..].iter().position(|&a| a == 0 || (a == 255) != full).unwrap_or(row.len() - s);
+            out.push((row0 + s, row0 + s + n, full));
+            x = s + n;
         }
     }
     out
