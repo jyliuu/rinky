@@ -63,7 +63,6 @@ int ink_page_count(ink_doc *d);
 /* Writes the value of a metadata key (info:Title, info:Author, format, ...). Returns the
  * length needed including the terminator, 0 if the key is missing, -1 on error. */
 int ink_metadata(ink_doc *d, const char *key, char *buf, size_t size);
-/* Anti-aliasing bits 0..8 for graphics and text. */
 
 int ink_page_bound(ink_doc *d, int page, ink_rect *out);
 
