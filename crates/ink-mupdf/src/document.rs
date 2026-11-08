@@ -130,6 +130,13 @@ pub struct Piece {
     pub region: FRect,
 }
 
+impl Piece {
+    /// The screen pixels of page-space rectangle `r` on this piece, `None` when it shows none.
+    fn screen_rect(&self, r: &FRect) -> Option<Rect> {
+        Some(self.ctm.map_rect(r).to_rect().intersect(&self.clip)).filter(|r| !r.is_empty())
+    }
+}
+
 /// Free zoom and pan of one page: see [`MupdfDocument::render_page_at`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderSpec {
@@ -925,19 +932,8 @@ impl MupdfDocument {
     /// Screen rectangles of the quads of `pos` on `screen` (empty when that page is not on
     /// that screen). Use it to draw stored highlights at any zoom.
     pub fn highlight_rects(&self, screen: usize, pos: &PagePosition) -> Vec<Rect> {
-        let mut out = Vec::new();
-        for p in self.pieces(screen) {
-            if p.page != pos.page as usize {
-                continue;
-            }
-            for q in &pos.quads {
-                let r = p.ctm.map_rect(&FRect::from_quad(q)).to_rect().intersect(&p.clip);
-                if !r.is_empty() {
-                    out.push(r);
-                }
-            }
-        }
-        out
+        let pieces = self.pieces(screen).into_iter().filter(|p| p.page == pos.page as usize);
+        pieces.flat_map(|p| pos.quads.iter().filter_map(move |q| p.screen_rect(&FRect::from_quad(q)))).collect()
     }
 
     /// The text under the quads of `pos`.
@@ -1149,7 +1145,7 @@ impl Document for MupdfDocument {
                         None => LinkTarget::External(l.uri.clone()),
                     }
                 };
-                let rect = piece.map(|pc| pc.ctm.map_rect(&l.rect).to_rect().intersect(&pc.clip)).filter(|r| !r.is_empty());
+                let rect = piece.and_then(|pc| pc.screen_rect(&l.rect));
                 Link { text: label, target, rect, footnote }
             })
             .collect())
@@ -1189,11 +1185,7 @@ impl Document for MupdfDocument {
             end: Position::Page(PagePosition { page: piece.page as u32, quads: vec![last.to_quad()] }),
             text: text.text_of(range),
             page,
-            rects: rects
-                .iter()
-                .map(|r| piece.ctm.map_rect(r).to_rect().intersect(&piece.clip))
-                .filter(|r| !r.is_empty())
-                .collect(),
+            rects: rects.iter().filter_map(|r| piece.screen_rect(r)).collect(),
         };
         self.selection = Some(sel.clone());
         Ok(Some(sel))
