@@ -76,27 +76,24 @@ impl TextInput {
         self.cursor += s.len();
     }
 
+    /// Start of the grapheme before the cursor.
+    fn prev_grapheme(&self) -> Option<usize> {
+        self.text[..self.cursor].grapheme_indices(true).next_back().map(|(i, _)| i)
+    }
+
     /// Deletes the grapheme before the cursor.
     pub fn backspace(&mut self) -> bool {
-        match self.text[..self.cursor].grapheme_indices(true).next_back() {
-            Some((i, _)) => {
-                self.text.replace_range(i..self.cursor, "");
-                self.cursor = i;
-                true
-            }
-            None => false,
-        }
+        let Some(i) = self.prev_grapheme() else { return false };
+        self.text.replace_range(i..self.cursor, "");
+        self.cursor = i;
+        true
     }
 
     /// Moves the cursor one grapheme left.
     pub fn left(&mut self) -> bool {
-        match self.text[..self.cursor].grapheme_indices(true).next_back() {
-            Some((i, _)) => {
-                self.cursor = i;
-                true
-            }
-            None => false,
-        }
+        let Some(i) = self.prev_grapheme() else { return false };
+        self.cursor = i;
+        true
     }
 
     /// Moves the cursor one grapheme right.

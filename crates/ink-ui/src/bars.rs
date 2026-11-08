@@ -4,10 +4,10 @@
 //! such screens can hit-test without the tree.
 
 use crate::draw::{fill_round_rect, stroke_round_rect, Path};
-use crate::gesture::{Gesture, TouchKind};
+use crate::gesture::Gesture;
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{follow_press, press_class, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Point, Rect, RefreshClass};
 use ink_text::Style;
@@ -145,7 +145,7 @@ fn icon_face(cx: &mut PaintCx, r: Rect, icon: Icon, pressed: bool) {
 
 impl Widget for AppBar {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let mut x = b.x + space(4);
         if self.back {
             let r = AppBar::back_rect(b);
@@ -195,19 +195,10 @@ impl Widget for AppBar {
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         match ev {
             UiEvent::Touch(t) => {
-                // No feedback on touch-down: the touch may still become a swipe.
                 let under = self.hit(b, t.pos);
-                let now = t.press_target(self.pressed, under);
-                if now != self.pressed {
-                    self.pressed = now;
-                    self.changed = true;
-                    EventResult::Handled
-                } else if t.kind == TouchKind::Down && under.is_some() {
-                    // Capture the contact (for its Press) without a repaint.
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                }
+                let (res, changed) = follow_press(t, &mut self.pressed, under, under.is_some());
+                self.changed |= changed;
+                res
             }
             UiEvent::Gesture(Gesture::Tap { pos }) => {
                 self.changed |= self.pressed.take().is_some();
@@ -223,11 +214,7 @@ impl Widget for AppBar {
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        if self.pressed.is_some() {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.pressed.is_some())
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
@@ -297,7 +284,7 @@ impl NavBar {
 
 impl Widget for NavBar {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         cx.canvas.fill_rect(b.x, b.y, b.w as i32, t.rule_px, t.fg);
         let cap_h = (t.caption.px * 1.35) as i32;
         for (i, (r, item)) in self.cells(b).into_iter().zip(&self.items).enumerate() {
@@ -321,20 +308,13 @@ impl Widget for NavBar {
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         match ev {
             UiEvent::Touch(t) => {
-                // No feedback on touch-down: the touch may still become a swipe.
+                let before = self.pressed;
                 let under = self.hit(b, t.pos);
-                let now = t.press_target(self.pressed, under);
-                if now != self.pressed {
-                    self.changed.extend(self.pressed);
-                    self.changed.extend(now);
-                    self.pressed = now;
-                    EventResult::Handled
-                } else if t.kind == TouchKind::Down && under.is_some() {
-                    // Capture the contact (for its Press) without a repaint.
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
+                let (res, changed) = follow_press(t, &mut self.pressed, under, under.is_some());
+                if changed {
+                    self.changed.extend(before.into_iter().chain(self.pressed));
                 }
+                res
             }
             UiEvent::Gesture(Gesture::Tap { pos }) => {
                 self.changed.extend(self.pressed.take());
@@ -354,11 +334,7 @@ impl Widget for NavBar {
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        if self.pressed.is_some() {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.pressed.is_some())
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
@@ -373,7 +349,7 @@ impl Widget for NavBar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gesture::Touch;
+    use crate::gesture::{Touch, TouchKind};
     use crate::theme::Theme;
     use crate::widget::WidgetTree;
     use ink_device::Canvas;

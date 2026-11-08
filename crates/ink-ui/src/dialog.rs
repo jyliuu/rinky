@@ -85,22 +85,26 @@ impl Widget for Dialog {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        if let UiEvent::Gesture(Gesture::Tap { pos }) = ev {
-            for (r, (_, action)) in self.button_rects(b).into_iter().zip(&self.buttons) {
-                if r.contains(*pos) {
-                    return EventResult::Action(action.clone());
-                }
-            }
-        }
-        match ev {
-            UiEvent::Gesture(_) | UiEvent::Touch(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
-        }
+        buttons_event(ev, &self.button_rects(b), &self.buttons)
     }
 
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
         // Touches change nothing here (no press feedback): they refresh nothing.
         Some(Vec::new())
+    }
+}
+
+/// What a modal box with `(label, action)` buttons at `rects` does with an event: a tap
+/// on a button reports its action; every other touch and gesture is taken (nothing
+/// under the box reacts).
+fn buttons_event(ev: &UiEvent, rects: &[Rect], buttons: &[(String, String)]) -> EventResult {
+    match ev {
+        UiEvent::Gesture(Gesture::Tap { pos }) => match rects.iter().zip(buttons).find(|(r, _)| r.contains(*pos)) {
+            Some((_, (_, action))) => EventResult::Action(action.clone()),
+            None => EventResult::Handled,
+        },
+        UiEvent::Gesture(_) | UiEvent::Touch(_) => EventResult::Handled,
+        _ => EventResult::Ignored,
     }
 }
 
@@ -319,7 +323,8 @@ pub fn wrap_spans(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32
     let mut line: Vec<(f32, String, Style)> = Vec::new();
     let mut x = 0.0f32;
     for (gap, pieces) in words {
-        let w: f32 = pieces.iter().map(|(t, s)| fonts.shaped_width(*s, px, t)).sum();
+        let widths: Vec<f32> = pieces.iter().map(|(t, s)| fonts.shaped_width(*s, px, t)).collect();
+        let w: f32 = widths.iter().sum();
         let gap = if gap && !line.is_empty() { space_w } else { 0.0 };
         if !line.is_empty() && x + gap + w > max {
             lines.push(std::mem::take(&mut line));
@@ -327,8 +332,7 @@ pub fn wrap_spans(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32
         } else {
             x += gap;
         }
-        for (t, s) in pieces {
-            let pw = fonts.shaped_width(s, px, &t);
+        for ((t, s), pw) in pieces.into_iter().zip(widths) {
             line.push((x, t, s));
             x += pw;
         }
@@ -415,18 +419,8 @@ impl Widget for Popup {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        if let UiEvent::Gesture(Gesture::Tap { pos }) = ev {
-            let body = Rect::new(b.x, b.y, b.w.saturating_sub(8), b.h.saturating_sub(8));
-            for (r, (_, action)) in self.button_rects(body).into_iter().zip(&self.buttons) {
-                if r.contains(*pos) {
-                    return EventResult::Action(action.clone());
-                }
-            }
-        }
-        match ev {
-            UiEvent::Gesture(_) | UiEvent::Touch(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
-        }
+        let body = Rect::new(b.x, b.y, b.w.saturating_sub(8), b.h.saturating_sub(8));
+        buttons_event(ev, &self.button_rects(body), &self.buttons)
     }
 
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {

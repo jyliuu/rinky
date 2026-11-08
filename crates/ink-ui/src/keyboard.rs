@@ -191,6 +191,11 @@ fn units(row: &[KeySpec]) -> u32 {
     row.iter().map(|k| k.width).sum()
 }
 
+/// Letter keys for the space-separated captions in `row`, with `lang`'s alternates.
+fn keys(lang: &str, row: &str) -> Vec<KeySpec> {
+    row.split(' ').map(|k| KeySpec::ch(k, alternates(lang, k))).collect()
+}
+
 /// With fewer than two languages the globe key has nothing to switch: it goes and the
 /// space bar takes its width.
 fn fit_languages(mut layout: KeyboardLayout, languages: usize) -> KeyboardLayout {
@@ -225,8 +230,7 @@ impl KeyboardLayout {
             "nb" => ["q w e r t y u i o p å", "a s d f g h j k l ø æ", "z x c v b n m"],
             _ => return None,
         };
-        let row = |s: &str| s.split(' ').map(|k| KeySpec::ch(k, alternates(lang, k))).collect::<Vec<_>>();
-        let (r1, r2, letters3) = (row(rows[0]), row(rows[1]), row(rows[2]));
+        let (r1, r2, letters3) = (keys(lang, rows[0]), keys(lang, rows[1]), keys(lang, rows[2]));
         let total = units(&r1).max(units(&r2)).max(units(&letters3) + 6);
         let side = (total - units(&letters3)) / 2;
         let mut r3 = vec![KeySpec::special("shift", KeyAction::Shift, side, Some(Icon::Shift))];
@@ -255,26 +259,22 @@ impl KeyboardLayout {
 
     /// Digits and punctuation.
     pub fn symbols() -> Self {
-        let row = |s: &str| s.split(' ').map(|k| KeySpec::ch(k, alternates("", k))).collect::<Vec<_>>();
-        let mut r3 = vec![KeySpec::special("=\\<", KeyAction::Layout("symbols2".into()), 3, None)];
-        r3.extend(row(". , ? ! ' \" :"));
-        r3.push(KeySpec::special("del", KeyAction::Backspace, 3, Some(Icon::Backspace)));
-        KeyboardLayout {
-            name: "symbols".into(),
-            rows: vec![row("1 2 3 4 5 6 7 8 9 0"), row("@ # € % & * - + ( )"), r3, Self::bottom_row("abc", "letters", "/", 20)],
-        }
+        Self::symbol_page("symbols", ["1 2 3 4 5 6 7 8 9 0", "@ # € % & * - + ( )", ". , ? ! ' \" :"], ("=\\<", "symbols2"), "/")
     }
 
     /// More symbols.
     pub fn symbols2() -> Self {
-        let row = |s: &str| s.split(' ').map(|k| KeySpec::ch(k, alternates("", k))).collect::<Vec<_>>();
-        let mut r3 = vec![KeySpec::special("?123", KeyAction::Layout("symbols".into()), 3, None)];
-        r3.extend(row("< > [ ] ; © ®"));
+        Self::symbol_page("symbols2", ["~ ` | • ° ± ÷ × ¶ §", "£ ¥ $ ¢ ^ _ = { } \\", "< > [ ] ; © ®"], ("?123", "symbols"), "…")
+    }
+
+    /// A page of symbol keys: `rows` of keys, the third between a key that switches to
+    /// the other page (`(caption, layout)`) and backspace, then the bottom row with
+    /// `extra` next to the space bar.
+    fn symbol_page(name: &str, rows: [&str; 3], other: (&str, &str), extra: &str) -> Self {
+        let mut r3 = vec![KeySpec::special(other.0, KeyAction::Layout(other.1.into()), 3, None)];
+        r3.extend(keys("", rows[2]));
         r3.push(KeySpec::special("del", KeyAction::Backspace, 3, Some(Icon::Backspace)));
-        KeyboardLayout {
-            name: "symbols2".into(),
-            rows: vec![row("~ ` | • ° ± ÷ × ¶ §"), row("£ ¥ $ ¢ ^ _ = { } \\"), r3, Self::bottom_row("abc", "letters", "…", 20)],
-        }
+        KeyboardLayout { name: name.into(), rows: vec![keys("", rows[0]), keys("", rows[1]), r3, Self::bottom_row("abc", "letters", extra, 20)] }
     }
 
     /// A layout by name (`letters` is not a layout: the keyboard maps it to its language).
@@ -697,14 +697,11 @@ impl Widget for Keyboard {
         // Flat board: white, a rule on top, keys with a thin border (KOReader style).
         cx.canvas.fill_rect(b.x, b.y, b.w as i32, b.h as i32, bg);
         cx.canvas.fill_rect(b.x, b.y, b.w as i32, 2, fg);
-        let area = self.keys_area(b);
-        let rects: Vec<(Rect, KeySpec)> = self.layout.key_rects(area).into_iter().map(|(r, k)| (r, k.clone())).collect();
-        let pressed: Vec<usize> = self.pressed.iter().map(|p| p.key).collect();
+        let rects = self.layout.key_rects(self.keys_area(b));
         let radius = 6.0;
-        for (i, (face, k)) in rects.iter().enumerate() {
-            let face = *face;
+        for (i, &(face, k)) in rects.iter().enumerate() {
             let special = !matches!(k.action, KeyAction::Char(_));
-            let down = pressed.contains(&i) || (k.action == KeyAction::Shift && self.upper());
+            let down = self.pressed.iter().any(|p| p.key == i) || (k.action == KeyAction::Shift && self.upper());
             // Every face is white (special keys too); a pressed key (and shift while on)
             // only gets a thicker border, inside its face. Nothing else in the face
             // changes, so the refresh changes few pixels.
@@ -740,9 +737,9 @@ impl Widget for Keyboard {
                 if self.popup.as_ref().is_some_and(|pp| pp.slot == p.slot) {
                     continue;
                 }
-                let Some((r, k)) = rects.get(p.key) else { continue };
+                let Some(&(r, k)) = rects.get(p.key) else { continue };
                 if let KeyAction::Char(c) = &k.action {
-                    let br = self.bubble(b, *r);
+                    let br = self.bubble(b, r);
                     fill_round_rect(cx.canvas, br, radius, bg);
                     stroke_round_rect(cx.canvas, br, radius, 3.0, fg);
                     let label = self.cased(c);

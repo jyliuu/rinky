@@ -18,6 +18,8 @@ use fontdue::{Font, FontSettings, Metrics};
 use ink_device::{Canvas, Rect};
 use rustybuzz::ttf_parser::GlyphId;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::ops::Range;
 use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -83,21 +85,7 @@ impl TextRun {
     /// Pen x at byte offset `byte` of the text (start of the cluster containing it), for
     /// cursors and selections. The end of the text gives the run width.
     pub fn x_at(&self, byte: usize) -> f32 {
-        self.glyphs.iter().filter(|g| g.cluster >= byte).map(|g| g.x).fold(None, |m: Option<f32>, x| Some(m.map_or(x, |m| m.min(x)))).unwrap_or(self.width)
-    }
-
-    /// Byte offset of the cluster boundary nearest to pen x `x`.
-    pub fn byte_at(&self, x: f32, text_len: usize) -> usize {
-        let mut best = (f32::MAX, text_len);
-        let mut clusters: Vec<(usize, f32)> = self.glyphs.iter().map(|g| (g.cluster, g.x)).collect();
-        clusters.push((text_len, self.width));
-        for (c, gx) in clusters {
-            let d = (gx - x).abs();
-            if d < best.0 {
-                best = (d, c);
-            }
-        }
-        best.1
+        self.glyphs.iter().filter(|g| g.cluster >= byte).map(|g| g.x).reduce(f32::min).unwrap_or(self.width)
     }
 }
 
@@ -118,6 +106,75 @@ impl Default for ShapeOptions {
     }
 }
 
+/// [`ShapeOptions`] as `rustybuzz` takes them.
+#[derive(Default)]
+struct Shaping {
+    features: Vec<rustybuzz::Feature>,
+    language: Option<rustybuzz::Language>,
+}
+
+impl Shaping {
+    fn new(opts: &ShapeOptions) -> Self {
+        let off = |t: &[u8; 4]| rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(t), 0, ..);
+        let mut features = Vec::new();
+        if !opts.kerning {
+            features.push(off(b"kern"));
+        }
+        if !opts.ligatures {
+            features.extend([off(b"liga"), off(b"clig")]);
+        }
+        Shaping { features, language: opts.language.as_deref().and_then(|l| l.parse().ok()) }
+    }
+}
+
+/// The maps behind the glyph and metric caches. Their keys are a few small integers
+/// (style, char or glyph id, size bits), looked up once per glyph drawn or measured;
+/// the default SipHash costs more than the rest of such a lookup.
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
+
+/// FxHash's multiply-rotate mix, with the high half folded into the low bits at the end
+/// (the table picks buckets by the low bits).
+#[derive(Clone, Copy, Default)]
+struct FastHasher(u64);
+
+impl FastHasher {
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for FastHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.add(*b as u64);
+        }
+    }
+
+    fn write_u8(&mut self, v: u8) {
+        self.add(v as u64);
+    }
+
+    fn write_u16(&mut self, v: u16) {
+        self.add(v as u64);
+    }
+
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
+
+    fn write_usize(&mut self, v: usize) {
+        self.add(v as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 32)
+    }
+}
+
 /// Cache key of a shaped glyph bitmap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct GlyphKey {
@@ -131,7 +188,7 @@ struct GlyphKey {
 
 /// Glyph bitmaps with a byte budget; least recently used entries go first.
 struct GlyphCache {
-    map: HashMap<GlyphKey, (GlyphMask, u64)>,
+    map: FastMap<GlyphKey, (GlyphMask, u64)>,
     bytes: usize,
     budget: usize,
     tick: u64,
@@ -139,7 +196,7 @@ struct GlyphCache {
 
 impl GlyphCache {
     fn new(budget: usize) -> Self {
-        GlyphCache { map: HashMap::new(), bytes: 0, budget, tick: 0 }
+        GlyphCache { map: FastMap::default(), bytes: 0, budget, tick: 0 }
     }
 
     fn get_or_insert(&mut self, key: GlyphKey, make: impl FnOnce() -> GlyphMask) -> &GlyphMask {
@@ -187,11 +244,13 @@ pub const GLYPH_CACHE_BYTES: usize = 8 << 20;
 /// A set of faces (main family plus fallbacks) with caches.
 pub struct Fonts {
     fonts: [Font; 3],
-    advance: HashMap<(Style, char, u32), f32>,
+    advance: FastMap<(Style, char, u32), f32>,
+    /// The default hasher on purpose: with [`FastMap`] this map made drawing a line on
+    /// the prototype path slower (26 -> 32 us for 108 glyphs, host release build).
     glyphs: HashMap<(Style, char, u32, u32), ProtoGlyph>,
     faces: Vec<FaceData>,
     /// First fallback face with a glyph for a char (`None`: no face has it).
-    fallback_for: HashMap<char, Option<FaceId>>,
+    fallback_for: FastMap<char, Option<FaceId>>,
     /// Faces added with [`Fonts::add_face`]: drawn only on request, never fallbacks.
     own: Vec<FaceId>,
     shaped: GlyphCache,
@@ -211,35 +270,31 @@ fn needs_glyph(c: char) -> bool {
     !(c.is_whitespace() || c.is_control() || matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}'))
 }
 
-fn parse(bytes: &[u8]) -> Result<Font, TextError> {
-    Font::from_bytes(bytes, FontSettings::default()).map_err(|e| TextError::Font(e.to_string()))
+/// The `fontdue` faces `[regular, bold, italic]`.
+fn parse_all(faces: [&[u8]; 3]) -> Result<[Font; 3], TextError> {
+    let parse = |bytes: &[u8]| Font::from_bytes(bytes, FontSettings::default()).map_err(|e| TextError::Font(e.to_string()));
+    Ok([parse(faces[0])?, parse(faces[1])?, parse(faces[2])?])
 }
 
 impl Fonts {
     /// The embedded Noto Serif faces.
     pub fn load() -> Self {
-        let load = |b: &[u8]| parse(b).expect("embedded font");
-        let face = |b: &'static [u8]| FaceData::from_static(b, 0).expect("embedded font");
-        Fonts::from_parts([load(REGULAR), load(BOLD), load(ITALIC)], [face(REGULAR), face(BOLD), face(ITALIC)])
+        Fonts::from_static([REGULAR, BOLD, ITALIC]).expect("embedded fonts")
     }
 
     /// Faces from TTF/OTF bytes: `[regular, bold, italic]`. The bytes are copied and kept
     /// for the rest of the program (the shaped path needs them).
     pub fn from_bytes(faces: [&[u8]; 3]) -> Result<Self, TextError> {
-        let fonts = [parse(faces[0])?, parse(faces[1])?, parse(faces[2])?];
-        let data = [
-            FaceData::from_vec(faces[0].to_vec(), 0)?,
-            FaceData::from_vec(faces[1].to_vec(), 0)?,
-            FaceData::from_vec(faces[2].to_vec(), 0)?,
-        ];
+        let fonts = parse_all(faces)?;
+        let data = faces.iter().map(|f| FaceData::from_vec(f.to_vec(), 0)).collect::<Result<_, _>>()?;
         Ok(Fonts::from_parts(fonts, data))
     }
 
     /// Faces from bytes that live for the whole program (embedded or memory-mapped with
     /// [`crate::face::map_file`]): `[regular, bold, italic]`. Nothing is copied.
     pub fn from_static(faces: [&'static [u8]; 3]) -> Result<Self, TextError> {
-        let fonts = [parse(faces[0])?, parse(faces[1])?, parse(faces[2])?];
-        let data = [FaceData::from_static(faces[0], 0)?, FaceData::from_static(faces[1], 0)?, FaceData::from_static(faces[2], 0)?];
+        let fonts = parse_all(faces)?;
+        let data = faces.iter().map(|f| FaceData::from_static(f, 0)).collect::<Result<_, _>>()?;
         Ok(Fonts::from_parts(fonts, data))
     }
 
@@ -250,13 +305,13 @@ impl Fonts {
         Fonts::from_bytes([&r, &b, &i])
     }
 
-    fn from_parts(fonts: [Font; 3], faces: [FaceData; 3]) -> Self {
+    fn from_parts(fonts: [Font; 3], faces: Vec<FaceData>) -> Self {
         Fonts {
             fonts,
-            advance: HashMap::new(),
+            advance: FastMap::default(),
             glyphs: HashMap::new(),
-            faces: faces.into_iter().collect(),
-            fallback_for: HashMap::new(),
+            faces,
+            fallback_for: FastMap::default(),
             own: Vec::new(),
             shaped: GlyphCache::new(GLYPH_CACHE_BYTES),
         }
@@ -418,28 +473,9 @@ impl Fonts {
     /// lacks draw its `.notdef`). An unknown face gives an empty run.
     pub fn shape_in(&mut self, face: FaceId, px: f32, text: &str) -> TextRun {
         let mut run = TextRun { px, ..TextRun::default() };
-        let Some(data) = self.faces.get(face as usize) else { return run };
-        let Some(shaper) = data.shaper() else { return run };
-        let scale = px / shaper.units_per_em().max(1) as f32;
-        let mut buf = rustybuzz::UnicodeBuffer::new();
-        buf.push_str(text);
-        buf.guess_segment_properties();
-        let out = rustybuzz::shape(shaper, &[], buf);
-        let mut pen = 0.0f32;
-        for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
-            let advance = pos.x_advance as f32 * scale;
-            run.glyphs.push(Glyph {
-                face,
-                id: info.glyph_id as u16,
-                cluster: info.cluster as usize,
-                x: pen + pos.x_offset as f32 * scale,
-                y: pos.y_offset as f32 * scale,
-                advance,
-                synth: Synth::NONE,
-            });
-            pen += advance;
+        if (face as usize) < self.faces.len() {
+            self.push_shaped(&mut run, face, text, 0..text.len(), Synth::NONE, &Shaping::default());
         }
-        run.width = pen;
         run
     }
 
@@ -506,12 +542,18 @@ impl Fonts {
         if let Some(found) = self.fallback_for.get(&c) {
             return found.unwrap_or(main);
         }
-        // A face rustybuzz cannot parse would drop the text; skip it.
-        let found = (3..self.faces.len())
-            .find(|i| !self.own.contains(&(*i as FaceId)) && self.faces[*i].has_char(c) && self.faces[*i].shaper().is_some())
-            .map(|i| i as FaceId);
+        let found = self.first_fallback(|f| f.has_char(c));
         self.fallback_for.insert(c, found);
         found.unwrap_or(main)
+    }
+
+    /// The first fallback face for which `covers` holds. Faces added with
+    /// [`Fonts::add_face`] are not fallbacks, and a face `rustybuzz` cannot parse would
+    /// drop the text, so both are skipped.
+    fn first_fallback(&self, covers: impl Fn(&FaceData) -> bool) -> Option<FaceId> {
+        (3..self.faces.len())
+            .find(|i| !self.own.contains(&(*i as FaceId)) && covers(&self.faces[*i]) && self.faces[*i].shaper().is_some())
+            .map(|i| i as FaceId)
     }
 
     /// The face that shows grapheme cluster `g` (a base char plus combining marks, e.g.
@@ -526,14 +568,11 @@ impl Fonts {
         if chars.as_str().is_empty() {
             return face;
         }
-        let faces = &self.faces;
-        let covers = |i: usize| g.chars().filter(|c| needs_glyph(*c)).all(|c| faces[i].has_char(c));
-        if covers(face as usize) {
+        let covers = |f: &FaceData| g.chars().filter(|c| needs_glyph(*c)).all(|c| f.has_char(c));
+        if covers(&self.faces[face as usize]) {
             return face;
         }
-        (3..faces.len())
-            .find(|i| !self.own.contains(&(*i as FaceId)) && covers(*i) && faces[*i].shaper().is_some())
-            .map_or(face, |i| i as FaceId)
+        self.first_fallback(covers).unwrap_or(face)
     }
 
     // ---- Shaped path ----
@@ -561,46 +600,42 @@ impl Fonts {
                 _ => items.push((i, i + g.len(), face)),
             }
         }
-        let mut features = Vec::new();
-        let tag = |t: &[u8; 4]| rustybuzz::ttf_parser::Tag::from_bytes(t);
-        if !opts.kerning {
-            features.push(rustybuzz::Feature::new(tag(b"kern"), 0, ..));
-        }
-        if !opts.ligatures {
-            features.push(rustybuzz::Feature::new(tag(b"liga"), 0, ..));
-            features.push(rustybuzz::Feature::new(tag(b"clig"), 0, ..));
-        }
-        let language = opts.language.as_deref().and_then(|l| l.parse::<rustybuzz::Language>().ok());
-        let mut pen = 0.0f32;
+        let shaping = Shaping::new(opts);
         for (start, end, fid) in items {
             let synth = self.synth_for(fid, style);
-            let extra = if synth.bold { embolden_px(px) as f32 } else { 0.0 };
-            let Some(face) = self.faces[fid as usize].shaper() else { continue };
-            let scale = px / face.units_per_em().max(1) as f32;
-            let mut buf = rustybuzz::UnicodeBuffer::new();
-            buf.push_str(&text[start..end]);
-            if let Some(l) = &language {
-                buf.set_language(l.clone());
-            }
-            buf.guess_segment_properties();
-            let out = rustybuzz::shape(face, &features, buf);
-            for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
-                let advance = pos.x_advance as f32 * scale;
-                let advance = if advance > 0.0 { advance + extra } else { advance };
-                run.glyphs.push(Glyph {
-                    face: fid,
-                    id: info.glyph_id as u16,
-                    cluster: start + info.cluster as usize,
-                    x: pen + pos.x_offset as f32 * scale,
-                    y: pos.y_offset as f32 * scale,
-                    advance,
-                    synth,
-                });
-                pen += advance;
-            }
+            self.push_shaped(&mut run, fid, text, start..end, synth, &shaping);
         }
-        run.width = pen;
         run
+    }
+
+    /// Shapes `text[range]` with face `fid` and appends the glyphs to `run` at its end
+    /// (clusters as byte offsets into `text`). Synthetic bold widens every advancing
+    /// glyph. A face `rustybuzz` cannot parse adds nothing.
+    fn push_shaped(&self, run: &mut TextRun, fid: FaceId, text: &str, range: Range<usize>, synth: Synth, shaping: &Shaping) {
+        let Some(face) = self.faces[fid as usize].shaper() else { return };
+        let scale = run.px / face.units_per_em().max(1) as f32;
+        let extra = if synth.bold { embolden_px(run.px) as f32 } else { 0.0 };
+        let mut buf = rustybuzz::UnicodeBuffer::new();
+        buf.push_str(&text[range.clone()]);
+        if let Some(l) = &shaping.language {
+            buf.set_language(l.clone());
+        }
+        buf.guess_segment_properties();
+        let out = rustybuzz::shape(face, &shaping.features, buf);
+        for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
+            let advance = pos.x_advance as f32 * scale;
+            let advance = if advance > 0.0 { advance + extra } else { advance };
+            run.glyphs.push(Glyph {
+                face: fid,
+                id: info.glyph_id as u16,
+                cluster: range.start + info.cluster as usize,
+                x: run.width + pos.x_offset as f32 * scale,
+                y: pos.y_offset as f32 * scale,
+                advance,
+                synth,
+            });
+            run.width += advance;
+        }
     }
 
     /// Width of shaped `text`.
@@ -640,20 +675,8 @@ impl Fonts {
     /// Draws a shaped run blending toward gray `value` (0 = black ink, 255 = white text on
     /// a dark background).
     pub fn draw_run_value(&mut self, canvas: &mut Canvas, run: &TextRun, x: f32, baseline: f32, value: u8) -> f32 {
-        for g in &run.glyphs {
-            let m = self.glyph_mask(g.face, g.id, run.px, g.synth);
-            if m.coverage.is_empty() {
-                continue;
-            }
-            let gx = (x + g.x).round() as i32 + m.left;
-            let gy = (baseline - g.y).round() as i32 + m.top;
-            if value == 0 {
-                canvas.draw_mask(gx, gy, m.width, m.height, &m.coverage);
-            } else {
-                blend_mask(canvas, gx, gy, m, value);
-            }
-        }
-        x + run.width
+        let all = canvas.bounds();
+        self.draw_run_clipped(canvas, run, x, baseline, value, all)
     }
 
     /// Like [`Fonts::draw_run_value`], but only pixels inside `clip` change: glyph parts
@@ -666,57 +689,41 @@ impl Fonts {
     /// ([`Fonts::glyph_mask_extra`]); the pen advance stays the same.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_run_clipped_extra(&mut self, canvas: &mut Canvas, run: &TextRun, x: f32, baseline: f32, value: u8, clip: Rect, extra: u32) -> f32 {
-        let clip = clip.intersect(&canvas.bounds());
+        // Where pixels may change: `clip`, on the canvas, inside the canvas's own clip.
+        let mut clip = clip.intersect(&canvas.bounds());
+        if let Some(c) = canvas.clip() {
+            clip = clip.intersect(&c);
+        }
         if clip.is_empty() {
             return x + run.width;
         }
         for g in &run.glyphs {
             let m = self.glyph_mask_extra(g.face, g.id, run.px, g.synth, extra);
-            if m.coverage.is_empty() {
-                continue;
-            }
             let gx = (x + g.x).round() as i32 + m.left;
             let gy = (baseline - g.y).round() as i32 + m.top;
-            // Mask columns and rows that fall inside the clip.
-            let x0 = (clip.x - gx).max(0) as usize;
-            let y0 = (clip.y - gy).max(0) as usize;
-            let x1 = ((clip.right() - gx).max(0) as usize).min(m.width);
-            let y1 = ((clip.bottom() - gy).max(0) as usize).min(m.height);
-            for my in y0..y1 {
-                for mx in x0..x1 {
-                    let a = m.coverage[my * m.width + mx] as u32;
-                    if a == 0 {
-                        continue;
-                    }
-                    let (px, py) = (gx + mx as i32, gy + my as i32);
-                    if let Some(bg) = canvas.get(px, py) {
-                        // With value 0 this is exactly `Canvas::draw_mask`'s darkening.
-                        canvas.set(px, py, ((bg as u32 * (255 - a) + value as u32 * a) / 255) as u8);
-                    }
-                }
-            }
+            blend_mask(canvas, gx, gy, m, value, clip);
         }
         x + run.width
     }
-
-    /// Shapes and draws `text`; returns the pen position after it.
-    pub fn draw_shaped(&mut self, canvas: &mut Canvas, style: Style, px: f32, x: f32, baseline: f32, text: &str) -> f32 {
-        let run = self.shape(style, px, text);
-        self.draw_run(canvas, &run, x, baseline)
-    }
 }
 
-/// Blends `value` into the canvas with the mask's coverage.
-fn blend_mask(canvas: &mut Canvas, x: i32, y: i32, m: &GlyphMask, value: u8) {
-    for my in 0..m.height {
-        for mx in 0..m.width {
-            let a = m.coverage[my * m.width + mx] as u32;
-            if a == 0 {
-                continue;
-            }
-            let (px, py) = (x + mx as i32, y + my as i32);
-            if let Some(bg) = canvas.get(px, py) {
-                canvas.set(px, py, ((bg as u32 * (255 - a) + value as u32 * a) / 255) as u8);
+/// Blends `value` into the canvas with the coverage of `m` placed at `(x, y)`, only
+/// inside `clip` (which lies on the canvas). Row slices, not a bounds-checked get/set
+/// per pixel: every line of UI text goes through here on each paint. With value 0 this
+/// is exactly `Canvas::draw_mask`'s darkening.
+fn blend_mask(canvas: &mut Canvas, x: i32, y: i32, m: &GlyphMask, value: u8, clip: Rect) {
+    let area = Rect::new(x, y, m.width as u32, m.height as u32).intersect(&clip);
+    if area.is_empty() {
+        return;
+    }
+    let (n, v) = (area.w as usize, value as u32);
+    for py in area.y..area.bottom() {
+        let mi = (py - y) as usize * m.width + (area.x - x) as usize;
+        let ci = py as usize * canvas.width + area.x as usize;
+        for (p, &a) in canvas.pixels[ci..ci + n].iter_mut().zip(&m.coverage[mi..mi + n]) {
+            if a != 0 {
+                let a = a as u32;
+                *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
             }
         }
     }
@@ -917,6 +924,12 @@ mod tests {
         assert!((cjk[0].advance - 40.0).abs() < 0.01);
         assert!(f.cached_bytes() > 0);
         assert_eq!(f.face_info(3).unwrap().family, "InkTest Fallback");
+        // One face on request: no fallback, plain advances, clusters into the text.
+        let own = f.shape_in(3, 40.0, "日本");
+        assert_eq!(own.glyphs.iter().map(|g| (g.face, g.cluster)).collect::<Vec<_>>(), vec![(3, 0), (3, 3)]);
+        assert!((own.width - 80.0).abs() < 0.01 && (own.glyphs[1].x - 40.0).abs() < 0.01, "{own:?}");
+        assert!(f.shape_in(0, 40.0, "日").glyphs.iter().all(|g| g.face == 0 && g.id == 0), "the main face draws .notdef");
+        assert_eq!(f.shape_in(99, 40.0, "x"), TextRun { px: 40.0, ..TextRun::default() });
     }
 
     #[test]
@@ -946,7 +959,8 @@ mod tests {
         f.set_cache_budget(20_000);
         let mut c = Canvas::new(1200, 100);
         for px in [30.0, 31.0, 32.0, 33.0, 34.0] {
-            f.draw_shaped(&mut c, Style::Regular, px, 0.0, 80.0, "The quick brown fox jumps over the lazy dog");
+            let run = f.shape(Style::Regular, px, "The quick brown fox jumps over the lazy dog");
+            f.draw_run(&mut c, &run, 0.0, 80.0);
         }
         assert!(f.cached_bytes() <= 20_000, "{}", f.cached_bytes());
         assert!(f.cached_glyphs() > 0);
@@ -959,9 +973,6 @@ mod tests {
         assert_eq!(run.x_at(0), 0.0);
         assert!(run.x_at(1) > 0.0 && run.x_at(2) > run.x_at(1));
         assert_eq!(run.x_at(3), run.width);
-        assert_eq!(run.byte_at(run.width + 50.0, 3), 3);
-        assert_eq!(run.byte_at(-5.0, 3), 0);
-        assert_eq!(run.byte_at(run.x_at(2) + 1.0, 3), 2);
     }
 
     #[test]
@@ -992,6 +1003,12 @@ mod tests {
                     assert_eq!(cut.get(x, y), want, "({x}, {y}) value {value}");
                 }
             }
+            // The canvas's own clip limits drawing the same way.
+            let mut limited = Canvas::new(500, 100);
+            limited.clear(230);
+            limited.set_clip(Some(clip));
+            f.draw_run_value(&mut limited, &run, 5.0, 60.0, value);
+            assert_eq!(limited.pixels, cut.pixels, "value {value}");
             // A clip off the canvas draws nothing and does not panic.
             f.draw_run_clipped(&mut cut, &run, -1e6, 1e6, value, Rect::new(-50, -50, 10, 10));
         }
