@@ -214,13 +214,6 @@ pub fn escape_text(s: &str) -> String {
     out
 }
 
-/// Escapes an attribute value for XML (double-quoted).
-pub fn escape_attr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    escape_into(&mut out, s, true);
-    out
-}
-
 /// True for characters allowed in XML 1.0 documents.
 pub fn is_xml_char(c: char) -> bool {
     matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
@@ -581,7 +574,9 @@ mod tests {
     #[test]
     fn escaping_and_entities() {
         assert_eq!(escape_text("a<b&c>\u{1}"), "a&lt;b&amp;c&gt;");
-        assert_eq!(escape_attr("\"x\"\n"), "&quot;x&quot;&#10;");
+        let mut attr = String::new();
+        push_attr(&mut attr, "a", "\"x\"\n");
+        assert_eq!(attr, " a=\"&quot;x&quot;&#10;\"");
         let mut out = String::from("<p");
         push_attr(&mut out, "title", "a\tb & ü\u{0}");
         out.push('>');

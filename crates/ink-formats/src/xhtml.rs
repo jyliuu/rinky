@@ -226,11 +226,6 @@ pub(crate) fn parse_counted(html: &str) -> (RcDom, usize) {
     (tok.sink.tb.sink.dom, skipped)
 }
 
-/// Concatenated text below `node`.
-pub fn text_of(node: &Handle) -> String {
-    text_of_max(node, usize::MAX)
-}
-
 /// Concatenated text below `node`, stopping after about `max` bytes (titles and
 /// headings; a heading may hold a whole broken document).
 pub fn text_of_max(node: &Handle, max: usize) -> String {
@@ -521,7 +516,7 @@ mod tests {
                 "mbp:pagebreak" => Action::Drop,
                 "font" => Action::Unwrap,
                 "h1" => {
-                    attrs.push(("id".into(), text_of(node).to_lowercase()));
+                    attrs.push(("id".into(), text_of_max(node, usize::MAX).to_lowercase()));
                     Action::Keep
                 }
                 _ => Action::Keep,
