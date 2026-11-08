@@ -4,7 +4,7 @@
 //! Modal layers go on top of a [`Scrim`]: it takes every touch outside them and reports
 //! its action (for example `dismiss`) on a tap, so nothing underneath reacts.
 
-use crate::draw::{fill_round_rect, stroke_round_rect, Path};
+use crate::draw::{fill_round_rect, fill_top_round_rect, stroke_round_rect, stroke_top_round_rect};
 use crate::gesture::{Direction, Gesture};
 use crate::icon::Icon;
 use crate::widget::{paint_button, split_rows, ButtonKind, EventResult, PaintCx, Widget};
@@ -216,8 +216,8 @@ impl Widget for Menu {
 pub struct BottomSheet {
     /// Title shown on the sheet's top bar.
     pub title: String,
-    /// The sheet took a touch or a tap that changes nothing on it (set by `event`,
-    /// cleared by `damage`).
+    /// The sheet took a gesture that changes nothing on it (set by `event`, cleared by
+    /// `damage`).
     pub taken: bool,
 }
 
@@ -239,9 +239,8 @@ impl Widget for BottomSheet {
         let t = cx.theme;
         // Rounded top corners and a black edge along the top and sides (the sheet
         // stands on the bottom edge of the screen).
-        let (x, y, w, h) = (b.x as f32, b.y as f32, b.w as f32, b.h as f32);
-        Path::new().top_round_rect(x, y, w, h, t.radius_lg).fill(cx.canvas, t.bg);
-        Path::new().top_round_rect_outline(x, y, w, h, t.radius_lg, t.border_px as f32).fill(cx.canvas, t.fg);
+        fill_top_round_rect(cx.canvas, b, t.radius_lg, t.bg);
+        stroke_top_round_rect(cx.canvas, b, t.radius_lg, t.border_px, t.fg);
         // The side edges stop 8 px above the bottom: the panel's last 8 px stay empty.
         cx.canvas.fill_rect(b.x, b.bottom() - 8, b.w as i32, 8, t.bg);
         // Grab handle: a pill, mid gray, thick enough not to ghost.
@@ -254,15 +253,19 @@ impl Widget for BottomSheet {
     fn event(&mut self, ev: &UiEvent, _b: Rect) -> EventResult {
         match ev {
             UiEvent::Gesture(Gesture::Swipe { dir: Direction::Down, .. }) => EventResult::Action("close".into()),
-            UiEvent::Gesture(_) | UiEvent::Touch(_) => {
+            // Taps on the sheet's empty parts do not fall through to what is under it.
+            UiEvent::Gesture(_) => {
                 self.taken = true;
                 EventResult::Handled
             }
+            // Touch notifications are left alone: a widget that takes one is painted
+            // again, and for the sheet that is every control on it (the touch-down and
+            // the lift of each tap on a control the sheet does not handle itself).
             _ => EventResult::Ignored,
         }
     }
 
-    /// A touch or tap on the sheet's empty parts changes nothing: no rectangle, so no
+    /// A tap on the sheet's empty parts changes nothing: no rectangle, so no
     /// refresh (the tree would otherwise repaint the whole sheet, which for a tall sheet
     /// becomes a full-screen flash). The first paint is reported in full.
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
@@ -538,6 +541,12 @@ mod tests {
             dir: crate::Direction::Down,
         });
         assert_eq!(s.event(&swipe, BottomSheet::frame(screen, 700)), EventResult::Action("close".into()));
+        // Touch notifications pass by (taking one would repaint every control on it).
+        let p = Point::new(600, 1300);
+        for kind in [crate::TouchKind::Down, crate::TouchKind::Up] {
+            let touch = UiEvent::Touch(crate::Touch { slot: 0, kind, pos: p, start: p, held: Duration::ZERO, moved: false });
+            assert_eq!(s.event(&touch, BottomSheet::frame(screen, 700)), EventResult::Ignored);
+        }
         let t = Toast { text: "Saved".into(), timeout: Duration::from_secs(2) };
         assert_eq!(t.refresh_class(), RefreshClass::Du);
         assert!(Toast::frame(screen).bottom() < 1696);

@@ -312,6 +312,40 @@ pub fn stroke_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, width: f32, 
     Path::new().round_rect_outline(r.x as f32, r.y as f32, r.w as f32, r.h as f32, radius, width).fill(canvas, value);
 }
 
+/// Rows at the top of a [`Path::top_round_rect`] of radius `radius` that its corners
+/// reach, or `None` when they reach the whole of `r` (a short shape).
+fn top_band(r: Rect, radius: f32) -> Option<u32> {
+    let band = radius.max(0.0).ceil() as u32 + 2;
+    (band < r.h).then_some(band)
+}
+
+/// Fills [`Path::top_round_rect`] of `r` with the same pixels: the rounded rows through
+/// the path, the rest as one rectangle. A sheet as tall as the screen would otherwise
+/// take a coverage mask of its whole area (a few MB, most of the coverage cache).
+pub fn fill_top_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, value: u8) {
+    let (x, y, w) = (r.x as f32, r.y as f32, r.w as f32);
+    let Some(band) = top_band(r, radius) else {
+        Path::new().top_round_rect(x, y, w, r.h as f32, radius).fill(canvas, value);
+        return;
+    };
+    Path::new().top_round_rect(x, y, w, band as f32, radius).fill(canvas, value);
+    canvas.fill_rect(r.x, r.y + band as i32, r.w as i32, (r.h - band) as i32, value);
+}
+
+/// Fills [`Path::top_round_rect_outline`] of `r` (`width` whole pixels) with the same
+/// pixels: the rounded rows through the path, the side edges below them as rectangles.
+pub fn stroke_top_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, width: i32, value: u8) {
+    let (x, y, w, wf) = (r.x as f32, r.y as f32, r.w as f32, width as f32);
+    let Some(band) = top_band(r, radius).filter(|b| *b as i32 > width) else {
+        Path::new().top_round_rect_outline(x, y, w, r.h as f32, radius, wf).fill(canvas, value);
+        return;
+    };
+    Path::new().top_round_rect_outline(x, y, w, band as f32, radius, wf).fill(canvas, value);
+    let (y0, h) = (r.y + band as i32, (r.h - band) as i32);
+    canvas.fill_rect(r.x, y0, width, h, value);
+    canvas.fill_rect(r.right() - width, y0, width, h, value);
+}
+
 /// Draws `src` scaled to fit inside `r` (aspect kept, centred; each target pixel is the
 /// mean of the source pixels it covers). Returns the rectangle actually covered.
 pub fn blit_fit(canvas: &mut Canvas, src: &Canvas, r: Rect) -> Rect {
@@ -385,6 +419,33 @@ pub fn center(r: Rect) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The banded top-rounded fill and outline draw exactly what one path over the whole
+    /// shape draws, also clipped, short and on a gray background.
+    #[test]
+    fn top_round_rect_bands_match_the_whole_path() {
+        let cases = [
+            (Rect::new(0, 240, 1272, 1456), 24.0, 3),
+            (Rect::new(0, 7, 300, 200), 24.5, 3),
+            (Rect::new(-5, 10, 200, 90), 10.0, 1),
+            (Rect::new(3, 20, 180, 20), 24.0, 3),
+            (Rect::new(10, 30, 150, 60), 0.0, 4),
+        ];
+        for (r, radius, width) in cases {
+            for clip in [None, Some(Rect::new(0, r.y + 5, 120, 40))] {
+                let (mut a, mut b) = (Canvas::new(400.max(r.right() as usize + 4), r.bottom() as usize + 4), Canvas::new(1, 1));
+                a.pixels.fill(0x88);
+                a.set_clip(clip);
+                b.clone_from(&a);
+                let (x, y, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+                Path::new().top_round_rect(x, y, w, h, radius).fill(&mut a, 255);
+                Path::new().top_round_rect_outline(x, y, w, h, radius, width as f32).fill(&mut a, 0);
+                fill_top_round_rect(&mut b, r, radius, 255);
+                stroke_top_round_rect(&mut b, r, radius, width, 0);
+                assert!(a.pixels == b.pixels, "{r:?} radius {radius} width {width} clip {clip:?}");
+            }
+        }
+    }
 
     /// `blend` before the row-slice version (2026-11-02): get/set per pixel.
     fn blend_reference(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {

@@ -17,7 +17,8 @@ in_log() { guest "grep -q -- '$1' $DEST/rinky.log"; }
 log_count_at_least() { [ "$(guest "grep -c -- '$1' $DEST/rinky.log" 2>/dev/null || echo 0)" -ge "$2" ]; }
 wait_home 240 home-before
 guest "rm -f $DB $DB-journal" || fail "remove $DB"
-start_reader
+# Fast on_page_change calls are logged at debug.
+READER_LOG=debug start_reader
 wait_until 30 "first page" in_log "on_page_change" || fail "no on_page_change in the log"
 not_home page1
 sleep 8; tap 1000 900; sleep 8; tap 1000 900; sleep 8; tap 1000 900; sleep 2

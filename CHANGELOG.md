@@ -39,6 +39,15 @@ All notable changes to rinky are listed here. The format is based on
   pages after it to be counted.
 - The library shows its books at once when rinky starts and reads the book folders
   in the background; books added or removed meanwhile show up a moment later.
+### Changed
+- Reading settings (Aa): a tap on a control no longer redraws the whole sheet when the
+  finger goes down and again when it lifts, so the sheet answers taps sooner. The
+  sheet also opens faster.
+
+### Fixed
+- Reading settings (Aa): a preset or a font size step now also refreshes the preview
+  and the other controls it changes (the size, the preset chips, Justify), which
+  could stay showing the old values on the screen.
 
 ## [0.5.3] - 2026-11-07
 

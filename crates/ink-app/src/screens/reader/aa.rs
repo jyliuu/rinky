@@ -30,8 +30,10 @@
 //! ([`ReaderScreen::link_return_page`], [`ReaderScreen::go_back_from_link`]).
 //!
 //! The controls share one [`Shown`] record: a control updates it from its own action and
-//! every control reads it before painting, so after a preset (one action that changes
-//! several values) the whole sheet shows the new values when the reader repaints it.
+//! every control reads it before painting. After every action [`show_changes`] marks the
+//! other controls whose look the action changed (a preset sets the size, spacing,
+//! margins, justify and hyphenation; a size step selects or clears a preset), so they
+//! are drawn and shown in the same frame.
 //!
 //! Actions: `aa-size:PX`, `aa-spacing:F`, `aa-margin:PX`, `aa-mtop:PX`, `aa-mbottom:PX`,
 //! `aa-justify:on|off`, `aa-hyph:on|off`, `aa-publisher:on|off` (the book's CSS),
@@ -58,7 +60,7 @@ use ink_store::Settings;
 use ink_text::Style;
 use ink_ui::controls::{paint_round_button, paint_slider_knob, paint_slider_track};
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
-use ink_ui::{BottomSheet, Button, EventResult, Gesture, Icon, Label, PaintCx, Segmented, Tabs, Toggle, TouchKind, UiEvent, Widget};
+use ink_ui::{BottomSheet, Button, EventResult, Gesture, Icon, Label, PaintCx, Segmented, Tabs, Toggle, TouchKind, UiEvent, Widget, WidgetId};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -650,6 +652,9 @@ impl ReaderScreen {
 
     /// Handles `aa` and the `aa-*` actions; `None` when `a` is not one of them.
     pub(super) fn aa_action(&mut self, a: &str, cx: &mut AppCtx) -> anyhow::Result<Option<Transition>> {
+        if let Some(o) = self.overlay.as_mut().filter(|o| o.kind == OverlayKind::Aa && a.starts_with("aa-")) {
+            show_changes(o);
+        }
         match a {
             "aa" => self.open_aa(cx),
             "aa-linkback" => {
@@ -768,6 +773,11 @@ enum Inner {
     Toggle(Toggle, fn(&Shown) -> bool),
 }
 
+/// The chip with value `v` (`usize::MAX`: none).
+fn chip_of(chips: &[(String, f32)], v: f32) -> usize {
+    chips.iter().position(|(_, c)| (c - v).abs() < 0.01).unwrap_or(usize::MAX)
+}
+
 /// An ink-ui control bound to one value of the shared [`Shown`]: it shows the shared
 /// value, maps a chip to its action and records the action in the shared values.
 struct Control {
@@ -782,13 +792,20 @@ impl Control {
         c
     }
 
+    /// The shared values no longer match what the control shows (another control
+    /// changed them).
+    fn stale(&self) -> bool {
+        let s = self.shown.borrow();
+        match &self.inner {
+            Inner::Seg(w, chips, value) => w.selected != chip_of(chips, value(&s)),
+            Inner::Toggle(t, on) => t.on != on(&s),
+        }
+    }
+
     fn sync(&mut self) {
         let s = self.shown.borrow();
         match &mut self.inner {
-            Inner::Seg(w, chips, value) => {
-                let v = value(&s);
-                w.selected = chips.iter().position(|(_, c)| (c - v).abs() < 0.01).unwrap_or(usize::MAX);
-            }
+            Inner::Seg(w, chips, value) => w.selected = chip_of(chips, value(&s)),
             Inner::Toggle(t, on) => t.on = on(&s),
         }
     }
@@ -875,12 +892,41 @@ struct SliderPanel {
     drag: Option<(usize, f32)>,
     /// Rows changed since the last paint (positions in `which`).
     changed: Vec<usize>,
+    /// The preview changed since the last paint (by another control: a font, a preset).
+    preview_changed: bool,
+    /// What the last paint showed.
+    painted: Option<PanelLook>,
     /// A drag just ended: the next update is a REAGL settle of what DU showed (no flash).
     settle: bool,
     /// Shaped preview words for (family, size, face).
     cache: Option<PreviewCache>,
     /// Time of the last paint (logged on release).
     last_paint: Duration,
+}
+
+/// The shared values a [`SliderPanel`] draws: its rows' values and the preview's.
+#[derive(Clone, Debug, PartialEq)]
+struct PanelLook {
+    /// [`Shown::get`] of every slider.
+    values: [f32; 5],
+    justify: bool,
+    para_space: f32,
+    indent: f32,
+    weight: u8,
+    font: Option<String>,
+}
+
+impl PanelLook {
+    fn new(s: &Shown) -> Self {
+        PanelLook {
+            values: std::array::from_fn(|i| s.get(i)),
+            justify: s.justify,
+            para_space: s.para_space,
+            indent: s.indent,
+            weight: s.weight,
+            font: s.font.clone(),
+        }
+    }
 }
 
 /// The preview's words shaped once per family and size: a spacing or margin drag
@@ -898,7 +944,31 @@ struct PreviewCache {
 
 impl SliderPanel {
     fn new(which: Vec<usize>, shown: &Rc<RefCell<Shown>>, screen_w: u32) -> Self {
-        SliderPanel { which, shown: shown.clone(), screen_w, drag: None, changed: Vec::new(), settle: false, cache: None, last_paint: Duration::ZERO }
+        SliderPanel {
+            which,
+            shown: shown.clone(),
+            screen_w,
+            drag: None,
+            changed: Vec::new(),
+            preview_changed: false,
+            painted: None,
+            settle: false,
+            cache: None,
+            last_paint: Duration::ZERO,
+        }
+    }
+
+    /// Marks the rows and the preview whose shared values differ from the last paint;
+    /// true when anything does.
+    fn show_changes(&mut self) -> bool {
+        let now = PanelLook::new(&self.shown.borrow());
+        let Some(old) = self.painted.as_ref().filter(|old| **old != now) else { return false };
+        let rows: Vec<usize> = (0..self.which.len()).filter(|&k| old.values[self.which[k]] != now.values[self.which[k]]).collect();
+        for k in rows {
+            self.mark(k);
+        }
+        self.preview_changed = true;
+        true
     }
 
     /// Height for `n` rows under a preview of `preview_h`.
@@ -1076,6 +1146,7 @@ impl Widget for SliderPanel {
             let shown = self.shown.clone();
             let s = shown.borrow();
             paint_preview(cx, preview, &s, self.screen_w, &mut self.cache);
+            self.painted = Some(PanelLook::new(&s));
         }
         for (k, row) in rows.into_iter().enumerate() {
             self.paint_row(cx, k, row);
@@ -1143,7 +1214,8 @@ impl Widget for SliderPanel {
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
         self.settle = false;
-        if self.changed.is_empty() {
+        let preview_changed = std::mem::take(&mut self.preview_changed);
+        if self.changed.is_empty() && !preview_changed {
             return None;
         }
         let (preview, rows) = Self::areas(b, self.which.len());
@@ -1160,6 +1232,8 @@ struct FamilyGrid {
     names: Vec<String>,
     shown: Rc<RefCell<Shown>>,
     page: usize,
+    /// The family the last paint showed selected.
+    painted: Option<String>,
 }
 
 impl FamilyGrid {
@@ -1201,6 +1275,11 @@ impl FamilyGrid {
     fn selected(&self) -> String {
         self.shown.borrow().font.clone().unwrap_or_else(|| BUILTIN.to_string())
     }
+
+    /// The shared family differs from the one the last paint selected.
+    fn stale(&self) -> bool {
+        self.painted.as_ref().is_some_and(|p| *p != self.selected())
+    }
 }
 
 impl Widget for FamilyGrid {
@@ -1208,6 +1287,7 @@ impl Widget for FamilyGrid {
         let (fg, bg) = (cx.theme.fg, cx.theme.bg);
         let sel = self.selected();
         let pages = self.paging(b).2;
+        self.painted = Some(sel.clone());
         for (r, cell) in self.cells(b) {
             let rad = cx.theme.radius;
             match cell {
@@ -1319,7 +1399,7 @@ fn rows(tab: Tab, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
             vec![
                 Row::one("preset", None, CONTROL_H, seg(presets, |s| s.preset().map_or(-1.0, |i| i as f32))),
                 Row::one("size", None, SliderPanel::height(1, PREVIEW_H), Box::new(SliderPanel::new(vec![0], shown, screen_w))),
-                Row::one("font", Some("Font"), 2 * CONTROL_H + GAP, Box::new(FamilyGrid { names: families, shown: shown.clone(), page: 0 })),
+                Row::one("font", Some("Font"), 2 * CONTROL_H + GAP, Box::new(FamilyGrid { names: families, shown: shown.clone(), page: 0, painted: None })),
                 Row::pair(("justify", toggle("Justify", "aa-justify", |s| s.justify)), ("hyph", toggle("Hyphenate", "aa-hyph", |s| s.hyph)), false),
                 Row::pair(("publisher", toggle("Book's styles", "aa-publisher", |s| s.publisher)), ("weight", seg(chips(&WEIGHTS, "aa-weight"), |s| s.weight as f32)), true),
             ]
@@ -1345,6 +1425,21 @@ fn rows(tab: Tab, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
         .into_iter()
         .flatten()
         .collect(),
+    }
+}
+
+/// Marks every control of the sheet `o` whose look no longer matches the shared values
+/// (another control changed them), so the next paint draws and shows it. Controls that
+/// took the action itself are already marked; they match and are left as they are.
+pub fn show_changes(o: &mut Overlay) {
+    let ids: Vec<WidgetId> = o.ids.values().copied().collect();
+    let t = &mut o.tree;
+    for id in ids {
+        if t.get_mut::<Control>(id).is_some_and(|c| c.stale()) || t.get_mut::<FamilyGrid>(id).is_some_and(|g| g.stale()) {
+            t.mark_dirty(id, RefreshClass::Gl16);
+        } else if let Some(class) = t.get_mut::<SliderPanel>(id).and_then(|p| p.show_changes().then(|| p.refresh_class())) {
+            t.mark_changed(id, class);
+        }
     }
 }
 
