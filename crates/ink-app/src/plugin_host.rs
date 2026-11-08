@@ -1383,6 +1383,11 @@ enum BoxKind {
     Row,
 }
 
+impl BoxKind {
+    /// The word after `:::` that starts each kind of block.
+    const WORDS: [(&str, BoxKind); 7] = [("", Self::Plain), ("you", Self::You), ("answer", Self::Answer), ("action", Self::Action), ("chips", Self::Chip), ("card", Self::Card), ("row", Self::Row)];
+}
+
 /// A `:::` block: kind, its two `|`-separated arguments, its Markdown.
 #[derive(Clone, Debug)]
 struct Seg {
@@ -1426,34 +1431,21 @@ fn split_directives(md: &str) -> Directives {
                 Some((a, b)) => (a.trim().to_string(), b.trim().to_string()),
                 None => (args.trim().to_string(), String::new()),
             };
-            let kind = match word {
-                "" => Some(BoxKind::Plain),
-                "you" => Some(BoxKind::You),
-                "answer" => Some(BoxKind::Answer),
-                "action" => Some(BoxKind::Action),
-                "chips" => Some(BoxKind::Chip),
-                "card" => Some(BoxKind::Card),
-                "row" => Some(BoxKind::Row),
-                "input" => {
-                    input = Some((a, b));
-                    continue;
-                }
-                "sheet" => {
-                    sheet = true;
-                    continue;
-                }
-                "back" => {
-                    back = Some(a);
-                    continue;
-                }
+            match word {
+                "input" => input = Some((a, b)),
+                "sheet" => sheet = true,
+                "back" => back = Some(a),
                 // Read by `PluginUi::push` and `MarkdownView::set_text`.
-                "top" | "emphasis" => continue,
-                _ => None,
-            };
-            if let Some(kind) = kind {
-                flush(std::mem::replace(&mut cur, (kind, a, b, String::new())), &mut segs);
-                continue;
+                "top" | "emphasis" => {}
+                _ => match BoxKind::WORDS.iter().find(|(w, _)| *w == word) {
+                    Some(&(_, kind)) => flush(std::mem::replace(&mut cur, (kind, a, b, String::new())), &mut segs),
+                    None => {
+                        cur.3.push_str(line);
+                        cur.3.push('\n');
+                    }
+                },
             }
+            continue;
         }
         cur.3.push_str(line);
         cur.3.push('\n');
@@ -2044,12 +2036,7 @@ impl MarkdownView {
                 BoxKind::Plain => lines.extend(layout_blocks(cx, &seg.blocks, base, width)),
                 BoxKind::You => {
                     let inner = (width * 0.85 - 2.0 * PAD).max(100.0);
-                    let mut body = layout_blocks(cx, &seg.blocks, base, inner);
-                    trim_gaps(&mut body);
-                    if !seg.b.is_empty() {
-                        body.push(gap_line(base * 0.3));
-                        body.extend(caption_lines(cx, &seg.b, cap, inner));
-                    }
+                    let mut body = text_and_caption(cx, seg, base, cap, inner);
                     let w = extent(cx, &body).min(inner) + 2.0 * PAD;
                     let x = width - w;
                     shift(&mut body, x + PAD);
@@ -2067,16 +2054,9 @@ impl MarkdownView {
                         body.push(Line { height: h, runs: vec![Run { x: ix, text: label, style: Style::Bold, px: cap, link: None, muted: false }], icon: Some((PAD, Icon::Chat)), ..Line::default() });
                         body.push(gap_line(base * 0.3));
                     }
-                    let mut text = layout_blocks(cx, &seg.blocks, base, inner);
-                    trim_gaps(&mut text);
+                    let mut text = text_and_caption(cx, seg, base, cap, inner);
                     shift(&mut text, PAD);
                     body.extend(text);
-                    if !seg.b.is_empty() {
-                        body.push(gap_line(base * 0.3));
-                        let mut foot = caption_lines(cx, &seg.b, cap, inner);
-                        shift(&mut foot, PAD);
-                        body.extend(foot);
-                    }
                     push_box(&mut lines, &mut groups, Group { kind: seg.kind, x: 0.0, w: width, link: None }, body, PAD * 0.6, PAD);
                     lines.push(gap_line(base * 0.6));
                 }
@@ -2217,6 +2197,18 @@ impl MarkdownView {
         self.page = self.page.min(self.pages.len() - 1);
         self.laid_for = Some((b.w, b.h));
     }
+}
+
+/// `seg`'s Markdown laid out `width` wide without the gaps at its end, then its second
+/// argument as a caption below it (`:::you` and `:::answer`).
+fn text_and_caption(cx: &mut Lay, seg: &Seg, base: f32, cap: f32, width: f32) -> Vec<Line> {
+    let mut body = layout_blocks(cx, &seg.blocks, base, width);
+    trim_gaps(&mut body);
+    if !seg.b.is_empty() {
+        body.push(gap_line(base * 0.3));
+        body.extend(caption_lines(cx, &seg.b, cap, width));
+    }
+    body
 }
 
 /// `text` as muted caption lines (`px`) wrapped to `width`.
