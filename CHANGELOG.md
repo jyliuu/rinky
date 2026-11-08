@@ -46,7 +46,8 @@ All notable changes to rinky are listed here. The format is based on
   colours now come out darker (pure red is 77 of 255 instead of 129).
 - PDF and comic page turns are near instant when you rest on a page for a moment:
   rinky draws the next page (or the previous one, after turning back) while you read.
-- Long EPUB books open sooner: rinky unpacks the chapter it shows first, not every chapter.
+- Long EPUB books open sooner, above all when opened again: rinky unpacks the chapter
+  it shows first and the others while you read, not every chapter before the first page.
 
 ### Fixed
 - Reading settings (Aa): a preset or a font size step now also refreshes the preview
