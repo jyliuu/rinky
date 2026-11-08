@@ -799,38 +799,19 @@ fn attr_matches(a: &AttrSel, v: Option<&str>) -> bool {
 
 /// True when `e` matches compound `c`.
 pub fn matches_compound<E: SelectorElement>(c: &Compound, e: E) -> bool {
-    if let Some(t) = &c.tag {
-        if !e.local_name().eq_ignore_ascii_case(t) {
-            return false;
-        }
-    }
-    if !c.ids.is_empty() && !c.ids.iter().all(|i| e.id() == Some(i.as_str())) {
-        return false;
-    }
-    if !c.classes.iter().all(|cl| e.has_class(cl)) {
-        return false;
-    }
-    if !c.attrs.iter().all(|a| attr_matches(a, e.attr(&a.name))) {
-        return false;
-    }
-    c.pseudos.iter().all(|p| match p {
-        Pseudo::FirstChild => e.prev_sibling().is_none(),
-        Pseudo::LastChild => e.next_sibling().is_none(),
-        Pseudo::OnlyChild => e.prev_sibling().is_none() && e.next_sibling().is_none(),
-        Pseudo::FirstOfType => {
-            let mut s = e.prev_sibling();
-            while let Some(x) = s {
-                if x.local_name() == e.local_name() {
-                    return false;
-                }
-                s = x.prev_sibling();
-            }
-            true
-        }
-        Pseudo::Root => e.is_root(),
-        Pseudo::Link => e.local_name() == "a" && e.attr("href").is_some(),
-        Pseudo::Not(inner) => !matches_compound(inner, e),
-    })
+    c.tag.as_ref().is_none_or(|t| e.local_name().eq_ignore_ascii_case(t))
+        && c.ids.iter().all(|i| e.id() == Some(i.as_str()))
+        && c.classes.iter().all(|cl| e.has_class(cl))
+        && c.attrs.iter().all(|a| attr_matches(a, e.attr(&a.name)))
+        && c.pseudos.iter().all(|p| match p {
+            Pseudo::FirstChild => e.prev_sibling().is_none(),
+            Pseudo::LastChild => e.next_sibling().is_none(),
+            Pseudo::OnlyChild => e.prev_sibling().is_none() && e.next_sibling().is_none(),
+            Pseudo::FirstOfType => std::iter::successors(e.prev_sibling(), |x| x.prev_sibling()).all(|x| x.local_name() != e.local_name()),
+            Pseudo::Root => e.is_root(),
+            Pseudo::Link => e.local_name() == "a" && e.attr("href").is_some(),
+            Pseudo::Not(inner) => !matches_compound(inner, e),
+        })
 }
 
 /// True when `e` matches selector `s`.
