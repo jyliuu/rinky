@@ -33,13 +33,8 @@ pub const PROVIDER_ORDER: [&str; 4] = ["openai", "deepseek", "openrouter", "anth
 impl Kind {
     /// From a provider id (`openai`, `deepseek`, `openrouter`, `anthropic`).
     pub fn from_id(id: &str) -> Option<Kind> {
-        match id.trim().to_ascii_lowercase().as_str() {
-            "openai" => Some(Kind::OpenAi),
-            "deepseek" => Some(Kind::DeepSeek),
-            "openrouter" => Some(Kind::OpenRouter),
-            "anthropic" => Some(Kind::Anthropic),
-            _ => None,
-        }
+        let id = id.trim().to_ascii_lowercase();
+        [Kind::OpenAi, Kind::DeepSeek, Kind::OpenRouter, Kind::Anthropic].into_iter().find(|k| k.id() == id)
     }
 
     /// Guess from a base URL (same rules as `providers/registry.lua`).
@@ -280,6 +275,16 @@ fn provider_error(decoded: &Value, anthropic: bool) -> Option<String> {
     Some(m.unwrap_or_else(|| "provider error".into()))
 }
 
+/// `data` as a JSON object, or `None` when it is not one.
+fn object(data: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(data).ok().filter(Value::is_object)
+}
+
+/// The string field `k` of `v` (empty when missing).
+fn text_at(v: &Value, k: &str) -> String {
+    v.get(k).and_then(Value::as_str).unwrap_or("").into()
+}
+
 fn json_text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -499,14 +504,10 @@ impl StreamAccumulator {
         if data == "[DONE]" {
             return;
         }
-        let Ok(d) = serde_json::from_str::<Value>(data) else {
+        let Some(d) = object(data.as_bytes()) else {
             self.error = Some("The AI service returned an invalid streaming response.".into());
             return;
         };
-        if !d.is_object() {
-            self.error = Some("The AI service returned an invalid streaming response.".into());
-            return;
-        }
         if let Some(e) = provider_error(&d, false) {
             self.error = Some(format!("AI provider error: {e}"));
             return;
@@ -569,14 +570,10 @@ impl StreamAccumulator {
     }
 
     fn feed_anthropic(&mut self, data: &str) {
-        let Ok(d) = serde_json::from_str::<Value>(data) else {
+        let Some(d) = object(data.as_bytes()) else {
             self.error = Some("The AI service returned an invalid Anthropic stream.".into());
             return;
         };
-        if !d.is_object() {
-            self.error = Some("The AI service returned an invalid Anthropic stream.".into());
-            return;
-        }
         self.events += 1;
         let index = d.get("index").and_then(num).map(|x| x as i64).unwrap_or(0);
         match d.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -594,15 +591,7 @@ impl StreamAccumulator {
                 match b.get("type").and_then(Value::as_str) {
                     Some("tool_use") => {
                         let input = b.get("input").filter(|v| v.is_object()).cloned();
-                        self.calls.insert(
-                            index,
-                            PartialCall {
-                                id: b.get("id").and_then(Value::as_str).unwrap_or("").into(),
-                                name: b.get("name").and_then(Value::as_str).unwrap_or("").into(),
-                                input,
-                                args: String::new(),
-                            },
-                        );
+                        self.calls.insert(index, PartialCall { id: text_at(b, "id"), name: text_at(b, "name"), input, args: String::new() });
                     }
                     Some("text") => {
                         if let Some(t) = b.get("text").and_then(Value::as_str) {
@@ -675,12 +664,9 @@ impl StreamAccumulator {
 
 /// Reads a whole (non-streamed) 2xx response body.
 pub fn parse_whole(kind: Kind, body: &[u8]) -> Result<Reply, Failure> {
-    let Ok(d) = serde_json::from_slice::<Value>(body) else {
+    let Some(d) = object(body) else {
         return Err(Failure::new("The AI service returned invalid JSON.", None));
     };
-    if !d.is_object() {
-        return Err(Failure::new("The AI service returned invalid JSON.", None));
-    }
     if kind == Kind::Anthropic {
         let usage = d.get("usage").and_then(anthropic_usage);
         if let Some(e) = provider_error(&d, true) {
@@ -693,11 +679,10 @@ pub fn parse_whole(kind: Kind, body: &[u8]) -> Result<Reply, Failure> {
         for b in d.get("content").and_then(Value::as_array).into_iter().flatten() {
             match b.get("type").and_then(Value::as_str) {
                 Some("text") => text.push_str(b.get("text").and_then(Value::as_str).unwrap_or("")),
-                Some("tool_use") => calls.push(ToolCall {
-                    id: b.get("id").and_then(Value::as_str).unwrap_or("").into(),
-                    name: b.get("name").and_then(Value::as_str).unwrap_or("").into(),
-                    arguments: b.get("input").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({})),
-                }),
+                Some("tool_use") => {
+                    let arguments = b.get("input").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
+                    calls.push(ToolCall { id: text_at(b, "id"), name: text_at(b, "name"), arguments })
+                }
                 _ => {}
             }
         }
@@ -724,7 +709,7 @@ pub fn parse_whole(kind: Kind, body: &[u8]) -> Result<Reply, Failure> {
             Some(v @ Value::Object(_)) => v.clone(),
             _ => json!({}),
         };
-        calls.push(ToolCall { id: raw.get("id").and_then(Value::as_str).unwrap_or("").into(), name: name.into(), arguments });
+        calls.push(ToolCall { id: text_at(raw, "id"), name: name.into(), arguments });
     }
     let text = match msg.get("content") {
         Some(Value::String(s)) => Some(s.clone()),
