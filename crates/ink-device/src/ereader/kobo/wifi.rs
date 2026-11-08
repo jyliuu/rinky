@@ -441,7 +441,13 @@ pub fn probe() -> crate::netman::Probe {
         return Probe::default();
     }
     let e = env();
-    let address = link::has_address(std::path::Path::new("/sys"), &e.interface);
+    let sys = std::path::Path::new("/sys");
+    if !link::may_be_associated(link::operstate(sys, &e.interface).as_deref()) {
+        // Not associated, sysfs says: no wpa_cli (this runs every 10 s while no
+        // network is found).
+        return Probe { radio: true, ..Probe::default() };
+    }
+    let address = link::has_address(sys, &e.interface);
     let kv = status(e);
     let associated = get(&kv, "wpa_state") == Some("COMPLETED");
     let signal = address

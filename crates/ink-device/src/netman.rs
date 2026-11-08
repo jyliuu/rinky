@@ -18,8 +18,10 @@
 //! - Associated without an address and the backend runs DHCP itself
 //!   ([`NetBackend::needs_dhcp`], a Kobo): DHCP runs, once per association (again after
 //!   [`JOIN_FOR`] without a lease).
-//! - While connected the link is probed every [`CONNECTED_PROBE`] (sysfs only on a
-//!   Kobo, plus two lipc reads on a Kindle).
+//! - While connected the link is probed every [`CONNECTED_PROBE`]: sysfs and
+//!   `getifaddrs`, plus two `wpa_cli` calls on a Kobo or two lipc reads on a Kindle.
+//!   While not connected a probe whose sysfs operational state says there is no
+//!   association (`down`, `dormant`) starts no process.
 //! - "Wi-Fi was on" ([`NetEvent::WasOn`]): set by turning Wi-Fi on or a connection,
 //!   cleared only by the user turning it off. The app keeps it in the settings and
 //!   passes it back at start-up ([`Cmd::Boot`]); with it set, the radio is turned on
@@ -632,10 +634,26 @@ pub fn spawn(mut backend: Box<dyn NetBackend + Send>, queue: Arc<NetQueue>) -> O
 pub mod link {
     use std::path::Path;
 
+    /// The interface's operational state (`/sys/class/net/IF/operstate`, trimmed):
+    /// `up`, `dormant` (Wi-Fi not authenticated yet), `down`, `unknown` (a driver
+    /// that does not report it), ... `None` when the file cannot be read (no such
+    /// interface, or a kernel without it). `sys` is the sysfs root (`/sys` on a device).
+    pub fn operstate(sys: &Path, iface: &str) -> Option<String> {
+        std::fs::read_to_string(sys.join("class/net").join(iface).join("operstate")).ok().map(|s| s.trim().to_string())
+    }
+
     /// The interface's operational state is `up` (for Wi-Fi: associated and
-    /// authenticated). `sys` is the sysfs root (`/sys` on a device).
+    /// authenticated).
     pub fn operstate_up(sys: &Path, iface: &str) -> bool {
-        std::fs::read_to_string(sys.join("class/net").join(iface).join("operstate")).is_ok_and(|s| s.trim() == "up")
+        operstate(sys, iface).as_deref() == Some("up")
+    }
+
+    /// The operational state `state` may come with an association: not when sysfs says
+    /// plainly that there is none (`down`, `dormant`, ...). `unknown` and an unreadable
+    /// file may (a driver that does not report the state): the caller then asks the
+    /// platform. A probe skips its process calls when this is false.
+    pub fn may_be_associated(state: Option<&str>) -> bool {
+        !matches!(state, Some("down" | "dormant" | "lowerlayerdown" | "notpresent"))
     }
 
     /// An address that means a working connection: IPv4, or IPv6 outside the
@@ -684,9 +702,11 @@ pub mod link {
         out
     }
 
-    /// The interface is up and has a usable address: connected.
+    /// The interface is up and has a usable address: connected. An operational state
+    /// of `unknown` or none readable counts as up (some Wi-Fi drivers never set it;
+    /// the address then decides alone).
     pub fn has_address(sys: &Path, iface: &str) -> bool {
-        operstate_up(sys, iface) && addresses(iface).iter().any(usable)
+        matches!(operstate(sys, iface).as_deref(), Some("up" | "unknown") | None) && addresses(iface).iter().any(usable)
     }
 
     #[cfg(test)]
@@ -702,6 +722,20 @@ pub mod link {
             std::fs::write(d.join("class/net/wlan0/operstate"), "up\n").unwrap();
             assert!(operstate_up(&d, "wlan0"));
             assert!(!operstate_up(&d, "eth9"));
+            assert_eq!(operstate(&d, "wlan0").as_deref(), Some("up"));
+            assert_eq!(operstate(&d, "eth9"), None);
+            assert!(!may_be_associated(Some("dormant")) && !may_be_associated(Some("down")));
+            assert!(may_be_associated(Some("up")) && may_be_associated(Some("unknown")) && may_be_associated(None));
+            // A driver that reports "unknown", or no sysfs file: the address decides.
+            let lo = if cfg!(target_os = "linux") { "lo" } else { "lo0" };
+            std::fs::create_dir_all(d.join(format!("class/net/{lo}"))).unwrap();
+            std::fs::write(d.join(format!("class/net/{lo}/operstate")), "down\n").unwrap();
+            assert!(!has_address(&d, lo), "down: not connected whatever the addresses");
+            // (127.0.0.1 stands in for a real address here.)
+            std::fs::write(d.join(format!("class/net/{lo}/operstate")), "unknown\n").unwrap();
+            assert!(has_address(&d, lo));
+            std::fs::remove_file(d.join(format!("class/net/{lo}/operstate"))).unwrap();
+            assert!(has_address(&d, lo));
             let _ = std::fs::remove_dir_all(&d);
             // The loopback interface has 127.0.0.1 on every unix host.
             let lo = if cfg!(target_os = "linux") { "lo" } else { "lo0" };

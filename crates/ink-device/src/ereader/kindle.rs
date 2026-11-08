@@ -96,6 +96,9 @@ fn start_join(lipc: &Lipc, essid: &str, password: Option<&str>) -> Result<()> {
     lipc.set_str(CMD, "ensureConnection", &format!("wifi:{essid}"))
 }
 
+/// The Kindle's Wi-Fi interface.
+const WLAN: &str = "wlan0";
+
 /// The Kindle's [`NetBackend`] for the network worker: wifid joins and runs DHCP; the
 /// link is read from sysfs and `getifaddrs` (connected), with wifid's `currentEssid`
 /// for the network's name. With Amazon's framework stopped wifid neither scans nor
@@ -128,7 +131,18 @@ impl NetBackend for KindleNet {
             return Probe::default();
         }
         let sys = self.sys.path("/sys");
-        let address = link::has_address(&sys, "wlan0");
+        let state = link::operstate(&sys, WLAN);
+        if !link::may_be_associated(state.as_deref()) {
+            // sysfs says plainly there is no association: no lipc process (this runs
+            // every 10 s while no network is found).
+            return Probe { radio, ..Probe::default() };
+        }
+        let address = if sys.join("class/net").join(WLAN).exists() {
+            link::has_address(&sys, WLAN)
+        } else {
+            // A model whose interface is not wlan0: wifid's word, as before the worker.
+            self.lipc.get_str(WIFID, "cmState").is_ok_and(|s| s == "CONNECTED")
+        };
         let current = self.lipc.hash_get(WIFID, "currentEssid").ok().and_then(|h| wifi::current_from(&h));
         let signal = address
             .then(|| self.lipc.get_str(WIFID, "signalStrength").ok().and_then(|s| wifi::parse_signal(&s)))
@@ -137,7 +151,7 @@ impl NetBackend for KindleNet {
         Probe {
             radio,
             address,
-            associated: address || link::operstate_up(&sys, "wlan0") || current.as_ref().is_some_and(|c| c.connected),
+            associated: address || state.as_deref() == Some("up") || current.as_ref().is_some_and(|c| c.connected),
             essid: current.map(|c| c.essid).filter(|e| !e.is_empty()),
             signal,
         }
