@@ -987,11 +987,19 @@ pub(super) mod tests {
         meta: ink_doc::Metadata,
         layout: ink_doc::LayoutSettings,
         selection: Option<Selection>,
+        /// The last [`ink_doc::Document::set_read_ahead`] call, shared with the test.
+        pub read_ahead: std::rc::Rc<std::cell::Cell<Option<bool>>>,
     }
 
     impl PagedDoc {
         fn new(pages: Vec<Vec<&'static str>>) -> Self {
-            PagedDoc { pages, meta: Default::default(), layout: ink_doc::LayoutSettings::for_screen(1272, 1696), selection: None }
+            PagedDoc {
+                pages,
+                meta: Default::default(),
+                layout: ink_doc::LayoutSettings::for_screen(1272, 1696),
+                selection: None,
+                read_ahead: Default::default(),
+            }
         }
         fn at(&self, page: usize, p: Point) -> (usize, usize) {
             let lines = &self.pages[page];
@@ -1058,6 +1066,9 @@ pub(super) mod tests {
         }
         fn set_selection(&mut self, sel: Selection) {
             self.selection = Some(sel);
+        }
+        fn set_read_ahead(&mut self, on: bool) {
+            self.read_ahead.set(Some(on));
         }
     }
 

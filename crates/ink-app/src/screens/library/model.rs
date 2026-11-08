@@ -9,7 +9,7 @@
 use super::covers;
 use ink_doc::Provider;
 use ink_store::koreader::{self, KoreaderDirs};
-use ink_store::library::{BookMeta, SortKey};
+use ink_store::library::{BookMeta, FolderScan, ScanReport, SortKey};
 use ink_store::{BookEntry, BookState, LibraryIndex, Paths, ReadingStatus};
 use std::collections::VecDeque;
 use std::sync::mpsc;
@@ -119,11 +119,34 @@ pub struct Library {
     pub unreadable: Vec<PathBuf>,
     /// Metadata read on a background thread ([`Library::start_background`]).
     worker: Option<MetaWorker>,
+    /// The folders read on a background thread ([`Library::start_scan`]).
+    scan: Option<mpsc::Receiver<(FolderScan, Duration)>>,
 }
 
 impl Library {
     /// Loads `library.json` (a broken file gives an empty index, logged) and scans `dirs`.
     pub fn open(paths: &Paths, dirs: &[PathBuf]) -> Library {
+        let mut lib = Self::load(paths, dirs);
+        lib.rescan();
+        lib
+    }
+
+    /// Loads `library.json` and reads `dirs` on a background thread
+    /// ([`Library::start_scan`]): the saved books can be shown at once, and the changes
+    /// come in with [`Library::take_scan`]. With no saved books (a first start) the
+    /// folders are scanned now, so the first screen is not an empty library.
+    pub fn open_saved(paths: &Paths, dirs: &[PathBuf]) -> Library {
+        let mut lib = Self::load(paths, dirs);
+        if lib.index.books.is_empty() {
+            lib.rescan();
+        } else {
+            lib.pending = lib.index.needs_metadata().into_iter().map(Path::to_path_buf).collect();
+            lib.start_scan();
+        }
+        lib
+    }
+
+    fn load(paths: &Paths, dirs: &[PathBuf]) -> Library {
         let index = match LibraryIndex::load(&paths.library()) {
             Ok(i) => i,
             Err(e) => {
@@ -131,9 +154,16 @@ impl Library {
                 LibraryIndex::default()
             }
         };
-        let mut lib = Library { index, paths: paths.clone(), dirs: dirs.to_vec(), pending: VecDeque::new(), unsaved: false, unreadable: Vec::new(), worker: None };
-        lib.rescan();
-        lib
+        Library {
+            index,
+            paths: paths.clone(),
+            dirs: dirs.to_vec(),
+            pending: VecDeque::new(),
+            unsaved: false,
+            unreadable: Vec::new(),
+            worker: None,
+            scan: None,
+        }
     }
 
     /// Sets the folders scanned by the next [`Library::rescan`].
@@ -142,14 +172,70 @@ impl Library {
     }
 
     /// Scans the folders again (new, changed and removed files) and queues metadata work.
+    /// A background scan still running is dropped: this one is newer.
     pub fn rescan(&mut self) {
+        self.scan = None;
         let t = Instant::now();
         let r = self.index.scan_report(&self.dirs, now());
+        self.scanned(r, t.elapsed(), "");
+    }
+
+    /// Reads the folders on a background thread (nice 10 on Linux);
+    /// [`Library::take_scan`] puts what it found into the index.
+    pub fn start_scan(&mut self) {
+        let dirs = self.dirs.clone();
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new().name("library-scan".into()).spawn(move || {
+            ink_html::paginate::lower_priority();
+            let t = Instant::now();
+            let scan = FolderScan::read(&dirs);
+            let _ = tx.send((scan, t.elapsed()));
+        });
+        match spawned {
+            Ok(_) => self.scan = Some(rx),
+            Err(e) => {
+                log::warn!("library: no scan thread ({e}); scanning now");
+                self.rescan();
+            }
+        }
+    }
+
+    /// True while the background scan runs.
+    pub fn scanning(&self) -> bool {
+        self.scan.is_some()
+    }
+
+    /// Puts the background scan's result into the index once it is there. True when
+    /// books were added or removed.
+    pub fn take_scan(&mut self) -> bool {
+        let Some(rx) = &self.scan else { return false };
+        let (scan, took) = match rx.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                log::warn!("library: the scan thread stopped; scanning now");
+                self.rescan();
+                return true;
+            }
+        };
+        self.scan = None;
+        let t = Instant::now();
+        let r = self.index.apply_scan(scan, now());
+        let changed = r.added > 0 || r.removed > 0;
+        self.scanned(r, took, &format!(" (background, applied in {:?})", t.elapsed()));
+        if self.worker.is_none() && self.pending.is_empty() {
+            self.save();
+        }
+        changed
+    }
+
+    /// Logs a scan's report and queues the books that need metadata.
+    fn scanned(&mut self, r: ScanReport, took: Duration, how: &str) {
         for e in &r.errors {
             log::warn!("library scan: {e}");
         }
         self.unreadable = r.unreadable;
-        log::info!("library scan: {} books, {} added, {} removed in {:?}", self.index.books.len(), r.added, r.removed, t.elapsed());
+        log::info!("library scan: {} books, {} added, {} removed in {took:?}{how}", self.index.books.len(), r.added, r.removed);
         self.pending = self.index.needs_metadata().into_iter().map(Path::to_path_buf).collect();
         self.unsaved |= r.added > 0 || r.removed > 0;
     }
@@ -474,6 +560,10 @@ impl Library {
         self.pending.retain(|p| p != path);
         self.index.remove(path);
         self.save_changed();
+        if self.scanning() {
+            // The running scan may have listed the file before it was deleted.
+            self.start_scan();
+        }
         Ok(())
     }
 

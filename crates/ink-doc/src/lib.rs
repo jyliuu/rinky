@@ -522,6 +522,14 @@ pub trait Document {
         true
     }
 
+    /// Turns on (the default) or off the pages an engine that paginates in the
+    /// background lays out past the current page whenever the count is asked
+    /// (`page_count`), so that a reader clamping page turns to the count never waits.
+    /// Off, `page_count` returns the pages known so far and never waits for the
+    /// background: a reader shows its first page with that count (and the estimate)
+    /// and turns this on once the page is on the panel. Default: nothing.
+    fn set_read_ahead(&mut self, _on: bool) {}
+
     /// A plausible total page count while pagination runs (`page_count().complete` is
     /// false), estimated from the sizes of the parts not paginated yet; show it marked
     /// as an estimate ("~1234"). `None` when the count is complete or no estimate exists.

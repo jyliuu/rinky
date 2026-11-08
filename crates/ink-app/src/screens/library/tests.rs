@@ -109,6 +109,61 @@ fn queries_sort_filter_and_search() {
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
+/// Waits for the background folder scan and applies it; true when it changed the books.
+fn take_scan(lib: &mut Library) -> bool {
+    let t = std::time::Instant::now();
+    while lib.scanning() {
+        assert!(t.elapsed() < Duration::from_secs(60), "scan thread did not finish");
+        if lib.take_scan() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+/// With a saved index the books are there at once and the folders are read on a
+/// thread: files added and removed while rinky was off come in with `take_scan`.
+#[test]
+fn open_saved_shows_the_saved_books_and_applies_the_scan_later() {
+    let (dir, paths) = books("open-saved", &["juliet.epub", "formats/sample.fb2"]);
+    let mut lib = Library::open(&paths, std::slice::from_ref(&dir));
+    lib.extract_some(Duration::from_secs(60));
+    let saved = |lib: &Library| {
+        let mut v: Vec<PathBuf> = lib.index.books.iter().map(|b| b.path.clone()).collect();
+        v.sort();
+        v
+    };
+    let before = saved(&lib);
+    std::fs::remove_file(dir.join("sample.fb2")).unwrap();
+    std::fs::copy(testdata("synthetic.epub"), dir.join("synthetic.epub")).unwrap();
+    let mut lib = Library::open_saved(&paths, std::slice::from_ref(&dir));
+    assert_eq!(saved(&lib), before);
+    assert_eq!(lib.pending(), 0, "the saved books have their metadata");
+    assert!(take_scan(&mut lib), "a book added and one removed");
+    assert!(!lib.scanning());
+    assert_eq!(saved(&lib), vec![dir.join("juliet.epub"), dir.join("synthetic.epub")]);
+    assert_eq!(lib.pending(), 1, "the new book waits for its metadata");
+    assert_eq!(lib.index.get(&dir.join("juliet.epub")).unwrap().title, "Romeo and Juliet");
+    // Nothing changed since: the next start scan changes nothing.
+    lib.extract_some(Duration::from_secs(60));
+    let mut lib = Library::open_saved(&paths, std::slice::from_ref(&dir));
+    assert!(!take_scan(&mut lib));
+    assert_eq!(lib.index.books.len(), 2);
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+/// No saved books (a first start): the folders are scanned before the first screen,
+/// which would otherwise show an empty library.
+#[test]
+fn open_saved_without_saved_books_scans_at_once() {
+    let (dir, paths) = books("open-saved-first", &["juliet.epub"]);
+    let lib = Library::open_saved(&paths, std::slice::from_ref(&dir));
+    assert!(!lib.scanning());
+    assert_eq!((lib.index.books.len(), lib.pending()), (1, 1));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn delete_removes_the_book_and_our_files_but_not_koreader_files() {
     let (dir, paths) = books("delete", &["juliet.epub", "synthetic.epub"]);
@@ -262,11 +317,11 @@ impl Harness {
         h
     }
 
-    /// Lets the metadata thread finish: timer events, as the app loop sends them while
-    /// the screen has a timeout, until no book is left.
+    /// Lets the folder scan and the metadata thread finish: timer events, as the app
+    /// loop sends them while the screen has a timeout, until no book is left.
     fn settle_metadata(&mut self) {
         let t = std::time::Instant::now();
-        while self.screen.library().is_some_and(|l| l.pending() > 0) {
+        while self.screen.library().is_some_and(|l| l.pending() > 0 || l.scanning()) {
             assert!(t.elapsed() < Duration::from_secs(60), "metadata thread did not finish");
             std::thread::sleep(Duration::from_millis(5));
             self.event(UiEvent::Timer(0));
@@ -1458,6 +1513,27 @@ impl ink_plugin::Plugin for Rescanner {
         cx.ui()?.rescan_library();
         Ok(())
     }
+}
+
+/// A library started again shows its saved books in the first frame; a book copied
+/// in while rinky was off is listed once the folder scan comes in on a timer tick.
+#[test]
+fn a_restarted_library_shows_saved_books_then_the_scanned_ones() {
+    let (dir, paths) = books("restart", &["juliet.epub"]);
+    let mut h = Harness::new("restart", &dir, paths);
+    std::fs::copy(testdata("synthetic.epub"), dir.join("synthetic.epub")).unwrap();
+    // The app started again: a new screen on the same home.
+    h.screen = LibraryScreen::new();
+    let p = providers();
+    h.screen.on_enter(&mut cx!(h, p)).unwrap();
+    h.paint();
+    let listed = |h: &Harness, f: &str| h.screen.hits.iter().any(|(_, x)| *x == Hit::Book(dir.join(f)));
+    assert!(listed(&h, "juliet.epub") && !listed(&h, "synthetic.epub"));
+    assert!(h.screen.timeout().is_some(), "the timer brings the scan");
+    h.settle_metadata();
+    assert!(listed(&h, "juliet.epub") && listed(&h, "synthetic.epub"));
+    assert_eq!(h.screen.timeout(), None);
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
 /// A plugin that adds a book while the library is shown gets it listed at the next

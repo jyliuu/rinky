@@ -70,6 +70,8 @@ pub struct HtmlDocument {
     images: RefCell<ImageCache>,
     /// The page the reader shows.
     current: Cell<usize>,
+    /// `page_count` keeps a few pages past `current` known ([`Document::set_read_ahead`]).
+    read_ahead: bool,
     /// (chapter, key) of the reading position: the start of the page the reader turned
     /// to, or the position the book was opened at. Kept across relayouts (font size,
     /// rotation and back return to the same page) until the reader turns a page.
@@ -139,6 +141,7 @@ impl HtmlDocument {
             flats: RefCell::new(HashMap::new()),
             images: RefCell::new(ImageCache::default()),
             current: Cell::new(0),
+            read_ahead: true,
             reading: Cell::new(None),
             anchor: None,
             paths,
@@ -1094,7 +1097,7 @@ impl Document for HtmlDocument {
     fn page_count(&self) -> PageCount {
         // Keep a few pages after the current one known, so a reader that clamps page
         // turns to the count never waits for the background thread.
-        if self.params.is_some() {
+        if self.params.is_some() && self.read_ahead {
             self.finish_deferred();
             let _ = self.ensure_pages(self.current.get().saturating_add(3));
         }
@@ -1544,6 +1547,10 @@ impl Document for HtmlDocument {
         self.cache = Some((dir.to_path_buf(), book_id.to_string()));
     }
 
+    fn set_read_ahead(&mut self, on: bool) {
+        self.read_ahead = on;
+    }
+
     fn wait_paginated(&mut self, timeout: Duration) -> bool {
         if let Some(w) = &self.worker {
             if !w.wait(timeout) {
@@ -1923,6 +1930,35 @@ mod tests {
             HtmlChapter { path: "b.xhtml".into(), html: html("<p>The end.</p>") },
         ];
         HtmlDocument::new(Metadata::default(), chapters, Box::new(ink_doc::MemoryLoader::default())).unwrap()
+    }
+
+    /// With the read-ahead off the count is the pages known so far (nothing is laid
+    /// out for it); turned on, the count lays out the pages after the current one.
+    #[test]
+    fn read_ahead_off_counts_only_the_known_pages() {
+        let html = |b: &str| format!("<html xmlns='http://www.w3.org/1999/xhtml'><head><title>t</title></head><body>{b}</body></html>");
+        let long: String = (0..200).map(|i| format!("<p>Paragraph {i}: the quick brown fox jumps over the lazy dog.</p>")).collect();
+        let chapters = vec![
+            HtmlChapter { path: "a.xhtml".into(), html: html("<p>Title</p>") },
+            HtmlChapter { path: "b.xhtml".into(), html: html(&long) },
+            HtmlChapter { path: "c.xhtml".into(), html: html(&long) },
+        ];
+        let mut doc = HtmlDocument::new(Metadata::default(), chapters, Box::new(ink_doc::MemoryLoader::default())).unwrap();
+        doc.set_layout(&LayoutSettings::for_screen(600, 800)).unwrap();
+        // Only the first chapter known, and no background thread to change that.
+        doc.shared.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        doc.worker = None;
+        let first = doc.shared.map.lock().unwrap().chapters[0].clone();
+        let known = first.as_ref().unwrap().keys.len();
+        let mut map = MapState::new(3);
+        map.chapters[0] = first;
+        doc.shared = Arc::new(Shared { map: Mutex::new(map), ..Default::default() });
+        doc.set_read_ahead(false);
+        assert_eq!(doc.page_count(), PageCount { pages: known, complete: false });
+        assert!(doc.page_estimate().is_some());
+        doc.set_read_ahead(true);
+        let count = doc.page_count();
+        assert!(count.pages >= known + 3, "{count:?}");
     }
 
     /// The foreground writes only a complete map, unless the document closes: then a

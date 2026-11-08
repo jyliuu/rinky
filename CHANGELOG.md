@@ -34,6 +34,11 @@ All notable changes to rinky are listed here. The format is based on
   open several times faster: the picture is decoded straight to its size on screen.
 - The library takes in new books about twice as fast: the cover thumbnail of each book
   is made with much less work.
+### Changed
+- A book opened for the first time shows its first page without waiting for the
+  pages after it to be counted.
+- The library shows its books at once when rinky starts and reads the book folders
+  in the background; books added or removed meanwhile show up a moment later.
 
 ## [0.5.3] - 2026-11-07
 
