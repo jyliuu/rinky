@@ -272,17 +272,6 @@ fn demote_contents_lists(blocks: &mut [Block]) {
     }
 }
 
-/// Text converted to chapters and a TOC.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TxtConversion {
-    /// XHTML chapters (`text-NNN.xhtml`).
-    pub chapters: Vec<HtmlChapter>,
-    /// Nested TOC: parts with their chapters.
-    pub toc: Vec<TocNode>,
-    /// Encoding used.
-    pub encoding: &'static str,
-}
-
 fn xhtml(title: &str, body: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>{}</title></head><body>{}</body></html>",
@@ -365,13 +354,6 @@ pub fn convert_text(text: &str, title: &str) -> (Vec<HtmlChapter>, Vec<TocNode>)
         .map(|(i, (t, b))| HtmlChapter { path: format!("text-{:03}.xhtml", i + 1), html: xhtml(&t, &b) })
         .collect();
     (out, toc)
-}
-
-/// Converts text bytes: detects the encoding, then [`convert_text`].
-pub fn convert(bytes: &[u8], title: &str) -> TxtConversion {
-    let d = decode_text(bytes);
-    let (chapters, toc) = convert_text(&d.text, title);
-    TxtConversion { chapters, toc, encoding: d.encoding }
 }
 
 /// Metadata from a Project Gutenberg style header in the first lines.
@@ -564,9 +546,9 @@ mod tests {
     fn encodings_and_header() {
         let src = "Глава 1\n\nМой дядя самых честных правил, когда не в шутку занемог.\n\nГлава 2\n\nОн уважать себя заставил и лучше выдумать не мог.\n".repeat(20);
         let (cp, _, _) = encoding_rs::WINDOWS_1251.encode(&src);
-        let c = convert(&cp, "t");
-        assert_eq!(c.encoding, "windows-1251");
-        assert!(c.chapters.iter().any(|ch| ch.html.contains("Мой дядя")));
+        let d = decode_text(&cp);
+        assert_eq!(d.encoding, "windows-1251");
+        assert!(convert_text(&d.text, "t").0.iter().any(|ch| ch.html.contains("Мой дядя")));
         let mut info = BookInfo::new(Format::Txt);
         header_metadata("Title: Alice\nAuthor: Lewis Carroll\nLanguage: English\n*** START OF", &mut info);
         assert_eq!(info.metadata.title, "Alice");
