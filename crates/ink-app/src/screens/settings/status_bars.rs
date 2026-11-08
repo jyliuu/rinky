@@ -73,19 +73,24 @@ pub enum Step {
     Saved(View, String),
 }
 
+/// Each bar's action name and title, by `Edge as usize`.
+const EDGES: [(Edge, &str, &str); 2] = [(Edge::Top, "top", "Top bar"), (Edge::Bottom, "bottom", "Bottom bar")];
+
 fn edge_name(e: Edge) -> &'static str {
-    match e {
-        Edge::Top => "top",
-        Edge::Bottom => "bottom",
-    }
+    EDGES[e as usize].1
 }
 
 fn edge_of(s: &str) -> Option<Edge> {
-    match s {
-        "top" => Some(Edge::Top),
-        "bottom" => Some(Edge::Bottom),
-        _ => None,
-    }
+    EDGES.iter().find(|(_, n, _)| *n == s).map(|(e, ..)| *e)
+}
+
+/// "Top bar" / "Bottom bar".
+fn bar_title(e: Edge) -> &'static str {
+    EDGES[e as usize].2
+}
+
+fn bar_ref(bars: &StatusBars, e: Edge) -> &StatusBar {
+    [&bars.top, &bars.bottom][e as usize]
 }
 
 fn bar_mut(bars: &mut StatusBars, e: Edge) -> &mut StatusBar {
@@ -95,36 +100,12 @@ fn bar_mut(bars: &mut StatusBars, e: Edge) -> &mut StatusBar {
     }
 }
 
-fn bar_ref(bars: &StatusBars, e: Edge) -> &StatusBar {
-    match e {
-        Edge::Top => &bars.top,
-        Edge::Bottom => &bars.bottom,
-    }
-}
-
 fn slot_mut(bar: &mut StatusBar, slot: usize) -> Option<&mut Vec<String>> {
-    match slot {
-        0 => Some(&mut bar.left),
-        1 => Some(&mut bar.center),
-        2 => Some(&mut bar.right),
-        _ => None,
-    }
+    [&mut bar.left, &mut bar.center, &mut bar.right].into_iter().nth(slot)
 }
 
 fn slot_ref(bar: &StatusBar, slot: usize) -> &[String] {
-    match slot {
-        0 => &bar.left,
-        1 => &bar.center,
-        _ => &bar.right,
-    }
-}
-
-/// "Top bar" / "Bottom bar".
-fn bar_title(e: Edge) -> &'static str {
-    match e {
-        Edge::Top => "Top bar",
-        Edge::Bottom => "Bottom bar",
-    }
+    [&bar.left, &bar.center, &bar.right][slot.min(2)]
 }
 
 /// The page title of `view`.
