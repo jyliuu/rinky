@@ -212,12 +212,11 @@ pub fn blend(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {
         let c0 = (y - r.y) as usize * rw + (area.x - r.x) as usize;
         let p0 = y as usize * cw + area.x as usize;
         let row = &mut canvas.pixels[p0..p0 + n];
+        // One formula for every coverage (0 keeps the pixel, 255 gives `value`): with no
+        // branch the loop vectorizes.
         for (p, &a) in row.iter_mut().zip(&cov[c0..c0 + n]) {
             let a = a as u32;
-            if a == 0 {
-                continue;
-            }
-            *p = if a >= 255 { value } else { ((*p as u32 * (255 - a) + v * a) / 255) as u8 };
+            *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
         }
     }
 }
