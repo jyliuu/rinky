@@ -359,18 +359,23 @@ struct Piece {
 }
 
 /// An unbreakable box: text between two break opportunities.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct WordBox {
     /// Byte range of the content (without trailing spaces).
     start: usize,
     end: usize,
-    /// Byte end including trailing spaces.
-    end_ws: usize,
     width: f32,
     space: f32,
     forced: bool,
     /// The line may end here with a hyphen (soft hyphen or dictionary split).
     hyphen: bool,
+}
+
+impl WordBox {
+    /// The box cut at byte `cut` into a head `head` wide and the rest `rest` wide.
+    fn split(&self, cut: usize, head: f32, hyphen: bool, rest: f32) -> (WordBox, WordBox) {
+        (WordBox { start: self.start, end: cut, width: head, space: 0.0, forced: false, hyphen }, WordBox { start: cut, width: rest, ..*self })
+    }
 }
 
 struct Line {
@@ -1238,7 +1243,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 0.0
             };
             let hyphen = trimmed.ends_with(SOFT_HYPHEN);
-            boxes.push(WordBox { start: prev, end, end_ws: b, width, space, forced, hyphen });
+            boxes.push(WordBox { start: prev, end, width, space, forced, hyphen });
             prev = b;
         }
         // Lines.
@@ -1344,18 +1349,14 @@ impl<'a, 'e> Flow<'a, 'e> {
                 best = Some((cut, acc));
             }
             let (cut, wdt) = best?;
-            let a = WordBox { start: bx.start, end: cut, end_ws: cut, width: wdt + hyph_w, space: 0.0, forced: false, hyphen: true };
-            let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: (bx.width - wdt).max(0.0), space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
-            return Some((a, b));
+            return Some(bx.split(cut, wdt + hyph_w, true, (bx.width - wdt).max(0.0)));
         }
         for &pt in points.iter().rev() {
             let cut = bx.start + pt;
             let wdt = self.width(p, bx.start, cut);
             if wdt + hyph_w <= avail {
                 let rest = self.width(p, cut, bx.end);
-                let a = WordBox { start: bx.start, end: cut, end_ws: cut, width: wdt + hyph_w, space: 0.0, forced: false, hyphen: true };
-                let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: rest, space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
-                return Some((a, b));
+                return Some(bx.split(cut, wdt + hyph_w, true, rest));
             }
         }
         None
@@ -1379,10 +1380,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         } else {
             (bx.width - wdt).max(0.0)
         };
-        Some((
-            WordBox { start: bx.start, end: c, end_ws: c, width: wdt, space: 0.0, forced: false, hyphen: false },
-            WordBox { start: c, end: bx.end, end_ws: bx.end_ws, width: rest, space: bx.space, forced: bx.forced, hyphen: bx.hyphen },
-        ))
+        Some(bx.split(c, wdt, false, rest))
     }
 
     /// Positions one line, emits its draw items and its slice.
