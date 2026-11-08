@@ -77,6 +77,9 @@ ink_doc *ink_open(const char *path, size_t store_max, char *err, size_t errlen)
 	}
 	fz_set_error_callback(d->ctx, on_error, d);
 	fz_set_warning_callback(d->ctx, on_warning, d);
+	/* Pages are drawn in gray for e-ink: the fast built-in conversions are enough, and
+	   colour management through lcms2 cost 10-15 % of a page render. */
+	fz_disable_icc(d->ctx);
 	fz_try(d->ctx)
 	{
 		fz_register_document_handlers(d->ctx);

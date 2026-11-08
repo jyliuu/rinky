@@ -260,6 +260,29 @@ fn contrast_and_gamma_change_gray_levels() {
     assert!((118..=138).contains(&m3) && l3 == 255, "contrast 2: {m3} {l3}");
 }
 
+/// Colour management is off (`fz_disable_icc` in the shim): gray content keeps its exact
+/// levels whether it is drawn in DeviceGray or as neutral RGB, and colours become gray
+/// by the plain luma weights (0.30 R + 0.59 G + 0.11 B).
+#[test]
+fn gray_levels_are_exact_and_colours_use_luma_weights() {
+    let mut page = testgen::PdfPage::letter();
+    page.rect(100.0, 100.0, 100.0, 100.0, 0.5);
+    page.rect_rgb(300.0, 100.0, 100.0, 100.0, [0.5, 0.5, 0.5]);
+    page.rect_rgb(100.0, 300.0, 100.0, 100.0, [1.0, 0.0, 0.0]);
+    page.rect_rgb(300.0, 300.0, 100.0, 100.0, [0.0, 1.0, 0.0]);
+    let path = write("colours.pdf", &testgen::write_pdf(&[page], &[], &[]));
+    let mut d = open(&path, "", W, H);
+    let c = screen(&mut d, 0);
+    let s = W as f32 / 612.0;
+    let top = (H as f32 - 792.0 * s) / 2.0;
+    let at = |x: f32, y: f32| px(&c, x * s, top + y * s);
+    let (gray, neutral, red, green) = (at(150.0, 150.0), at(350.0, 150.0), at(150.0, 350.0), at(350.0, 350.0));
+    assert!((127..=128).contains(&gray), "DeviceGray 0.5: {gray}");
+    assert_eq!(neutral, gray, "neutral RGB draws as the same gray");
+    assert!((76..=77).contains(&red), "red: {red}");
+    assert!((149..=151).contains(&green), "green: {green}");
+}
+
 // --- 3. Text, search, selection, highlights ------------------------------------------
 
 #[test]

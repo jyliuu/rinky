@@ -4,6 +4,13 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- PDF and comic pages draw about 10 % faster: rinky no longer runs colour management
+  for a gray screen. Gray pages look exactly as before; in colour pages, saturated
+  colours now come out darker (pure red is 77 of 255 instead of 129).
+
 ## [0.5.3] - 2026-11-07
 
 ### Changed
