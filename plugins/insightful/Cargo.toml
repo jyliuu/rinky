@@ -14,6 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 ink-plugin.workspace = true
+# Calendar math (`clock::civil_from_days`), already in the tree through ink-plugin.
+ink-device.workspace = true
 ink-doc.workspace = true
 ink-net.workspace = true
 serde.workspace = true
