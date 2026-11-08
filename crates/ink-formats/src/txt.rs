@@ -61,37 +61,26 @@ fn normalise(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Lines of normalised text without trailing whitespace (tabs and indents kept).
+/// Lines of normalised text without trailing whitespace (tabs and indents kept), so a
+/// blank line is an empty one.
 fn lines_of(t: &str) -> Vec<&str> {
     let t = t.strip_prefix('\u{feff}').unwrap_or(t);
     t.split('\n').map(|l| l.trim_end()).collect()
 }
 
 fn mode_of(lines: &[&str]) -> Mode {
-    let nonblank: Vec<&str> = lines.iter().copied().filter(|l| !l.trim().is_empty()).collect();
-    if nonblank.is_empty() {
+    let nonblank = lines.iter().filter(|l| !l.is_empty()).count();
+    if nonblank == 0 {
         return Mode::Line;
     }
-    // Runs of blank lines between text lines.
-    let mut separators = 0;
-    let mut seen_text = false;
-    let mut in_blank = false;
-    for l in lines {
-        if l.trim().is_empty() {
-            in_blank = true;
-        } else {
-            if seen_text && in_blank {
-                separators += 1;
-            }
-            seen_text = true;
-            in_blank = false;
-        }
-    }
-    if separators * 10 >= nonblank.len() {
+    // Runs of blank lines between text lines: the steps from a blank line to text, less
+    // the one after blank lines at the start.
+    let steps = lines.windows(2).filter(|w| w[0].is_empty() && !w[1].is_empty()).count();
+    if (steps - usize::from(lines[0].is_empty())) * 10 >= nonblank {
         return Mode::Blank;
     }
-    let indented = nonblank.iter().filter(|l| l.starts_with("  ") || l.starts_with('\t') || l.starts_with('\u{3000}')).count();
-    if indented * 5 >= nonblank.len() && indented < nonblank.len() {
+    let indented = lines.iter().filter(|l| l.starts_with("  ") || l.starts_with('\t') || l.starts_with('\u{3000}')).count();
+    if indented * 5 >= nonblank && indented < nonblank {
         Mode::Indent
     } else {
         Mode::Line
@@ -108,7 +97,7 @@ fn groups<'t>(lines: &[&'t str], mode: Mode) -> Vec<Vec<&'t str>> {
         }
     };
     for &l in lines {
-        let blank = l.trim().is_empty();
+        let blank = l.is_empty();
         match mode {
             Mode::Blank => {
                 if blank {
@@ -221,7 +210,7 @@ fn join_lines(lines: &[&str]) -> String {
         if i > 0 {
             out.push(' ');
         }
-        out.push_str(l.trim());
+        out.push_str(l.trim_start());
     }
     out
 }
@@ -244,7 +233,7 @@ fn blocks_of(groups: &[Vec<&str>], mode: Mode, allow_caps: bool) -> Vec<Block> {
         };
         match heading {
             Some(level) => out.push(Block::Heading { level, title: join_lines(g) }),
-            None if mode == Mode::Line => out.push(Block::Para(g[0].trim().to_string())),
+            None if mode == Mode::Line => out.push(Block::Para(g[0].trim_start().to_string())),
             None => out.push(Block::Para(join_lines(g))),
         }
     }
