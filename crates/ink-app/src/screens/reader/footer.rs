@@ -881,7 +881,7 @@ impl ReaderScreen {
             return Ok(Vec::new());
         }
         let t = Instant::now();
-        self.bars.device = Some(DeviceStatus::read(cx, &cx.settings.status_bars));
+        // redraw_bars reads the device values: the tick is due (bar_info).
         let status = self.status_shown.clone();
         let Some(rows) = self.redraw_bars(cx, &status, Part::Text) else { return Ok(Vec::new()) };
         log::info!("footer: minute tick redrew {} bar rows in {} ms", rows.len(), t.elapsed().as_millis());

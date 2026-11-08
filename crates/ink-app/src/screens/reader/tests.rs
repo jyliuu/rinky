@@ -1698,6 +1698,28 @@ fn a_page_turn_is_one_update_with_the_bars() {
     }
 }
 
+/// The minute tick reads the device values once and shows the bar rows.
+#[test]
+fn the_minute_tick_reads_the_device_once() {
+    struct Counted(std::rc::Rc<std::cell::Cell<u32>>);
+    impl ink_device::Battery for Counted {
+        fn state(&self) -> ink_device::Result<ink_device::BatteryState> {
+            self.0.set(self.0.get() + 1);
+            Ok(ink_device::BatteryState { percent: 57, charging: false })
+        }
+    }
+    let mut h = Harness::new("tick-reads", "juliet.epub");
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    h.dev.battery = Box::new(Counted(reads.clone()));
+    h.reader.bars.next_tick = Some(std::time::Instant::now());
+    let n = h.probe.updates().len();
+    let damage = h.with_cx(|r, cx| r.bars_tick(cx)).unwrap();
+    assert!(!damage.is_empty(), "the bar rows are redrawn");
+    assert_eq!(reads.get(), 1, "battery reads in one tick");
+    assert_eq!(h.reader.bars.device.as_ref().unwrap().battery, Some((57, false)));
+    assert_eq!(h.probe.updates().len(), n);
+}
+
 /// A page turn's one update carries the hardware page-turn wave (next page sweeps left,
 /// previous right); with `reader.page_animation = "off"` and for jumps it has none.
 #[test]
