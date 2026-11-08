@@ -405,7 +405,10 @@ impl HtmlDocument {
         if !complete {
             if self.book.loader.is_none() {
                 // The thread cannot read images through this loader: sizes first.
-                self.prefill_chapter_images(c);
+                let ch = &self.book.chapters[c];
+                for v in crate::book::scan_image_refs(&ch.html) {
+                    self.fg_image_size(&ink_doc::resolve_href(&ch.dir, &v));
+                }
             }
             paginate::start_full_layout(self.book.clone(), params, self.font_sources.clone(), self.shared.clone(), c);
         }
@@ -449,14 +452,6 @@ impl HtmlDocument {
         );
         self.correct_map(c, &l);
         Ok(l)
-    }
-
-    /// Reads the sizes of the images of chapter `c` through the foreground loader.
-    fn prefill_chapter_images(&self, c: usize) {
-        let ch = &self.book.chapters[c];
-        for v in crate::book::scan_image_refs(&ch.html) {
-            self.fg_image_size(&ink_doc::resolve_href(&ch.dir, &v));
-        }
     }
 
     /// True when the page map's entry for chapter `c` equals the page starts of `l`
@@ -942,62 +937,6 @@ impl HtmlDocument {
         if memo.insert(key, entry) != Some(entry) {
             self.positions_dirty.set(true);
         }
-    }
-
-    /// Page of `pos` when known without paginating more (see [`Document::page_of_known`]):
-    /// remembered, a spine item start, or in a spine item that is parsed already; `None`
-    /// rather than parsing a chapter on the UI thread.
-    fn known_page_of(&self, pos: &Position) -> Option<usize> {
-        let Position::XPointer(x) = pos else {
-            return if self.shared.map.lock().unwrap().known_pages().1 { self.page_of(pos).ok() } else { None };
-        };
-        let frag = x.fragment()?;
-        let Some(c) = self.book.chapter_of_fragment(frag) else {
-            // Past the last fragment: the end of the book, once it is known.
-            return if self.shared.map.lock().unwrap().known_pages().1 { self.page_of(pos).ok() } else { None };
-        };
-        {
-            let m = self.shared.map.lock().unwrap();
-            let first = m.first_page(c)?;
-            let keys = &m.chapters[c].as_ref()?.keys;
-            // The start of a chapter needs no DOM.
-            let start = *x == XPointer::fragment_start(frag) || *x == XPointer::fragment_point(frag);
-            if start && !keys.is_empty() {
-                return Some(first);
-            }
-        }
-        let key = pos.to_string();
-        if let Some(p) = self.memo_page(&key) {
-            return Some(p);
-        }
-        if !self.book.has_chapter(c) {
-            return None;
-        }
-        // Chapters 0..=c are paginated and c is parsed: no layout, no parse.
-        self.page_of(pos).ok()
-    }
-
-    /// Total pages estimated from the source sizes while pagination runs.
-    fn estimate_pages(&self) -> Option<usize> {
-        let m = self.shared.map.lock().unwrap();
-        let (prefix, all) = m.known_pages();
-        if all {
-            return None;
-        }
-        let (mut pages, mut bytes, mut unknown) = (0usize, 0usize, 0usize);
-        for (c, src) in m.chapters.iter().zip(&self.book.chapters) {
-            match c {
-                Some(p) => {
-                    pages += p.keys.len();
-                    bytes += src.html.len();
-                }
-                None => unknown += src.html.len(),
-            }
-        }
-        // About 2.5 KB of XHTML per page at the default size when nothing is known yet.
-        let per_page = if pages > 0 && bytes > 0 { bytes as f64 / pages as f64 } else { 2500.0 };
-        let est = pages + (unknown as f64 / per_page.max(1.0)).round() as usize;
-        Some(est.max(prefix).max(1))
     }
 
     /// The flow layout of the chapter holding `page` (for tests and tools).
@@ -1637,12 +1576,59 @@ impl Document for HtmlDocument {
         self.ensure_paginated(n.saturating_sub(1)).is_ok()
     }
 
+    /// Total pages estimated from the source sizes while pagination runs.
     fn page_estimate(&self) -> Option<usize> {
-        self.estimate_pages()
+        let m = self.shared.map.lock().unwrap();
+        let (prefix, all) = m.known_pages();
+        if all {
+            return None;
+        }
+        let (mut pages, mut bytes, mut unknown) = (0usize, 0usize, 0usize);
+        for (c, src) in m.chapters.iter().zip(&self.book.chapters) {
+            match c {
+                Some(p) => {
+                    pages += p.keys.len();
+                    bytes += src.html.len();
+                }
+                None => unknown += src.html.len(),
+            }
+        }
+        // About 2.5 KB of XHTML per page at the default size when nothing is known yet.
+        let per_page = if pages > 0 && bytes > 0 { bytes as f64 / pages as f64 } else { 2500.0 };
+        let est = pages + (unknown as f64 / per_page.max(1.0)).round() as usize;
+        Some(est.max(prefix).max(1))
     }
 
+    /// Known without paginating more: remembered, a spine item start, or in a spine item that is parsed already; `None`
+    /// rather than parsing a chapter on the UI thread.
     fn page_of_known(&self, pos: &Position) -> Option<usize> {
-        self.known_page_of(pos)
+        let Position::XPointer(x) = pos else {
+            return if self.shared.map.lock().unwrap().known_pages().1 { self.page_of(pos).ok() } else { None };
+        };
+        let frag = x.fragment()?;
+        let Some(c) = self.book.chapter_of_fragment(frag) else {
+            // Past the last fragment: the end of the book, once it is known.
+            return if self.shared.map.lock().unwrap().known_pages().1 { self.page_of(pos).ok() } else { None };
+        };
+        {
+            let m = self.shared.map.lock().unwrap();
+            let first = m.first_page(c)?;
+            let keys = &m.chapters[c].as_ref()?.keys;
+            // The start of a chapter needs no DOM.
+            let start = *x == XPointer::fragment_start(frag) || *x == XPointer::fragment_point(frag);
+            if start && !keys.is_empty() {
+                return Some(first);
+            }
+        }
+        let key = pos.to_string();
+        if let Some(p) = self.memo_page(&key) {
+            return Some(p);
+        }
+        if !self.book.has_chapter(c) {
+            return None;
+        }
+        // Chapters 0..=c are paginated and c is parsed: no layout, no parse.
+        self.page_of(pos).ok()
     }
 
     fn spine_starts(&self) -> Vec<usize> {

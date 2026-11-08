@@ -562,14 +562,6 @@ pub trait Classifier {
     fn classify(&mut self, dom: &Dom, id: NodeId, parent_ws: WhiteSpace) -> StructStyle;
 }
 
-/// Elements that are always classified by their name, whatever the CSS says.
-fn fixed_display(name: &str) -> Option<Display> {
-    match name {
-        "body" => Some(Display::Block),
-        _ => None,
-    }
-}
-
 /// Builds a [`Dom`] from parser events, applying crengine's rules.
 pub struct Builder<'c> {
     dom: Dom,
@@ -683,8 +675,9 @@ impl<'c> Builder<'c> {
             Some(c) => c.classify(&self.dom, id, parent_ws),
             None => default_struct(&name, parent_ws),
         };
-        if let Some(d) = fixed_display(&name) {
-            st.display = d;
+        // `body` is a block whatever the CSS says.
+        if name == "body" {
+            st.display = Display::Block;
         }
         if in_svg || name == "svg" {
             st.display = if name == "svg" { st.display } else { Display::Inline };

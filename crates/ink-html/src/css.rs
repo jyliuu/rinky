@@ -209,10 +209,6 @@ fn tok_of(t: &Token, p: &mut Parser, depth: u32) -> Option<Tok> {
     })
 }
 
-fn collect_tokens(p: &mut Parser) -> Vec<Tok> {
-    collect_tokens_at(p, 0)
-}
-
 fn collect_tokens_at(p: &mut Parser, depth: u32) -> Vec<Tok> {
     let mut out = Vec::new();
     while let Ok(t) = p.next() {
@@ -245,7 +241,7 @@ fn declarations(p: &mut Parser) -> Vec<Declaration> {
                     _ => return Ok(None),
                 };
                 p.expect_colon()?;
-                let mut value = collect_tokens(p);
+                let mut value = collect_tokens_at(p, 0);
                 let mut important = false;
                 let n = value.len();
                 if n >= 2 && value[n - 2] == Tok::Delim('!') && matches!(&value[n - 1], Tok::Ident(i) if i.eq_ignore_ascii_case("important")) {
@@ -381,7 +377,7 @@ fn prelude_until_block(p: &mut Parser) -> (cssparser::SourcePosition, bool) {
 fn import_url(prelude: &str) -> Option<String> {
     let mut input = ParserInput::new(prelude);
     let mut p = Parser::new(&mut input);
-    let first = collect_tokens(&mut p);
+    let first = collect_tokens_at(&mut p, 0);
     let url = match first.first()? {
         Tok::Url(u) | Tok::Str(u) => u.clone(),
         _ => return None,

@@ -848,10 +848,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    fn resolve_src(&self, raw: &str) -> String {
-        resolve_href(self.chapter_dir, raw)
-    }
-
     /// Size of an image element in device px for a containing width `w`.
     fn image_box(&mut self, id: NodeId, w: f32, max_h: f32) -> Option<(String, f32, f32)> {
         let e = self.dom.element(id)?;
@@ -865,7 +861,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             if raw.starts_with("data:") {
                 return None;
             }
-            let src = self.resolve_src(raw);
+            let src = resolve_href(self.chapter_dir, raw);
             let (iw, ih) = (self.env.image_size)(&src)?;
             (src, iw as f32, ih as f32)
         };
