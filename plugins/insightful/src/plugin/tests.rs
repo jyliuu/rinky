@@ -119,7 +119,7 @@ fn explain_with_tool_call_streams_in_batches_and_saves() {
         "AGENT ACTION block shown: {views:#?}"
     );
     let last = views.last().unwrap();
-    assert!(last.starts_with(":::back insightful:chats\n:::you\n**Selected passage"), "{last}");
+    assert!(last.starts_with(":::emphasis\n:::back insightful:chats\n:::you\n**Selected passage"), "{last}");
     assert!(last.contains("> \"Two households, both alike in dignity\"\n\nExplain the selected passage clearly"), "{last}");
     assert!(last.contains(":::answer AI — gpt-test | 300 tokens in · 90 out · 2 requests\nword0 word1"), "{last}");
     assert!(last.contains(":::chips\n- [Who is Tybalt?](insightful:q/0)"));
@@ -223,7 +223,7 @@ fn a_chat_has_a_back_link_to_the_list_and_last_chat_reopens_it() {
     env.select("In fair Verona");
     env.action("people");
     env.pump();
-    assert!(env.viewers().last().unwrap().starts_with(":::back insightful:chats\n"), "a chat goes back to the list");
+    assert!(env.viewers().last().unwrap().starts_with(":::emphasis\n:::back insightful:chats\n"), "a chat goes back to the list");
     env.answer(VIEWER, "insightful:chats");
     assert!(env.viewers().last().unwrap().starts_with(":::chips\n- [Start new chat]"), "the list has no back link");
     env.answer(VIEWER, "closed");
@@ -566,7 +566,7 @@ fn preset_sends_the_full_prompt_and_the_bubble_shows_it() {
     assert!(system.contains("Title: Romeo and Juliet\nAuthor: William Shakespeare"));
 
     let view = env.viewers().last().unwrap().clone();
-    let bubble = format!(":::back insightful:chats\n:::you\n**Selected passage — Act 1**\n\n> \"In fair Verona, where we lay our scene\"\n\n{full}\n");
+    let bubble = format!(":::emphasis\n:::back insightful:chats\n:::you\n**Selected passage — Act 1**\n\n> \"In fair Verona, where we lay our scene\"\n\n{full}\n");
     assert!(view.starts_with(&bubble), "the passage and the whole prompt, no tap needed: {view}");
     assert!(!view.contains("tap to see") && !view.contains("People / characters"), "{view}");
 }
@@ -592,7 +592,7 @@ fn ask_opens_the_chat_view_with_the_keyboard() {
     env.answer(INPUT_ASK, "Who is Tybalt?");
     env.pump();
     let last = env.viewers().last().unwrap().clone();
-    assert!(last.starts_with(":::back insightful:chats\n:::you\nWho is Tybalt?"), "{last}");
+    assert!(last.starts_with(":::emphasis\n:::back insightful:chats\n:::you\nWho is Tybalt?"), "{last}");
     // In the chat the bar asks a follow-up in the same chat.
     env.answer(VIEWER, "insightful:ask");
     assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_FOLLOWUP, .. })));
@@ -623,4 +623,24 @@ fn a_run_answers_its_own_chat_while_another_is_open() {
     let saved = env.chats_file();
     assert_eq!(saved["chats"][0]["messages"].as_array().unwrap().len(), 2, "c1 untouched");
     assert_eq!(saved["chats"][1]["messages"].as_array().unwrap().len(), 2, "c2 has its answer");
+}
+
+/// Bold and italics in answers show: the chat view (empty, streaming and finished)
+/// asks for the interface font's real bold and italic faces, which the UI's light
+/// titles otherwise draw in the regular face. The chat list keeps the light look.
+#[test]
+fn chat_views_draw_bold_and_italics() {
+    let mut env = Env::new("emphasis", TOML, &[(200, &answer_turn())]);
+    env.action("ask_book");
+    env.answer(VIEWER, "insightful:ask");
+    env.answer(INPUT_ASK, "Who is Tybalt?");
+    env.pump();
+    let views = env.viewers();
+    assert!(views.len() >= 2, "{views:#?}");
+    for v in &views {
+        assert!(v.starts_with(":::emphasis\n:::back insightful:chats\n"), "{v}");
+    }
+    env.answer(VIEWER, "insightful:chats");
+    let list = env.viewers().pop().unwrap();
+    assert!(!list.contains(":::emphasis"), "{list}");
 }

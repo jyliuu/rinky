@@ -4,6 +4,13 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Insightful: bold and italic text in answers (and headings) now shows in bold and
+  italics, in the interface font's own faces, where before it looked like the rest of
+  the text. The chat's labels keep their light look.
+
 ## [0.6.0] - 2026-11-08
 
 ### Added
