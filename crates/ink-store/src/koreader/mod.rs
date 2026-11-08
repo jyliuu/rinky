@@ -217,24 +217,14 @@ pub fn merge_into(state: &mut BookState, ko: &KoBookMetadata, prefer_koreader: b
         state.page = ko.last_page.map(|p| p.saturating_sub(1)).or(state.page);
         sum.position = true;
     }
-    if prefer_koreader || state.percent.is_none() {
-        state.percent = ko.percent_finished.map(|p| p.clamp(0.0, 1.0) as f32).or(state.percent);
-    }
+    fill(&mut state.percent, ko.percent_finished.map(|p| p.clamp(0.0, 1.0) as f32), prefer_koreader);
     if (prefer_koreader || state.status == ReadingStatus::New) && ko.status != ReadingStatus::New {
         state.status = ko.status;
     }
-    if prefer_koreader || state.rating.is_none() {
-        state.rating = ko.rating.or(state.rating);
-    }
-    if prefer_koreader || state.review.is_none() {
-        state.review = ko.review.clone().or(state.review.take());
-    }
-    if state.md5.is_none() {
-        state.md5 = ko.md5.clone();
-    }
-    if ko.doc_pages.is_some() && state.pages.is_none() {
-        state.pages = ko.doc_pages;
-    }
+    fill(&mut state.rating, ko.rating, prefer_koreader);
+    fill(&mut state.review, ko.review.clone(), prefer_koreader);
+    fill(&mut state.md5, ko.md5.clone(), false);
+    fill(&mut state.pages, ko.doc_pages, false);
     // What `state` has, to skip equal entries without a scan per annotation (a sync
     // merges every KOReader annotation again).
     let mut have_highlights: HashSet<(String, String, Option<u32>)> = state.highlights.iter().map(|h| (h.start.clone(), h.end.clone(), h.page)).collect();
@@ -277,10 +267,15 @@ pub fn merge_into(state: &mut BookState, ko: &KoBookMetadata, prefer_koreader: b
             }
         }
     }
-    if state.imported_from.is_none() {
-        state.imported_from = Some(format!("koreader:{}", ko.path.display()));
-    }
+    fill(&mut state.imported_from, Some(format!("koreader:{}", ko.path.display())), false);
     sum
+}
+
+/// Puts `theirs` into `ours` when it is set and `ours` is not (or `prefer` is set).
+fn fill<T>(ours: &mut Option<T>, theirs: Option<T>, prefer: bool) {
+    if prefer || ours.is_none() {
+        *ours = theirs.or(ours.take());
+    }
 }
 
 /// A box as a quad; boxes are only built from finite numbers (see `boxes`), and the
