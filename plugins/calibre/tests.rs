@@ -16,6 +16,7 @@ use std::time::Instant;
 
 #[test]
 fn frame_encode_decode() {
+    assert_eq!((op::name(op::OK), op::name(op::GET_BOOK_COUNT), op::name(op::ERROR), op::name(10)), ("OK", "GET_BOOK_COUNT", "ERROR", "?"));
     let f = encode(op::OK, &json!({"a": 1}));
     assert_eq!(f, b"11[0,{\"a\":1}]");
     assert_eq!(decode(&f), Ok(Some((Frame { op: 0, arg: json!({"a": 1}) }, f.len()))));
