@@ -299,35 +299,33 @@ impl OpdsFeed {
 /// Decodes XML/HTML character references: the five XML entities, numeric references and
 /// common HTML names. Unknown references are kept as written.
 pub fn decode_entities(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
     let mut out = String::with_capacity(s.len());
+    push_decoded(&mut out, s);
+    out
+}
+
+/// [`decode_entities`] of `s`, appended to `out`.
+fn push_decoded(out: &mut String, s: &str) {
     let mut rest = s;
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
         let end = rest[1..].find(|c: char| c == ';' || c == '&' || c.is_whitespace()).map(|j| j + 1);
-        let Some(end) = end.filter(|&e| rest.as_bytes().get(e) == Some(&b';') && e <= 12) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        let name = &rest[1..end];
-        let ch: Option<String> = if let Some(num) = name.strip_prefix('#') {
-            let v = match num.strip_prefix(['x', 'X']) {
-                Some(h) => u32::from_str_radix(h, 16).ok(),
-                None => num.parse().ok(),
-            };
-            v.and_then(char::from_u32).map(String::from)
-        } else {
-            named_entity(name).map(str::to_string)
-        };
-        match ch {
-            Some(c) => {
-                out.push_str(&c);
-                rest = &rest[end + 1..];
+        let decoded = end.filter(|&e| rest.as_bytes().get(e) == Some(&b';') && e <= 12).filter(|&e| {
+            let name = &rest[1..e];
+            match name.strip_prefix('#') {
+                Some(num) => {
+                    let v = match num.strip_prefix(['x', 'X']) {
+                        Some(h) => u32::from_str_radix(h, 16).ok(),
+                        None => num.parse().ok(),
+                    };
+                    v.and_then(char::from_u32).map(|c| out.push(c)).is_some()
+                }
+                None => named_entity(name).map(|t| out.push_str(t)).is_some(),
             }
+        });
+        match decoded {
+            Some(end) => rest = &rest[end + 1..],
             None => {
                 out.push('&');
                 rest = &rest[1..];
@@ -335,7 +333,6 @@ pub fn decode_entities(s: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
 }
 
 fn named_entity(name: &str) -> Option<&'static str> {
@@ -386,7 +383,30 @@ fn is_block(tag: &str) -> bool {
 
 /// Normalizes whitespace per line and drops empty lines.
 fn tidy_lines(s: &str) -> String {
-    s.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        let mut words = line.split_whitespace().peekable();
+        if words.peek().is_some() && !out.is_empty() {
+            out.push('\n');
+        }
+        push_words(&mut out, words);
+    }
+    out
+}
+
+/// Appends `words` separated by single spaces.
+fn push_words<'a>(out: &mut String, words: impl Iterator<Item = &'a str>) {
+    for (i, w) in words.enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+}
+
+/// Appends `s` with line breaks turned into spaces.
+fn push_flat(out: &mut String, s: &str) {
+    out.extend(s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }));
 }
 
 /// HTML markup (already unescaped from the XML) to plain text: tags removed, block tags
@@ -395,29 +415,30 @@ pub fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
     // Line breaks in the markup are spaces; block elements make the lines.
-    let flat = |t: &str| t.replace(['\n', '\r'], " ");
     while let Some(i) = rest.find('<') {
-        out.push_str(&flat(&rest[..i]));
+        push_flat(&mut out, &rest[..i]);
         let Some(j) = rest[i..].find('>') else {
-            out.push_str(&flat(&rest[i..]));
+            push_flat(&mut out, &rest[i..]);
             rest = "";
             break;
         };
         let tag = rest[i + 1..i + j].trim_start_matches('/');
-        let name: String = tag.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-        if is_block(&name) {
+        let name = &tag[..tag.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(tag.len())];
+        if is_block(name) {
             out.push('\n');
         } else if !name.is_empty() {
             out.push(' ');
         }
         rest = &rest[i + j + 1..];
     }
-    out.push_str(&flat(rest));
+    push_flat(&mut out, rest);
     tidy_lines(&decode_entities(&out))
 }
 
 fn one_line(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(s.len());
+    push_words(&mut out, s.split_whitespace());
+    out
 }
 
 // ---------------------------------------------------------------------------------------
@@ -604,12 +625,12 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
             }
             Event::Text(t) => {
                 if let Some(c) = cap.as_mut() {
-                    let text = decode_entities(&String::from_utf8_lossy(&t));
+                    let text = String::from_utf8_lossy(&t);
                     if c.mode == Mode::Xhtml {
                         // XML line breaks are spaces; block elements make the lines.
-                        c.buf.push_str(&text.replace(['\n', '\r'], " "));
+                        push_flat(&mut c.buf, &decode_entities(&text));
                     } else {
-                        c.buf.push_str(&text);
+                        push_decoded(&mut c.buf, &text);
                     }
                 }
             }
