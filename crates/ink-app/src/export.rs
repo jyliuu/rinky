@@ -68,8 +68,10 @@ fn report_text(r: &ExportReport) -> String {
     let books = |n: usize| format!("{n} book{}", if n == 1 { "" } else { "s" });
     match (r.books, r.failed.len(), r.written.as_slice()) {
         (0, 0, _) => "No highlights to export".to_string(),
-        // Kindle clippings: every book in one file.
-        (n, 0, [one]) if n > 1 => format!("Exported {} to {}", books(n), short_name(one)),
+        // Kindle clippings: every book in one file, named even when it holds one book.
+        (n, 0, [one]) if n > 1 || one.file_name().is_some_and(|f| f == ink_store::export::CLIPPINGS_FILE) => {
+            format!("Exported {} to {}", books(n), short_name(one))
+        }
         (n, 0, _) => format!("Exported {} to exports/", books(n)),
         (n, f, _) => format!("Exported {n}, {f} failed (see the log)"),
     }
@@ -200,6 +202,7 @@ mod tests {
         assert_eq!(report_text(&r(1, &["/x/exports/A.md"], 0)), "Exported 1 book to exports/");
         assert_eq!(report_text(&r(3, &["/x/exports/A.md", "/x/exports/B.md", "/x/exports/C.md"], 0)), "Exported 3 books to exports/");
         assert_eq!(report_text(&r(3, &["/x/exports/My Clippings.txt"], 0)), "Exported 3 books to exports/My Clippings.txt");
+        assert_eq!(report_text(&r(1, &["/x/exports/My Clippings.txt"], 0)), "Exported 1 book to exports/My Clippings.txt");
         assert_eq!(report_text(&r(2, &["/x/a", "/x/b"], 1)), "Exported 2, 1 failed (see the log)");
     }
 
