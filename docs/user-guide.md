@@ -396,16 +396,29 @@ root; use it only on a network you trust, and turn it off again.
 
 ## 7. Export your highlights
 
-rinky writes a book's highlights, notes and bookmarks to a Markdown file,
-`/mnt/us/rinky/exports/<title>.md`: title and author, then each entry in book order
-with its chapter, the quoted text, your note, the page and the date. Copy it off over
-USB or SSH.
+rinky writes a book's highlights, notes and bookmarks to a file in
+`/mnt/us/rinky/exports/`. Copy it off over USB or SSH. You choose the kind of file under
+*Settings > KOReader import > Export format*:
+
+- **Markdown** (the default): `<title>.md`, easy to read anywhere. Title and author,
+  then each entry in book order with its chapter, the quoted text, your note, the page
+  and the date.
+- **Kindle clippings**: the same layout as the `My Clippings.txt` a Kindle keeps, so
+  tools that import Kindle highlights (Readwise, Clippings.io and others) take it as
+  it is. One book goes to `<title>.txt`; exporting every book at once writes them all
+  to one `My Clippings.txt`. A note follows its highlight as a separate clipping, as
+  on a Kindle.
+- **JSON**: `<title>.json`, with every detail (text, note, chapter, page, dates,
+  highlight style and position), for your own scripts.
+
+Where to export from:
 
 - While reading: *Contents*, the *Highlights* tab, *Export*.
 - In the library: hold a book, *Export highlights*.
 - Every book at once: *Settings > KOReader import > Export all highlights*.
 - Over SSH: `/mnt/us/rinky/rinky export-highlights BOOK` (a path or part of a title),
-  or `--all`.
+  or `--all`. Add `--format clippings` or `--format json` for the other kinds of file;
+  without it you get Markdown.
 
 Exporting again replaces the file. Page numbers are filled in when you export from the
 reader; from the library only PDFs get them.

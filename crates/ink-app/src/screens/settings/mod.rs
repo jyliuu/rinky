@@ -145,6 +145,43 @@ pub fn current_settings<'a>(cx: &'a AppCtx) -> &'a Settings {
     cx.settings_update.as_ref().unwrap_or(cx.settings)
 }
 
+/// The name of an export format in the settings list.
+fn export_format_name(f: ExportFormat) -> &'static str {
+    match f {
+        ExportFormat::Markdown => "Markdown",
+        ExportFormat::Clippings => "Kindle clippings",
+        ExportFormat::Json => "JSON",
+    }
+}
+
+/// Where "Export all highlights" writes in format `f`.
+fn export_subtitle(f: ExportFormat) -> &'static str {
+    match f {
+        ExportFormat::Markdown => "One Markdown file per book, in rinky/exports",
+        ExportFormat::Clippings => "All books in rinky/exports/My Clippings.txt",
+        ExportFormat::Json => "One JSON file per book, in rinky/exports",
+    }
+}
+
+/// Rows of the KOReader import page (import, library, highlight export and its format).
+pub(crate) fn koreader_rows(format: ExportFormat) -> Vec<Row> {
+    let mut rows = vec![
+        Row::header("From KOReader"),
+        Row::item("Import from KOReader", "ko-import").icon(Icon::Download).subtitle("Positions, highlights, notes, status, statistics"),
+        Row::note("KOReader's files are only read, never changed."),
+        Row::header("Library"),
+        Row::item("Rescan the library", "lib-rescan").icon(Icon::Sync).subtitle("Read the book folders again"),
+        Row::item("Browse files", "lib-files").icon(Icon::Folder).subtitle("Open a book from any folder"),
+        Row::note("These run on the library screen; it opens when you tap."),
+        Row::header("Highlights"),
+        Row::item("Export all highlights", "export-all").icon(Icon::Download).subtitle(export_subtitle(format)),
+        Row::header("Export format"),
+    ];
+    rows.extend(ExportFormat::ALL.iter().map(|f| Row::choice(export_format_name(*f), *f == format, format!("exportfmt:{}", f.name()))));
+    rows.push(Row::note("Export highlights in the reader menu and the book menu use it too."));
+    rows
+}
+
 /// A module page that is not wired yet.
 struct ComingSoon;
 
@@ -202,6 +239,7 @@ use crate::router::{AppCtx, AppScreen, ScreenRegistry, Transition};
 use crate::plugin_host::{self, hooks, PluginEntry};
 use crate::update;
 use ink_device::{Device, Key, Rect, RefreshClass, Rotation, Size, WifiNetwork, WifiState};
+use ink_store::export::ExportFormat;
 use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::{Paths, Settings};
 use ink_ui::bars::APP_BAR_H;
@@ -1123,7 +1161,7 @@ impl SettingsScreen {
             Page::Layout => self.build_layout(cx, content),
             Page::Nav => self.build_nav(cx, content),
             Page::Folders => self.build_folders(cx, content),
-            Page::Koreader => self.build_koreader(content),
+            Page::Koreader => self.build_koreader(cx, content),
             Page::Language => self.build_language(cx, content),
             Page::Module(_) => self.build_module(cx, content),
             Page::Refresh => self.build_refresh(cx, content),
@@ -1337,22 +1375,8 @@ impl SettingsScreen {
         self.add_rows(rows, content);
     }
 
-    fn build_koreader(&mut self, content: Rect) {
-        let rows = vec![
-            Row::header("From KOReader"),
-            Row::item("Import from KOReader", "ko-import")
-                .icon(Icon::Download)
-                .subtitle("Positions, highlights, notes, status, statistics"),
-            Row::note("KOReader's files are only read, never changed."),
-            Row::header("Library"),
-            Row::item("Rescan the library", "lib-rescan").icon(Icon::Sync).subtitle("Read the book folders again"),
-            Row::item("Browse files", "lib-files").icon(Icon::Folder).subtitle("Open a book from any folder"),
-            Row::note("These run on the library screen; it opens when you tap."),
-            Row::header("Highlights"),
-            Row::item("Export all highlights", "export-all")
-                .icon(Icon::Download)
-                .subtitle("One Markdown file per book, in rinky/exports"),
-        ];
+    fn build_koreader(&mut self, cx: &mut AppCtx, content: Rect) {
+        let rows = koreader_rows(current_settings(cx).export_format());
         self.add_rows(rows, content);
     }
 
@@ -1887,8 +1911,9 @@ impl SettingsScreen {
                 self.set_status(format!("{} {}", dir.display(), if on == "on" { "added" } else { "removed" }));
             }
             "export-all" => {
+                let format = current_settings(cx).export_format();
                 let text = match crate::export::load_index(cx.paths) {
-                    Ok(index) => crate::export::export_everything(cx.paths, &index),
+                    Ok(index) => crate::export::export_everything(cx.paths, &index, format),
                     Err(e) => {
                         log::warn!("settings: export all: {e}");
                         format!("Export failed: {e}")
@@ -1905,6 +1930,11 @@ impl SettingsScreen {
                 crate::screens::library::request(req);
                 log::info!("settings: library request {req:?}; back to the screen below");
                 return Ok(Transition::Pop);
+            }
+            "exportfmt" => {
+                let Some(f) = ExportFormat::from_name(arg) else { return Ok(Transition::None) };
+                edit_settings(cx, |s| s.export_format = f.name().to_string());
+                self.rebuild_with(format!("Export format: {}", export_format_name(f)));
             }
             "lang" => {
                 if !LANGUAGES.iter().any(|(c, _)| *c == arg) {

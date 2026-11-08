@@ -296,6 +296,8 @@ pub struct LibraryScreen {
     run_action: Option<(ink_plugin::registry::LibraryAction, PathBuf)>,
     /// A toast to show in `handle` (needs `cx`): the result of "Export highlights".
     toast: Option<String>,
+    /// File format of "Export highlights" (from the settings, read on enter).
+    export_format: ink_store::export::ExportFormat,
     /// Rescan or KOReader import on a worker thread; it owns the library meanwhile
     /// (`lib` is `None`) and the screen shows only a progress line.
     pub(crate) job: Option<Job<LibJob>>,
@@ -372,6 +374,7 @@ impl LibraryScreen {
             plugin_actions: Vec::new(),
             run_action: None,
             toast: None,
+            export_format: ink_store::export::ExportFormat::default(),
             job: None,
             busy_text: String::new(),
             busy_dirty: false,
@@ -1089,6 +1092,7 @@ impl AppScreen for LibraryScreen {
             }
         }
         self.plugin_actions = cx.plugins.library_actions().to_vec();
+        self.export_format = cx.settings.export_format();
         // Nothing of the previous screen may stay on the panel.
         self.dirty = Some(RefreshClass::Gc16);
         // A plugin added books (OPDS download).

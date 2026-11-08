@@ -1,11 +1,13 @@
 //! Highlight export for the screens and the command line: runs
 //! [`ink_store::export`], logs the written paths at INFO and words the toast.
 //!
-//! Files go to `<paths.root>/exports/<title>.md` (`/mnt/us/rinky/exports` on the
-//! Kindle, the simulator's own data dir on the host).
+//! Files go to `<paths.root>/exports/` (`/mnt/us/rinky/exports` on the Kindle, the
+//! simulator's own data dir on the host): `<title>.md`, `<title>.json`, or Kindle's
+//! clippings layout (`<title>.txt` for one book, `My Clippings.txt` for all), in the
+//! format chosen in Settings (`export_format`) or with `--format`.
 
 use crate::plugin_host::PluginHost;
-use ink_store::export::{export_all, export_entry, ExportReport, Locator};
+use ink_store::export::{export_all_as, export_entry_as, ExportFormat, ExportReport, Locator};
 use ink_store::{BookEntry, LibraryIndex, Paths};
 use std::path::Path;
 
@@ -35,10 +37,10 @@ fn short_name(path: &Path) -> String {
     format!("exports/{name}")
 }
 
-/// Exports one book and returns the toast text. `loc` gives page numbers when the book
-/// is open (the reader).
-pub fn export_one(paths: &Paths, entry: &BookEntry, loc: &Locator) -> String {
-    match export_entry(paths, entry, loc) {
+/// Exports one book in `format` and returns the toast text. `loc` gives page numbers
+/// when the book is open (the reader).
+pub fn export_one(paths: &Paths, entry: &BookEntry, loc: &Locator, format: ExportFormat) -> String {
+    match export_entry_as(paths, entry, loc, format) {
         Ok(Some(p)) => {
             log::info!("export: wrote {}", p.display());
             format!("Saved {}", short_name(&p))
@@ -62,17 +64,21 @@ fn report_text(r: &ExportReport) -> String {
     for (b, e) in &r.failed {
         log::warn!("export: {}: {e}", b.display());
     }
-    log::info!("export: {} file(s) written, {} book(s) without highlights, {} failed", r.written.len(), r.empty, r.failed.len());
-    match (r.written.len(), r.failed.len()) {
-        (0, 0) => "No highlights to export".to_string(),
-        (n, 0) => format!("Exported {n} book{} to exports/", if n == 1 { "" } else { "s" }),
-        (n, f) => format!("Exported {n}, {f} failed (see the log)"),
+    log::info!("export: {} book(s) in {} file(s), {} book(s) without highlights, {} failed", r.books, r.written.len(), r.empty, r.failed.len());
+    let books = |n: usize| format!("{n} book{}", if n == 1 { "" } else { "s" });
+    match (r.books, r.failed.len(), r.written.as_slice()) {
+        (0, 0, _) => "No highlights to export".to_string(),
+        // Kindle clippings: every book in one file.
+        (n, 0, [one]) if n > 1 => format!("Exported {} to {}", books(n), short_name(one)),
+        (n, 0, _) => format!("Exported {} to exports/", books(n)),
+        (n, f, _) => format!("Exported {n}, {f} failed (see the log)"),
     }
 }
 
-/// Exports every book of `index` that has highlights, notes or bookmarks; the toast text.
-pub fn export_everything(paths: &Paths, index: &LibraryIndex) -> String {
-    report_text(&export_all(paths, index))
+/// Exports every book of `index` that has highlights, notes or bookmarks in `format`;
+/// the toast text.
+pub fn export_everything(paths: &Paths, index: &LibraryIndex, format: ExportFormat) -> String {
+    report_text(&export_all_as(paths, index, format))
 }
 
 /// The library index for `export_everything`, read from `paths.library()`.
@@ -80,18 +86,38 @@ pub fn load_index(paths: &Paths) -> Result<LibraryIndex, String> {
     LibraryIndex::load(&paths.library()).map_err(|e| format!("library.json: {e}"))
 }
 
-/// `rinky export-highlights [--all | BOOK]`. BOOK is a file path or a part of a
-/// title in the library. Prints each written path. Only reads sidecars and the library
-/// index (safe while the app runs). Exit 0 when files were written or there was nothing
-/// to write, 2 for bad arguments, 1 when a book is not found or a write failed.
+/// `rinky export-highlights [--format markdown|clippings|json] [--all | BOOK]`. BOOK is
+/// a file path or a part of a title in the library; the format defaults to Markdown.
+/// Prints each written path. Only reads sidecars and the library index (safe while the
+/// app runs). Exit 0 when files were written or there was nothing to write, 2 for bad
+/// arguments, 1 when a book is not found or a write failed.
 pub fn cli(args: &[String], paths: &Paths) -> anyhow::Result<i32> {
-    const USAGE: &str = "usage: rinky export-highlights [--all | BOOK]   (BOOK: file path or part of a title)";
+    const USAGE: &str = "usage: rinky export-highlights [--format markdown|clippings|json] [--all | BOOK]   (BOOK: file path or part of a title)";
+    let mut format = ExportFormat::Markdown;
+    let mut rest: Vec<&String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let value = match a.strip_prefix("--format") {
+            Some("") => it.next().map(String::as_str),
+            Some(v) if v.starts_with('=') => Some(&v[1..]),
+            _ => {
+                rest.push(a);
+                continue;
+            }
+        };
+        match value.and_then(ExportFormat::from_name) {
+            Some(f) => format = f,
+            None => {
+                eprintln!("{USAGE}");
+                return Ok(2);
+            }
+        }
+    }
     let index = load_index(paths).map_err(|e| anyhow::anyhow!(e))?;
-    let rest: Vec<&String> = args.iter().collect();
     let mut failed = false;
     match rest.as_slice() {
         [a] if a.as_str() == "--all" => {
-            let r = export_all(paths, &index);
+            let r = export_all_as(paths, &index, format);
             for p in &r.written {
                 println!("{}", p.display());
             }
@@ -104,7 +130,7 @@ pub fn cli(args: &[String], paths: &Paths) -> anyhow::Result<i32> {
         }
         [book] if !book.starts_with("--") => {
             let entry = find_book(&index, book)?;
-            match export_entry(paths, &entry, &Locator::none()) {
+            match export_entry_as(paths, &entry, &Locator::none(), format) {
                 Ok(Some(p)) => {
                     log::info!("export: wrote {}", p.display());
                     println!("{}", p.display());
@@ -163,6 +189,21 @@ mod tests {
     }
 
     #[test]
+    fn report_toasts_name_the_one_clippings_file() {
+        let r = |books: usize, written: &[&str], failed: usize| ExportReport {
+            written: written.iter().map(std::path::PathBuf::from).collect(),
+            books,
+            empty: 0,
+            failed: (0..failed).map(|i| (std::path::PathBuf::from(format!("/b/{i}")), "e".into())).collect(),
+        };
+        assert_eq!(report_text(&r(0, &[], 0)), "No highlights to export");
+        assert_eq!(report_text(&r(1, &["/x/exports/A.md"], 0)), "Exported 1 book to exports/");
+        assert_eq!(report_text(&r(3, &["/x/exports/A.md", "/x/exports/B.md", "/x/exports/C.md"], 0)), "Exported 3 books to exports/");
+        assert_eq!(report_text(&r(3, &["/x/exports/My Clippings.txt"], 0)), "Exported 3 books to exports/My Clippings.txt");
+        assert_eq!(report_text(&r(2, &["/x/a", "/x/b"], 1)), "Exported 2, 1 failed (see the log)");
+    }
+
+    #[test]
     fn toast_names_are_short() {
         let p = Path::new("/mnt/us/rinky/exports/Short.md");
         assert_eq!(short_name(p), "exports/Short.md");
@@ -193,6 +234,17 @@ mod tests {
         assert!(out.exists());
         assert!(cli(&a(&["nothing like it"]), &paths).is_err());
         assert_eq!(cli(&a(&[]), &paths).unwrap(), 2);
+        // --format, before or after the book, with a space or '='.
+        assert_eq!(cli(&a(&["--format", "json", "the bo"]), &paths).unwrap(), 0);
+        assert!(std::fs::read_to_string(paths.exports().join("The Book.json")).unwrap().contains("\"text\": \"hi\""));
+        assert_eq!(cli(&a(&["--all", "--format=clippings"]), &paths).unwrap(), 0);
+        let clip = std::fs::read_to_string(paths.exports().join("My Clippings.txt")).unwrap();
+        assert!(clip.starts_with("\u{feff}The Book\r\n- Your Highlight") && clip.contains("\r\nhi\r\n=========="), "{clip:?}");
+        assert_eq!(cli(&a(&["--format", "pdf", "--all"]), &paths).unwrap(), 2);
+        assert_eq!(cli(&a(&["--all", "--format"]), &paths).unwrap(), 2);
+        for f in ["The Book.json", "My Clippings.txt"] {
+            std::fs::remove_file(paths.exports().join(f)).unwrap();
+        }
         // A book with nothing to export writes no file and exits 0.
         let empty = dir.join("e.epub");
         std::fs::write(&empty, "y").unwrap();

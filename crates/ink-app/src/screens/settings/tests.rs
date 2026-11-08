@@ -552,6 +552,21 @@ fn navigation_bar_items_move_and_keep_their_limits() {
 }
 
 #[test]
+fn export_format_choice_is_saved_and_names_the_clippings_file() {
+    let rows = koreader_rows(ExportFormat::Markdown);
+    let r = run("export-format", &format!("{}{}shot export-format\n", main_tap("page:koreader"), tap_row(rows, "exportfmt:clippings")));
+    assert_eq!(saved(&r).export_format(), ExportFormat::Clippings);
+    assert!(r.probe.frames() > 0);
+    // The page lists the three formats with the chosen one checked.
+    let rows = koreader_rows(ExportFormat::Clippings);
+    let checked: Vec<&str> = rows.iter().filter(|r| r.trail == Trail::Check(true)).map(|r| r.action.as_str()).collect();
+    assert_eq!(checked, vec!["exportfmt:clippings"]);
+    assert_eq!(rows.iter().filter(|r| r.action.starts_with("exportfmt:")).count(), 3);
+    let all = rows.iter().find(|r| r.action == "export-all").unwrap();
+    assert_eq!(all.subtitle.as_deref(), Some("All books in rinky/exports/My Clippings.txt"));
+}
+
+#[test]
 fn full_refresh_choice_is_saved() {
     let refresh = choices(&REFRESH_CHOICES.map(|n| format!("refresh:{n}")), 1);
     let r = run("refresh", &format!("{}shot refresh\n{}", main_tap("page:refresh"), tap_row(refresh, "refresh:16")));

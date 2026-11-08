@@ -4,6 +4,16 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Highlights can be exported as Kindle clippings or JSON as well as Markdown. Choose
+  under Settings › KOReader import › Export format; the reader's and the library's
+  *Export highlights* use the same choice. Kindle clippings use the layout of a
+  Kindle's `My Clippings.txt`, so Readwise and similar tools read them; *Export all
+  highlights* then puts every book in one `exports/My Clippings.txt`. Over SSH,
+  `rinky export-highlights --format clippings|json` does the same.
+
 ## [0.5.3] - 2026-11-07
 
 ### Changed
