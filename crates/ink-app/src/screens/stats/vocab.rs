@@ -4,7 +4,7 @@
 //! card is refreshed).
 
 use super::{header, now_and_offset, pager, HEADER_H, MARGIN, PAGER_H};
-use crate::screens::common::{paint_cx, pill, swipe_step, tap_pos};
+use crate::screens::common::{input, paint_cx, pill, Input};
 use crate::router::{AppCtx, AppScreen, Transition};
 use ink_device::{Key, Rect, RefreshClass, Size};
 use ink_stats::{VocabDb, VocabWord};
@@ -378,32 +378,18 @@ impl AppScreen for VocabScreen {
     fn handle(&mut self, ev: &UiEvent, cx: &mut AppCtx) -> anyhow::Result<Transition> {
         let size = cx.screen.size();
         let (now, _) = now_and_offset(cx);
-        if matches!(ev, UiEvent::Quit) {
-            return Ok(Transition::Exit);
-        }
-        if let UiEvent::Key(k) = ev {
-            if !k.pressed {
-                return Ok(Transition::None);
-            }
-            return Ok(match k.key {
-                Key::Back => self.act(Hit::Back, now, size),
-                Key::PageNext if self.round.is_none() => self.act(Hit::NextPage, now, size),
-                Key::PagePrev if self.round.is_none() => self.act(Hit::PrevPage, now, size),
-                _ => Transition::None,
-            });
-        }
-        if let Some(step) = swipe_step(ev) {
-            if self.round.is_none() {
-                return Ok(self.act(if step > 0 { Hit::NextPage } else { Hit::PrevPage }, now, size));
-            }
-            return Ok(Transition::None);
-        }
-        if let Some(pos) = tap_pos(ev) {
-            if let Some(hit) = self.hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, h)| h.clone()) {
-                return Ok(self.act(hit, now, size));
-            }
-        }
-        Ok(Transition::None)
+        // Pages turn on the list only, not during a practice round.
+        let list = self.round.is_none();
+        let hit = match input(ev, &self.hits) {
+            Some(Input::Quit) => return Ok(Transition::Exit),
+            Some(Input::Key(Key::Back)) => Hit::Back,
+            Some(Input::Key(Key::PageNext)) if list => Hit::NextPage,
+            Some(Input::Key(Key::PagePrev)) if list => Hit::PrevPage,
+            Some(Input::Swipe(step)) if list => if step > 0 { Hit::NextPage } else { Hit::PrevPage },
+            Some(Input::Hit(hit)) => hit,
+            _ => return Ok(Transition::None),
+        };
+        Ok(self.act(hit, now, size))
     }
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {
