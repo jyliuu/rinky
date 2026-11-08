@@ -238,87 +238,26 @@ pub fn is_xml_name(name: &str) -> bool {
 
 /// Replacement text for HTML named entities that XHTML books use without a DTD.
 pub fn html_entity(name: &str) -> Option<&'static str> {
-    const LATIN1: [&str; 96] = [
-        "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml", "copy", "ordf", "laquo", "not",
-        "shy", "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro", "para", "middot", "cedil", "sup1",
-        "ordm", "raquo", "frac14", "frac12", "frac34", "iquest", "Agrave", "Aacute", "Acirc", "Atilde", "Auml",
-        "Aring", "AElig", "Ccedil", "Egrave", "Eacute", "Ecirc", "Euml", "Igrave", "Iacute", "Icirc", "Iuml", "ETH",
-        "Ntilde", "Ograve", "Oacute", "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute", "Ucirc",
-        "Uuml", "Yacute", "THORN", "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig", "ccedil",
-        "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde", "ograve", "oacute",
-        "ocirc", "otilde", "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc", "uuml", "yacute", "thorn", "yuml",
+    // The XML entities come first: quick-xml asks for `amp` and `lt` too.
+    const NAMES: [&str; 159] = [
+        "amp", "lt", "gt", "quot", "apos", "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml",
+        "copy", "ordf", "laquo", "not", "shy", "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro", "para",
+        "middot", "cedil", "sup1", "ordm", "raquo", "frac14", "frac12", "frac34", "iquest", "Agrave", "Aacute", "Acirc",
+        "Atilde", "Auml", "Aring", "AElig", "Ccedil", "Egrave", "Eacute", "Ecirc", "Euml", "Igrave", "Iacute", "Icirc",
+        "Iuml", "ETH", "Ntilde", "Ograve", "Oacute", "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute",
+        "Ucirc", "Uuml", "Yacute", "THORN", "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig",
+        "ccedil", "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde", "ograve",
+        "oacute", "ocirc", "otilde", "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc", "uuml", "yacute", "thorn",
+        "yuml", "mdash", "ndash", "hellip", "lsquo", "rsquo", "sbquo", "ldquo", "rdquo", "bdquo", "lsaquo", "rsaquo",
+        "dagger", "Dagger", "bull", "prime", "Prime", "permil", "euro", "trade", "larr", "rarr", "uarr", "darr", "harr",
+        "minus", "infin", "ne", "le", "ge", "asymp", "ensp", "emsp", "thinsp", "zwnj", "zwj", "lrm", "rlm", "OElig",
+        "oelig", "Scaron", "scaron", "Yuml", "fnof", "circ", "tilde", "alpha", "beta", "gamma", "delta", "pi", "sigma",
+        "omega", "Omega", "loz", "spades", "clubs", "hearts", "diams",
     ];
-    const LATIN1_CHARS: &str = "\u{a0}¡¢£¤¥¦§¨©ª«¬\u{ad}®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ";
-    if let Some(i) = LATIN1.iter().position(|n| *n == name) {
-        let (start, c) = LATIN1_CHARS.char_indices().nth(i)?;
-        return LATIN1_CHARS.get(start..start + c.len_utf8());
-    }
-    Some(match name {
-        "amp" => "&",
-        "lt" => "<",
-        "gt" => ">",
-        "quot" => "\"",
-        "apos" => "'",
-        "mdash" => "—",
-        "ndash" => "–",
-        "hellip" => "…",
-        "lsquo" => "‘",
-        "rsquo" => "’",
-        "sbquo" => "‚",
-        "ldquo" => "“",
-        "rdquo" => "”",
-        "bdquo" => "„",
-        "lsaquo" => "‹",
-        "rsaquo" => "›",
-        "dagger" => "†",
-        "Dagger" => "‡",
-        "bull" => "•",
-        "prime" => "′",
-        "Prime" => "″",
-        "permil" => "‰",
-        "euro" => "€",
-        "trade" => "™",
-        "larr" => "←",
-        "rarr" => "→",
-        "uarr" => "↑",
-        "darr" => "↓",
-        "harr" => "↔",
-        "minus" => "−",
-        "infin" => "∞",
-        "ne" => "≠",
-        "le" => "≤",
-        "ge" => "≥",
-        "asymp" => "≈",
-        "ensp" => "\u{2002}",
-        "emsp" => "\u{2003}",
-        "thinsp" => "\u{2009}",
-        "zwnj" => "\u{200c}",
-        "zwj" => "\u{200d}",
-        "lrm" => "\u{200e}",
-        "rlm" => "\u{200f}",
-        "OElig" => "Œ",
-        "oelig" => "œ",
-        "Scaron" => "Š",
-        "scaron" => "š",
-        "Yuml" => "Ÿ",
-        "fnof" => "ƒ",
-        "circ" => "ˆ",
-        "tilde" => "˜",
-        "alpha" => "α",
-        "beta" => "β",
-        "gamma" => "γ",
-        "delta" => "δ",
-        "pi" => "π",
-        "sigma" => "σ",
-        "omega" => "ω",
-        "Omega" => "Ω",
-        "loz" => "◊",
-        "spades" => "♠",
-        "clubs" => "♣",
-        "hearts" => "♥",
-        "diams" => "♦",
-        _ => return None,
-    })
+    const CHARS: &str = "&<>\"'\u{a0}¡¢£¤¥¦§¨©ª«¬\u{ad}®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ—–…‘’‚“”„‹›†‡•′″‰€™←→↑↓↔−∞≠≤≥≈\u{2002}\u{2003}\u{2009}\u{200c}\u{200d}\u{200e}\u{200f}ŒœŠšŸƒˆ˜αβγδπσωΩ◊♠♣♥♦";
+    let i = NAMES.iter().position(|n| *n == name)?;
+    let (start, c) = CHARS.char_indices().nth(i)?;
+    CHARS.get(start..start + c.len_utf8())
 }
 
 fn qname_parts(raw: &[u8]) -> (Option<String>, String) {
@@ -682,6 +621,10 @@ mod tests {
         assert_eq!(html_entity("yuml"), Some("ÿ"));
         assert_eq!(html_entity("mdash"), Some("—"));
         assert_eq!(html_entity("nope"), None);
+        // Names and characters stay aligned across the whole table.
+        for (name, want) in [("amp", "&"), ("apos", "'"), ("shy", "\u{ad}"), ("thorn", "þ"), ("ensp", "\u{2002}"), ("rlm", "\u{200f}"), ("diams", "♦")] {
+            assert_eq!(html_entity(name), Some(want), "{name}");
+        }
         assert!(is_xml_name("mbp:pagebreak") && !is_xml_name("1a") && !is_xml_name("a\"b"));
     }
 
