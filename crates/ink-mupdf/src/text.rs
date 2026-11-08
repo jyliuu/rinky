@@ -57,14 +57,12 @@ impl PageText {
 
     fn normalized(&self) -> Vec<Norm> {
         let mut out: Vec<Norm> = Vec::with_capacity(self.chars.len() + 16);
-        let n = self.chars.len();
         for (i, ch) in self.chars.iter().enumerate() {
-            let next_line_starts = i + 1 < n && self.chars[i + 1].line != ch.line;
-            // Line-end hyphenation: drop the hyphen, join the word.
-            if next_line_starts && (ch.c == '-' || ch.c == '\u{ad}') && self.chars[i + 1].c.is_lowercase() {
-                continue;
-            }
-            if ch.c == '\u{ad}' {
+            // The first character of the next line, when this one ends a line.
+            let next_line = self.chars.get(i + 1).filter(|n| n.line != ch.line);
+            // A soft hyphen never shows; a hyphen at a line end before a lower-case letter
+            // is dropped and the word joined.
+            if ch.c == '\u{ad}' || ch.c == '-' && next_line.is_some_and(|n| n.c.is_lowercase()) {
                 continue;
             }
             if ch.c.is_whitespace() {
@@ -76,11 +74,8 @@ impl PageText {
                     out.push(Norm { lower: lc, orig: (k == 0).then_some(ch.c), src: Some(i) });
                 }
             }
-            if next_line_starts {
-                let hyphen_join = (ch.c == '-' || ch.c == '\u{ad}') && self.chars[i + 1].c.is_lowercase();
-                if !hyphen_join && out.last().is_some_and(|l| l.lower != ' ') {
-                    out.push(Norm { lower: ' ', orig: Some(' '), src: None });
-                }
+            if next_line.is_some() && out.last().is_some_and(|l| l.lower != ' ') {
+                out.push(Norm { lower: ' ', orig: Some(' '), src: None });
             }
         }
         while out.last().is_some_and(|l| l.lower == ' ') {
@@ -119,25 +114,14 @@ impl PageText {
         let mut i = 0;
         while i + q.len() <= norm.len() {
             if norm[i..i + q.len()].iter().zip(&q).all(|(n, c)| n.lower == *c) {
-                let srcs: Vec<usize> = norm[i..i + q.len()].iter().filter_map(|n| n.src).collect();
-                if let (Some(&a), Some(&b)) = (srcs.iter().min(), srcs.iter().max()) {
+                let srcs = || norm[i..i + q.len()].iter().filter_map(|n| n.src);
+                if let (Some(a), Some(b)) = (srcs().min(), srcs().max()) {
+                    let shown = |r: Range<usize>| norm[r].iter().filter_map(|n| n.orig).collect::<String>();
                     let lo = i.saturating_sub(context);
-                    let hi = (i + q.len() + context).min(norm.len());
-                    let mut excerpt = String::new();
-                    let mut start = 0;
-                    let mut end = 0;
-                    for (k, n) in norm.iter().enumerate().take(hi).skip(lo) {
-                        if k == i {
-                            start = excerpt.len();
-                        }
-                        if let Some(c) = n.orig {
-                            excerpt.push(c);
-                        }
-                        if k + 1 == i + q.len() {
-                            end = excerpt.len();
-                        }
-                    }
-                    out.push(TextMatch { chars: a..b + 1, excerpt, matched: start..end });
+                    let start = shown(lo..i).len();
+                    let matched = start..start + shown(i..i + q.len()).len();
+                    let excerpt = shown(lo..(i + q.len() + context).min(norm.len()));
+                    out.push(TextMatch { chars: a..b + 1, excerpt, matched });
                 }
                 i += q.len();
             } else {
