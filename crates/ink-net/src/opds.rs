@@ -114,22 +114,13 @@ impl OpdsEntry {
 
     /// The best acquisition for a reader: free first, then EPUB, then any.
     pub fn best_acquisition(&self) -> Option<&OpdsLink> {
-        let acq = self.acquisitions();
+        // The first marker the file type contains gives its rank; anything else ranks 3.
+        const FORMATS: &[(&str, u8)] = &[("epub", 0), ("pdf", 2), ("mobi", 1), ("fb2", 1), ("cbz", 1), ("comicbook", 1)];
         let rank = |l: &&OpdsLink| {
-            let free = if l.is_free_acquisition() { 0 } else { 10 };
-            let m = l.final_mime();
-            let fmt = if m.contains("epub") {
-                0
-            } else if m.contains("pdf") {
-                2
-            } else if m.contains("mobi") || m.contains("fb2") || m.contains("cbz") || m.contains("comicbook") {
-                1
-            } else {
-                3
-            };
-            free + fmt
+            let fmt = FORMATS.iter().find(|(marker, _)| l.final_mime().contains(marker)).map_or(3, |(_, r)| *r);
+            if l.is_free_acquisition() { fmt } else { fmt + 10 }
         };
-        acq.into_iter().min_by_key(rank)
+        self.links.iter().filter(|l| l.is_acquisition()).min_by_key(rank)
     }
 
     /// The link to follow for a navigation entry: a catalog link with no `rel`,
