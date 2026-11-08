@@ -905,7 +905,7 @@ mod tests {
         }
         let mut chapters = 0;
         for b in books {
-            let book = crate::epub::load(&b).unwrap_or_else(|e| panic!("{}: {e}", b.display()));
+            let book = crate::epub::load(&b, None).unwrap_or_else(|e| panic!("{}: {e}", b.display()));
             for ch in &book.chapters {
                 same_paths(&ch.html, &[]);
                 chapters += 1;

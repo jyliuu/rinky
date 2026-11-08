@@ -684,8 +684,9 @@ fn cover_of<R: Read + Seek>(loader: &ZipLoader<R>, info: &BookInfo, pkg: &Packag
     Some(Cover { path, media_type, bytes })
 }
 
-fn prepare(path: &Path) -> Result<(ZipLoader<File>, Package, Option<String>)> {
-    let mut loader = open_archive(path)?;
+/// Package, DRM status and font keys of `path` (`zip`: its archive, when already open).
+fn prepare(path: &Path, zip: Option<ZipArchive<File>>) -> Result<(ZipLoader<File>, Package, Option<String>)> {
+    let mut loader = zip.map(ZipLoader::new).map_or_else(|| open_archive(path), Ok)?;
     let encrypted = loader.read_raw("META-INF/encryption.xml").map(|b| parse_encryption(&xml::decode_xml_bytes(&b))).unwrap_or_default();
     let pkg = read_package(&loader)?;
     let drm = drm_scheme(&loader, &encrypted);
@@ -694,8 +695,8 @@ fn prepare(path: &Path) -> Result<(ZipLoader<File>, Package, Option<String>)> {
 }
 
 /// Metadata, identifiers, cover and DRM status, without reading chapters.
-pub fn read_info(path: &Path) -> Result<BookInfo> {
-    let (loader, pkg, drm) = prepare(path)?;
+pub fn read_info(path: &Path, zip: Option<ZipArchive<File>>) -> Result<BookInfo> {
+    let (loader, pkg, drm) = prepare(path, zip)?;
     let mut info = info_of(&loader, &pkg, drm);
     info.cover = cover_of(&loader, &info, &pkg);
     Ok(info)
@@ -734,10 +735,10 @@ pub fn read_toc<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> (Vec<To
 
 /// [`load`], plus the engine's navigation (TOC and page list hrefs) for [`open`] when
 /// `with_nav` is set.
-fn load_parts(path: &Path, with_nav: bool) -> Result<(Book, Option<ink_html::Navigation>)> {
+fn load_parts(path: &Path, zip: Option<ZipArchive<File>>, with_nav: bool) -> Result<(Book, Option<ink_html::Navigation>)> {
     use ink_doc::timing::step;
     let t = std::time::Instant::now();
-    let (loader, pkg, drm) = prepare(path)?;
+    let (loader, pkg, drm) = prepare(path, zip)?;
     let t = step("zip+opf", t);
     if let Some(scheme) = drm {
         return Err(DocError::Unsupported(drm_message(&scheme)));
@@ -823,15 +824,15 @@ fn read_spine(file: &Path, loader: &ZipLoader<File>, paths: Vec<String>) -> Vec<
     paths.into_iter().zip(html).map(|(path, html)| HtmlChapter { path, html }).collect()
 }
 
-/// Converts an EPUB file. DRM-protected books are refused.
-pub fn load(path: &Path) -> Result<Book> {
-    Ok(load_parts(path, false)?.0)
+/// Converts an EPUB file (`zip`: its archive, when already open). DRM is refused.
+pub fn load(path: &Path, zip: Option<ZipArchive<File>>) -> Result<Book> {
+    Ok(load_parts(path, zip, false)?.0)
 }
 
 /// Opens an EPUB file as the plain engine document, with the engine's own TOC and page
 /// list (crengine xpointers resolved by ink-html).
-pub fn open(path: &Path) -> Result<HtmlDocument> {
-    let (book, nav) = load_parts(path, true)?;
+pub fn open(path: &Path, zip: Option<ZipArchive<File>>) -> Result<HtmlDocument> {
+    let (book, nav) = load_parts(path, zip, true)?;
     let mut doc = book.into_html_document()?;
     doc.set_navigation(nav.unwrap_or_default());
     Ok(doc)
@@ -954,8 +955,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("bad.epub");
         std::fs::write(&f, b"definitely not a zip").unwrap();
-        assert!(matches!(open(&f), Err(DocError::Format(_))));
-        assert!(matches!(open(&dir.join("missing.epub")), Err(DocError::Io(_))));
+        assert!(matches!(open(&f, None), Err(DocError::Format(_))));
+        assert!(matches!(open(&dir.join("missing.epub"), None), Err(DocError::Io(_))));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
