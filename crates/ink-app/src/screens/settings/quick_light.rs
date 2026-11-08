@@ -187,17 +187,21 @@ pub enum AutoMode {
 }
 
 impl AutoMode {
-    /// Index in the panel's choice (Off, Sunset, Custom).
-    pub fn index(self) -> usize {
-        self as usize
-    }
-
-    /// From the panel's choice.
+    /// From the panel's choice (Off, Sunset, Custom).
     pub fn from_index(i: usize) -> AutoMode {
         match i {
             1 => AutoMode::Sunset,
             2 => AutoMode::Custom,
             _ => AutoMode::Off,
+        }
+    }
+
+    /// The status line after choosing this mode.
+    fn status(self) -> &'static str {
+        match self {
+            AutoMode::Off => "Auto warmth off",
+            AutoMode::Sunset => "Auto warmth: sunset to sunrise",
+            AutoMode::Custom => "Auto warmth: your hours",
         }
     }
 }
@@ -987,10 +991,7 @@ impl ControlCenterScreen {
     fn make_tile(name: &str, cx: &mut AppCtx) -> Tile {
         let settings = current_settings(cx);
         let rot = crate::app::settings_rotation(settings);
-        let bars_on = match crate::screens::reader::reader_bars_hidden() {
-            Some(hidden) => !hidden && (settings.status_bars.top.enabled || settings.status_bars.bottom.enabled),
-            None => settings.status_bars.top.enabled || settings.status_bars.bottom.enabled,
-        };
+        let bars_on = (settings.status_bars.top.enabled || settings.status_bars.bottom.enabled) && crate::screens::reader::reader_bars_hidden() != Some(true);
         let a = format!("{TILE}:{name}");
         let caption = label(CONTROL_BUTTONS, name);
         let toggle = |glyph: Glyph, on: bool| Tile::new(glyph, caption, on_off(on), Some(on), a.clone());
@@ -1091,7 +1092,7 @@ impl ControlCenterScreen {
         let detail = Self::detail(cx);
         let choice = tree.add(
             None,
-            Box::new(Segmented::new(&["Off", "Sunset", "Custom"], AUTO).with_selected(detail.mode.index())),
+            Box::new(Segmented::new(&["Off", "Sunset", "Custom"], AUTO).with_selected(detail.mode as usize)),
             lay.auto_choice,
         );
         let detail = tree.add(None, Box::new(detail), lay.detail);
@@ -1138,12 +1139,6 @@ impl ControlCenterScreen {
         }
     }
 
-    /// Shows the warmth the device has now (after auto warmth changed it).
-    fn refresh_warmth(&mut self, cx: &mut AppCtx) {
-        let Ok(v) = cx.services.light.warmth() else { return };
-        self.show_warmth(v);
-    }
-
     /// Shows the device state of the background read (only the changed tiles and
     /// sliders repaint).
     fn apply_state_read(&mut self, cx: &mut AppCtx) {
@@ -1181,7 +1176,7 @@ impl ControlCenterScreen {
         let Some(ids) = self.ids else { return };
         let d = Self::detail(cx);
         if let Some(s) = self.tree.get_mut::<Segmented>(ids.choice) {
-            s.selected = d.mode.index();
+            s.selected = d.mode as usize;
         }
         if let Some(w) = self.tree.get_mut::<Detail>(ids.detail) {
             *w = d;
@@ -1203,6 +1198,11 @@ impl ControlCenterScreen {
         if let Some(w) = w {
             self.show_warmth(w);
         }
+    }
+
+    fn set_auto_mode(&mut self, cx: &mut AppCtx, mode: AutoMode) {
+        self.change_auto(cx, |w| w.mode = mode);
+        self.set_status(mode.status());
     }
 
     /// Writes the light while slider `id` is dragged (see [`should_write`]); only the
@@ -1499,9 +1499,7 @@ impl ControlCenterScreen {
                     self.set_status("Auto warmth: no warm light on this device");
                 } else {
                     let on = with_auto_warmth(&mut *cx.services.light, |w, _| w.mode != AutoMode::Off);
-                    let mode = if on { AutoMode::Off } else { AutoMode::Sunset };
-                    self.change_auto(cx, |w| w.mode = mode);
-                    self.set_status(if on { "Auto warmth off" } else { "Auto warmth: sunset to sunrise" });
+                    self.set_auto_mode(cx, if on { AutoMode::Off } else { AutoMode::Sunset });
                     self.refresh_tiles(cx);
                 }
             }
@@ -1681,7 +1679,10 @@ impl crate::router::AppScreen for ControlCenterScreen {
                 // The warmth on the 30 s timer, not on every plugin tile poll.
                 if self.slow_tick.is_none_or(|t| t.elapsed() + PLUGIN_POLL > SLOW_TICK) {
                     self.slow_tick = Some(Instant::now());
-                    self.refresh_warmth(cx);
+                    // The warmth the device has now (auto warmth may have changed it).
+                    if let Ok(v) = cx.services.light.warmth() {
+                        self.show_warmth(v);
+                    }
                 }
                 return Ok(Transition::None);
             }
@@ -1724,13 +1725,7 @@ impl crate::router::AppScreen for ControlCenterScreen {
             advanced::PICK => return Ok(self.pick(arg, cx)),
             popup::MENU_ROW => self.plugin_pick(&a, cx),
             AUTO => {
-                let mode = AutoMode::from_index(arg.parse().unwrap_or(0));
-                self.change_auto(cx, |w| w.mode = mode);
-                self.set_status(match mode {
-                    AutoMode::Off => "Auto warmth off",
-                    AutoMode::Sunset => "Auto warmth: sunset to sunrise",
-                    AutoMode::Custom => "Auto warmth: your hours",
-                });
+                self.set_auto_mode(cx, AutoMode::from_index(arg.parse().unwrap_or(0)));
             }
             FROM | TO => {
                 let d: i32 = arg.parse().unwrap_or(0);
