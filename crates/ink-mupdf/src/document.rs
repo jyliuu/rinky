@@ -294,7 +294,7 @@ impl Inner {
         let h = (b.h() * k).ceil().max(1.0) as usize;
         let ctm = Matrix::translate(-b.x0, -b.y0).then(&Matrix::scale(k));
         let mut px = vec![255u8; w * h];
-        self.raw.render(page, &ctm, Rect::new(0, 0, w as u32, h as u32), &mut px)?;
+        self.raw.render(page, &ctm, Rect::new(0, 0, w as u32, h as u32), w, &mut px)?;
         Ok((Gray { w, h, px }, k, b))
     }
 
@@ -830,32 +830,18 @@ impl MupdfDocument {
         self.inner.borrow().raw.cached_lists()
     }
 
-    fn apply_lut(&self, px: &mut [u8]) {
-        if let Some(t) = &self.lut {
-            for p in px.iter_mut() {
-                *p = t[*p as usize];
-            }
-        }
-    }
-
     /// Draws `page` with `ctm` into the rectangle `clip` of `dst`, an image `dst_w`
     /// pixels wide, and applies the contrast and gamma table. `clip` lies inside `dst`.
     fn render_into(&self, page: usize, ctm: &Matrix, clip: Rect, dst: &mut [u8], dst_w: usize) -> Result<()> {
-        let (x, y, cw, ch) = (clip.x as usize, clip.y as usize, clip.w as usize, clip.h as usize);
-        if x == 0 && cw == dst_w {
-            // Whole rows (a page as wide as the screen): drawn in place.
-            let rows = &mut dst[y * dst_w..(y + ch) * dst_w];
-            self.inner.borrow_mut().raw.render(page, ctm, clip, rows)?;
-            self.apply_lut(rows);
-            return Ok(());
-        }
-        // The shim clears the area to white before drawing.
-        let mut tmp = vec![0u8; cw * ch];
-        self.inner.borrow_mut().raw.render(page, ctm, clip, &mut tmp)?;
-        self.apply_lut(&mut tmp);
-        for (row, src) in tmp.chunks_exact(cw).enumerate() {
-            let at = (y + row) * dst_w + x;
-            dst[at..at + cw].copy_from_slice(src);
+        // Drawn in place, rows `dst_w` apart; the shim clears the clip to white first.
+        let at = clip.y as usize * dst_w + clip.x as usize;
+        self.inner.borrow_mut().raw.render(page, ctm, clip, dst_w, &mut dst[at..])?;
+        if let Some(t) = &self.lut {
+            for row in dst[at..].chunks_mut(dst_w).take(clip.h as usize) {
+                for p in &mut row[..clip.w as usize] {
+                    *p = t[*p as usize];
+                }
+            }
         }
         Ok(())
     }
@@ -947,7 +933,7 @@ impl MupdfDocument {
         let h = ((b.h() * z).round() as usize).clamp(1, max_h.max(1) as usize);
         let mut c = Canvas::new(w, h);
         let ctm = Matrix::translate(-b.x0, -b.y0).then(&Matrix::scale(z));
-        self.inner.borrow_mut().raw.render(0, &ctm, Rect::new(0, 0, w as u32, h as u32), &mut c.pixels)?;
+        self.inner.borrow_mut().raw.render(0, &ctm, Rect::new(0, 0, w as u32, h as u32), w, &mut c.pixels)?;
         Ok(c)
     }
 

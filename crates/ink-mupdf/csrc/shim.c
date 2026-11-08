@@ -210,19 +210,22 @@ void ink_list_drop(ink_doc *d, ink_list *list)
 		fz_drop_display_list(d->ctx, list);
 }
 
-int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w, int h, unsigned char *dst)
+int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w, int h, int stride, unsigned char *dst)
 {
 	fz_pixmap *pix = NULL;
 	fz_device *dev = NULL;
 	fz_var(pix);
 	fz_var(dev);
-	if (w <= 0 || h <= 0 || !dst)
+	if (w <= 0 || h <= 0 || stride < w || !dst)
 		return 0;
 	fz_try(d->ctx)
 	{
 		fz_irect bbox = fz_make_irect(x, y, x + w, y + h);
 		fz_matrix ctm = fz_make_matrix(m[0], m[1], m[2], m[3], m[4], m[5]);
-		pix = fz_new_pixmap_with_bbox_and_data(d->ctx, fz_device_gray(d->ctx), bbox, NULL, 0, dst);
+		/* As fz_new_pixmap_with_bbox_and_data, with the caller's stride. */
+		pix = fz_new_pixmap_with_data(d->ctx, fz_device_gray(d->ctx), w, h, NULL, 0, stride, dst);
+		pix->x = x;
+		pix->y = y;
 		fz_clear_pixmap_with_value(d->ctx, pix, 255);
 		dev = fz_new_draw_device(d->ctx, fz_identity, pix);
 		fz_run_display_list(d->ctx, list, dev, ctm, fz_rect_from_irect(bbox), NULL);

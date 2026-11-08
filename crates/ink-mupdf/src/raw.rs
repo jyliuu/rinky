@@ -209,18 +209,20 @@ impl RawDoc {
         self.lists.len()
     }
 
-    /// Draws `page` with `ctm` into `dst` (8-bit gray, `area.w * area.h` bytes, white
-    /// background), which covers device pixels `area`.
-    pub fn render(&mut self, page: usize, ctm: &Matrix, area: Rect, dst: &mut [u8]) -> Result<()> {
+    /// Draws `page` with `ctm` into `dst` (8-bit gray, white background), which covers
+    /// device pixels `area`: `area.h` rows of `area.w` bytes, `stride` bytes apart.
+    pub fn render(&mut self, page: usize, ctm: &Matrix, area: Rect, stride: usize, dst: &mut [u8]) -> Result<()> {
         let (w, h) = (area.w as usize, area.h as usize);
         if w == 0 || h == 0 {
             return Ok(());
         }
-        assert!(dst.len() >= w * h, "render buffer too small");
+        let need = (h - 1).checked_mul(stride).and_then(|n| n.checked_add(w));
+        assert!(stride >= w && need.is_some_and(|n| dst.len() >= n), "render buffer too small");
+        let stride = c_int::try_from(stride).map_err(|_| DocError::Format(format!("row stride {stride} too large")))?;
         let (list, _) = self.list(page)?;
-        // SAFETY: list belongs to this document; dst has w*h bytes.
+        // SAFETY: list belongs to this document; dst holds h rows of w bytes, stride apart.
         let rc = unsafe {
-            ffi::ink_render(self.ptr(), list, ctm.m.as_ptr(), area.x, area.y, w as c_int, h as c_int, dst.as_mut_ptr())
+            ffi::ink_render(self.ptr(), list, ctm.m.as_ptr(), area.x, area.y, w as c_int, h as c_int, stride, dst.as_mut_ptr())
         };
         if rc < 0 {
             return Err(self.error(format_args!("render page {page}")));

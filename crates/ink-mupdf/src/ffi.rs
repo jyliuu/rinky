@@ -68,6 +68,7 @@ extern "C" {
         y: c_int,
         w: c_int,
         h: c_int,
+        stride: c_int,
         dst: *mut c_uchar,
     ) -> c_int;
     pub fn ink_text(d: *mut InkDoc, list: *mut InkList, out: *mut *mut InkChar, n: *mut c_int) -> c_int;
