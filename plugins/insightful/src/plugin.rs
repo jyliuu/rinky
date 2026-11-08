@@ -15,6 +15,7 @@ use crate::provider::{self, ChatRequest, Msg, Profile, StreamAccumulator, ToolCa
 use crate::tools::{self, BookTools};
 use ink_doc::Selection;
 use ink_net::sse::SseParser;
+use ink_plugin::kit::Requests;
 use ink_plugin::net::WHOLE_LIMIT;
 use ink_plugin::{HostCtx, HttpEvent, Permission, Plugin, PluginError, PluginManifest, Registrar, Result, StreamMode};
 use serde_json::{json, Value};
@@ -86,12 +87,10 @@ struct Run {
     last_flush: Instant,
 }
 
-/// A model list request in flight.
+/// A model list request: the provider and the search text.
 struct ModelFetch {
-    request: u32,
     provider: String,
     query: Option<String>,
-    status: u16,
 }
 
 /// Insightful.
@@ -108,7 +107,7 @@ pub struct InsightfulPlugin {
     chat: Option<String>,
     questions: Vec<String>,
     run: Option<Run>,
-    models_req: Option<ModelFetch>,
+    models_req: Requests<ModelFetch>,
     /// Provider of the open model menu (the choice is saved for it).
     model_provider: Option<String>,
     error: Option<String>,
@@ -151,7 +150,7 @@ impl InsightfulPlugin {
             chat: None,
             questions: Vec::new(),
             run: None,
-            models_req: None,
+            models_req: Requests::default(),
             model_provider: None,
             error: None,
             viewer_open: false,
@@ -801,14 +800,10 @@ impl InsightfulPlugin {
         let Some(url) = models::url(&provider, &p.base_url, query.as_deref()) else {
             return Self::model_error(cx, &format!("{provider} has no model list. Use \"Enter model ID…\"."));
         };
-        if let Some(old) = self.models_req.take() {
-            cx.cancel_request(old.request);
-        }
-        match cx.start_request(models::request(&url, &p.api_key, p.timeout), StreamMode::Whole { limit: models::BODY_LIMIT }) {
-            Ok(request) => {
-                self.models_req = Some(ModelFetch { request, provider, query, status: 0 });
-                cx.toast("Loading models…")
-            }
+        self.models_req.cancel_all(cx);
+        let job = ModelFetch { provider: provider.clone(), query };
+        match self.models_req.start(cx, models::request(&url, &p.api_key, p.timeout), StreamMode::Whole { limit: models::BODY_LIMIT }, job) {
+            Ok(_) => cx.toast("Loading models…"),
             Err(e) => {
                 log::warn!("insightful: model list for {provider}: {e}");
                 Self::model_error(cx, &format!("Couldn't load models: {e}"))
@@ -817,26 +812,21 @@ impl InsightfulPlugin {
     }
 
     /// Events of the model list request: a menu of models, or an error dialog.
-    fn on_models_http(&mut self, cx: &mut HostCtx, ev: &HttpEvent) -> Result<()> {
-        let f = self.models_req.as_mut().expect("model request");
-        let body = match ev {
-            HttpEvent::Response { status, .. } => {
-                f.status = *status;
-                return Ok(());
-            }
-            HttpEvent::Done { body } => body.as_deref().unwrap_or(b""),
-            HttpEvent::Error(m) => {
-                let f = self.models_req.take().expect("model request");
+    fn on_models_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
+        let Some((p, answer)) = self.models_req.event(id, ev) else { return Ok(()) };
+        let (status, f) = (p.status, p.job);
+        let body = match answer {
+            Ok(b) => b,
+            Err(m) => {
                 log::warn!("insightful: model list for {}: {m}", f.provider);
                 return Self::model_error(cx, &format!("Couldn't load models: {m}. Check the Wi-Fi connection."));
             }
-            _ => return Ok(()),
         };
-        let f = self.models_req.take().expect("model request");
+        let body = body.as_slice();
         let kind = provider::Kind::from_id(&f.provider).unwrap_or(provider::Kind::OpenAi);
-        if !(200..300).contains(&f.status) {
-            let m = provider::http_error(kind, f.status, body).replacen("AI service", "Model service", 1);
-            log::warn!("insightful: model list for {}: HTTP {}", f.provider, f.status);
+        if !(200..300).contains(&status) {
+            let m = provider::http_error(kind, status, body).replacen("AI service", "Model service", 1);
+            log::warn!("insightful: model list for {}: HTTP {status}", f.provider);
             return Self::model_error(cx, &format!("Couldn't load models: {m}"));
         }
         let current = self.config.as_ref().and_then(|c| c.resolve(Some(&f.provider))).map(|p| p.model).unwrap_or_default();
@@ -914,9 +904,7 @@ impl Plugin for InsightfulPlugin {
             cx.cancel_request(id);
         }
         self.run = None;
-        if let Some(f) = self.models_req.take() {
-            cx.cancel_request(f.request);
-        }
+        self.models_req.cancel_all(cx);
         self.save();
         self.book = None;
         self.chat = None;
@@ -1082,8 +1070,8 @@ impl Plugin for InsightfulPlugin {
     }
 
     fn on_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
-        if self.models_req.as_ref().is_some_and(|f| f.request == id) {
-            return self.on_models_http(cx, ev);
+        if self.models_req.get_mut(id).is_some() {
+            return self.on_models_http(cx, id, ev);
         }
         let Some(r) = self.run.as_mut().filter(|r| r.request == Some(id)) else { return Ok(()) };
         match ev {

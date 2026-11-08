@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use api::{Cache, Summary};
 use ink_net::Request;
+use ink_plugin::kit::Requests;
 use ink_plugin::serde_json::json;
 use ink_plugin::{HostCtx, HttpEvent, Permission, Plugin, PluginManifest, Registrar, Result, StreamMode};
 
@@ -75,13 +76,6 @@ enum Job {
     Article { lang: usize, sum: Summary, save: bool },
 }
 
-/// The request in flight (at most one).
-struct Running {
-    id: u32,
-    job: Job,
-    status: u16,
-}
-
 /// One language's answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Page {
@@ -113,7 +107,8 @@ pub struct WikipediaPlugin {
     cache: Option<Cache>,
     cache_path: Option<PathBuf>,
     session: Option<Session>,
-    running: Option<Running>,
+    /// The request in flight (at most one).
+    running: Requests<Job>,
     view_open: bool,
     full: Option<FullText>,
 }
@@ -181,7 +176,7 @@ impl WikipediaPlugin {
     pub fn new() -> Self {
         let mut manifest = PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]);
         manifest.hosts = vec!["wikipedia.org".to_string()];
-        WikipediaPlugin { manifest, cache: None, cache_path: None, session: None, running: None, view_open: false, full: None }
+        WikipediaPlugin { manifest, cache: None, cache_path: None, session: None, running: Requests::default(), view_open: false, full: None }
     }
 
     // ---- settings ----
@@ -239,16 +234,9 @@ impl WikipediaPlugin {
 
     // ---- requests ----
 
-    fn cancel(&mut self, cx: &mut HostCtx) {
-        if let Some(r) = self.running.take() {
-            log::debug!("wikipedia: cancel request {}", r.id);
-            cx.cancel_request(r.id);
-        }
-    }
-
     /// Starts `job`; a failure to start shows as a card or toast, never as an error.
     fn start(&mut self, cx: &mut HostCtx, job: Job) -> Result<()> {
-        self.cancel(cx);
+        self.running.cancel_all(cx);
         let Some(s) = self.session.as_ref() else { return Ok(()) };
         let (url, total, limit) = match &job {
             Job::Summary { lang, title } => (api::summary_url(&s.langs[*lang], title), 20, 1 << 20),
@@ -256,11 +244,8 @@ impl WikipediaPlugin {
             Job::Article { lang, sum, .. } => (api::article_url(&s.langs[*lang], &sum.title), 45, 3 << 20),
         };
         log::info!("wikipedia: GET {url}");
-        match cx.start_request(request(url, total), StreamMode::Whole { limit }) {
-            Ok(id) => {
-                self.running = Some(Running { id, job, status: 0 });
-                Ok(())
-            }
+        match self.running.start(cx, request(url, total), StreamMode::Whole { limit }, job.clone()) {
+            Ok(_) => Ok(()),
             Err(e) => {
                 log::warn!("wikipedia: cannot start the request: {e}");
                 self.failed(cx, &job, &format!("{e}"))
@@ -276,7 +261,7 @@ impl WikipediaPlugin {
         }
         let langs = Self::languages(cx);
         log::info!("wikipedia: lookup {query:?} in {langs:?}");
-        self.cancel(cx);
+        self.running.cancel_all(cx);
         self.session = Some(Session { query, pages: vec![None; langs.len()], langs, shown: 0, hits: Vec::new(), hits_lang: 0 });
         self.fetch_page(cx, 0)
     }
@@ -370,9 +355,9 @@ impl WikipediaPlugin {
 
     // ---- answers ----
 
-    fn done(&mut self, cx: &mut HostCtx, run: Running, body: &[u8]) -> Result<()> {
-        match run.job.clone() {
-            Job::Summary { lang, title } => match run.status {
+    fn done(&mut self, cx: &mut HostCtx, job: Job, status: u16, body: &[u8]) -> Result<()> {
+        match job.clone() {
+            Job::Summary { lang, title } => match status {
                 200 => match api::parse_summary(body) {
                     Ok(sum) => {
                         let Some(s) = self.session.as_mut() else { return Ok(()) };
@@ -382,17 +367,17 @@ impl WikipediaPlugin {
                         self.cache_put(cx, &l, &title, &sum);
                         self.show_card(cx)
                     }
-                    Err(e) => self.failed(cx, &run.job, &format!("bad answer: {e}")),
+                    Err(e) => self.failed(cx, &job, &format!("bad answer: {e}")),
                 },
                 404 => {
                     log::info!("wikipedia: no page {title:?}, searching");
                     self.start(cx, Job::Search { lang, query: title })
                 }
-                st => self.failed(cx, &run.job, &format!("Wikipedia answered HTTP {st}")),
+                st => self.failed(cx, &job, &format!("Wikipedia answered HTTP {st}")),
             },
             Job::Search { lang, query } => {
-                if run.status != 200 {
-                    return self.failed(cx, &run.job, &format!("Wikipedia answered HTTP {}", run.status));
+                if status != 200 {
+                    return self.failed(cx, &job, &format!("Wikipedia answered HTTP {status}"));
                 }
                 // No hit but a spelling suggestion (`mutinyy` -> `mutiny`): offer it as the hit.
                 let parsed = api::parse_search(body).map(|h| if h.is_empty() { api::parse_suggestion(body).map(|s| vec![(s, String::new())]).unwrap_or_default() } else { h });
@@ -410,18 +395,18 @@ impl WikipediaPlugin {
                         s.shown = lang;
                         self.show_card(cx)
                     }
-                    Err(e) => self.failed(cx, &run.job, &format!("bad answer: {e}")),
+                    Err(e) => self.failed(cx, &job, &format!("bad answer: {e}")),
                 }
             }
             Job::Article { lang, sum, save } => {
-                if run.status != 200 {
-                    return self.failed(cx, &run.job, &format!("Wikipedia answered HTTP {}", run.status));
+                if status != 200 {
+                    return self.failed(cx, &job, &format!("Wikipedia answered HTTP {status}"));
                 }
                 let l = self.lang(lang).unwrap_or_else(|| DEFAULT_LANG.into());
                 let text = match api::parse_article(body) {
                     Ok(Some((_, t))) if !t.is_empty() => t,
-                    Ok(_) => return self.failed(cx, &run.job, "The article has no text."),
-                    Err(e) => return self.failed(cx, &run.job, &format!("bad answer: {e}")),
+                    Ok(_) => return self.failed(cx, &job, "The article has no text."),
+                    Err(e) => return self.failed(cx, &job, &format!("bad answer: {e}")),
                 };
                 let url = page_url(&sum, &l);
                 if save {
@@ -577,15 +562,15 @@ impl Plugin for WikipediaPlugin {
             }
             (ID_CARD, _) => {
                 // Closed: a lookup still loading is dropped (an article keeps going).
-                if self.running.as_ref().is_some_and(|r| !matches!(r.job, Job::Article { .. })) {
-                    self.cancel(cx);
+                if self.running.jobs().any(|j| !matches!(j, Job::Article { .. })) {
+                    self.running.cancel_all(cx);
                 }
                 Ok(())
             }
             (ID_VIEW, "closed") => {
                 self.view_open = false;
-                if self.running.as_ref().is_some_and(|r| matches!(r.job, Job::Article { save: false, .. })) {
-                    self.cancel(cx);
+                if self.running.jobs().any(|j| matches!(j, Job::Article { save: false, .. })) {
+                    self.running.cancel_all(cx);
                 }
                 Ok(())
             }
@@ -614,31 +599,16 @@ impl Plugin for WikipediaPlugin {
     }
 
     fn on_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
-        if self.running.as_ref().is_none_or(|r| r.id != id) {
-            log::debug!("wikipedia: event of an old request {id} ignored");
-            return Ok(());
-        }
-        match ev {
-            HttpEvent::Response { status, .. } => {
-                if let Some(r) = self.running.as_mut() {
-                    r.status = *status;
-                }
+        // Events of a cancelled request find no job and are dropped.
+        let Some((run, answer)) = self.running.event(id, ev) else { return Ok(()) };
+        match answer {
+            Ok(body) => self.done(cx, run.job, run.status, &body),
+            Err(m) if m.starts_with("interrupted") => {
+                // The device went to sleep; nothing to show on the screen saver.
+                log::info!("wikipedia: request interrupted by sleep");
                 Ok(())
             }
-            HttpEvent::Done { body } => {
-                let Some(run) = self.running.take() else { return Ok(()) };
-                self.done(cx, run, body.as_deref().unwrap_or_default())
-            }
-            HttpEvent::Error(m) => {
-                let Some(run) = self.running.take() else { return Ok(()) };
-                if m.starts_with("interrupted") {
-                    // The device went to sleep; nothing to show on the screen saver.
-                    log::info!("wikipedia: request interrupted by sleep");
-                    return Ok(());
-                }
-                self.failed(cx, &run.job, m)
-            }
-            _ => Ok(()),
+            Err(m) => self.failed(cx, &run.job, &m),
         }
     }
 }

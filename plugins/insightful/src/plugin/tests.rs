@@ -540,7 +540,7 @@ fn model_search_errors_offline_and_close() {
     // Closing the book cancels a pending list; a stale id is ignored.
     env.answer(MENU_MODEL, "list");
     env.with(|p, cx| p.on_close(cx)).unwrap();
-    assert!(env.plugin.models_req.is_none());
+    assert!(env.plugin.models_req.jobs().next().is_none());
     let n = env.ui.0.len();
     env.with(|p, cx| p.on_http(cx, 999, &HttpEvent::Done { body: Some(b"{}".to_vec()) })).unwrap();
     env.pump();

@@ -135,6 +135,13 @@ impl<J> Requests<J> {
         self.0.values().map(|p| &p.job)
     }
 
+    /// Cancels every request in flight ([`HostCtx::cancel_request`]) and forgets it.
+    pub fn cancel_all(&mut self, cx: &mut HostCtx) {
+        for (id, _) in self.0.drain() {
+            cx.cancel_request(id);
+        }
+    }
+
     /// Takes event `ev` of request `id`: `Response` records the status and content type;
     /// `Done` and `Error` end the request and return it with its [`Answer`]. Other events
     /// and unknown ids return `None`.
@@ -294,5 +301,9 @@ mod tests {
         let (p, answer) = r.event(b, &HttpEvent::Error("timed out".into())).unwrap();
         assert_eq!((p.job, p.status, p.success(), answer), ("b", 0, false, Err("timed out".into())));
         assert_eq!(r.jobs().count(), 0);
+        let c = r.start(&mut cx, Request::get("https://x.org/c"), StreamMode::Chunks, "c").unwrap();
+        r.cancel_all(&mut cx);
+        assert_eq!(r.jobs().count(), 0);
+        assert!(r.event(c, &HttpEvent::Done { body: None }).is_none(), "cancelled requests are forgotten");
     }
 }
