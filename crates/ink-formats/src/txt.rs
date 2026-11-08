@@ -235,7 +235,7 @@ fn blocks_of(groups: &[Vec<&str>], mode: Mode, allow_caps: bool) -> Vec<Block> {
         let heading = if short {
             match heading_level(g[0]) {
                 // The subtitle lines are looked at only for a heading line (rare).
-                Some(level) => Some(level).filter(|_| g[1..].iter().all(|l| heading_level(l).is_none())),
+                Some(level) => g[1..].iter().all(|l| heading_level(l).is_none()).then_some(level),
                 None if allow_caps && mode == Mode::Blank && g.len() == 1 && is_all_caps_title(g[0]) => Some(1),
                 None => None,
             }
