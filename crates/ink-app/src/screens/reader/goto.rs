@@ -165,14 +165,9 @@ pub fn build_with(info: &GotoInfo, extra: &GotoExtra, size: Size) -> Overlay {
                 .enumerate()
                 .map(|(i, (e, p))| {
                     let indent = "      ".repeat(e.level.min(4) as usize);
-                    let mut item = ListItem::new(format!("{indent}{}", e.title), format!("toc:{i}")).detail(page_text(e.page));
-                    if let Some(p) = p {
-                        item = item.progress(p);
-                    }
-                    if info.current == Some(i) {
-                        item = item.checked(true);
-                    }
-                    item
+                    let item = ListItem::new(format!("{indent}{}", e.title), format!("toc:{i}")).detail(page_text(e.page));
+                    // The current chapter is checked; the others keep no check mark space.
+                    ListItem { progress: p, checked: (info.current == Some(i)).then_some(true), ..item }
                 })
                 .collect();
             let mut l = List::new(items, ROW_H);
