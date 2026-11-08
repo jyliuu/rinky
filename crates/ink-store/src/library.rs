@@ -536,12 +536,8 @@ impl LibraryIndex {
         }
         let c = self.collections.iter_mut().find(|c| c.name == old).ok_or_else(|| StoreError::NotFound(format!("collection {old:?}")))?;
         c.name = new.to_string();
-        for b in &mut self.books {
-            for n in &mut b.collections {
-                if n == old {
-                    *n = new.to_string();
-                }
-            }
+        for n in self.books.iter_mut().flat_map(|b| &mut b.collections).filter(|n| *n == old) {
+            *n = new.to_string();
         }
         Ok(())
     }
