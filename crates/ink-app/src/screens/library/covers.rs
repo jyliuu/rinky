@@ -30,7 +30,7 @@ pub fn save(img: &Canvas, path: &Path) -> Option<PathBuf> {
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    match img.save_png(path) {
+    match img.save_png_fast(path) {
         Ok(()) => Some(path.to_path_buf()),
         Err(e) => {
             log::warn!("library: cannot write cover {}: {e}", path.display());
