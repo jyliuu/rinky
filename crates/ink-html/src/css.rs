@@ -617,22 +617,20 @@ impl SelParser<'_> {
         }
         let name = name.to_ascii_lowercase();
         self.skip_ws();
-        let op_start = self.i;
-        let op = match self.peek()? {
-            b']' => {
+        let op: fn(String) -> AttrOp = match (self.peek()?, self.s.get(self.i + 1) == Some(&b'=')) {
+            (b']', _) => {
                 self.i += 1;
                 return Some(AttrSel { name, op: AttrOp::Exists, case_insensitive: false });
             }
-            b'=' => {
-                self.i += 1;
-                "="
-            }
-            b'~' | b'|' | b'^' | b'$' | b'*' if self.s.get(self.i + 1) == Some(&b'=') => {
-                self.i += 2;
-                &self.src[op_start..op_start + 2]
-            }
+            (b'=', _) => AttrOp::Eq,
+            (b'~', true) => AttrOp::Includes,
+            (b'|', true) => AttrOp::DashMatch,
+            (b'^', true) => AttrOp::Prefix,
+            (b'$', true) => AttrOp::Suffix,
+            (b'*', true) => AttrOp::Substring,
             _ => return None,
         };
+        self.i += if self.s[self.i] == b'=' { 1 } else { 2 };
         self.skip_ws();
         let value = match self.peek()? {
             q @ (b'"' | b'\'') => {
@@ -661,15 +659,7 @@ impl SelParser<'_> {
             return None;
         }
         self.i += 1;
-        let op = match op {
-            "=" => AttrOp::Eq(value),
-            "~=" => AttrOp::Includes(value),
-            "|=" => AttrOp::DashMatch(value),
-            "^=" => AttrOp::Prefix(value),
-            "$=" => AttrOp::Suffix(value),
-            _ => AttrOp::Substring(value),
-        };
-        Some(AttrSel { name, op, case_insensitive: ci })
+        Some(AttrSel { name, op: op(value), case_insensitive: ci })
     }
 }
 
@@ -738,41 +728,24 @@ pub fn parse_selector(src: &str) -> Option<Selector> {
             return None;
         }
         let ws = p.skip_ws();
-        match p.peek() {
+        comb = match p.peek() {
             None => break,
-            Some(b'>') => {
+            Some(c @ (b'>' | b'+' | b'~')) => {
                 p.i += 1;
-                comb = Combinator::Child;
                 p.skip_ws();
+                match c {
+                    b'>' => Combinator::Child,
+                    b'+' => Combinator::NextSibling,
+                    _ => Combinator::SubsequentSibling,
+                }
             }
-            Some(b'+') => {
-                p.i += 1;
-                comb = Combinator::NextSibling;
-                p.skip_ws();
-            }
-            Some(b'~') => {
-                p.i += 1;
-                comb = Combinator::SubsequentSibling;
-                p.skip_ws();
-            }
-            Some(_) if ws => comb = Combinator::Descendant,
+            Some(_) if ws => Combinator::Descendant,
             Some(_) => return None,
-        }
+        };
     }
-    let (mut a, mut b, mut t) = (0, 0, 0);
-    for (_, c) in &left_to_right {
-        let (x, y, z) = compound_specificity(c);
-        a += x;
-        b += y;
-        t += z;
-    }
+    let (a, b, t) = left_to_right.iter().map(|(_, c)| compound_specificity(c)).fold((0, 0, 0), |s, x| (s.0 + x.0, s.1 + x.1, s.2 + x.2));
     // parts right to left; the combinator stored with part i links it to part i+1 (its left).
-    let n = left_to_right.len();
-    let mut parts = Vec::with_capacity(n);
-    for i in (0..n).rev() {
-        let comb_to_left = left_to_right[i].0;
-        parts.push((left_to_right[i].1.clone(), comb_to_left));
-    }
+    let parts = left_to_right.into_iter().rev().map(|(comb, c)| (c, comb)).collect();
     Some(Selector { parts, specificity: (a.min(1023) << 20) | (b.min(1023) << 10) | t.min(1023) })
 }
 
@@ -956,6 +929,17 @@ mod tests {
         assert_eq!(parse_selector("*").unwrap().specificity, 0);
         let a = parse_selector("[lang|=en]").unwrap();
         assert_eq!(a.parts[0].0.attrs[0].op, AttrOp::DashMatch("en".into()));
+        // Every combinator, a descendant after a child combinator, every attribute test.
+        let s = parse_selector("a > b c+d ~ e[x][x=1][x~='2'][x^=3][x$=\\34][x*=\"5\" i]").unwrap();
+        let combs: Vec<Combinator> = s.parts.iter().map(|p| p.1).collect();
+        use Combinator::*;
+        assert_eq!(combs, [SubsequentSibling, NextSibling, Descendant, Child, Descendant]);
+        let ops: Vec<&AttrOp> = s.parts[0].0.attrs.iter().map(|a| &a.op).collect();
+        let v = |s: &str| s.to_string();
+        assert_eq!(ops, [&AttrOp::Exists, &AttrOp::Eq(v("1")), &AttrOp::Includes(v("2")), &AttrOp::Prefix(v("3")), &AttrOp::Suffix(v("4")), &AttrOp::Substring(v("5"))]);
+        assert!(s.parts[0].0.attrs[5].case_insensitive && !s.parts[0].0.attrs[4].case_insensitive);
+        assert_eq!(s.specificity, (6 << 10) | 5);
+        assert!(parse_selector("a >").is_none() && parse_selector("[x!=1]").is_none() && parse_selector("[x~1]").is_none());
     }
 
     #[test]
