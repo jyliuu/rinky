@@ -612,13 +612,10 @@ pub fn parse_nav(xhtml: &str, nav_path: &str, spine: &HashMap<String, usize>) ->
 /// The cover image path: [`Package::cover_image`], else the first image of the guide's
 /// cover page (or of the first spine item when it is named like a cover).
 pub fn find_cover<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> Option<String> {
-    if let Some(c) = pkg.items.iter().find(|i| i.has("cover-image")) {
-        return Some(c.path.clone());
-    }
-    if let Some(c) = &pkg.cover_meta {
-        if pkg.item(c).is_some_and(|i| i.is_image()) || pkg.items.iter().any(|i| i.href == *c && i.is_image()) {
-            return pkg.cover_image();
-        }
+    // The manifest's own answer when it names an image (property or `<meta name="cover">`).
+    let names_image = |c: &String| pkg.item(c).is_some_and(|i| i.is_image()) || pkg.items.iter().any(|i| i.href == *c && i.is_image());
+    if pkg.items.iter().any(|i| i.has("cover-image")) || pkg.cover_meta.as_ref().is_some_and(names_image) {
+        return pkg.cover_image();
     }
     let page = pkg
         .guide
@@ -629,17 +626,12 @@ pub fn find_cover<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> Optio
             let first = pkg.item_path(pkg.spine.first()?)?;
             first.to_ascii_lowercase().contains("cover").then_some(first)
         });
-    if let Some(page) = page {
-        if let Ok(bytes) = loader.read_raw(&page) {
-            if let Ok(root) = xml::parse(&chapter_text(bytes)) {
-                let src = root.find("img").and_then(|i| i.attr("src")).or_else(|| root.find("image").and_then(|i| i.attr("href")));
-                if let Some(src) = src {
-                    return Some(resolve_href(dir_of(&page), src));
-                }
-            }
-        }
-    }
-    pkg.cover_image()
+    let first_image = |page: String| {
+        let root = xml::parse(&chapter_text(loader.read_raw(&page).ok()?)).ok()?;
+        let src = root.find("img").and_then(|i| i.attr("src")).or_else(|| root.find("image").and_then(|i| i.attr("href")))?;
+        Some(resolve_href(dir_of(&page), src))
+    };
+    page.and_then(first_image).or_else(|| pkg.cover_image())
 }
 
 fn open_archive(path: &Path) -> Result<ZipLoader<File>> {
