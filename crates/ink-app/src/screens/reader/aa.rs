@@ -1108,7 +1108,8 @@ impl Widget for FamilyGrid {
 struct Row {
     caption: Option<&'static str>,
     h: u32,
-    widgets: Vec<(Option<&'static str>, Box<dyn Widget>)>,
+    /// The widgets with their [`Overlay::ids`] keys.
+    widgets: Vec<(&'static str, Box<dyn Widget>)>,
     /// In the narrow columns of the landscape sheet the widgets go one under the other
     /// (side by side they would not fit their captions).
     stack_narrow: bool,
@@ -1116,7 +1117,12 @@ struct Row {
 
 impl Row {
     fn one(key: &'static str, caption: Option<&'static str>, h: u32, widget: Box<dyn Widget>) -> Self {
-        Row { caption, h, widgets: vec![(Some(key), widget)], stack_narrow: false }
+        Row { caption, h, widgets: vec![(key, widget)], stack_narrow: false }
+    }
+
+    /// Two controls side by side.
+    fn pair(a: (&'static str, Box<dyn Widget>), b: (&'static str, Box<dyn Widget>), stack_narrow: bool) -> Self {
+        Row { caption: None, h: CONTROL_H, widgets: vec![a, b], stack_narrow }
     }
 
     /// Height with the widgets side by side (or `stacked`: one under the other).
@@ -1154,24 +1160,8 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
                 Row::one("preset", None, CONTROL_H, seg(presets, |s| s.preset().map_or(-1.0, |i| i as f32))),
                 Row::one("size", None, SliderPanel::height(1, PREVIEW_H), Box::new(SliderPanel::new(vec![0], shown, screen_w))),
                 Row::one("font", Some("Font"), 2 * CONTROL_H + GAP, Box::new(FamilyGrid { names: families, shown: shown.clone(), page: 0 })),
-                Row {
-                    caption: None,
-                    h: CONTROL_H,
-                    widgets: vec![
-                        (Some("justify"), toggle("Justify", "aa-justify", |s| s.justify)),
-                        (Some("hyph"), toggle("Hyphenate", "aa-hyph", |s| s.hyph)),
-                    ],
-                    stack_narrow: false,
-                },
-                Row {
-                    caption: None,
-                    h: CONTROL_H,
-                    stack_narrow: true,
-                    widgets: vec![
-                        (Some("publisher"), toggle("Book's styles", "aa-publisher", |s| s.publisher)),
-                        (Some("weight"), seg(chips(&WEIGHTS, "aa-weight"), |s| s.weight as f32)),
-                    ],
-                },
+                Row::pair(("justify", toggle("Justify", "aa-justify", |s| s.justify)), ("hyph", toggle("Hyphenate", "aa-hyph", |s| s.hyph)), false),
+                Row::pair(("publisher", toggle("Book's styles", "aa-publisher", |s| s.publisher)), ("weight", seg(chips(&WEIGHTS, "aa-weight"), |s| s.weight as f32)), true),
             ]
         }
         1 => vec![
@@ -1279,10 +1269,7 @@ pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) 
         for (k, (key, widget)) in row.widgets.into_iter().enumerate() {
             let k = k as u32;
             let r = if stacked { Rect::new(x, y + (k * (h + GAP)) as i32, w, h) } else { Rect::new(x + (k * (w + 48)) as i32, y, w, h) };
-            let id = o.tree.add(Some(sheet), widget, r);
-            if let Some(key) = key {
-                o.ids.insert(key, id);
-            }
+            o.ids.insert(key, o.tree.add(Some(sheet), widget, r));
         }
         y += (t - cap_h) as i32;
     }
