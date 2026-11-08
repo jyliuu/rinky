@@ -911,7 +911,17 @@ mod tests {
         assert_eq!(combs, [SubsequentSibling, NextSibling, Descendant, Child, Descendant]);
         let ops: Vec<&AttrOp> = s.parts[0].0.attrs.iter().map(|a| &a.op).collect();
         let v = |s: &str| s.to_string();
-        assert_eq!(ops, [&AttrOp::Exists, &AttrOp::Eq(v("1")), &AttrOp::Includes(v("2")), &AttrOp::Prefix(v("3")), &AttrOp::Suffix(v("4")), &AttrOp::Substring(v("5"))]);
+        assert_eq!(
+            ops,
+            [
+                &AttrOp::Exists,
+                &AttrOp::Eq(v("1")),
+                &AttrOp::Includes(v("2")),
+                &AttrOp::Prefix(v("3")),
+                &AttrOp::Suffix(v("4")),
+                &AttrOp::Substring(v("5")),
+            ]
+        );
         assert!(s.parts[0].0.attrs[5].case_insensitive && !s.parts[0].0.attrs[4].case_insensitive);
         assert_eq!(s.specificity, (6 << 10) | 5);
         assert!(parse_selector("a >").is_none() && parse_selector("[x!=1]").is_none() && parse_selector("[x~1]").is_none());

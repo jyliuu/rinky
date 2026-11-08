@@ -1466,8 +1466,20 @@ impl<'a, 'e> Flow<'a, 'e> {
                 }
             } else {
                 // Black, undecorated, outside the DOM text and links.
-                let (px, node, link) = (st.font_size, NONE, NO_LINK);
-                let run = TextRun { x: mx, baseline, face, px, text: m, width: mw, node, link, deco_w: mw, line_top: top, line_bottom: bottom, ..Default::default() };
+                let run = TextRun {
+                    x: mx,
+                    baseline,
+                    face,
+                    px: st.font_size,
+                    text: m,
+                    width: mw,
+                    node: NONE,
+                    link: NO_LINK,
+                    deco_w: mw,
+                    line_top: top,
+                    line_bottom: bottom,
+                    ..Default::default()
+                };
                 self.out.items.push(Draw::Text(run));
             }
             if !outside {
@@ -1824,7 +1836,12 @@ impl<'a, 'e> Flow<'a, 'e> {
 /// borders): top, bottom, left and right, leaving out sides of width 0.
 fn border_rects(b: Edges<f32>, x: f32, w: f32, top: f32, bottom: f32, h: f32) -> impl Iterator<Item = RectRun> {
     let r = |x, y, w, h| RectRun { x, y, w, h, gray: 0 };
-    let sides = [(b.top, r(x, top, w, b.top)), (b.bottom, r(x, bottom - b.bottom, w, b.bottom)), (b.left, r(x, top, b.left, h)), (b.right, r(x + w - b.right, top, b.right, h))];
+    let sides = [
+        (b.top, r(x, top, w, b.top)),
+        (b.bottom, r(x, bottom - b.bottom, w, b.bottom)),
+        (b.left, r(x, top, b.left, h)),
+        (b.right, r(x + w - b.right, top, b.right, h)),
+    ];
     sides.into_iter().filter(|(width, _)| *width > 0.0).map(|(_, r)| r)
 }
 

@@ -947,7 +947,8 @@ impl Cascade {
                 set(slot, l);
             }
             "page-break-before" | "break-before" | "page-break-after" | "break-after" => {
-                *if d.name.ends_with("before") { &mut s.break_before } else { &mut s.break_after } = kw.as_deref().and_then(PageBreak::from_keyword).unwrap_or_default();
+                let slot = if d.name.ends_with("before") { &mut s.break_before } else { &mut s.break_after };
+                *slot = kw.as_deref().and_then(PageBreak::from_keyword).unwrap_or_default();
             }
             "page-break-inside" | "break-inside" => s.avoid_break_inside = matches!(kw.as_deref(), Some("avoid" | "avoid-page")),
             "vertical-align" => {
@@ -990,7 +991,9 @@ impl Cascade {
                     s.line_through |= has("line-through");
                 }
             }
-            "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens" | "adobe-hyphenate" => set(&mut s.hyphens, kw.as_deref().and_then(Hyphens::from_keyword)),
+            "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens" | "adobe-hyphenate" => {
+                set(&mut s.hyphens, kw.as_deref().and_then(Hyphens::from_keyword))
+            }
             "letter-spacing" | "word-spacing" => {
                 let px = if kw.as_deref() == Some("normal") { Some(0.0) } else { v.first().and_then(|t| self.px(t, font)) };
                 if let Some(p) = px {
