@@ -668,18 +668,13 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
     }
     let mut items: Vec<(Cow<Table>, Option<&Table>)> = Vec::new();
     let mut used = vec![false; hls.len()];
-    if let Some(b) = bookmarks {
-        for bm in b.seq().into_iter().filter_map(|x| x.as_table()) {
-            let mut hl = None;
-            if bm.bool("highlighted") == Some(true) {
-                let found = pos_key(bm, paging).and_then(|k| by_pos.get(&k)).and_then(|c| c.iter().copied().find(|&i| same_time(hls[i].1, bm)));
-                if let Some(i) = found {
-                    used[i] = true;
-                    hl = Some(hls[i].1);
-                }
-            }
-            items.push((Cow::Borrowed(bm), hl));
+    for bm in bookmarks.iter().flat_map(|b| b.seq()).filter_map(|x| x.as_table()) {
+        let candidates = pos_key(bm, paging).filter(|_| bm.bool("highlighted") == Some(true)).and_then(|k| by_pos.get(&k));
+        let found = candidates.and_then(|c| c.iter().copied().find(|&i| same_time(hls[i].1, bm)));
+        if let Some(i) = found {
+            used[i] = true;
         }
+        items.push((Cow::Borrowed(bm), found.map(|i| hls[i].1)));
     }
     if import_old {
         // The datetimes of the highlighted items by position.
