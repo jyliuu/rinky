@@ -156,28 +156,54 @@ impl Slider {
     }
 }
 
+/// Draws a round outlined icon button (a slider's step buttons).
+pub fn paint_round_button(cx: &mut PaintCx, r: Rect, icon: Icon) {
+    let fg = cx.theme.fg;
+    stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, cx.theme.border_px as f32, fg);
+    cx.icon(icon, r, r.w / 2, fg);
+}
+
+/// Height of a slider's track bar.
+const TRACK_H: f32 = 12.0;
+
+/// Draws a slider's bar across the middle of `track`, black up to the fraction `f`, the
+/// rest in the theme's track gray, or white with a black outline when `du` (a drag shown
+/// with DU has no gray). Returns the centre of the knob.
+pub fn paint_slider_track(cx: &mut PaintCx, track: Rect, f: f32, du: bool) -> (f32, f32) {
+    let (fg, r) = (cx.theme.fg, TRACK_H / 2.0);
+    let ty = track.y as f32 + track.h as f32 / 2.0;
+    let kx = track.x as f32 + f * track.w as f32;
+    let bar = Rect::new(track.x, (ty - r) as i32, track.w, TRACK_H as u32);
+    fill_round_rect(cx.canvas, bar, r, if du { cx.theme.bg } else { cx.theme.track() });
+    if du {
+        stroke_round_rect(cx.canvas, bar, r, 2.0, fg);
+    }
+    fill_round_rect(cx.canvas, Rect::new(bar.x, bar.y, (kx - track.x as f32).max(0.0) as u32, bar.h), r, fg);
+    (kx, ty)
+}
+
+/// Draws a slider's knob centred at `at` on `track`: a ring, solid while `dragging`.
+pub fn paint_slider_knob(cx: &mut PaintCx, track: Rect, (kx, ty): (f32, f32), dragging: bool) {
+    let (fg, bg) = (cx.theme.fg, cx.theme.bg);
+    let kr = (track.h as f32 * 0.28).min(26.0);
+    Path::new().circle(kx, ty, kr).fill(cx.canvas, fg);
+    Path::new().circle(kx, ty, kr - 5.0).fill(cx.canvas, if dragging { fg } else { bg });
+}
+
 impl Widget for Slider {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let (fg, bg) = (cx.theme.fg, cx.theme.bg);
+        let fg = cx.theme.fg;
         let (px, small) = (cx.theme.font_px, cx.theme.small_px);
         let top = Rect::new(b.x + 8, b.y, b.w.saturating_sub(16), b.h / 2);
         cx.text_left(top, &self.label, small * 1.15, Style::Regular, fg);
         let baseline = cx.baseline_in(top, px, Style::Bold);
         cx.draw_text_right(Style::Bold, px, top.right() as f32, baseline, &self.value_text(), fg, b);
         let (minus, track, plus) = Slider::parts(b);
-        for (r, icon) in [(minus, Icon::Minus), (plus, Icon::Plus)] {
-            stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, 3.0, fg);
-            cx.icon(icon, r, r.w / 2, fg);
-        }
-        let ty = track.y as f32 + track.h as f32 / 2.0;
+        paint_round_button(cx, minus, Icon::Minus);
+        paint_round_button(cx, plus, Icon::Plus);
         let f = if self.max > self.min { (self.value - self.min) / (self.max - self.min) } else { 0.0 };
-        let kx = track.x as f32 + f * track.w as f32;
-        let th = 12.0;
-        fill_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, track.w, th as u32), th / 2.0, cx.theme.track());
-        fill_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, (kx - track.x as f32) as u32, th as u32), th / 2.0, fg);
-        let kr = (track.h as f32 * 0.28).min(26.0);
-        Path::new().circle(kx, ty, kr).fill(cx.canvas, fg);
-        Path::new().circle(kx, ty, kr - 5.0).fill(cx.canvas, if self.dragging { fg } else { bg });
+        let knob = paint_slider_track(cx, track, f, false);
+        paint_slider_knob(cx, track, knob, self.dragging);
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {

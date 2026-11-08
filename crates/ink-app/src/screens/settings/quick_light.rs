@@ -40,6 +40,7 @@ use ink_device::light::{AmberMode, AmberSchedule, AmberScheduler, DayTime};
 use ink_device::{Clock, Light, Rect, RefreshClass, Rotation, Size};
 use ink_store::prefs::{label, CONTROL_BUTTONS};
 use ink_text::Style;
+use ink_ui::controls::paint_round_button;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
 use ink_ui::{
     Damage, Direction, EventResult, Gesture, Icon, Label, PaintCx, Segmented, Slider, TouchKind, UiEvent, Widget,
@@ -712,10 +713,8 @@ impl Widget for Detail {
                     let x0 = if i == 0 { b.x } else { b.x + (b.w / 2) as i32 };
                     cx.text_left(Rect::new(x0, b.y, 104, b.h), cap, t.label.px, Style::Regular, t.fg);
                     cx.text_centered(times[i], &v.to_string(), t.body.px, Style::Bold, t.fg);
-                    for (r, icon) in [(btns[2 * i], Icon::Minus), (btns[2 * i + 1], Icon::Plus)] {
-                        stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, t.border_px as f32, t.fg);
-                        cx.icon(icon, r, r.w / 2, t.fg);
-                    }
+                    paint_round_button(cx, btns[2 * i], Icon::Minus);
+                    paint_round_button(cx, btns[2 * i + 1], Icon::Plus);
                 }
             }
         }

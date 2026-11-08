@@ -31,13 +31,12 @@
 //! negative: the book's own; Layout tab), `aa-weight:N` (darker text 0..=2; Text tab),
 //! `aa-preset:I`, `aa-font:NAME` (empty: the
 //! default family), `aa-anim:on|off`, `aa-night:on|off`, `aa-flash:N`, `aa-statusbars`,
-//! `aa-linkback`, `aa-global`, `close` (and the footer module's `aa-footer:NAME`,
-//! `aa-header:NAME`). A tab tap reports `aa` (the reader builds the sheet again; the
-//! tab is remembered here).
+//! `aa-linkback`, `aa-global`, `close`. A tab tap reports `aa` (the reader builds the
+//! sheet again; the tab is remembered here).
 
-use super::footer::{self, Edge};
+use super::footer;
 use super::stored_layout;
-use super::overlay::{Overlay, OverlayKind, PageScrim};
+use super::overlay::{Overlay, OverlayKind};
 use super::ReaderScreen;
 use crate::fonts::{self, BUILTIN};
 use crate::router::{AppCtx, Route, Transition};
@@ -47,7 +46,8 @@ use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::sidecar::BookSettings;
 use ink_store::Settings;
 use ink_text::Style;
-use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
+use ink_ui::controls::{paint_round_button, paint_slider_knob, paint_slider_track};
+use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::{BottomSheet, Button, EventResult, Gesture, Icon, Label, PaintCx, Segmented, Tabs, Toggle, TouchKind, UiEvent, Widget};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -145,10 +145,6 @@ fn take_relayout(now: bool) -> bool {
 pub struct AaExtras {
     /// Font families of the list (the built-in one first); empty: built-in only.
     pub families: Vec<String>,
-    /// Footer style name (footer module).
-    pub footer: String,
-    /// Header style name (footer module).
-    pub header: String,
     /// Page turn wave (`reader.page_animation`: `on` / `off`).
     pub wave: bool,
     /// The panel can sweep a page turn (the toggle is shown).
@@ -159,37 +155,27 @@ pub struct AaExtras {
     pub flash_every: u32,
     /// 1-based page a followed link came from ("Back to p. N"), if any.
     pub link_return: Option<usize>,
-    /// Room the top and bottom status bars take from their screen edges
-    /// ([`footer::bar_reserve`]), for the live preview.
-    pub bars: (f32, f32),
 }
 
 impl Default for AaExtras {
     fn default() -> Self {
         AaExtras {
             families: Vec::new(),
-            footer: "full".into(),
-            header: "none".into(),
             wave: true,
             wave_supported: true,
             night: false,
             flash_every: 8,
             link_return: None,
-            bars: (0.0, 0.0),
         }
     }
 }
 
 impl AaExtras {
-    /// Night mode, refresh interval and the global footer and header
-    /// from `settings` (the reader puts the book's own footer and header over them).
+    /// Night mode, refresh interval and page turn wave from `settings`.
     pub fn from_settings(settings: &Settings) -> Self {
         AaExtras {
             night: settings.device.night_mode,
             flash_every: settings.reader.flash_every,
-            footer: settings.reader.footer.as_str().into(),
-            header: settings.reader.header.as_str().into(),
-            bars: (footer::bar_reserve(&settings.status_bars, Edge::Top), footer::bar_reserve(&settings.status_bars, Edge::Bottom)),
             wave: ink_store::prefs::page_animation_on(&settings.reader.page_animation),
             ..AaExtras::default()
         }
@@ -290,8 +276,6 @@ impl Shown {
                 }
             }
             ("aa-font", _) => self.font = family_value(value),
-            ("aa-footer", _) => self.extras.footer = value.into(),
-            ("aa-header", _) => self.extras.header = value.into(),
             ("aa-anim", _) => self.extras.wave = on,
             ("aa-night", _) => self.extras.night = on,
             ("aa-flash", Some(v)) => self.extras.flash_every = v as u32,
@@ -307,23 +291,11 @@ impl Shown {
 
     /// Value of slider `i` of [`SLIDERS`].
     pub fn get(&self, i: usize) -> f32 {
-        match i {
-            0 => self.font_px,
-            1 => self.spacing,
-            2 => self.margin,
-            3 => self.margin_top,
-            _ => self.margin_bottom,
-        }
+        [self.font_px, self.spacing, self.margin, self.margin_top, self.margin_bottom][i.min(4)]
     }
 
     fn set(&mut self, i: usize, v: f32) {
-        match i {
-            0 => self.font_px = v,
-            1 => self.spacing = v,
-            2 => self.margin = v,
-            3 => self.margin_top = v,
-            _ => self.margin_bottom = v,
-        }
+        *[&mut self.font_px, &mut self.spacing, &mut self.margin, &mut self.margin_top, &mut self.margin_bottom][i.min(4)] = v;
     }
 }
 
@@ -395,40 +367,18 @@ pub fn book_layout(settings: &Settings, book: &BookSettings, w: u32, h: u32) -> 
 /// [`book_layout`] with the margins as stored (what the sheet shows and saves).
 pub fn stored_book_layout(settings: &Settings, book: &BookSettings, w: u32, h: u32) -> LayoutSettings {
     let mut l = stored_layout(settings, w, h);
-    if let Some(v) = book.font_px {
-        l.font_px = v;
-    }
-    if let Some(v) = book.line_spacing {
-        l.line_spacing = v;
-    }
-    if let Some(v) = book.margin_x {
-        l.margin_left = v;
-        l.margin_right = v;
-    }
-    if let Some(v) = book.margin_top {
-        l.margin_top = v;
-    }
-    if let Some(v) = book.margin_bottom {
-        l.margin_bottom = v;
-    }
-    if let Some(v) = book.justify {
-        l.justify = v;
-    }
-    if let Some(v) = book.hyphenation {
-        l.hyphenate = v;
-    }
-    if let Some(v) = book.publisher_styles {
-        l.publisher_styles = v;
-    }
-    if let Some(v) = book.paragraph_spacing {
-        l.paragraph_spacing = v;
-    }
-    if let Some(v) = book.paragraph_indent {
-        l.paragraph_indent = super::indent_em(v);
-    }
-    if let Some(v) = book.font_weight {
-        l.embolden = v.min(WEIGHT_MAX);
-    }
+    l.font_px = book.font_px.unwrap_or(l.font_px);
+    l.line_spacing = book.line_spacing.unwrap_or(l.line_spacing);
+    l.margin_left = book.margin_x.unwrap_or(l.margin_left);
+    l.margin_right = book.margin_x.unwrap_or(l.margin_right);
+    l.margin_top = book.margin_top.unwrap_or(l.margin_top);
+    l.margin_bottom = book.margin_bottom.unwrap_or(l.margin_bottom);
+    l.justify = book.justify.unwrap_or(l.justify);
+    l.hyphenate = book.hyphenation.unwrap_or(l.hyphenate);
+    l.publisher_styles = book.publisher_styles.unwrap_or(l.publisher_styles);
+    l.paragraph_spacing = book.paragraph_spacing.unwrap_or(l.paragraph_spacing);
+    l.paragraph_indent = book.paragraph_indent.map_or(l.paragraph_indent, super::indent_em);
+    l.embolden = book.font_weight.map_or(l.embolden, |v| v.min(WEIGHT_MAX));
     l.font_family = match book.font_family.as_deref() {
         Some(f) => family_value(f),
         None => {
@@ -443,7 +393,7 @@ pub fn stored_book_layout(settings: &Settings, book: &BookSettings, w: u32, h: u
 
 /// Applies one Aa action to `book` (the book's overrides, starting from the shown
 /// layout `l`). Returns false for an action that is not a book layout setting (the
-/// Page-tab actions: see [`apply_global`] and the footer module).
+/// Page-tab actions: see [`apply_global`]).
 pub fn apply(action: &str, l: &LayoutSettings, book: &mut BookSettings) -> bool {
     let Some((name, value)) = action.split_once(':') else { return false };
     let num = value.parse::<f32>().ok().filter(|v| v.is_finite());
@@ -659,98 +609,60 @@ impl ReaderScreen {
     }
 }
 
-/// What a [`Control`] edits (how it reads [`Shown`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Field {
-    Hyph,
-    Publisher,
-    ParaSpace,
-    Indent,
-    Weight,
-    Justify,
-    Preset,
-    Night,
-    Wave,
-    Flash,
-}
-
-/// The ink-ui control inside a [`Control`].
+/// The ink-ui control inside a [`Control`], with how it reads the shared [`Shown`].
 enum Inner {
-    Seg(Segmented),
-    Toggle(Toggle),
+    /// Chips: the action and the value of each chip, and the shown value (the chip with
+    /// that value is selected).
+    Seg(Segmented, Vec<(String, f32)>, fn(&Shown) -> f32),
+    /// A switch, on when the shown value is.
+    Toggle(Toggle, fn(&Shown) -> bool),
 }
 
-impl Inner {
-    fn widget(&mut self) -> &mut dyn Widget {
-        match self {
-            Inner::Seg(w) => w,
-            Inner::Toggle(w) => w,
-        }
-    }
-
-    /// Selects option `i` (segmented, single chips).
-    fn select(&mut self, i: Option<usize>) {
-        match self {
-            Inner::Seg(s) => s.selected = i.unwrap_or(usize::MAX),
-            Inner::Toggle(_) => {}
-        }
-    }
-}
-
-/// An ink-ui control bound to one [`Field`] of the shared [`Shown`]: it shows the
-/// shared value, maps an option index to its action (`values[i]`) and records the
-/// action in the shared values.
+/// An ink-ui control bound to one value of the shared [`Shown`]: it shows the shared
+/// value, maps a chip to its action and records the action in the shared values.
 struct Control {
-    field: Field,
     inner: Inner,
-    /// Action per option index (segmented, chips); empty: the control's own action.
-    values: Vec<String>,
     shown: Rc<RefCell<Shown>>,
 }
 
 impl Control {
-    fn new(field: Field, inner: Inner, values: Vec<String>, shown: &Rc<RefCell<Shown>>) -> Self {
-        let mut c = Control { field, inner, values, shown: shown.clone() };
+    fn new(inner: Inner, shown: &Rc<RefCell<Shown>>) -> Self {
+        let mut c = Control { inner, shown: shown.clone() };
         c.sync();
         c
     }
 
     fn sync(&mut self) {
         let s = self.shown.borrow();
-        let e = &s.extras;
-        if let Inner::Toggle(t) = &mut self.inner {
-            t.on = match self.field {
-                Field::Night => e.night,
-                Field::Wave => e.wave,
-                Field::Hyph => s.hyph,
-                Field::Publisher => s.publisher,
-                _ => s.justify,
-            };
-            return;
+        match &mut self.inner {
+            Inner::Seg(w, chips, value) => {
+                let v = value(&s);
+                w.selected = chips.iter().position(|(_, c)| (c - v).abs() < 0.01).unwrap_or(usize::MAX);
+            }
+            Inner::Toggle(t, on) => t.on = on(&s),
         }
-        let sel = match self.field {
-            Field::Preset => s.preset(),
-            Field::Flash => FLASHES.iter().position(|(n, _)| *n == e.flash_every),
-            Field::ParaSpace => PARA_SPACINGS.iter().position(|(v, _)| (*v - s.para_space).abs() < 0.01),
-            Field::Indent => INDENTS.iter().position(|(v, _)| (*v - s.indent).abs() < 0.01),
-            Field::Weight => WEIGHTS.iter().position(|(v, _)| *v == s.weight),
-            _ => None,
-        };
-        self.inner.select(sel);
+    }
+
+    fn widget(&mut self) -> &mut dyn Widget {
+        match &mut self.inner {
+            Inner::Seg(w, ..) => w,
+            Inner::Toggle(w, _) => w,
+        }
     }
 }
 
 impl Widget for Control {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         self.sync();
-        self.inner.widget().paint(cx, b);
+        self.widget().paint(cx, b);
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        match self.inner.widget().event(ev, b) {
+        match self.widget().event(ev, b) {
             EventResult::Action(a) => {
-                let a = match a.split(':').nth(1).and_then(|i| i.parse::<usize>().ok()).and_then(|i| self.values.get(i)) {
-                    Some(v) if !self.values.is_empty() => v.clone(),
+                let chip = a.split(':').nth(1).and_then(|i| i.parse::<usize>().ok());
+                let a = match (&self.inner, chip) {
+                    (Inner::Seg(_, chips, _), Some(i)) if i < chips.len() => chips[i].0.clone(),
                     _ => a,
                 };
                 self.shown.borrow_mut().apply(&a);
@@ -761,7 +673,7 @@ impl Widget for Control {
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
-        self.inner.widget().damage(b)
+        self.widget().damage(b)
     }
 }
 
@@ -870,9 +782,12 @@ impl SliderPanel {
         (label, minus, track, plus)
     }
 
-    fn value_at(spec: &SliderSpec, track: Rect, p: Point) -> f32 {
+    /// Sets row `k` of `rows` to the value under `p` on its track; true when it changed.
+    fn drag_to(&mut self, rows: &[Rect], k: usize, p: Point) -> bool {
+        let (_, _, track, _) = Self::parts(rows[k]);
+        let spec = &SLIDERS[self.which[k]];
         let f = (p.x - track.x) as f32 / track.w.max(1) as f32;
-        spec.snap(spec.min + f.clamp(0.0, 1.0) * (spec.max - spec.min))
+        self.set(k, spec.snap(spec.min + f.clamp(0.0, 1.0) * (spec.max - spec.min)))
     }
 
     fn report(&self, k: usize) -> EventResult {
@@ -903,31 +818,20 @@ impl SliderPanel {
     fn paint_row(&self, cx: &mut PaintCx, k: usize, row: Rect) {
         let spec = &SLIDERS[self.which[k]];
         let v = self.shown.borrow().get(self.which[k]);
-        let (fg, bg) = (cx.theme.fg, cx.theme.bg);
+        let fg = cx.theme.fg;
         let (label, minus, track, plus) = Self::parts(row);
         // Caption above, value below (bold), in the label column.
         let top = Rect::new(label.x, label.y + 4, label.w, label.h / 2 - 4);
         let bottom = Rect::new(label.x, label.y + label.h as i32 / 2, label.w, label.h / 2 - 4);
         cx.text_left(top, spec.label, cx.theme.small_px, Style::Regular, fg);
         cx.text_left(bottom, &spec.shown_text(v), cx.theme.font_px, Style::Bold, fg);
-        for (r, icon) in [(minus, Icon::Minus), (plus, Icon::Plus)] {
-            stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, cx.theme.border_px as f32, fg);
-            cx.icon(icon, r, r.w / 2, fg);
-        }
-        let ty = track.y as f32 + track.h as f32 / 2.0;
+        paint_round_button(cx, minus, Icon::Minus);
+        paint_round_button(cx, plus, Icon::Plus);
         let f = if spec.max > spec.min { (v - spec.min) / (spec.max - spec.min) } else { 0.0 };
-        let kx = track.x as f32 + f * track.w as f32;
-        let th = 12.0;
         let dragging = self.drag.is_some_and(|(d, _)| d == k);
         // While dragging (DU) the track is drawn black only: no gray under DU.
-        let track_v = if dragging { bg } else { cx.theme.track() };
-        fill_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, track.w, th as u32), th / 2.0, track_v);
-        if dragging {
-            stroke_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, track.w, th as u32), th / 2.0, 2.0, fg);
-        }
-        fill_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, (kx - track.x as f32).max(0.0) as u32, th as u32), th / 2.0, fg);
-        Path::new().circle(kx, ty, 26.0).fill(cx.canvas, fg);
-        Path::new().circle(kx, ty, 21.0).fill(cx.canvas, if dragging { fg } else { bg });
+        let knob = paint_slider_track(cx, track, f, dragging);
+        paint_slider_knob(cx, track, knob, dragging);
     }
 }
 
@@ -1032,53 +936,32 @@ impl Widget for SliderPanel {
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         let (_, rows) = Self::areas(b, self.which.len());
         match ev {
-            UiEvent::Touch(t) => match t.kind {
-                TouchKind::Down => {
-                    for (k, row) in rows.iter().enumerate() {
-                        let (_, _, track, _) = Self::parts(*row);
-                        let hit = Rect::new(track.x - 30, track.y, track.w + 60, track.h);
-                        if hit.contains(t.pos) {
-                            let spec = SLIDERS[self.which[k]];
-                            self.drag = Some((k, self.shown.borrow().get(self.which[k])));
-                            self.set(k, Self::value_at(&spec, track, t.pos));
-                            self.mark(k);
-                            return EventResult::Handled;
-                        }
-                    }
-                    EventResult::Ignored
+            UiEvent::Touch(t) => match (t.kind, self.drag) {
+                (TouchKind::Down, _) => {
+                    let on_track = |tr: Rect| Rect::new(tr.x - 30, tr.y, tr.w + 60, tr.h).contains(t.pos);
+                    let Some(k) = rows.iter().position(|r| on_track(Self::parts(*r).2)) else { return EventResult::Ignored };
+                    self.drag = Some((k, self.shown.borrow().get(self.which[k])));
+                    self.drag_to(&rows, k, t.pos);
+                    self.mark(k);
+                    EventResult::Handled
                 }
-                TouchKind::Move | TouchKind::Hold => match self.drag {
-                    Some((k, _)) => {
-                        let (_, _, track, _) = Self::parts(rows[k]);
-                        if self.set(k, Self::value_at(&SLIDERS[self.which[k]], track, t.pos)) {
-                            EventResult::Handled
-                        } else {
-                            EventResult::Ignored
-                        }
-                    }
-                    None => EventResult::Ignored,
-                },
-                TouchKind::Up => match self.drag.take() {
-                    Some((k, _)) => {
-                        let (_, _, track, _) = Self::parts(rows[k]);
-                        self.set(k, Self::value_at(&SLIDERS[self.which[k]], track, t.pos));
-                        self.mark(k);
-                        self.settle = true;
-                        log::info!("aa: {} drag ended, last panel paint {:?}", SLIDERS[self.which[k]].label, self.last_paint);
-                        self.report(k)
-                    }
-                    None => EventResult::Ignored,
-                },
-                // A slider drag follows the finger from touch-down; Press changes nothing.
-                TouchKind::Press => EventResult::Ignored,
+                (TouchKind::Move | TouchKind::Hold, Some((k, _))) if self.drag_to(&rows, k, t.pos) => EventResult::Handled,
+                (TouchKind::Up, Some((k, _))) => {
+                    self.drag = None;
+                    self.drag_to(&rows, k, t.pos);
+                    self.mark(k);
+                    self.settle = true;
+                    log::info!("aa: {} drag ended, last panel paint {:?}", SLIDERS[self.which[k]].label, self.last_paint);
+                    self.report(k)
+                }
                 // The drag ended without a lift (rotation): back to the value before it.
-                TouchKind::Cancel => match self.drag.take() {
-                    Some((k, before)) => {
-                        self.set(k, before);
-                        EventResult::Handled
-                    }
-                    None => EventResult::Ignored,
-                },
+                (TouchKind::Cancel, Some((k, before))) => {
+                    self.drag = None;
+                    self.set(k, before);
+                    EventResult::Handled
+                }
+                // A slider drag follows the finger from touch-down; Press changes nothing.
+                _ => EventResult::Ignored,
             },
             UiEvent::Gesture(Gesture::Tap { pos }) => {
                 for (k, row) in rows.iter().enumerate() {
@@ -1129,13 +1012,6 @@ struct FamilyGrid {
     page: usize,
 }
 
-/// A cell of the [`FamilyGrid`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Cell2 {
-    Name(usize),
-    More,
-}
-
 impl FamilyGrid {
     fn cols(b: Rect) -> u32 {
         if b.w >= 1100 {
@@ -1153,8 +1029,9 @@ impl FamilyGrid {
         (per, per_page, self.names.len().div_ceil(per_page.max(1)).max(1))
     }
 
-    /// The cells of the current page.
-    fn cells(&self, b: Rect) -> Vec<(Rect, Cell2)> {
+    /// The cells of the current page with the index of their family; `None`: the last
+    /// cell, "More", when there are several pages.
+    fn cells(&self, b: Rect) -> Vec<(Rect, Option<usize>)> {
         let cols = Self::cols(b);
         let (per, per_page, pages) = self.paging(b);
         let paged = per_page < per;
@@ -1164,16 +1041,11 @@ impl FamilyGrid {
             let (c, r) = (n as u32 % cols, n as u32 / cols);
             Rect::new(b.x + (c * (w + GAP)) as i32, b.y + (r * (CONTROL_H + GAP)) as i32, w, CONTROL_H)
         };
-        let mut out: Vec<(Rect, Cell2)> =
-            (page * per_page..((page + 1) * per_page).min(self.names.len())).enumerate().map(|(n, i)| (at(n), Cell2::Name(i))).collect();
+        let mut out: Vec<_> = (page * per_page..((page + 1) * per_page).min(self.names.len())).enumerate().map(|(n, i)| (at(n), Some(i))).collect();
         if paged {
-            out.push((at(per - 1), Cell2::More));
+            out.push((at(per - 1), None));
         }
         out
-    }
-
-    fn pages(&self, b: Rect) -> usize {
-        self.paging(b).2
     }
 
     fn selected(&self) -> String {
@@ -1185,11 +1057,11 @@ impl Widget for FamilyGrid {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         let (fg, bg) = (cx.theme.fg, cx.theme.bg);
         let sel = self.selected();
-        let pages = self.pages(b);
+        let pages = self.paging(b).2;
         for (r, cell) in self.cells(b) {
             let rad = cx.theme.radius;
             match cell {
-                Cell2::Name(i) => {
+                Some(i) => {
                     let name = &self.names[i];
                     let on = name.eq_ignore_ascii_case(&sel);
                     if on {
@@ -1203,7 +1075,7 @@ impl Widget for FamilyGrid {
                     let x = inner.x as f32 + (inner.w as f32 - w) / 2.0;
                     fonts::draw_family_text(cx, name, px, x, inner, name, if on { bg } else { fg }, inner);
                 }
-                Cell2::More => {
+                None => {
                     stroke_round_rect(cx.canvas, r, rad, cx.theme.border_px as f32, fg);
                     let text = format!("More ({}/{})", self.page % pages + 1, pages);
                     cx.text_centered(r, &text, cx.theme.small_px, Style::Bold, fg);
@@ -1215,24 +1087,19 @@ impl Widget for FamilyGrid {
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         let UiEvent::Gesture(g) = ev else { return EventResult::Ignored };
         let Gesture::Tap { pos } = g else { return EventResult::Handled };
-        for (r, cell) in self.cells(b) {
-            if !r.contains(*pos) {
-                continue;
+        match self.cells(b).into_iter().find(|(r, _)| r.contains(*pos)) {
+            Some((_, Some(i))) => {
+                let a = format!("aa-font:{}", self.names[i]);
+                self.shown.borrow_mut().apply(&a);
+                EventResult::Action(a)
             }
-            return match cell {
-                Cell2::Name(i) => {
-                    let a = format!("aa-font:{}", self.names[i]);
-                    self.shown.borrow_mut().apply(&a);
-                    EventResult::Action(a)
-                }
-                Cell2::More => {
-                    self.page = (self.page + 1) % self.pages(b);
-                    log::info!("aa: font list page {}", self.page + 1);
-                    EventResult::Handled
-                }
-            };
+            Some((_, None)) => {
+                self.page = (self.page + 1) % self.paging(b).2;
+                log::info!("aa: font list page {}", self.page + 1);
+                EventResult::Handled
+            }
+            None => EventResult::Handled,
         }
-        EventResult::Handled
     }
 }
 
@@ -1240,7 +1107,8 @@ impl Widget for FamilyGrid {
 struct Row {
     caption: Option<&'static str>,
     h: u32,
-    widgets: Vec<(Option<&'static str>, Box<dyn Widget>)>,
+    /// The widgets with their [`Overlay::ids`] keys.
+    widgets: Vec<(&'static str, Box<dyn Widget>)>,
     /// In the narrow columns of the landscape sheet the widgets go one under the other
     /// (side by side they would not fit their captions).
     stack_narrow: bool,
@@ -1248,7 +1116,12 @@ struct Row {
 
 impl Row {
     fn one(key: &'static str, caption: Option<&'static str>, h: u32, widget: Box<dyn Widget>) -> Self {
-        Row { caption, h, widgets: vec![(Some(key), widget)], stack_narrow: false }
+        Row { caption, h, widgets: vec![(key, widget)], stack_narrow: false }
+    }
+
+    /// Two controls side by side.
+    fn pair(a: (&'static str, Box<dyn Widget>), b: (&'static str, Box<dyn Widget>), stack_narrow: bool) -> Self {
+        Row { caption: None, h: CONTROL_H, widgets: vec![a, b], stack_narrow }
     }
 
     /// Height with the widgets side by side (or `stacked`: one under the other).
@@ -1258,63 +1131,48 @@ impl Row {
     }
 }
 
-fn seg(options: &[&str]) -> Inner {
-    Inner::Seg(Segmented::new(options, "seg"))
+/// Chips for a table of (value, caption): actions `<action>:<value>`.
+fn chips<T: Copy + std::fmt::Display + Into<f64>>(table: &[(T, &'static str)], action: &str) -> Vec<(&'static str, String, f32)> {
+    table.iter().map(|&(v, label)| (label, format!("{action}:{v}"), v.into() as f32)).collect()
 }
 
 /// The rows of tab `tab`.
 fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
     let screen_w = size.w;
     let s = shown.borrow().clone();
-    let ctl = |f, inner, values: Vec<String>| -> Box<dyn Widget> { Box::new(Control::new(f, inner, values, shown)) };
-    let toggle = |f, label: &str, on: bool, action: &str| ctl(f, Inner::Toggle(Toggle::new(label, on, action)), Vec::new());
-    // A segmented choice from a (value, caption) table; option I reports `action:value`.
-    fn choice<T: std::fmt::Display>(table: &[(T, &str)], action: &str) -> (Inner, Vec<String>) {
-        let captions: Vec<&str> = table.iter().map(|x| x.1).collect();
-        (seg(&captions), table.iter().map(|x| format!("{action}:{}", x.0)).collect())
-    }
-    let pick = |f, (inner, values): (Inner, Vec<String>)| ctl(f, inner, values);
+    let seg = |chips: Vec<(&str, String, f32)>, value: fn(&Shown) -> f32| -> Box<dyn Widget> {
+        let labels: Vec<&str> = chips.iter().map(|c| c.0).collect();
+        let inner = Inner::Seg(Segmented::new(&labels, "seg"), chips.into_iter().map(|(_, a, v)| (a, v)).collect(), value);
+        Box::new(Control::new(inner, shown))
+    };
+    let toggle = |label: &str, action: &str, on: fn(&Shown) -> bool| -> Box<dyn Widget> {
+        Box::new(Control::new(Inner::Toggle(Toggle::new(label, false, action), on), shown))
+    };
     match tab {
         0 => {
-            let preset_names: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
+            let presets = PRESETS.iter().enumerate().map(|(i, p)| (p.name, format!("aa-preset:{i}"), i as f32)).collect();
             let mut families = s.extras.families.clone();
             if families.is_empty() {
                 families.push(BUILTIN.to_string());
             }
             vec![
-                Row::one("preset", None, CONTROL_H, ctl(Field::Preset, seg(&preset_names), (0..PRESETS.len()).map(|i| format!("aa-preset:{i}")).collect())),
+                Row::one("preset", None, CONTROL_H, seg(presets, |s| s.preset().map_or(-1.0, |i| i as f32))),
                 Row::one("size", None, SliderPanel::height(1, PREVIEW_H), Box::new(SliderPanel::new(vec![0], shown, screen_w))),
                 Row::one("font", Some("Font"), 2 * CONTROL_H + GAP, Box::new(FamilyGrid { names: families, shown: shown.clone(), page: 0 })),
-                Row {
-                    caption: None,
-                    h: CONTROL_H,
-                    widgets: vec![
-                        (Some("justify"), toggle(Field::Justify, "Justify", s.justify, "aa-justify")),
-                        (Some("hyph"), toggle(Field::Hyph, "Hyphenate", s.hyph, "aa-hyph")),
-                    ],
-                    stack_narrow: false,
-                },
-                Row {
-                    caption: None,
-                    h: CONTROL_H,
-                    stack_narrow: true,
-                    widgets: vec![
-                        (Some("publisher"), toggle(Field::Publisher, "Book's styles", s.publisher, "aa-publisher")),
-                        (Some("weight"), pick(Field::Weight, choice(&WEIGHTS, "aa-weight"))),
-                    ],
-                },
+                Row::pair(("justify", toggle("Justify", "aa-justify", |s| s.justify)), ("hyph", toggle("Hyphenate", "aa-hyph", |s| s.hyph)), false),
+                Row::pair(("publisher", toggle("Book's styles", "aa-publisher", |s| s.publisher)), ("weight", seg(chips(&WEIGHTS, "aa-weight"), |s| s.weight as f32)), true),
             ]
         }
         1 => vec![
             Row::one("sliders", None, SliderPanel::height(4, PREVIEW_H), Box::new(SliderPanel::new(vec![1, 2, 3, 4], shown, screen_w))),
-            Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, pick(Field::ParaSpace, choice(&PARA_SPACINGS, "aa-pspace"))),
-            Row::one("indent", Some("First-line indent"), CONTROL_H, pick(Field::Indent, choice(&INDENTS, "aa-indent"))),
+            Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, seg(chips(&PARA_SPACINGS, "aa-pspace"), |s| s.para_space)),
+            Row::one("indent", Some("First-line indent"), CONTROL_H, seg(chips(&INDENTS, "aa-indent"), |s| s.indent)),
         ],
         _ => [
-            s.extras.wave_supported.then(|| Row::one("wave", None, CONTROL_H, toggle(Field::Wave, "Page turn wave", s.extras.wave, "aa-anim"))),
+            s.extras.wave_supported.then(|| Row::one("wave", None, CONTROL_H, toggle("Page turn wave", "aa-anim", |s| s.extras.wave))),
             Some(Row::one("statusbars", None, CONTROL_H, Box::new(Button::new("Status bars…", "aa-statusbars")))),
-            Some(Row::one("flash", Some("Full refresh every"), CONTROL_H, pick(Field::Flash, choice(&FLASHES, "aa-flash")))),
-            Some(Row::one("night", None, CONTROL_H, toggle(Field::Night, "Night mode", s.extras.night, "aa-night"))),
+            Some(Row::one("flash", Some("Full refresh every"), CONTROL_H, seg(chips(&FLASHES, "aa-flash"), |s| s.extras.flash_every as f32))),
+            Some(Row::one("night", None, CONTROL_H, toggle("Night mode", "aa-night", |s| s.extras.night))),
         ]
         .into_iter()
         .flatten()
@@ -1357,8 +1215,7 @@ pub fn preview_rect(o: &Overlay) -> Option<Rect> {
 /// Builds the sheet on tab `tab` (0 Text, 1 Layout, 2 Page).
 pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) -> Overlay {
     let tab = tab.min(TABS.len() - 1);
-    let mut o = Overlay::new(OverlayKind::Aa);
-    o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
+    let mut o = Overlay::over_page(OverlayKind::Aa, size, "close");
     let h = SHEET_H.min(size.h.saturating_sub(160));
     let frame = BottomSheet::frame(size, h);
     let sheet = o.tree.add(None, Box::new(BottomSheet { title: "Reading settings".into(), taken: false }), frame);
@@ -1411,10 +1268,7 @@ pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) 
         for (k, (key, widget)) in row.widgets.into_iter().enumerate() {
             let k = k as u32;
             let r = if stacked { Rect::new(x, y + (k * (h + GAP)) as i32, w, h) } else { Rect::new(x + (k * (w + 48)) as i32, y, w, h) };
-            let id = o.tree.add(Some(sheet), widget, r);
-            if let Some(key) = key {
-                o.ids.insert(key, id);
-            }
+            o.ids.insert(key, o.tree.add(Some(sheet), widget, r));
         }
         y += (t - cap_h) as i32;
     }
@@ -1429,6 +1283,7 @@ pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) 
 
 #[cfg(test)]
 mod tests {
+    use super::super::footer::Edge;
     use super::*;
 
     #[test]
