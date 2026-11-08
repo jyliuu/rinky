@@ -1258,6 +1258,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         // Boxes.
         let mut boxes: Vec<WordBox> = Vec::with_capacity(ops.len());
         let mut prev = 0usize;
+        // The width of a space in the last segment one was measured in (most boxes of a
+        // paragraph end with a space of the same segment).
+        let mut space_of: Option<(usize, f32)> = None;
         for (b, kind) in ops {
             let seg_text = &text[prev..b];
             let forced = kind == Break::Mandatory && b < text.len() || seg_text.ends_with('\n');
@@ -1268,7 +1271,14 @@ impl<'a, 'e> Flow<'a, 'e> {
                 let sp_seg = src[para.char_index(end).min(src.len() - 1)].seg as usize;
                 let n_sp = text[end..b].chars().filter(|&c| c == ' ').count();
                 if n_sp > 0 {
-                    self.range_width(" ", &segs[sp_seg])
+                    match space_of {
+                        Some((s, sw)) if s == sp_seg => sw,
+                        _ => {
+                            let sw = self.range_width(" ", &segs[sp_seg]);
+                            space_of = Some((sp_seg, sw));
+                            sw
+                        }
+                    }
                 } else {
                     0.0
                 }
@@ -1441,35 +1451,41 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut placed: Vec<(Piece, f32, bool)> = Vec::with_capacity(n_boxes);
         let mut pen = 0.0f32;
         let mut spaces = 0usize;
+        // The segment whose metrics are in `asc` and `desc` already (the same segment
+        // gives the same metrics, so the next pieces of a run of words skip them).
+        let mut measured_seg = None;
         for (bi, b) in boxes.iter().enumerate() {
             for run in p.runs(b.start, b.end) {
                 // Widths only place the pieces across the line.
                 let width = if self.text_items { self.run_width(p, run) } else { 0.0 };
                 let pc = Piece { seg: run.0, start: run.1, end: run.2, width };
-                let seg = &segs[pc.seg as usize];
-                let st = self.st(seg.style);
-                let shift = seg.shift;
-                match seg.kind {
-                    SegKind::Image { h, .. } => {
-                        let a = image_ascent(st.vertical_align, h, sa);
-                        let shift = if matches!(st.vertical_align, VAlign::Middle | VAlign::Top) { 0.0 } else { shift };
-                        asc = asc.max(a + shift);
-                        desc = desc.max(h - a - shift);
-                    }
-                    SegKind::Text { face, px } => {
-                        let (a, d) = self.env.fonts.vmetrics(face, px);
-                        let l = self.line_height(st);
-                        let hl = (l - (a - d)) / 2.0;
-                        if shift == 0.0 {
-                            asc = asc.max(a + hl + shift);
-                            desc = desc.max(l - a - hl - shift);
-                        } else {
-                            // Sub/superscripts do not grow the line beyond their glyphs.
+                if measured_seg != Some(pc.seg) {
+                    measured_seg = Some(pc.seg);
+                    let seg = &segs[pc.seg as usize];
+                    let st = self.st(seg.style);
+                    let shift = seg.shift;
+                    match seg.kind {
+                        SegKind::Image { h, .. } => {
+                            let a = image_ascent(st.vertical_align, h, sa);
+                            let shift = if matches!(st.vertical_align, VAlign::Middle | VAlign::Top) { 0.0 } else { shift };
                             asc = asc.max(a + shift);
-                            desc = desc.max(-d - shift);
+                            desc = desc.max(h - a - shift);
                         }
+                        SegKind::Text { face, px } => {
+                            let (a, d) = self.env.fonts.vmetrics(face, px);
+                            let l = self.line_height(st);
+                            let hl = (l - (a - d)) / 2.0;
+                            if shift == 0.0 {
+                                asc = asc.max(a + hl + shift);
+                                desc = desc.max(l - a - hl - shift);
+                            } else {
+                                // Sub/superscripts do not grow the line beyond their glyphs.
+                                asc = asc.max(a + shift);
+                                desc = desc.max(-d - shift);
+                            }
+                        }
+                        SegKind::Break => {}
                     }
-                    SegKind::Break => {}
                 }
                 let wdt = pc.width;
                 placed.push((pc, pen, false));
