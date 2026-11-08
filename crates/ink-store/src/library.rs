@@ -869,8 +869,6 @@ mod tests {
         assert!(matches!(LibraryIndex::load(&file), Err(StoreError::Format(_))));
     }
 
-    /// 10k books: save and load times (debug build here; the release ARM number is in
-    /// the selftest output on the emulator).
     #[test]
     fn search_keys_follow_edits_and_never_change_equality() {
         let mut lib = LibraryIndex::default();
@@ -914,6 +912,8 @@ mod tests {
         }
     }
 
+    /// 10k books: save and load times (debug build here; the release ARM number is in
+    /// the selftest output on the emulator).
     #[test]
     fn library_10k_benchmark() {
         let tmp = TempDir::new("lib-10k");
