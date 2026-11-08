@@ -10,7 +10,7 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Gesture, TouchKind};
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{press_class, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Point, Rect, RefreshClass};
 use ink_text::hyphen::{hyphenator_for, Hyphenator};
@@ -77,11 +77,6 @@ impl Widget for Toggle {
             }
             _ => EventResult::Ignored,
         }
-    }
-
-    fn refresh_class(&self) -> RefreshClass {
-        // The off state has a gray track, which DU would show white; the switch is small.
-        RefreshClass::Gl16
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
@@ -252,11 +247,7 @@ impl Widget for Slider {
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        if self.dragging {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.dragging)
     }
 }
 

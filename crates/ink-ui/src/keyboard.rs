@@ -27,7 +27,7 @@ use crate::gesture::{Touch, TouchKind};
 use crate::icon::Icon;
 use crate::widget::{EventResult, PaintCx, Widget};
 use crate::UiEvent;
-use ink_device::{Point, Rect, RefreshClass, Size};
+use ink_device::{Point, Rect, Size};
 use ink_text::Style;
 
 /// Border of a pressed key (and of shift while it is on), px, drawn inside the face.
@@ -765,13 +765,6 @@ impl Widget for Keyboard {
         }
     }
 
-    fn refresh_class(&self) -> RefreshClass {
-        // Every key shows gray (antialiased captions, the alternates
-        // dot): GL16 keeps it, DU would turn it black or white. Only the changed key
-        // faces are refreshed, so it stays a small partial update.
-        RefreshClass::Gl16
-    }
-
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
         let changed = std::mem::take(&mut self.changed);
         if std::mem::take(&mut self.full) {
@@ -798,7 +791,7 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
     use crate::widget::WidgetTree;
-    use ink_device::Canvas;
+    use ink_device::{Canvas, RefreshClass};
     use ink_text::Fonts;
     use std::time::Duration;
 
