@@ -581,16 +581,15 @@ impl Plugin for KoSyncPlugin {
     fn on_ui_result(&mut self, cx: &mut HostCtx, id: u32, result: &str) -> Result<()> {
         match id {
             MENU => self.menu_pick(cx, result),
-            IN_SERVER | IN_USER if !result.trim().is_empty() => {
-                let key = if id == IN_SERVER { "server" } else { "user" };
-                cx.storage()?.set(key, Value::String(result.trim().to_string()))?;
+            IN_SERVER | IN_USER => {
+                cx.set_from_input(if id == IN_SERVER { "server" } else { "user" }, result, |t| Ok(json!(t)))?;
                 self.show_menu(cx)
             }
             IN_PASS if !result.is_empty() => {
                 cx.storage()?.set("userkey", Value::String(kosync::userkey(result)))?;
                 self.show_menu(cx)
             }
-            IN_SERVER | IN_USER | IN_PASS => self.show_menu(cx),
+            IN_PASS => self.show_menu(cx),
             JUMP => {
                 if let Some(pos) = self.offer.take() {
                     if result == "jump" {

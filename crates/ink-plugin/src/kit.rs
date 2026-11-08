@@ -39,6 +39,20 @@ impl HostCtx<'_> {
         self.setting(key)?.as_u64()
     }
 
+    /// Stores keyboard answer `text`, trimmed, as setting `key` with the value `value`
+    /// makes of it. A blank answer stores nothing; an `Err` from `value` is shown as a
+    /// toast instead. True when stored.
+    pub fn set_from_input(&mut self, key: &str, text: &str, value: impl FnOnce(&str) -> std::result::Result<Value, String>) -> Result<bool> {
+        let t = text.trim();
+        if t.is_empty() {
+            return Ok(false);
+        }
+        match value(t) {
+            Ok(v) => self.storage()?.set(key, v).map(|_| true),
+            Err(m) => self.toast(&m).map(|_| false),
+        }
+    }
+
     /// Opens a menu of `(label, action)` items (owned or borrowed strings), see
     /// [`UiRequest::Menu`]. Needs the `ui` permission.
     pub fn menu<L: Into<String>, A: Into<String>>(&mut self, id: u32, title: &str, items: impl IntoIterator<Item = (L, A)>) -> Result<()> {
@@ -256,6 +270,19 @@ mod tests {
         let mut cx = HostCtx::new(&mut ui, &mut st, &[]);
         assert!(matches!(cx.toast("t"), Err(PluginError::Permission(_))));
         assert!(matches!(cx.view_markdown(3, "v", "m"), Err(PluginError::Permission(_))));
+    }
+
+    #[test]
+    fn input_answers_become_settings() {
+        let (mut ui, mut st) = (UiQueue::default(), MemoryStorage::default());
+        let perms = [Permission::Ui, Permission::Storage];
+        let mut cx = HostCtx::new(&mut ui, &mut st, &perms);
+        let port = |t: &str| t.parse::<u16>().map(|p| json!(p)).map_err(|_| format!("{t} is not a port"));
+        assert!(!cx.set_from_input("port", "  ", port).unwrap(), "a blank answer stores nothing");
+        assert!(!cx.set_from_input("port", " x ", port).unwrap());
+        assert!(cx.set_from_input("port", " 22 ", port).unwrap());
+        assert_eq!(cx.setting_u64("port"), Some(22));
+        assert_eq!(ui.0, [UiRequest::Toast { text: "x is not a port".into() }]);
     }
 
     #[test]

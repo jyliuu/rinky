@@ -476,11 +476,9 @@ impl WikipediaPlugin {
 
     fn set_language(&mut self, cx: &mut HostCtx, text: &str) -> Result<()> {
         let l = text.trim().to_lowercase();
-        if api::valid_lang(&l) {
-            cx.storage()?.set("language", json!(l))?;
+        let bad = |t: &str| format!("“{}” is not a language code (examples: en, de, da)", api::cut_at(t, 20));
+        if cx.set_from_input("language", text, |t| if api::valid_lang(&l) { Ok(json!(l)) } else { Err(bad(t)) })? {
             log::info!("wikipedia: language {l}");
-        } else {
-            cx.toast(&format!("“{}” is not a language code (examples: en, de, da)", api::cut_at(text.trim(), 20)))?;
         }
         self.show_settings(cx)
     }
@@ -496,11 +494,9 @@ impl WikipediaPlugin {
                 out.push(l);
             }
         }
-        if bad.is_empty() {
-            cx.storage()?.set("languages", json!(out))?;
+        let list = |_: &str| if bad.is_empty() { Ok(json!(out)) } else { Err(format!("Not a language code: {}", api::cut_at(&bad.join(", "), 30))) };
+        if cx.set_from_input("languages", text, list)? {
             log::info!("wikipedia: extra languages {out:?}");
-        } else {
-            cx.toast(&format!("Not a language code: {}", api::cut_at(&bad.join(", "), 30)))?;
         }
         self.show_settings(cx)
     }
@@ -587,9 +583,8 @@ impl Plugin for WikipediaPlugin {
                 cx.storage()?.set("languages", json!([]))?;
                 self.show_settings(cx)
             }
-            (ID_LANG, text) if !text.trim().is_empty() => self.set_language(cx, text),
-            (ID_EXTRA, text) if !text.trim().is_empty() => self.set_extra(cx, text),
-            (ID_LANG | ID_EXTRA, _) => self.show_settings(cx),
+            (ID_LANG, text) => self.set_language(cx, text),
+            (ID_EXTRA, text) => self.set_extra(cx, text),
             _ => Ok(()),
         }
     }

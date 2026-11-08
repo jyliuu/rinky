@@ -520,14 +520,7 @@ impl Plugin for CalibrePlugin {
                 _ => Ok(()),
             },
             IN_SERVER => {
-                let t = result.trim();
-                if !t.is_empty() {
-                    if parse_server(t).is_some() {
-                        cx.storage()?.set("server", json!(t))?;
-                    } else {
-                        cx.toast("Write the address as host:port, for example 192.168.1.20:9090")?;
-                    }
-                }
+                cx.set_from_input("server", result, |t| parse_server(t).map(|_| json!(t)).ok_or_else(|| "Write the address as host:port, for example 192.168.1.20:9090".into()))?;
                 self.show_menu(cx)
             }
             IN_PASSWORD => {
@@ -544,14 +537,8 @@ impl Plugin for CalibrePlugin {
                 self.connect(cx)
             }
             IN_DIR => {
-                let t = result.trim();
-                if !t.is_empty() {
-                    if t.starts_with('/') {
-                        cx.storage()?.set("books_dir", json!(t.trim_end_matches('/')))?;
-                    } else {
-                        cx.toast("The books folder must be a full path, for example /mnt/us/Books")?;
-                    }
-                }
+                let full = |t: &str| Some(json!(t.trim_end_matches('/'))).filter(|_| t.starts_with('/'));
+                cx.set_from_input("books_dir", result, |t| full(t).ok_or_else(|| "The books folder must be a full path, for example /mnt/us/Books".into()))?;
                 self.show_menu(cx)
             }
             _ => Ok(()),
