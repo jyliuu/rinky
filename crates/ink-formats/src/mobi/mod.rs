@@ -317,7 +317,7 @@ impl Mobi {
         }
         info.metadata.authors = all(exth::AUTHOR);
         info.metadata.publisher = get(exth::PUBLISHER);
-        info.metadata.description = get(exth::DESCRIPTION).map(|d| crate::xml::collapse_ws(&strip_tags(&d)));
+        info.metadata.description = get(exth::DESCRIPTION).map(|d| crate::xml::collapse_ws(&crate::xml::strip_tags(&d)));
         info.metadata.language = get(exth::LANGUAGE).or_else(|| locale_language(h.locale));
         info.subjects = all(exth::SUBJECT);
         info.date = get(exth::DATE);
@@ -344,23 +344,6 @@ impl Mobi {
         }
         info
     }
-}
-
-fn strip_tags(s: &str) -> String {
-    let mut out = String::new();
-    let mut tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => {
-                tag = true;
-                out.push(' ');
-            }
-            '>' if tag => tag = false,
-            c if !tag => out.push(c),
-            _ => {}
-        }
-    }
-    out
 }
 
 /// Language from the MOBI locale field (low byte = Windows primary language id).

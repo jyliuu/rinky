@@ -14,19 +14,12 @@ use super::header::{decode, MobiHeader};
 use super::{index, Converted, Mobi, Resources};
 use crate::book::{Target, TocNode, MAX_TOC_DEPTH};
 use crate::xhtml::{self, Action, Rewrite};
+use crate::util::find_bytes_ci as find_ci;
 use crate::xml::collapse_ws;
 use ink_doc::Result;
 use ink_html::HtmlChapter;
 use markup5ever_rcdom::Handle;
 use std::collections::{BTreeSet, HashMap};
-
-/// Lowercase ASCII search.
-fn find_ci(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
-        return None;
-    }
-    (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()].eq_ignore_ascii_case(needle))
-}
 
 /// Byte offsets named by `filepos=` attributes.
 pub fn filepos_targets(raw: &[u8]) -> BTreeSet<usize> {

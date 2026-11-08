@@ -8,9 +8,9 @@
 //! chapter.
 
 use crate::book::{Book, BookInfo, Cover, Identifier, Target, TocNode};
-use crate::fb2::FB2_CSS;
+use crate::fb2::{assign_section_ids, chapter_html, Chapters, FB2_CSS};
 use crate::util::{read_limited, sniff_media_type, MAX_ENTRY};
-use crate::xml::{self, escape_attr, escape_text, Element, Node};
+use crate::xml::{self, Element, Node};
 use crate::Format;
 use ink_doc::{percent_decode, resolve_href, DocError, MemoryLoader, Result};
 use ink_html::HtmlChapter;
@@ -130,62 +130,108 @@ fn info_of(desc: &Element) -> BookInfo {
 
 struct Conv<'a> {
     images: &'a HashMap<String, String>,
-    ids: &'a HashMap<String, String>,
+    chapters: &'a Chapters,
     out: String,
 }
 
+/// FB3 elements written as one XHTML element: (FB3 name, tag, class).
+const ELEMENTS: &[(&str, &str, Option<&str>)] = &[
+    ("p", "p", None),
+    ("subtitle", "p", Some("subtitle")),
+    ("text-author", "p", Some("text-author")),
+    ("epigraph", "blockquote", Some("epigraph")),
+    ("blockquote", "blockquote", Some("cite")),
+    ("poem", "div", Some("poem")),
+    ("annotation", "div", Some("annotation")),
+    ("div", "div", None),
+    ("pre", "pre", None),
+    ("ol", "ol", None),
+    ("ul", "ul", None),
+    ("li", "li", None),
+    ("table", "table", None),
+    ("tr", "tr", None),
+    ("strong", "strong", None),
+    ("em", "em", None),
+    ("sub", "sub", None),
+    ("sup", "sup", None),
+    ("code", "code", None),
+    ("underline", "u", None),
+    ("strikethrough", "s", None),
+    ("spacing", "span", None),
+    ("span", "span", None),
+    ("paper-page-break", "span", None),
+];
+
 impl Conv<'_> {
+    /// Writes the start tag with its class and the id of `el`.
     fn open(&mut self, tag: &str, class: Option<&str>, el: &Element) {
         self.out.push('<');
         self.out.push_str(tag);
         if let Some(c) = class {
-            self.out.push_str(&format!(" class=\"{c}\""));
+            xml::push_attr(&mut self.out, "class", c);
         }
         if let Some(id) = el.attr("id") {
-            self.out.push_str(&format!(" id=\"{}\"", escape_attr(id)));
+            xml::push_attr(&mut self.out, "id", id);
         }
+        self.out.push('>');
+    }
+
+    fn close(&mut self, tag: &str) {
+        self.out.push_str("</");
+        self.out.push_str(tag);
         self.out.push('>');
     }
 
     fn wrap(&mut self, tag: &str, class: Option<&str>, el: &Element, depth: u8) {
         self.open(tag, class, el);
         self.children(el, depth);
-        self.out.push_str(&format!("</{tag}>"));
+        self.close(tag);
     }
 
     fn children(&mut self, el: &Element, depth: u8) {
         for c in &el.children {
             match c {
-                Node::Text(t) => self.out.push_str(&escape_text(t)),
+                Node::Text(t) => xml::push_text(&mut self.out, t),
                 Node::Element(e) => self.element(e, depth),
             }
         }
     }
 
-    fn href(&self, h: &str) -> String {
-        match h.strip_prefix('#') {
-            Some(id) => match self.ids.get(id) {
-                Some(f) => format!("{f}#{id}"),
-                None => h.to_string(),
-            },
-            None => h.to_string(),
+    /// Child elements, titles as headings of `title_depth`, the rest at `depth`.
+    fn blocks(&mut self, el: &Element, title_depth: u8, depth: u8) {
+        for c in el.elements() {
+            if c.name == "title" {
+                self.title(c, title_depth);
+            } else {
+                self.element(c, depth);
+            }
         }
     }
 
     fn title(&mut self, el: &Element, depth: u8) {
         let tag = format!("h{}", depth.clamp(1, 6));
         self.open(&tag, Some("title"), el);
-        let lines: Vec<&Element> = el.children_named("p").collect();
-        if lines.is_empty() {
+        let mut lines = el.children_named("p").peekable();
+        if lines.peek().is_none() {
             self.children(el, depth);
         }
-        for (i, p) in lines.iter().enumerate() {
+        for (i, p) in lines.enumerate() {
             if i > 0 {
                 self.out.push_str("<br/>");
             }
             self.children(p, depth);
         }
-        self.out.push_str(&format!("</{tag}>"));
+        self.close(&tag);
+    }
+
+    /// `<a href="...">` for a link or note reference, `href` pointed at its chapter.
+    fn link(&mut self, el: &Element, note: bool) {
+        self.out.push_str("<a");
+        xml::push_attr(&mut self.out, "href", &self.chapters.href(el.attr("href").unwrap_or("")));
+        if note {
+            self.out.push_str(" class=\"note\" epub:type=\"noteref\"");
+        }
+        self.out.push('>');
     }
 
     fn element(&mut self, el: &Element, depth: u8) {
@@ -199,14 +245,9 @@ impl Conv<'_> {
                         _ => self.element(c, depth),
                     }
                 }
-                self.out.push_str("</div>");
+                self.close("div");
             }
             "title" => self.title(el, depth.max(1)),
-            "p" => self.wrap("p", None, el, depth),
-            "subtitle" => self.wrap("p", Some("subtitle"), el, depth),
-            "epigraph" => self.wrap("blockquote", Some("epigraph"), el, depth),
-            "blockquote" => self.wrap("blockquote", Some("cite"), el, depth),
-            "poem" => self.wrap("div", Some("poem"), el, depth),
             "stanza" => {
                 self.open("div", Some("stanza"), el);
                 for c in el.elements() {
@@ -216,131 +257,69 @@ impl Conv<'_> {
                         self.element(c, depth);
                     }
                 }
-                self.out.push_str("</div>");
-            }
-            "text-author" => self.wrap("p", Some("text-author"), el, depth),
-            "annotation" => self.wrap("div", Some("annotation"), el, depth),
-            "pre" => self.wrap("pre", None, el, depth),
-            "ol" | "ul" | "li" | "table" | "tr" => {
-                let tag = el.name.clone();
-                self.wrap(&tag, None, el, depth)
+                self.close("div");
             }
             "th" | "td" => {
-                let tag = el.name.clone();
                 self.out.push('<');
-                self.out.push_str(&tag);
-                for a in ["colspan", "rowspan", "align", "valign"] {
+                self.out.push_str(&el.name);
+                for a in crate::fb2::CELL_ATTRS {
                     if let Some(v) = el.attr(a) {
-                        self.out.push_str(&format!(" {a}=\"{}\"", escape_attr(v)));
+                        xml::push_attr(&mut self.out, a, v);
                     }
                 }
                 self.out.push('>');
                 self.children(el, depth);
-                self.out.push_str(&format!("</{tag}>"));
+                self.close(&el.name);
             }
-            "div" => self.wrap("div", None, el, depth),
             "br" => self.out.push_str("<br/>"),
-            "strong" | "em" | "sub" | "sup" | "code" => {
-                let tag = el.name.clone();
-                self.wrap(&tag, None, el, depth)
-            }
-            "underline" => self.wrap("u", None, el, depth),
-            "strikethrough" => self.wrap("s", None, el, depth),
-            "spacing" | "span" | "paper-page-break" => self.wrap("span", None, el, depth),
             "a" => {
-                let h = self.href(el.attr("href").unwrap_or(""));
-                self.out.push_str(&format!("<a href=\"{}\">", escape_attr(&h)));
+                self.link(el, false);
                 self.children(el, depth);
-                self.out.push_str("</a>");
+                self.close("a");
             }
             "note" => {
-                let h = self.href(el.attr("href").unwrap_or(""));
-                self.out.push_str(&format!("<a href=\"{}\" class=\"note\" epub:type=\"noteref\">", escape_attr(&h)));
+                self.link(el, true);
                 if el.children.is_empty() {
-                    self.out.push_str(&escape_text(el.attr("autotext").unwrap_or("*")));
+                    xml::push_text(&mut self.out, el.attr("autotext").unwrap_or("*"));
                 } else {
                     self.children(el, depth);
                 }
-                self.out.push_str("</a>");
+                self.close("a");
             }
             "img" => {
                 if let Some(path) = el.attr("src").and_then(|s| self.images.get(s)) {
-                    let alt = el.attr("alt").unwrap_or("");
-                    self.out.push_str(&format!("<img src=\"{}\" alt=\"{}\"/>", escape_attr(path), escape_attr(alt)));
+                    self.out.push_str("<img");
+                    xml::push_attr(&mut self.out, "src", path);
+                    xml::push_attr(&mut self.out, "alt", el.attr("alt").unwrap_or(""));
+                    self.out.push_str("/>");
                 }
             }
             "notes" => {
                 self.out.push_str("<div class=\"notes\">");
-                for c in el.elements() {
-                    if c.name == "title" {
-                        self.title(c, 1);
-                    } else {
-                        self.element(c, 2);
-                    }
-                }
-                self.out.push_str("</div>");
+                self.blocks(el, 1, 2);
+                self.close("div");
             }
             "notebody" => {
                 self.out.push_str("<div class=\"section\"");
                 if let Some(id) = el.attr("id") {
-                    self.out.push_str(&format!(" id=\"{}\" epub:type=\"footnote\"", escape_attr(id)));
+                    xml::push_attr(&mut self.out, "id", id);
+                    self.out.push_str(" epub:type=\"footnote\"");
                 }
                 self.out.push('>');
-                for c in el.elements() {
-                    if c.name == "title" {
-                        self.title(c, depth);
-                    } else {
-                        self.element(c, depth);
-                    }
-                }
-                self.out.push_str("</div>");
+                self.blocks(el, depth, depth);
+                self.close("div");
             }
-            _ => self.children(el, depth),
+            name => match ELEMENTS.iter().find(|e| e.0 == name) {
+                Some(&(_, tag, class)) => self.wrap(tag, class, el, depth),
+                None => self.children(el, depth),
+            },
         }
     }
 }
 
-fn collect_ids(el: &Element, file: &str, out: &mut HashMap<String, String>) {
-    if let Some(id) = el.attr("id") {
-        out.entry(id.to_string()).or_insert_with(|| file.to_string());
-    }
-    for e in el.elements() {
-        collect_ids(e, file, out);
-    }
-}
-
-fn assign_ids(el: &mut Element, n: &mut usize) {
-    if el.name == "section" && el.attr("id").is_none() {
-        *n += 1;
-        el.attrs.push(xml::Attr { local: "id".into(), qname: "id".into(), value: format!("fb3-s{n}") });
-    }
-    for c in &mut el.children {
-        if let Node::Element(e) = c {
-            assign_ids(e, n);
-        }
-    }
-}
-
-fn section_toc(el: &Element, chapter_of: &dyn Fn(&str) -> Option<usize>) -> Vec<TocNode> {
-    let mut out = Vec::new();
-    for s in el.children_named("section") {
-        let children = section_toc(s, chapter_of);
-        let title = s.child("title").map(|t| t.children_named("p").map(|p| p.text_collapsed()).collect::<Vec<_>>().join(" ")).filter(|t| !t.trim().is_empty());
-        let id = s.attr("id").unwrap_or("");
-        match (title, chapter_of(id)) {
-            (Some(title), Some(ch)) => out.push(TocNode { title, target: Some(Target::id(ch, id)), children }),
-            _ => out.extend(children),
-        }
-    }
-    out
-}
-
-fn chapter_html(title: &str, body: &str) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>{}</title><link rel=\"stylesheet\" type=\"text/css\" href=\"fb2.css\"/></head><body>{}</body></html>",
-        escape_text(title),
-        body
-    )
+/// A section's TOC title: the paragraphs of its title joined.
+fn section_title(s: &Element) -> Option<String> {
+    s.child("title").map(|t| t.children_named("p").map(|p| p.text_collapsed()).collect::<Vec<_>>().join(" ")).filter(|t| !t.trim().is_empty())
 }
 
 struct Parts {
@@ -387,7 +366,7 @@ pub fn load(path: &Path) -> Result<Book> {
     let body_path = p.body_path.clone().unwrap_or_default();
     let mut body = pkg.xml(&body_path)?;
     let mut n = 0;
-    assign_ids(&mut body, &mut n);
+    assign_section_ids(&mut body, "fb3", &mut n);
     // Images: relationship id -> loader path (the zip path).
     let mut loader = MemoryLoader::default();
     let mut images = HashMap::new();
@@ -423,16 +402,15 @@ pub fn load(path: &Path) -> Result<Book> {
     if units.is_empty() {
         return Err(DocError::Format("FB3 body is empty".into()));
     }
-    let file = |i: usize| format!("fb3-{:03}.xhtml", i + 1);
-    let mut ids = HashMap::new();
+    let mut files = Chapters::new("fb3");
     for (i, (_, els)) in units.iter().enumerate() {
         for e in els {
-            collect_ids(e, &file(i), &mut ids);
+            files.add(e, i);
         }
     }
     let mut chapters = Vec::new();
     for (i, (kind, els)) in units.iter().enumerate() {
-        let mut c = Conv { images: &images, ids: &ids, out: String::new() };
+        let mut c = Conv { images: &images, chapters: &files, out: String::new() };
         for e in els {
             if *kind == "header" && e.name == "title" {
                 c.title(e, 1);
@@ -445,10 +423,9 @@ pub fn load(path: &Path) -> Result<Book> {
             "notes" => els[0].child("title").map(|t| t.text_collapsed()).unwrap_or_else(|| "Notes".into()),
             _ => p.info.metadata.title.clone(),
         };
-        chapters.push(HtmlChapter { path: file(i), html: chapter_html(&title, &c.out) });
+        chapters.push(HtmlChapter { path: files.path(i), html: chapter_html(&title, &c.out) });
     }
-    let chapter_of = |id: &str| ids.get(id).and_then(|f| f.trim_start_matches("fb3-").trim_end_matches(".xhtml").parse::<usize>().ok()).map(|n| n - 1);
-    let mut toc = section_toc(&body, &chapter_of);
+    let mut toc = files.section_toc(&body, section_title);
     for (i, (kind, els)) in units.iter().enumerate() {
         if *kind == "notes" {
             if let Some(t) = els[0].child("title").map(|t| t.text_collapsed()).filter(|t| !t.is_empty()) {

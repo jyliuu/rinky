@@ -21,18 +21,25 @@ pub struct Gray {
 pub type PxBox = (usize, usize, usize, usize);
 
 impl Gray {
-    fn ink(&self, x: usize, y: usize) -> bool {
-        self.px[y * self.w + x] < INK
+    /// Rows `[y0, y1)` of the image (none when it has no width).
+    fn rows(&self, y0: usize, y1: usize) -> std::slice::ChunksExact<'_, u8> {
+        self.px[y0 * self.w..y1 * self.w].chunks_exact(self.w.max(1))
     }
 
     /// Ink pixels per row inside columns `[x0, x1)`.
     fn row_counts(&self, x0: usize, x1: usize) -> Vec<usize> {
-        (0..self.h).map(|y| (x0..x1).filter(|&x| self.ink(x, y)).count()).collect()
+        self.rows(0, self.h).map(|row| row[x0..x1].iter().filter(|&&p| p < INK).count()).collect()
     }
 
-    /// Ink pixels per column inside rows `[y0, y1)`.
+    /// Ink pixels per column inside rows `[y0, y1)`, summed row by row (memory order).
     fn col_counts(&self, y0: usize, y1: usize) -> Vec<usize> {
-        (0..self.w).map(|x| (y0..y1).filter(|&y| self.ink(x, y)).count()).collect()
+        let mut out = vec![0; self.w];
+        for row in self.rows(y0, y1) {
+            for (c, &p) in out.iter_mut().zip(row) {
+                *c += usize::from(p < INK);
+            }
+        }
+        out
     }
 }
 
