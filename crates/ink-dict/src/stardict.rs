@@ -107,6 +107,73 @@ impl Field {
     }
 }
 
+/// An index file (`.idx` or `.syn`) in memory: records of a NUL-terminated word and a
+/// fixed-size tail, sorted by [`stardict_cmp`]. Beside the file's bytes only the start
+/// of each record is kept: 4 bytes per word, not a decoded copy of every record.
+#[derive(Default)]
+struct Index {
+    buf: Vec<u8>,
+    starts: Vec<u32>,
+    /// Bytes after each word's NUL.
+    tail: usize,
+}
+
+impl Index {
+    /// Splits `buf` into records with `tail` bytes after each word's NUL. `what` names a
+    /// record in errors.
+    fn parse(buf: Vec<u8>, tail: usize, what: &str) -> std::result::Result<Index, String> {
+        if buf.len() > u32::MAX as usize {
+            return Err(format!("{what} file too big"));
+        }
+        let mut starts = Vec::new();
+        let mut p = 0usize;
+        while p < buf.len() {
+            let nul = buf[p..].iter().position(|b| *b == 0).ok_or_else(|| format!("{what} at byte {p} has no NUL"))?;
+            let end = p + nul + 1 + tail;
+            if end > buf.len() {
+                return Err(format!("{what} at byte {p} is cut off"));
+            }
+            starts.push(p as u32);
+            p = end;
+        }
+        Ok(Index { buf, starts, tail })
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// Record `i`: its word and its tail. Records are contiguous, so a record ends
+    /// where the next one starts.
+    fn record(&self, i: usize) -> (&[u8], &[u8]) {
+        let end = self.starts.get(i + 1).map_or(self.buf.len(), |&s| s as usize);
+        let r = &self.buf[self.starts[i] as usize..end];
+        let (word, tail) = r.split_at(r.len() - self.tail);
+        (&word[..word.len() - 1], tail)
+    }
+
+    fn word(&self, i: usize) -> &[u8] {
+        self.record(i).0
+    }
+
+    /// The records whose word equals `w` ignoring ASCII case, in order.
+    fn matching<'a>(&'a self, w: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
+        let (mut lo, mut hi) = (0, self.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if ascii_casecmp(self.word(mid), w) == Ordering::Less {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        (lo..self.len()).take_while(move |&i| ascii_casecmp(self.word(i), w) == Ordering::Equal)
+    }
+}
+fn be32(b: &[u8]) -> u32 {
+    u32::from_be_bytes(b[..4].try_into().expect("4 bytes"))
+}
+
 /// An open StarDict dictionary.
 pub struct Dictionary {
     /// Folder or file stem used as the short name (the `<name>` folder in the library).
@@ -114,12 +181,10 @@ pub struct Dictionary {
     /// The `.ifo` header.
     pub info: IfoInfo,
     ifo: PathBuf,
-    idx: Vec<u8>,
-    /// Per entry: (start of the word in `idx`, word length, offset, size).
-    entries: Vec<(u32, u32, u64, u32)>,
-    syn: Vec<u8>,
-    /// Per synonym: (start, length, entry index).
-    syns: Vec<(u32, u32, u32)>,
+    /// Headwords; each tail is the offset (u32 or u64 BE) and size (u32 BE) in `dict`.
+    idx: Index,
+    /// Synonyms; each tail is the u32 BE number of an entry of `idx`.
+    syn: Index,
     dict: DictData,
     /// The dictionary's style sheet (`<stem>.css` next to the `.ifo`), for the full view.
     pub style: crate::markdown::Style,
@@ -127,7 +192,7 @@ pub struct Dictionary {
 
 impl std::fmt::Debug for Dictionary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Dictionary").field("name", &self.name).field("ifo", &self.ifo).field("words", &self.entries.len()).field("synonyms", &self.syns.len()).finish()
+        f.debug_struct("Dictionary").field("name", &self.name).field("ifo", &self.ifo).field("words", &self.idx.len()).field("synonyms", &self.syn.len()).finish()
     }
 }
 
@@ -151,28 +216,30 @@ fn with_ext(stem: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
+fn format_err(path: &Path, e: impl std::fmt::Display) -> DictError {
+    DictError::Format(format!("{}: {e}", path.display()))
+}
+
 impl Dictionary {
     /// Opens the dictionary whose header is `ifo` (`.../NAME.ifo`).
     pub fn open(ifo: &Path) -> Result<Dictionary> {
         let text = std::fs::read(ifo).map_err(|e| io_err(ifo, e))?;
-        let info = IfoInfo::parse(&String::from_utf8_lossy(&text)).map_err(|e| DictError::Format(format!("{}: {e}", ifo.display())))?;
+        let info = IfoInfo::parse(&String::from_utf8_lossy(&text)).map_err(|e| format_err(ifo, e))?;
         let stem = ifo.with_extension("");
         let name = stem.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let (idx_path, gz) = [(with_ext(&stem, ".idx"), false), (with_ext(&stem, ".idx.gz"), true)].into_iter().find(|(p, _)| p.is_file()).ok_or_else(|| DictError::Format(format!("{}: no .idx or .idx.gz next to it", ifo.display())))?;
-        let idx = read_limited(&idx_path, gz)?;
-        let entries = parse_idx(&idx, info.idxoffsetbits).map_err(|e| DictError::Format(format!("{}: {e}", idx_path.display())))?;
-        let dict_path = [with_ext(&stem, ".dict"), with_ext(&stem, ".dict.dz")].into_iter().find(|p| p.is_file()).ok_or_else(|| DictError::Format(format!("{}: no .dict or .dict.dz next to it", ifo.display())))?;
+        let (idx_path, gz) = [(with_ext(&stem, ".idx"), false), (with_ext(&stem, ".idx.gz"), true)].into_iter().find(|(p, _)| p.is_file()).ok_or_else(|| format_err(ifo, "no .idx or .idx.gz next to it"))?;
+        let tail = if info.idxoffsetbits == 64 { 12 } else { 8 };
+        let idx = Index::parse(read_limited(&idx_path, gz)?, tail, "entry").map_err(|e| format_err(&idx_path, e))?;
+        let dict_path = [with_ext(&stem, ".dict"), with_ext(&stem, ".dict.dz")].into_iter().find(|p| p.is_file()).ok_or_else(|| format_err(ifo, "no .dict or .dict.dz next to it"))?;
         let dict = DictData::open(&dict_path)?;
         let syn_path = with_ext(&stem, ".syn");
-        let (syn, syns) = if syn_path.is_file() {
-            let syn = read_limited(&syn_path, false)?;
-            let syns = parse_syn(&syn, entries.len()).map_err(|e| DictError::Format(format!("{}: {e}", syn_path.display())))?;
-            (syn, syns)
+        let syn = if syn_path.is_file() {
+            Index::parse(read_limited(&syn_path, false)?, 4, "synonym").map_err(|e| format_err(&syn_path, e))?
         } else {
-            (Vec::new(), Vec::new())
+            Index::default()
         };
         let style = std::fs::read_to_string(stem.with_extension("css")).map(|css| crate::markdown::Style::parse(&css)).unwrap_or_default();
-        Ok(Dictionary { name, info, ifo: ifo.to_path_buf(), idx, entries, syn, syns, dict, style })
+        Ok(Dictionary { name, info, ifo: ifo.to_path_buf(), idx, syn, dict, style })
     }
 
     /// Display name: `bookname`, or the file stem when it is empty.
@@ -186,127 +253,57 @@ impl Dictionary {
 
     /// Number of headwords.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.idx.len()
     }
 
     /// True without headwords.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.idx.len() == 0
     }
 
     /// Headword of entry `i`.
     pub fn headword(&self, i: usize) -> &str {
-        let (s, l, _, _) = self.entries[i];
-        std::str::from_utf8(&self.idx[s as usize..(s + l) as usize]).unwrap_or("")
-    }
-
-    fn word_bytes(&self, i: usize) -> &[u8] {
-        let (s, l, _, _) = self.entries[i];
-        &self.idx[s as usize..(s + l) as usize]
-    }
-
-    fn syn_bytes(&self, i: usize) -> &[u8] {
-        let (s, l, _) = self.syns[i];
-        &self.syn[s as usize..(s + l) as usize]
+        std::str::from_utf8(self.idx.word(i)).unwrap_or("")
     }
 
     /// Entries whose headword or synonym equals `word` ignoring ASCII case. Entries that
     /// match byte for byte come first, then the others in index order; no duplicates.
     pub fn find(&self, word: &str) -> Vec<usize> {
         let w = word.as_bytes();
-        let mut exact = Vec::new();
-        let mut other = Vec::new();
-        let mut add = |i: usize, same: bool| {
-            if !exact.contains(&i) && !other.contains(&i) {
-                if same {
-                    exact.push(i)
-                } else {
-                    other.push(i)
-                }
+        let words = self.idx.matching(w).map(|i| (i, self.idx.word(i) == w));
+        let syns = self.syn.matching(w).filter_map(|j| {
+            let (syn, tail) = self.syn.record(j);
+            // A synonym pointing past the index is skipped, not fatal.
+            Some(be32(tail) as usize).filter(|&i| i < self.idx.len()).map(|i| (i, syn == w))
+        });
+        // An entry's first match decides whether it counts as exact.
+        let mut found: Vec<(usize, bool)> = Vec::new();
+        for (i, same) in words.chain(syns) {
+            if !found.iter().any(|(j, _)| *j == i) {
+                found.push((i, same));
             }
-        };
-        let mut i = lower_bound(self.entries.len(), |i| ascii_casecmp(self.word_bytes(i), w) == Ordering::Less);
-        while i < self.entries.len() && ascii_casecmp(self.word_bytes(i), w) == Ordering::Equal {
-            add(i, self.word_bytes(i) == w);
-            i += 1;
         }
-        let mut j = lower_bound(self.syns.len(), |j| ascii_casecmp(self.syn_bytes(j), w) == Ordering::Less);
-        while j < self.syns.len() && ascii_casecmp(self.syn_bytes(j), w) == Ordering::Equal {
-            add(self.syns[j].2 as usize, self.syn_bytes(j) == w);
-            j += 1;
-        }
-        exact.extend(other);
-        exact
+        let (exact, other): (Vec<_>, Vec<_>) = found.into_iter().partition(|(_, same)| *same);
+        exact.into_iter().chain(other).map(|(i, _)| i).collect()
     }
 
     /// The fields of entry `i`.
     pub fn fields(&self, i: usize) -> Result<Vec<Field>> {
-        let (_, _, off, size) = self.entries[i];
+        let t = self.idx.record(i).1;
+        let (off, size) = if self.info.idxoffsetbits == 64 { (u64::from_be_bytes(t[..8].try_into().expect("8 bytes")), be32(&t[8..])) } else { (be32(t) as u64, be32(&t[4..])) };
         let data = self.dict.read(off, size)?;
         Ok(split_fields(&data, &self.info.sametypesequence))
     }
 
     /// Entry `i` as plain text: the text fields joined by blank lines.
     pub fn definition(&self, i: usize) -> Result<String> {
-        let parts: Vec<String> = self.fields(i)?.iter().filter_map(Field::text).filter(|s| !s.is_empty()).collect();
-        Ok(parts.join("\n\n"))
+        Ok(join_text(&self.fields(i)?))
     }
 }
 
-/// First index in `0..n` for which `less` is false (`less` must be true then false).
-fn lower_bound(n: usize, less: impl Fn(usize) -> bool) -> usize {
-    let (mut lo, mut hi) = (0, n);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if less(mid) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
-fn parse_idx(idx: &[u8], bits: u32) -> std::result::Result<Vec<(u32, u32, u64, u32)>, String> {
-    if idx.len() > u32::MAX as usize {
-        return Err("index too big".into());
-    }
-    let tail = if bits == 64 { 12 } else { 8 };
-    let mut out = Vec::new();
-    let mut p = 0usize;
-    while p < idx.len() {
-        let nul = idx[p..].iter().position(|b| *b == 0).ok_or_else(|| format!("word at byte {p} has no NUL"))?;
-        let w = p + nul + 1;
-        let t = idx.get(w..w + tail).ok_or_else(|| format!("entry at byte {p} is cut off"))?;
-        let (off, size) = if bits == 64 {
-            (u64::from_be_bytes(t[..8].try_into().unwrap()), u32::from_be_bytes(t[8..12].try_into().unwrap()))
-        } else {
-            (u32::from_be_bytes(t[..4].try_into().unwrap()) as u64, u32::from_be_bytes(t[4..8].try_into().unwrap()))
-        };
-        out.push((p as u32, nul as u32, off, size));
-        p = w + tail;
-    }
-    Ok(out)
-}
-
-fn parse_syn(syn: &[u8], words: usize) -> std::result::Result<Vec<(u32, u32, u32)>, String> {
-    if syn.len() > u32::MAX as usize {
-        return Err("synonyms too big".into());
-    }
-    let mut out = Vec::new();
-    let mut p = 0usize;
-    while p < syn.len() {
-        let nul = syn[p..].iter().position(|b| *b == 0).ok_or_else(|| format!("synonym at byte {p} has no NUL"))?;
-        let w = p + nul + 1;
-        let t = syn.get(w..w + 4).ok_or_else(|| format!("synonym at byte {p} is cut off"))?;
-        let i = u32::from_be_bytes(t.try_into().unwrap());
-        // A synonym pointing past the index is skipped, not fatal.
-        if (i as usize) < words {
-            out.push((p as u32, nul as u32, i));
-        }
-        p = w + 4;
-    }
-    Ok(out)
+/// The plain text of `fields` joined by blank lines.
+pub(crate) fn join_text(fields: &[Field]) -> String {
+    fields.iter().filter_map(Field::text).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n")
 }
 
 /// Splits entry data into fields. With a `sametypesequence` the types are not stored and
@@ -316,25 +313,18 @@ fn split_fields(data: &[u8], seq: &str) -> Vec<Field> {
     let mut out = Vec::new();
     let mut p = 0usize;
     if !seq.is_empty() {
-        let kinds: Vec<char> = seq.chars().collect();
-        for (k, &kind) in kinds.iter().enumerate() {
-            if p > data.len() {
-                break;
-            }
-            let last = k + 1 == kinds.len();
-            if last {
+        let last = seq.chars().count() - 1;
+        for (k, kind) in seq.chars().enumerate() {
+            if k == last {
+                // The rest; a NUL or size prefix written anyway is dropped.
                 let d = &data[p..];
-                let d = if kind.is_ascii_lowercase() { d.strip_suffix(&[0]).unwrap_or(d) } else if d.len() >= 4 && !kind.is_ascii_lowercase() && u32::from_be_bytes(d[..4].try_into().unwrap()) as usize == d.len() - 4 { &d[4..] } else { d };
+                let d = if kind.is_ascii_lowercase() { d.strip_suffix(&[0]).unwrap_or(d) } else if d.len() >= 4 && be32(d) as usize == d.len() - 4 { &d[4..] } else { d };
                 out.push(Field { kind, data: d.to_vec() });
                 break;
             }
-            match take_field(data, p, kind) {
-                Some((f, next)) => {
-                    out.push(Field { kind, data: f.to_vec() });
-                    p = next;
-                }
-                None => break,
-            }
+            let Some((f, next)) = take_field(data, p, kind) else { break };
+            out.push(Field { kind, data: f.to_vec() });
+            p = next;
         }
         return out;
     }
@@ -410,8 +400,9 @@ mod tests {
 
     #[test]
     fn broken_index_is_an_error() {
-        assert!(parse_idx(b"word", 32).is_err());
-        assert!(parse_idx(b"word\0\0\0", 32).is_err());
-        assert_eq!(parse_idx(b"", 32).unwrap().len(), 0);
+        let parse = |b: &[u8]| Index::parse(b.to_vec(), 8, "entry");
+        assert!(parse(b"word").is_err());
+        assert!(parse(b"word\0\0\0").is_err());
+        assert_eq!(parse(b"").unwrap().len(), 0);
     }
 }

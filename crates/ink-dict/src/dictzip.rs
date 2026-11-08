@@ -9,7 +9,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use flate2::{Decompress, FlushDecompress};
 
@@ -32,7 +32,7 @@ pub(crate) struct Dz {
     /// File offset of every chunk, plus the end of the last one.
     offsets: Vec<u64>,
     /// The last two chunks inflated: (index, bytes).
-    cache: Mutex<Vec<(usize, Vec<u8>)>>,
+    cache: Mutex<Vec<(usize, Arc<[u8]>)>>,
 }
 
 impl DictData {
@@ -118,7 +118,7 @@ impl Dz {
         Ok(out)
     }
 
-    fn chunk(&self, i: usize) -> Result<Vec<u8>> {
+    fn chunk(&self, i: usize) -> Result<Arc<[u8]>> {
         if let Some((_, b)) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(j, _)| *j == i) {
             return Ok(b.clone());
         }
@@ -148,6 +148,7 @@ impl Dz {
             }
         }
         out.truncate(self.chunk_len as usize);
+        let out: Arc<[u8]> = out.into();
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if cache.len() >= 2 {
             cache.remove(0);

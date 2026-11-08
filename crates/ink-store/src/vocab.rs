@@ -79,9 +79,7 @@ pub struct VocabDb {
 impl VocabDb {
     /// Opens (creating if needed) the database at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
-        }
+        crate::create_parent_dir(path)?;
         Self::init(Connection::open(path)?)
     }
 
@@ -90,14 +88,7 @@ impl VocabDb {
     /// the new name is returned. Other errors (locked, a newer schema) are returned and
     /// nothing is moved.
     pub fn open_or_recover(path: &Path) -> Result<(Self, Option<PathBuf>)> {
-        match Self::open(path) {
-            Ok(db) => Ok((db, None)),
-            Err(StoreError::Sqlite(e)) if crate::is_damaged_sqlite(&e) => {
-                let Some(moved) = crate::set_aside_database(path) else { return Err(StoreError::Sqlite(e)) };
-                Ok((Self::open(path)?, Some(moved)))
-            }
-            Err(e) => Err(e),
-        }
+        crate::open_db_or_recover(path, Self::open)
     }
 
     /// An in-memory database (tests).

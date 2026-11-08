@@ -149,6 +149,28 @@ fn legacy_formats() {
     assert_eq!(m.position().as_deref(), Some("page:4"));
 }
 
+/// A highlighted legacy bookmark takes the style of the first highlight with equal
+/// positions whose datetime does not differ; any other highlight is an old one of its
+/// own. -0.0 equals 0.0; NaN equals nothing.
+#[test]
+fn legacy_bookmarks_match_highlights_by_position_and_time() {
+    let styles = |m: &KoBookMetadata| m.annotations.iter().map(|a| (a.datetime.clone(), a.drawer.clone().unwrap_or_default())).collect::<Vec<_>>();
+    let pair = |d: &str, s: &str| (d.to_string(), s.to_string());
+    let rolling = br#"return { bookmarks = { { datetime = "d1", highlighted = true, notes = "a", pos0 = "/p[1]", pos1 = "/p[2]", page = "/p[1]" } },
+        highlight = { [1] = { { datetime = "d2", drawer = "invert", pos0 = "/p[1]", pos1 = "/p[2]" },
+                              { datetime = "d1", drawer = "underscore", pos0 = "/p[1]", pos1 = "/p[2]" },
+                              { drawer = "strikeout", pos0 = "/p[1]", pos1 = "/p[2]" } } } }"#;
+    assert_eq!(styles(&parse(rolling, Some(false))), [pair("d1", "underscore"), pair("d2", "invert")]);
+    let paging = |x: &str| {
+        format!(
+            r#"return {{ bookmarks = {{ {{ datetime = "d", highlighted = true, page = 3, pos0 = {{ x = {x}, y = 1 }}, pos1 = {{ x = 2, y = 3 }} }} }},
+               highlight = {{ [3] = {{ {{ datetime = "d", drawer = "underscore", pos0 = {{ x = 0, y = 1 }}, pos1 = {{ x = 2, y = 3 }} }} }} }} }}"#
+        )
+    };
+    assert_eq!(styles(&parse(paging("-0.0").as_bytes(), Some(true))), [pair("d", "underscore")]);
+    assert_eq!(styles(&parse(paging("nan").as_bytes(), Some(true))), [pair("d", ""), pair("d", "underscore")]);
+}
+
 #[test]
 fn bad_and_hostile_files() {
     let tmp = TempDir::new("ko-bad");

@@ -127,12 +127,6 @@ impl Drop for Snapshot {
     }
 }
 
-fn sibling(p: &Path, suffix: &str) -> PathBuf {
-    let mut s = p.as_os_str().to_owned();
-    s.push(suffix);
-    PathBuf::from(s)
-}
-
 /// Copies `db` (and its `-wal` / `-journal`) into a new directory under `scratch`
 /// (default: the system temp dir).
 fn snapshot(db: &Path, scratch: Option<&Path>) -> Result<Snapshot> {
@@ -147,9 +141,9 @@ fn snapshot(db: &Path, scratch: Option<&Path>) -> Result<Snapshot> {
     let snap = Snapshot { db: dir.join("copy.sqlite3"), dir };
     std::fs::copy(db, &snap.db)?;
     for suffix in ["-wal", "-journal"] {
-        let src = sibling(db, suffix);
+        let src = crate::with_suffix(db, suffix);
         if src.is_file() {
-            std::fs::copy(&src, sibling(&snap.db, suffix))?;
+            std::fs::copy(&src, crate::with_suffix(&snap.db, suffix))?;
         }
     }
     Ok(snap)
@@ -182,6 +176,11 @@ fn col(cols: &HashSet<String>, t: &str, c: &str) -> String {
     } else {
         "NULL".into()
     }
+}
+
+/// [`col`] of each of `names`, separated by commas.
+fn col_list(cols: &HashSet<String>, t: &str, names: &[&str]) -> String {
+    names.iter().map(|c| col(cols, t, c)).collect::<Vec<_>>().join(", ")
 }
 
 /// Integer from any SQLite type (KOReader's columns are not strictly typed).
@@ -222,20 +221,8 @@ pub fn read_statistics_db(db: &Path, scratch: Option<&Path>) -> Result<KoStatist
         return Err(StoreError::Format(format!("{}: no `book` table, not a KOReader statistics database", db.display())));
     }
     let bc = columns(&conn, "book")?;
-    let sql = format!(
-        "SELECT b.id, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} FROM book b ORDER BY b.id",
-        col(&bc, "b", "title"),
-        col(&bc, "b", "authors"),
-        col(&bc, "b", "md5"),
-        col(&bc, "b", "pages"),
-        col(&bc, "b", "last_open"),
-        col(&bc, "b", "notes"),
-        col(&bc, "b", "highlights"),
-        col(&bc, "b", "series"),
-        col(&bc, "b", "language"),
-        col(&bc, "b", "total_read_time"),
-        col(&bc, "b", "total_read_pages"),
-    );
+    let fields = ["title", "authors", "md5", "pages", "last_open", "notes", "highlights", "series", "language", "total_read_time", "total_read_pages"];
+    let sql = format!("SELECT b.id, {} FROM book b ORDER BY b.id", col_list(&bc, "b", &fields));
     let mut st = conn.prepare(&sql)?;
     out.books = st
         .query_map([], |r| {
@@ -310,18 +297,8 @@ pub fn read_vocabulary(db: &Path, scratch: Option<&Path>) -> Result<Vec<KoVocabW
     } else {
         col(&vc, "v", "book_title")
     };
-    let sql = format!(
-        "SELECT v.word, {title}, {}, {}, {}, {}, {}, {}, {}, {} FROM vocabulary v ORDER BY {}, v.word",
-        col(&vc, "v", "create_time"),
-        col(&vc, "v", "review_time"),
-        col(&vc, "v", "due_time"),
-        col(&vc, "v", "review_count"),
-        col(&vc, "v", "streak_count"),
-        col(&vc, "v", "prev_context"),
-        col(&vc, "v", "next_context"),
-        col(&vc, "v", "highlight"),
-        col(&vc, "v", "create_time"),
-    );
+    let fields = ["create_time", "review_time", "due_time", "review_count", "streak_count", "prev_context", "next_context", "highlight"];
+    let sql = format!("SELECT v.word, {title}, {} FROM vocabulary v ORDER BY {}, v.word", col_list(&vc, "v", &fields), col(&vc, "v", "create_time"));
     let mut st = conn.prepare(&sql)?;
     let words = st
         .query_map([], |r| {
@@ -345,8 +322,11 @@ pub fn read_vocabulary(db: &Path, scratch: Option<&Path>) -> Result<Vec<KoVocabW
 /// Schema statements copied from KOReader (`plugins/statistics.koplugin/main.lua`,
 /// `plugins/vocabbuilder.koplugin/db.lua`), for test fixtures and the selftest.
 pub mod schema {
-    /// Statistics, schema 20221111.
-    pub const STATISTICS: &str = r#"
+    /// KOReader's `book` table, the same in every statistics schema (and in ours,
+    /// `crate::stats`, so its rows copy over as they are).
+    macro_rules! book_table {
+        () => {
+            r#"
         CREATE TABLE IF NOT EXISTS book
             (
                 id integer PRIMARY KEY autoincrement,
@@ -362,6 +342,15 @@ pub mod schema {
                 total_read_time  integer,
                 total_read_pages integer
             );
+"#
+        };
+    }
+    pub(crate) use book_table;
+
+    /// Statistics, schema 20221111.
+    pub const STATISTICS: &str = concat!(
+        book_table!(),
+        r#"
         CREATE UNIQUE INDEX IF NOT EXISTS book_title_authors_md5 ON book(title, authors, md5);
         CREATE TABLE IF NOT EXISTS page_stat_data
             (
@@ -396,25 +385,13 @@ pub mod schema {
                 JOIN (SELECT number as idx FROM numbers) AS N ON idx <= (last_page - first_page + 1)
             );
         PRAGMA user_version=20221111;
-    "#;
+    "#
+    );
 
     /// Statistics before 2020-10 (`page_stat` table with `period`).
-    pub const STATISTICS_2019: &str = r#"
-        CREATE TABLE IF NOT EXISTS book
-            (
-                id integer PRIMARY KEY autoincrement,
-                title text,
-                authors text,
-                notes      integer,
-                last_open  integer,
-                highlights integer,
-                pages      integer,
-                series text,
-                language text,
-                md5 text,
-                total_read_time  integer,
-                total_read_pages integer
-            );
+    pub const STATISTICS_2019: &str = concat!(
+        book_table!(),
+        r#"
         CREATE TABLE IF NOT EXISTS page_stat
             (
                 id_book integer,
@@ -428,7 +405,8 @@ pub mod schema {
             (
                 version integer
             );
-    "#;
+    "#
+    );
 
     /// Vocabulary builder, schema 20240905.
     pub const VOCABULARY: &str = r#"
@@ -478,7 +456,7 @@ pub fn write_sample_databases(dir: &Path, old_schema: bool, wal: bool) -> Result
     let vocab = dir.join("vocabulary_builder.sqlite3");
     for p in [&stats, &vocab] {
         for suffix in ["", "-wal", "-shm", "-journal"] {
-            let _ = std::fs::remove_file(sibling(p, suffix));
+            let _ = std::fs::remove_file(crate::with_suffix(p, suffix));
         }
     }
     // In WAL mode keep every row in the `-wal` file (no automatic checkpoint, none on
@@ -569,7 +547,7 @@ mod tests {
     fn wal_databases_are_read_completely_and_left_alone() {
         let tmp = TempDir::new("ko-wal");
         let (db, vocab) = write_sample_databases(&tmp.path().join("ko"), false, true).unwrap();
-        assert!(sibling(&db, "-wal").exists(), "the sample keeps its data in the WAL");
+        assert!(crate::with_suffix(&db, "-wal").exists(), "the sample keeps its data in the WAL");
         let mut header = [0u8; 20];
         use std::io::Read;
         std::fs::File::open(&db).unwrap().read_exact(&mut header).unwrap();

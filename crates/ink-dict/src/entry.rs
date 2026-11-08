@@ -14,7 +14,7 @@
 //!
 //! [`parse`] returns `None` for other markup; the caller keeps the plain text then.
 
-use crate::text::decode_entity;
+use crate::text::push_decoded;
 
 /// A parsed entry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -128,22 +128,7 @@ fn tokens(s: &str) -> Vec<Tok<'_>> {
 
 fn decode(t: &str) -> String {
     let mut out = String::with_capacity(t.len());
-    let mut rest = t;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after = &rest[amp + 1..];
-        match after.find(';').filter(|n| *n <= 10).and_then(|n| decode_entity(&after[..n]).map(|c| (n, c))) {
-            Some((n, c)) => {
-                out.push_str(&c);
-                rest = &after[n + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
+    push_decoded(&mut out, t);
     out
 }
 

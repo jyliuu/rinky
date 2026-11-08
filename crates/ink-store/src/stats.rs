@@ -82,22 +82,9 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// Gap that ends a session when sessions are rebuilt from page records (KOReader data).
 pub const SESSION_GAP_SECS: u64 = 600;
 
-const SCHEMA: &str = r#"
-    CREATE TABLE IF NOT EXISTS book
-        (
-            id integer PRIMARY KEY autoincrement,
-            title text,
-            authors text,
-            notes      integer,
-            last_open  integer,
-            highlights integer,
-            pages      integer,
-            series text,
-            language text,
-            md5 text,
-            total_read_time  integer,
-            total_read_pages integer
-        );
+const SCHEMA: &str = concat!(
+    crate::koreader::sqlite::schema::book_table!(),
+    r#"
     CREATE UNIQUE INDEX IF NOT EXISTS book_title_authors_md5 ON book(title, authors, md5);
     CREATE INDEX IF NOT EXISTS book_md5 ON book(md5);
     CREATE TABLE IF NOT EXISTS page_stat_data
@@ -122,7 +109,8 @@ const SCHEMA: &str = r#"
             source     text NOT NULL DEFAULT 'rinky'
         );
     CREATE INDEX IF NOT EXISTS session_book_start ON session(id_book, start_time);
-"#;
+"#
+);
 
 /// A book as the statistics know it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -231,12 +219,14 @@ fn u(v: i64) -> u64 {
     v.max(0) as u64
 }
 
+fn u32_of(v: i64) -> u32 {
+    v.clamp(0, u32::MAX as i64) as u32
+}
+
 impl StatsDb {
     /// Opens (creating if needed) the database at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
-        }
+        crate::create_parent_dir(path)?;
         let conn = Connection::open(path)?;
         Self::init(conn, WriteQueue::for_path(path))
     }
@@ -246,15 +236,7 @@ impl StatsDb {
     /// `-journal`) and a new database is started; the new name is returned. Other errors
     /// (locked, read-only, a newer schema) are returned and nothing is moved.
     pub fn open_or_recover(path: &Path) -> Result<(Self, Option<PathBuf>)> {
-        let damaged = |e: &StoreError| matches!(e, StoreError::Sqlite(e) if crate::is_damaged_sqlite(e));
-        match Self::open(path) {
-            Ok(db) => Ok((db, None)),
-            Err(e) if damaged(&e) => {
-                let Some(moved) = crate::set_aside_database(path) else { return Err(e) };
-                Ok((Self::open(path)?, Some(moved)))
-            }
-            Err(e) => Err(e),
-        }
+        crate::open_db_or_recover(path, Self::open)
     }
 
     /// An in-memory database (tests).
@@ -347,11 +329,10 @@ impl StatsDb {
     /// page count are updated, so a crash loses at most the unwritten records.
     pub fn record_pages(&mut self, session: i64, recs: &[PageRecord]) -> Result<()> {
         let (_turn, tx) = self.write_tx()?;
-        let (book, start): (i64, i64) = tx
-            .query_row("SELECT id_book, start_time FROM session WHERE id = ?1", [session], |r| Ok((r.get(0)?, r.get(1)?)))
+        let (book, start, mut end): (i64, i64, i64) = tx
+            .query_row("SELECT id_book, start_time, end_time FROM session WHERE id = ?1", [session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?
             .ok_or_else(|| StoreError::NotFound(format!("session {session}")))?;
-        let mut end: i64 = tx.query_row("SELECT end_time FROM session WHERE id = ?1", [session], |r| r.get(0))?;
         {
             let mut ins = tx.prepare_cached(
                 "INSERT INTO page_stat_data (id_book, page, start_time, duration, total_pages) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -417,7 +398,7 @@ impl StatsDb {
                 md5: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 title: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 authors: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                pages: r.get::<_, Option<i64>>(3)?.map(|p| p.clamp(0, u32::MAX as i64) as u32),
+                pages: r.get::<_, Option<i64>>(3)?.map(u32_of),
                 read_time: u(r.get(4)?),
                 pages_read: u(r.get(5)?),
                 sessions: u(r.get(6)?),
@@ -446,10 +427,10 @@ impl StatsDb {
         )?;
         let rows = st.query_map([md5], |r| {
             Ok(PageRecord {
-                page: r.get::<_, i64>(0)?.clamp(0, u32::MAX as i64) as u32,
-                total_pages: r.get::<_, i64>(1)?.clamp(0, u32::MAX as i64) as u32,
+                page: u32_of(r.get(0)?),
+                total_pages: u32_of(r.get(1)?),
                 start_time: u(r.get(2)?),
-                duration: r.get::<_, i64>(3)?.clamp(0, u32::MAX as i64) as u32,
+                duration: u32_of(r.get(3)?),
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

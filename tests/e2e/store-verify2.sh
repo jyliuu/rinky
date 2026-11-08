@@ -3,12 +3,10 @@
 # `verifier_`, which does not match the cycle 2 names (`verifier2_`); this scenario runs
 # them:
 #  1. the verifier2 tests that are not ignored, on the user store (fuse.fsp) and on /tmp
-#     (enforced);
-#  2. the open defects about values that cannot be read back (ignored `verifier:` tests),
-#     on the user store: logged with their result (each is expected to fail until fixed;
-#     a pass is logged as fixed). The quadratic-import scaling tests run on the host; on
-#     ARM their cost shows in the measurements below;
-#  3. only with STORE_VERIFY2_MEASURE=1 (they take about 27 minutes while the import is
+#     (enforced). This includes the four tests about values that cannot be read back,
+#     which were ignored `verifier:` tests until fixed. The import scaling tests (ignored
+#     `slow:` timing ratios) run on the host; on ARM their cost shows in the measurements;
+#  2. only with STORE_VERIFY2_MEASURE=1 (they took about 27 minutes while the import was
 #     quadratic): the measurements (ignored `measurement:` tests) under `timeout`: KOReader
 #     import of the largest accepted metadata files (compact hostile shapes: 600 s each;
 #     KOReader's own dump.lua layout: 900 s), and sidecar save/load times with many
@@ -40,20 +38,6 @@ log "verifier2 tests (not ignored) on /tmp"
 guest "cd $G && TMPDIR=/tmp ./ink_store_tests verifier2_ --test-threads=1 --nocapture" \
   >"$OUT/verifier2-tmp.log" 2>&1 || fail "verifier2 tests on /tmp: $(grep -E 'FAILED|panicked' "$OUT/verifier2-tmp.log" | head -3)"
 pass "verifier2 tests on /tmp: $(grep 'test result' "$OUT/verifier2-tmp.log")"
-
-log "open defects (ignored verifier: tests) on the user store"
-for t in verifier2_plugin_settings_deep_value_never_loses_other_settings \
-         verifier2_plugin_settings_first_deep_value_keeps_the_file_loadable \
-         verifier2_settings_deep_plugin_value_keeps_settings_loadable \
-         verifier2_sidecar_deep_plugin_value_does_not_block_position_saves; do
-  guest "cd $G && TMPDIR=$T timeout 900 ./ink_store_tests verify2_tests::$t --exact --include-ignored --nocapture; echo exit=\$?" \
-    >"$OUT/defect-$t.log" 2>&1
-  if grep -q 'test result: ok' "$OUT/defect-$t.log"; then
-    log "defect test $t: passes (fixed)"
-  else
-    log "defect test $t: fails as reported: $(grep -E 'panicked|exit=' -A1 "$OUT/defect-$t.log" | grep -v '^--' | head -3 | tr '\n' ' ' | cut -c1-300)"
-  fi
-done
 
 if [ "${STORE_VERIFY2_MEASURE:-0}" = 1 ]; then
   log "measurements (KOReader import at the parser's limits; sidecar save times)"

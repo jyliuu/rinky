@@ -68,16 +68,20 @@ impl<'a> PluginStore<'a> {
         self.settings.get(key).cloned()
     }
 
-    /// Sets a plugin setting (`null` removes it) and writes the settings file.
+    /// Sets a plugin setting (`null` removes it) and writes the settings file. A value
+    /// the file could not be read back with (nested deeper than serde_json reads) is
+    /// refused with [`StoreError::Invalid`]; nothing changes then.
     pub fn set(&mut self, key: &str, value: Value) -> Result<()> {
-        if value.is_null() {
-            self.settings.remove(key);
-        } else {
-            self.settings.insert(key.to_string(), value);
-        }
-        let file = self.paths.plugin_settings(&self.name);
+        let old = if value.is_null() { self.settings.remove(key) } else { self.settings.insert(key.to_string(), value) };
         let json = serde_json::to_vec_pretty(&self.settings).map_err(|e| StoreError::Format(e.to_string()))?;
-        save_with_backup(&file, &json, |b| parse_settings(b).is_ok())
+        if let Err(e) = parse_settings(&json) {
+            match old {
+                Some(v) => self.settings.insert(key.to_string(), v),
+                None => self.settings.remove(key),
+            };
+            return Err(StoreError::Invalid(format!("plugin {} setting {key:?} would not load again: {e}", self.name)));
+        }
+        save_with_backup(&self.paths.plugin_settings(&self.name), &json, |b| parse_settings(b).is_ok())
     }
 
     /// All settings.
@@ -138,6 +142,9 @@ mod tests {
             let mut st = PluginStore::open(&paths, "stats", None).unwrap();
             assert_eq!(st.get("x"), None);
             st.set("x", json!({"a": [1, 2, null], "big": u64::MAX})).unwrap();
+            let deep = (0..200).fold(json!(1), |v, _| json!([v]));
+            assert!(matches!(st.set("x", deep), Err(StoreError::Invalid(_))));
+            assert_eq!(st.get("x").unwrap()["big"], u64::MAX, "a refused value changes nothing");
             st.set("gone", json!(1)).unwrap();
             st.set("gone", Value::Null).unwrap();
             assert!(st.book_get("k").is_none());

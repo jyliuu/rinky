@@ -269,11 +269,7 @@ impl LibraryIndex {
 
     /// Saves atomically as compact JSON (with a `.old` backup at most once a minute).
     pub fn save(&self, path: &Path) -> Result<()> {
-        let mut copy_version = self.version;
-        if copy_version < Self::VERSION {
-            copy_version = Self::VERSION;
-        }
-        let json = serde_json::to_vec(&VersionedRef { version: copy_version, books: &self.books, collections: &self.collections })
+        let json = serde_json::to_vec(&VersionedRef { version: self.version.max(Self::VERSION), books: &self.books, collections: &self.collections })
             .map_err(|e| StoreError::Format(e.to_string()))?;
         save_with_backup(path, &json, |b| parse_index(b).is_ok())
     }
@@ -423,16 +419,12 @@ impl LibraryIndex {
             SortKey::Author => v.sort_by_cached_key(|b| (lower(b.authors.first().map(String::as_str).unwrap_or("\u{10FFFF}")), lower(&b.title))),
             SortKey::Added => v.sort_by_key(|b| std::cmp::Reverse(b.added)),
             SortKey::Progress => v.sort_by(|a, b| b.percent.unwrap_or(0.0).total_cmp(&a.percent.unwrap_or(0.0))),
-            SortKey::Series => v.sort_by(|a, b| {
-                let ka = (a.series.as_deref().map(lower), a.series_index.unwrap_or(0.0));
-                let kb = (b.series.as_deref().map(lower), b.series_index.unwrap_or(0.0));
+            SortKey::Series => {
                 // Books without a series go last.
-                match (&ka.0, &kb.0) {
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    _ => ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1)),
-                }
-            }),
+                let mut keyed: Vec<_> = v.into_iter().map(|b| (b.series.as_deref().map(lower), b.series_index.unwrap_or(0.0), b)).collect();
+                keyed.sort_by(|a, b| (a.0.is_none(), &a.0).cmp(&(b.0.is_none(), &b.0)).then(a.1.total_cmp(&b.1)));
+                return keyed.into_iter().map(|k| k.2).collect();
+            }
         }
         v
     }
@@ -559,7 +551,8 @@ struct Walk {
     errors: Vec<String>,
 }
 
-fn is_book_name(path: &Path) -> bool {
+/// True if `path` has one of [`BOOK_EXTENSIONS`] (any case).
+pub(crate) fn is_book_name(path: &Path) -> bool {
     let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
     BOOK_EXTENSIONS.contains(&ext.as_str())
 }
@@ -605,12 +598,12 @@ fn walk(dir: &Path, depth: usize, w: &mut Walk) {
             Ok(m) => m,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
+                w.errors.push(format!("{}: {err}", path.display()));
+                // Anything that is not a book file could be a folder of books: keep
+                // anything under it.
                 if is_book_name(&path) {
-                    w.errors.push(format!("{}: {err}", path.display()));
                     w.keep_files.insert(path);
                 } else {
-                    // Could be a folder of books: keep anything under it.
-                    w.errors.push(format!("{}: {err}", path.display()));
                     w.keep_dirs.push(path);
                 }
                 continue;
