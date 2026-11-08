@@ -17,7 +17,8 @@ use ink_text::hyphen::{hyphenator_for, Hyphenator};
 use ink_text::linebreak::wrap;
 use ink_text::Style;
 
-/// An on/off switch with a label on its left.
+/// An on/off switch with a label on its left. It keeps the default GL16 refresh: the off
+/// state has a gray track, which DU would show white.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toggle {
     /// Caption.
