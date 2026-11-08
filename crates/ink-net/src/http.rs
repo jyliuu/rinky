@@ -284,23 +284,17 @@ pub trait HttpClient {
     fn send(&self, req: Request) -> Result<Response>;
 }
 
-impl<T: HttpClient + ?Sized> HttpClient for &T {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
+/// References and smart pointers to a client are clients.
+macro_rules! forward_client {
+    ($($ptr:ty),+) => {$(
+        impl<T: HttpClient + ?Sized> HttpClient for $ptr {
+            fn send(&self, req: Request) -> Result<Response> {
+                (**self).send(req)
+            }
+        }
+    )+};
 }
-
-impl<T: HttpClient + ?Sized> HttpClient for Box<T> {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
-}
-
-impl<T: HttpClient + ?Sized> HttpClient for Arc<T> {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
-}
+forward_client!(&T, Box<T>, Arc<T>);
 
 /// Which certificate authorities a [`UreqClient`] trusts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
