@@ -783,9 +783,12 @@ impl SliderPanel {
         (label, minus, track, plus)
     }
 
-    fn value_at(spec: &SliderSpec, track: Rect, p: Point) -> f32 {
+    /// Sets row `k` of `rows` to the value under `p` on its track; true when it changed.
+    fn drag_to(&mut self, rows: &[Rect], k: usize, p: Point) -> bool {
+        let (_, _, track, _) = Self::parts(rows[k]);
+        let spec = &SLIDERS[self.which[k]];
         let f = (p.x - track.x) as f32 / track.w.max(1) as f32;
-        spec.snap(spec.min + f.clamp(0.0, 1.0) * (spec.max - spec.min))
+        self.set(k, spec.snap(spec.min + f.clamp(0.0, 1.0) * (spec.max - spec.min)))
     }
 
     fn report(&self, k: usize) -> EventResult {
@@ -934,53 +937,32 @@ impl Widget for SliderPanel {
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         let (_, rows) = Self::areas(b, self.which.len());
         match ev {
-            UiEvent::Touch(t) => match t.kind {
-                TouchKind::Down => {
-                    for (k, row) in rows.iter().enumerate() {
-                        let (_, _, track, _) = Self::parts(*row);
-                        let hit = Rect::new(track.x - 30, track.y, track.w + 60, track.h);
-                        if hit.contains(t.pos) {
-                            let spec = SLIDERS[self.which[k]];
-                            self.drag = Some((k, self.shown.borrow().get(self.which[k])));
-                            self.set(k, Self::value_at(&spec, track, t.pos));
-                            self.mark(k);
-                            return EventResult::Handled;
-                        }
-                    }
-                    EventResult::Ignored
+            UiEvent::Touch(t) => match (t.kind, self.drag) {
+                (TouchKind::Down, _) => {
+                    let on_track = |tr: Rect| Rect::new(tr.x - 30, tr.y, tr.w + 60, tr.h).contains(t.pos);
+                    let Some(k) = rows.iter().position(|r| on_track(Self::parts(*r).2)) else { return EventResult::Ignored };
+                    self.drag = Some((k, self.shown.borrow().get(self.which[k])));
+                    self.drag_to(&rows, k, t.pos);
+                    self.mark(k);
+                    EventResult::Handled
                 }
-                TouchKind::Move | TouchKind::Hold => match self.drag {
-                    Some((k, _)) => {
-                        let (_, _, track, _) = Self::parts(rows[k]);
-                        if self.set(k, Self::value_at(&SLIDERS[self.which[k]], track, t.pos)) {
-                            EventResult::Handled
-                        } else {
-                            EventResult::Ignored
-                        }
-                    }
-                    None => EventResult::Ignored,
-                },
-                TouchKind::Up => match self.drag.take() {
-                    Some((k, _)) => {
-                        let (_, _, track, _) = Self::parts(rows[k]);
-                        self.set(k, Self::value_at(&SLIDERS[self.which[k]], track, t.pos));
-                        self.mark(k);
-                        self.settle = true;
-                        log::info!("aa: {} drag ended, last panel paint {:?}", SLIDERS[self.which[k]].label, self.last_paint);
-                        self.report(k)
-                    }
-                    None => EventResult::Ignored,
-                },
-                // A slider drag follows the finger from touch-down; Press changes nothing.
-                TouchKind::Press => EventResult::Ignored,
+                (TouchKind::Move | TouchKind::Hold, Some((k, _))) if self.drag_to(&rows, k, t.pos) => EventResult::Handled,
+                (TouchKind::Up, Some((k, _))) => {
+                    self.drag = None;
+                    self.drag_to(&rows, k, t.pos);
+                    self.mark(k);
+                    self.settle = true;
+                    log::info!("aa: {} drag ended, last panel paint {:?}", SLIDERS[self.which[k]].label, self.last_paint);
+                    self.report(k)
+                }
                 // The drag ended without a lift (rotation): back to the value before it.
-                TouchKind::Cancel => match self.drag.take() {
-                    Some((k, before)) => {
-                        self.set(k, before);
-                        EventResult::Handled
-                    }
-                    None => EventResult::Ignored,
-                },
+                (TouchKind::Cancel, Some((k, before))) => {
+                    self.drag = None;
+                    self.set(k, before);
+                    EventResult::Handled
+                }
+                // A slider drag follows the finger from touch-down; Press changes nothing.
+                _ => EventResult::Ignored,
             },
             UiEvent::Gesture(Gesture::Tap { pos }) => {
                 for (k, row) in rows.iter().enumerate() {
