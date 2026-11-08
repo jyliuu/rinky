@@ -412,12 +412,6 @@ impl PluginHost {
         host
     }
 
-    /// Uses `client` for plugin network access instead of the default `ureq` client
-    /// (tests, mock servers).
-    pub fn set_http_client(&mut self, client: Arc<dyn HttpClient + Send + Sync>) {
-        self.net = Net { client: Some(client.clone()), worker: Some(NetWorker::new(client)) };
-    }
-
     fn broadcast(&mut self, mut doc: Option<&mut dyn Document>, ev: Lifecycle) {
         // Network events that arrived meanwhile go first (screens that do not call
         // handle_event yet still deliver them on every page turn).
