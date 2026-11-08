@@ -15,7 +15,7 @@
 //! ticks, the return page), which the reader fills with
 //! `ReaderScreen::menu_overlay`.
 
-use super::overlay::{Bar, Overlay, OverlayKind, Rule};
+use super::overlay::{keyword_icon, Bar, Overlay, OverlayKind, Rule};
 use crate::router::{AppCtx, Route, Transition};
 use ink_device::{Rect, RefreshClass, Size};
 use ink_doc::Position;
@@ -185,28 +185,23 @@ pub fn build_with(info: &MenuInfo, extra: &MenuExtra, plugins: &[String], size: 
     o
 }
 
+/// Icons of dock entries by keywords of their label ([`keyword_icon`]).
+const DOCK_ICONS: [(&[&str], Icon); 7] = [
+    (&["dict", "look", "define"], Icon::Book),
+    (&["wiki", "translat"], Icon::Globe),
+    (&["insightful", "ai"], Icon::Sparkle),
+    (&["sync"], Icon::Sync),
+    (&["calibre", "librar", "opds"], Icon::Library),
+    (&["ssh", "terminal"], Icon::Terminal),
+    (&["usb"], Icon::Usb),
+];
+
 /// The icon of a dock entry, picked from its label.
 pub fn dock_icon(label: &str) -> Icon {
-    let l = label.to_lowercase();
-    let has = |ks: &[&str]| ks.iter().any(|k| l.contains(k));
     if label == PLUGIN_MORE_LABEL {
         Icon::More
-    } else if has(&["dict", "look", "define"]) {
-        Icon::Book
-    } else if has(&["wiki", "translat"]) {
-        Icon::Globe
-    } else if has(&["insightful", "ai"]) {
-        Icon::Sparkle
-    } else if has(&["sync"]) {
-        Icon::Sync
-    } else if has(&["calibre", "librar", "opds"]) {
-        Icon::Library
-    } else if has(&["ssh", "terminal"]) {
-        Icon::Terminal
-    } else if has(&["usb"]) {
-        Icon::Usb
     } else {
-        Icon::Star
+        keyword_icon(label, &DOCK_ICONS)
     }
 }
 

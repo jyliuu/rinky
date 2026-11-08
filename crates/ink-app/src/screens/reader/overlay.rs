@@ -6,7 +6,7 @@
 
 use ink_device::{Rect, Size};
 use ink_ui::theme::space;
-use ink_ui::{AppBar, Button, EventResult, Gesture, Menu, PaintCx, UiEvent, Widget, WidgetId, WidgetTree};
+use ink_ui::{AppBar, Button, EventResult, Gesture, Icon, Menu, PaintCx, UiEvent, Widget, WidgetId, WidgetTree};
 use std::collections::HashMap;
 
 /// Which overlay is open.
@@ -86,6 +86,13 @@ impl Overlay {
     pub fn button_rect(&self, action: &str) -> Option<Rect> {
         self.buttons.iter().find(|(a, _)| a == action).map(|(_, r)| *r)
     }
+}
+
+/// The icon of the first entry of `table` with a keyword in `label` (any case); a star
+/// when none has (plugin entries in the menu's dock and on the selection card).
+pub fn keyword_icon(label: &str, table: &[(&[&str], Icon)]) -> Icon {
+    let l = label.to_lowercase();
+    table.iter().find(|(keys, _)| keys.iter().any(|k| l.contains(k))).map_or(Icon::Star, |e| e.1)
 }
 
 /// Where a [`Bar`] draws its rule.

@@ -31,7 +31,7 @@
 //! this session, in the current layout. Drawing saved highlights after a reopen needs a
 //! `Document` call that maps a position range to rectangles.
 
-use super::overlay::{Overlay, OverlayKind};
+use super::overlay::{keyword_icon, Overlay, OverlayKind};
 use ink_device::{Canvas, Point, Rect, Size};
 use ink_doc::Selection;
 use ink_text::Style;
@@ -546,23 +546,14 @@ pub struct Tool {
     pub action: String,
 }
 
-/// Icon for a plugin selection action, picked from its label.
-fn plugin_icon(label: &str) -> Icon {
-    let l = label.to_lowercase();
-    if ["dict", "look", "define", "word"].iter().any(|k| l.contains(k)) {
-        Icon::Book
-    } else if l.contains("translat") {
-        Icon::Globe
-    } else if ["note", "comment", "ask", "chat"].iter().any(|k| l.contains(k)) {
-        Icon::Chat
-    } else if ["share", "send", "export"].iter().any(|k| l.contains(k)) {
-        Icon::Forward
-    } else if l.contains("copy") {
-        Icon::ListView
-    } else {
-        Icon::Star
-    }
-}
+/// Icons of plugin selection actions by keywords of their label ([`keyword_icon`]).
+const PLUGIN_ICONS: [(&[&str], Icon); 5] = [
+    (&["dict", "look", "define", "word"], Icon::Book),
+    (&["translat"], Icon::Globe),
+    (&["note", "comment", "ask", "chat"], Icon::Chat),
+    (&["share", "send", "export"], Icon::Forward),
+    (&["copy"], Icon::ListView),
+];
 
 /// Every tool of the card in order: Highlight (Remove highlight when the selection is a
 /// saved highlight, `highlighted`), Note, Insightful (`plugin-sel:I` with
@@ -582,7 +573,7 @@ pub fn all_tools(plugins: &[String], insightful: Option<usize>, highlighted: boo
     if let Some(i) = insightful.filter(|i| *i < plugins.len()) {
         v.push(Tool { label: "Insightful".into(), icon: Some(Icon::Sparkle), action: format!("plugin-sel:{i}") });
     }
-    v.extend(plugins.iter().enumerate().filter(|(i, _)| Some(*i) != insightful).map(|(i, l)| Tool { label: l.clone(), icon: Some(plugin_icon(l)), action: format!("plugin-sel:{i}") }));
+    v.extend(plugins.iter().enumerate().filter(|(i, _)| Some(*i) != insightful).map(|(i, l)| Tool { label: l.clone(), icon: Some(keyword_icon(l, &PLUGIN_ICONS)), action: format!("plugin-sel:{i}") }));
     v.push(Tool { label: "Search".into(), icon: Some(Icon::Search), action: "sel-search".into() });
     v
 }
