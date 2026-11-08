@@ -192,7 +192,10 @@ impl Path {
         }
         let local: Vec<Vec<(f32, f32)>> =
             self.contours.iter().map(|c| c.iter().map(|p| (p.0 - b.x as f32, p.1 - b.y as f32)).collect()).collect();
-        COVERAGE.with_borrow_mut(|cache| blend(canvas, b, cache.get(b.w as usize, b.h as usize, local), value));
+        COVERAGE.with_borrow_mut(|cache| {
+            let (cov, runs) = cache.get(b.w as usize, b.h as usize, local);
+            blend_runs(canvas, b, cov, runs, value);
+        });
     }
 }
 
@@ -208,14 +211,14 @@ thread_local! {
 /// and `fill_contours` is a pure function: a bit-identical input gets its earlier output.
 #[derive(Default)]
 struct CoverageCache {
-    /// (key, coverage), least recently used first. The key holds the size, each
-    /// contour's length and the bits of every point.
-    entries: Vec<(Vec<u32>, Vec<u8>)>,
+    /// (key, coverage, its [`runs`]), least recently used first. The key holds the size,
+    /// each contour's length and the bits of every point.
+    entries: Vec<(Vec<u32>, Vec<u8>, Vec<Run>)>,
     bytes: usize,
 }
 
 impl CoverageCache {
-    fn get(&mut self, w: usize, h: usize, contours: Vec<Vec<(f32, f32)>>) -> &[u8] {
+    fn get(&mut self, w: usize, h: usize, contours: Vec<Vec<(f32, f32)>>) -> (&[u8], &[Run]) {
         let mut key = vec![w as u32, h as u32];
         for c in &contours {
             key.push(c.len() as u32);
@@ -226,39 +229,63 @@ impl CoverageCache {
             None => {
                 let cov = fill_contours(w, h, &contours);
                 self.bytes += cov.len();
-                (key, cov)
+                let runs = runs(&cov, w);
+                (key, cov, runs)
             }
         };
         while self.bytes > COVERAGE_BUDGET && !self.entries.is_empty() {
             self.bytes -= self.entries.remove(0).1.len();
         }
         self.entries.push(entry);
-        &self.entries.last().expect("just pushed").1
+        let (_, cov, runs) = self.entries.last().expect("just pushed");
+        (cov, runs)
+    }
+}
+
+/// A run of covered pixels in one row of a coverage mask: (start, end) indices and
+/// whether every pixel of it is fully covered.
+type Run = (usize, usize, bool);
+
+/// The runs of nonzero coverage of `cov`, a mask `w` wide.
+fn runs(cov: &[u8], w: usize) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::new();
+    for (i, &a) in cov.iter().enumerate().filter(|(_, a)| **a != 0) {
+        match out.last_mut() {
+            Some(r) if r.1 == i && r.2 == (a == 255) && i % w != 0 => r.1 += 1,
+            _ => out.push((i, i + 1, a == 255)),
+        }
+    }
+    out
+}
+
+/// [`blend`] of a mask through its [`runs`]: pixels without coverage are not visited and
+/// fully covered ones are set, so a large outline or fill costs only its covered pixels.
+/// Row slices of the part of `r` that drawing may change, not a get/set per pixel.
+fn blend_runs(canvas: &mut Canvas, r: Rect, cov: &[u8], runs: &[Run], value: u8) {
+    let (area, rw, v) = (drawable(canvas, r), r.w as usize, value as u32);
+    for &(s, e, full) in runs {
+        let (y, x) = (r.y + (s / rw) as i32, r.x + (s % rw) as i32);
+        let (x0, x1) = (x.max(area.x), (x + (e - s) as i32).min(area.right()));
+        if y < area.y || y >= area.bottom() || x0 >= x1 {
+            continue;
+        }
+        let p0 = y as usize * canvas.width + x0 as usize;
+        let row = &mut canvas.pixels[p0..p0 + (x1 - x0) as usize];
+        if full {
+            row.fill(value);
+            continue;
+        }
+        // One formula for every coverage: with no branch the loop vectorizes.
+        for (p, &a) in row.iter_mut().zip(&cov[s + (x0 - x) as usize..]) {
+            let a = a as u32;
+            *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
+        }
     }
 }
 
 /// Blends `value` into `r` of the canvas with per-pixel coverage `cov` (`r.w * r.h`).
 pub fn blend(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {
-    // Row slices of the part of `r` that drawing may change, instead of a bounds-checked
-    // get/set per pixel: the sheets and panels blend their full-size outlines on every
-    // paint.
-    let area = drawable(canvas, r);
-    if area.is_empty() {
-        return;
-    }
-    let (rw, cw, n) = (r.w as usize, canvas.width, area.w as usize);
-    let v = value as u32;
-    for y in area.y..area.bottom() {
-        let c0 = (y - r.y) as usize * rw + (area.x - r.x) as usize;
-        let p0 = y as usize * cw + area.x as usize;
-        let row = &mut canvas.pixels[p0..p0 + n];
-        // One formula for every coverage (0 keeps the pixel, 255 gives `value`): with no
-        // branch the loop vectorizes.
-        for (p, &a) in row.iter_mut().zip(&cov[c0..c0 + n]) {
-            let a = a as u32;
-            *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
-        }
-    }
+    blend_runs(canvas, r, cov, &runs(cov, r.w as usize), value);
 }
 
 /// Fills a rounded rectangle.
