@@ -200,15 +200,9 @@ impl ChapterMap {
             // Ticks from Kindle locations while the page fraction still moves.
             let mut map = Self::from_entries(&entries, toc.len(), &[], 0);
             let top = toc.iter().map(|e| e.level).min().unwrap_or(0);
-            let locations = doc.location_count().filter(|l| l.0 > 1);
-            map.marks = match locations {
-                Some(n) => thin_marks(
-                    toc.iter()
-                        .filter(|e| ticks_entry(toc.len(), top, e.level))
-                        .filter_map(|e| doc.location(&e.position).map(|l| l.0.saturating_sub(1) as f32 / (n.0 - 1) as f32)),
-                ),
-                None => Vec::new(),
-            };
+            let last = doc.location_count().filter(|l| l.0 > 1).map(|n| (n.0 - 1) as f32);
+            let fraction = |e: &TocEntry| Some(doc.location(&e.position)?.0.saturating_sub(1) as f32 / last?);
+            map.marks = if last.is_some() { thin_marks(toc.iter().filter(|e| ticks_entry(toc.len(), top, e.level)).filter_map(fraction)) } else { Vec::new() };
             map
         };
         map.key = Self::key_of(doc);
@@ -443,13 +437,7 @@ pub fn widget_piece(name: &str, info: &FooterInfo) -> Option<Piece> {
         "wifi" => info.device.wifi.filter(|on| *on).map(|_| Piece::Icon(Icon::Wifi, String::new())),
         "frontlight" => info.device.light.map(|l| Piece::Icon(Icon::Light, l.to_string())),
         "page" => (info.total > 0).then(|| Piece::Text((info.page + 1).to_string(), Style::Regular)),
-        "page_of_total" => (info.total > 0).then(|| {
-            let text = match info.total_estimate {
-                Some(e) => format!("{} / {}", info.page + 1, about(e)),
-                None => format!("{} / {}", info.page + 1, info.total),
-            };
-            Piece::Text(text, Style::Regular)
-        }),
+        "page_of_total" => (info.total > 0).then(|| Piece::Text(format!("{} / {}", info.page + 1, info.total_estimate.map_or_else(|| info.total.to_string(), about)), Style::Regular)),
         "percent" => Some(Piece::Text(percent_text(info.progress), Style::Bold)),
         "chapter_title" => info.chapter_title.clone().and_then(text),
         "book_title" => text(info.book_title.clone()),
