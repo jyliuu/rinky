@@ -3787,9 +3787,13 @@ mod tests {
         ui.handle(&key(Key::PagePrev), screen());
         ui.handle(&key(Key::PageNext), screen());
         let (before, ..) = v(&ui);
+        // Five batches of five sentences: each push lays out the whole chat again (about
+        // 0.7 s in a debug build), and the answer still ends well below the window.
         let mut answer = String::from("The");
-        for i in 0..25 {
-            answer.push_str(&format!(" streamed words of batch {i}, more of them, and then some more words to fill a few lines of the answer card."));
+        for i in 0..5 {
+            for j in 0..5 {
+                answer.push_str(&format!(" streamed words of batch {i}.{j}, more of them, and then some more words to fill a few lines of the answer card."));
+            }
             ui.push("p", UiRequest::TextViewer { id: 1, title: "Chat".into(), markdown: chat(20, &answer) });
             s.ui(&mut ui, false);
             assert_eq!(v(&ui).0, before, "batch {i}");

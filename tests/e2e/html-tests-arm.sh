@@ -4,8 +4,8 @@
 # 1. cargo zigbuild --release --tests for ink-html and ink-doc (reuses the build cache);
 #    the binary paths come from cargo's JSON messages;
 # 2. the binaries plus what the tests read (feature fixtures, crengine expected
-#    xpointers, testdata/*.epub, tests/golden/*.png, fonts/, crates/ink-doc/Cargo.toml)
-#    are copied to /mnt/us/htmltest;
+#    xpointers, testdata/*.epub, tests/golden/*.png, fonts/) are copied
+#    to /mnt/us/htmltest;
 # 3. before that, the emulator guard (crates/ink-html/examples/emuguard.rs) takes
 #    physical page 0x40000000 out of circulation on the guest (see below); it stays
 #    running after the tests (/var/tmp/emuguard, log /var/tmp/emuguard.log, copied to
@@ -48,7 +48,6 @@ mkdir -p "$STAGE/t/bin" "$STAGE/t/crates/ink-html/tests" "$STAGE/t/crates/ink-do
 while read -r crate name path; do cp "$path" "$STAGE/t/bin/$crate-$name"; done <"$STAGE/bins.txt"
 cp "$(cat "$STAGE/build.json.emuguard")" "$STAGE/t/bin/emuguard" || fail "no emuguard in the build output"
 cp -R "$E2E_ROOT/crates/ink-html/tests/fixtures" "$E2E_ROOT/crates/ink-html/tests/crengine" "$STAGE/t/crates/ink-html/tests/"
-cp "$E2E_ROOT/crates/ink-doc/Cargo.toml" "$STAGE/t/crates/ink-doc/"
 cp -R "$E2E_ROOT/testdata" "$E2E_ROOT/fonts" "$STAGE/t/"
 cp -R "$E2E_ROOT/tests/golden" "$STAGE/t/tests/"
 rm -rf "$STAGE/t/crates/ink-html/tests/fixtures/src" "$STAGE/t/testdata/"*.sdr

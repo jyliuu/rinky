@@ -417,16 +417,14 @@ fn verifier2_settings_load_or_recover_waits_for_a_save_in_progress() {
     std::fs::rename(&f, &tmp).unwrap();
     let strict = Settings::load(&f).unwrap();
     eprintln!("verifier2 settings gap: strict Settings::load returned language {:?} (saved: \"de\")", strict.language);
-    // load_or_recover in the gap, the writer finishes its rename 30 ms later.
-    let t = std::thread::spawn({
+    // load_or_recover in the gap: the writer finishes its rename while the load waits.
+    // (A writer thread that slept 30 ms first could miss the 127 ms of waits on a busy
+    // machine, and the load then returned the backup.)
+    crate::on_settle_wait({
         let (f, tmp) = (f.clone(), tmp.clone());
-        move || {
-            std::thread::sleep(Duration::from_millis(30));
-            std::fs::rename(&tmp, &f).unwrap();
-        }
+        move || std::fs::rename(&tmp, &f).unwrap()
     });
     let (back, warning) = Settings::load_or_recover(&f).unwrap();
-    t.join().unwrap();
     assert_eq!((back.language.as_str(), warning), ("de", None));
 }
 

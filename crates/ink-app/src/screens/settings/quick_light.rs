@@ -2201,8 +2201,12 @@ mod tests {
         s.ui.control_buttons = ["wifi", "plugin:drift:d"].map(String::from).to_vec();
         let tile = layout(Size::new(1272, 1696), 2).tiles[1];
         let (x, y) = (tile.x + 40, tile.y + tile.h as i32 / 2);
+        // The fake light never finishes its state read, so the first tile poll comes
+        // STATE_WAIT (4 s, plus up to one 150 ms poll) and PLUGIN_POLL (2 s) after the
+        // panel opens. 6000 ms of script sleep left no margin: the script counts only time
+        // spent sleeping, and one late wake-up on a busy machine put the poll after `quit`.
         let (mut device, probe) =
-            headless::open(HeadlessOptions { script: parse(&format!("{OPEN}sleep 6000\nquit\n")).unwrap(), out_dir: None, ..Default::default() });
+            headless::open(HeadlessOptions { script: parse(&format!("{OPEN}sleep 7000\nquit\n")).unwrap(), out_dir: None, ..Default::default() });
         let _fake = crate::screens::settings::fakes::install(&mut device);
         let root = std::env::temp_dir().join(format!("ink-cc-drift-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2429,9 +2433,16 @@ mod tests {
     #[test]
     fn long_press_on_a_tile_opens_the_picker_before_the_lift() {
         for (name, x, y) in [("rotate", 1095, 852), ("wifi", 789, 852)] {
-            let none = run_cc(&format!("hold-{name}-none"), &format!("{OPEN}sleep 300\n")).probe.panel();
-            let held = run_cc(&format!("hold-{name}-held"), &format!("{OPEN}down {x} {y}\nsleep 900\n")).probe.panel();
-            let lifted = run_cc(&format!("hold-{name}-lifted"), &format!("{OPEN}down {x} {y}\nsleep 900\nup {x} {y}\nsleep 400\n")).probe.panel();
+            // Real-time scripts that mostly sleep: the three independent runs go at once.
+            let runs = [
+                (format!("hold-{name}-none"), format!("{OPEN}sleep 300\n")),
+                (format!("hold-{name}-held"), format!("{OPEN}down {x} {y}\nsleep 900\n")),
+                (format!("hold-{name}-lifted"), format!("{OPEN}down {x} {y}\nsleep 900\nup {x} {y}\nsleep 400\n")),
+            ];
+            let [none, held, lifted]: [ink_device::Canvas; 3] = std::thread::scope(|s| {
+                let handles: Vec<_> = runs.iter().map(|(n, script)| s.spawn(move || run_cc(n, script).probe.panel())).collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>().try_into().unwrap()
+            });
             let differing = none.pixels.iter().zip(&held.pixels).filter(|(a, b)| a != b).count();
             assert!(differing > 20_000, "{name}: the picker is not on the panel before the lift ({differing} pixels differ)");
             assert!(held.pixels == lifted.pixels, "{name}: the lift changed the panel");

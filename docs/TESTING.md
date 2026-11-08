@@ -91,6 +91,30 @@ The emulator scenarios that run these test binaries on the ARM guest include the
 tests: `html-tests-arm` and `formats-selftest` pass `--include-ignored`, and
 `mupdf-verify-attacks` runs the fuzz test and the measurements with `--ignored`.
 
+## Writing tests that don't flake
+
+Rules for new tests. Each comes from a test that failed on a loaded machine and was fixed:
+
+- Read only files the test wrote itself, or files under `testdata/` and `tests/`. Never
+  read a file of the source checkout such as `Cargo.toml`: a branch switch during a long
+  run can rewrite it.
+- A test that starts `rinky sim` or `rinky demo` sets `TMPDIR` to its own directory. The
+  binary keeps its state in `$TMPDIR/rinky-sim`, which is otherwise shared with other test
+  runs and with your own sim sessions.
+- No wall-clock bound that a busy machine can exceed while the code is right. Check what
+  the bound stands for instead: a log line, a counter, a per-thread count. A script sleep
+  that must outlast a poll needs margin (the control-center tile test sleeps 7 s for a 4 s
+  state wait plus a 2 s tile poll).
+- Something that must happen inside a bounded wait (ink-store's 127 ms settle wait) runs
+  from a hook at that wait (`on_settle_wait` in test builds), not from a thread that
+  sleeps first.
+- The reader's status bars redraw on the wall-clock minute. The reader test harness moves
+  a tick that is not yet due out of reach, so screen-update counts stay exact; a test that
+  wants the tick sets `bars.next_tick` to now.
+
+Still slow (worth a look): `update::tests::verifier_two_concurrent_updates_leave_one_consistent_version`
+(15-18 s) and `settings::tests::without_device_services_every_page_opens` (about 11 s).
+
 ## Golden images
 
 Three sets, all exact pixel matches:

@@ -642,12 +642,23 @@ mod tests {
         assert_eq!(m.read("a.css").unwrap(), b"p{}");
         assert!(!m.exists("b.css"));
         assert!(m.shared().unwrap().exists("a.css"));
-        // INK_MANIFEST_DIR: the test binary runs on the emulator with the files copied there.
-        let root = std::env::var_os("INK_MANIFEST_DIR").map(PathBuf::from).unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into());
-        let d = DirLoader { root };
-        assert!(d.exists("Cargo.toml"));
-        assert!(d.shared().unwrap().exists("Cargo.toml"));
-        assert!(matches!(d.read("../ink-doc/Cargo.toml"), Err(DocError::NotFound(_))));
+        // The test writes its own files: reading the crate's Cargo.toml from the source
+        // checkout failed when the checkout changed under a long workspace run (a branch
+        // switch rewrites the file) or when INK_MANIFEST_DIR pointed elsewhere.
+        let base = std::env::temp_dir().join(format!("ink-doc-loaders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("book/img")).unwrap();
+        std::fs::write(base.join("book/img/a.png"), b"png").unwrap();
+        std::fs::write(base.join("outside.css"), b"p{}").unwrap();
+        let d = DirLoader { root: base.join("book") };
+        assert_eq!(d.read("img/a.png").unwrap(), b"png");
+        assert!(d.exists("img/x/../a.png"));
+        assert!(!d.exists("img/b.png"));
+        assert!(d.shared().unwrap().exists("img/a.png"));
+        // A path that leaves the root is refused even though the file exists.
+        assert!(matches!(d.read("../outside.css"), Err(DocError::NotFound(_))));
+        assert!(matches!(d.read("img/../../outside.css"), Err(DocError::NotFound(_))));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     struct Fake;
