@@ -22,8 +22,6 @@
 //!
 //! Screens receive [`UiEvent`]s: gestures and per-contact touch notifications in logical
 //! coordinates, plus keys and power events passed through from the device.
-//!
-//! Owner from wave A: the `ui` agent (with `ink-text`).
 
 #![warn(missing_docs)]
 

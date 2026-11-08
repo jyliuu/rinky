@@ -1,4 +1,4 @@
-//! Logging, crash logs and exit reasons (owner: trace).
+//! Logging, crash logs and exit reasons.
 //!
 //! Every line looks like `[INFO 12:34:56.789 +1234 ink_app::app] text`: level, local
 //! wall-clock time, milliseconds since the process started

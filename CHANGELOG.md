@@ -19,6 +19,12 @@ All notable changes to rinky are listed here. The format is based on
   faint scans, two pages side by side, crop the white margins, and right to left for
   manga, where a tap on the left or a swipe to the right turns to the next page. The
   choices are kept for each book.
+- Highlights can be exported as Kindle clippings or JSON as well as Markdown. Choose
+  under Settings › KOReader import › Export format; the reader's and the library's
+  *Export highlights* use the same choice. Kindle clippings use the layout of a
+  Kindle's `My Clippings.txt`, so Readwise and similar tools read them; *Export all
+  highlights* then puts every book in one `exports/My Clippings.txt`. Over SSH,
+  `rinky export-highlights --format clippings|json` does the same.
 
 ## [0.5.3] - 2026-11-07
 

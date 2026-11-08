@@ -19,8 +19,6 @@
 //! On the Kindle's user store (`fuse.fsp` on firmware 5.19.5) a file can be missing for
 //! a moment while a new version is renamed over it; [`load_recovering`] waits for such a
 //! save instead of falling back to the older backup.
-//!
-//! Owner from wave A: the `store` agent.
 
 #![warn(missing_docs)]
 

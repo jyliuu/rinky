@@ -1,6 +1,6 @@
-//! Reader screen (owner from wave B: the `reader` agent).
+//! Reader screen.
 //!
-//! Phase 0 behaviour is the prototype's `run` loop:
+//! The page loop:
 //! - the saved page with a GC16 flash (no "Opening" screen in between: the screen below
 //!   stays until the page is ready);
 //! - taps, swipes, pinches and the other gestures run the actions of the user's gesture
@@ -12,10 +12,10 @@
 //!
 //! Page Next/Prev keys (host simulator) turn pages too. powerd events are logged.
 //!
-//! Phase 3 (wave B `reader`) adds overlays over the page ([`overlay`]): a tap in the
-//! middle of the page (or the top band, or the Menu key) opens the menu ([`menu`]): top
-//! bar with back, title, clock, battery and the tools; bottom bar with chapter, page,
-//! percent and a page slider. The page is kept in a buffer so closing an overlay puts it
+//! Overlays sit over the page ([`overlay`]): a tap in the middle of the page (or the
+//! top band, or the Menu key) opens the menu ([`menu`]): top bar with back, title,
+//! clock, battery and the tools; bottom bar with chapter, page, percent and a page
+//! slider. The page is kept in a buffer so closing an overlay puts it
 //! back without rendering it again.
 //!
 //! A book that cannot be opened (missing file, DRM, KFX, broken file) shows "Cannot open

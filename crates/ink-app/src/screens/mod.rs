@@ -1,13 +1,12 @@
-//! Screens. Each module owns one route and registers it with one call; later agents
-//! work inside their own module directory only:
+//! Screens. Each module owns one route and registers it with one call:
 //!
-//! | Module | Route | Owner |
-//! | --- | --- | --- |
-//! | `reader/` | `Route::Reader` | `reader` (wave B) |
-//! | `library/` | `Route::Library` | `library` (wave B) |
-//! | `settings/` | `Route::Settings` | `settings` (wave B) |
-//! | `demo/` | `Route::Demo` | `ui` (wave A) |
-//! | `stats/` | `Route::Statistics`, `Route::Vocabulary` | `stats` (wave C) |
+//! | Module | Route |
+//! | --- | --- |
+//! | `reader/` | `Route::Reader` |
+//! | `library/` | `Route::Library` |
+//! | `settings/` | `Route::Settings` |
+//! | `demo/` | `Route::Demo` |
+//! | `stats/` | `Route::Statistics`, `Route::Vocabulary` |
 
 pub(crate) mod common;
 pub mod demo;

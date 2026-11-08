@@ -2,7 +2,8 @@
 //!
 //! Every method has a default that returns [`DeviceError::Unsupported`], so a backend
 //! implements only what it has. On the Kindle these are thin wrappers over `lipc`
-//! properties of `powerd`, `wifid`, `cmd` and `volumd` (see `PLAN.md`, "Facts measured").
+//! properties of `powerd`, `wifid`, `cmd` and `volumd` (see `docs/ARCHITECTURE.md`,
+//! "Kindle system services").
 
 use crate::{DeviceError, Result};
 use std::time::{Duration, SystemTime};

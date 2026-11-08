@@ -1,4 +1,4 @@
-//! Status bars in the page margins (owner: the `statusbar` builder).
+//! Status bars in the page margins.
 //!
 //! The reader draws two KOReader-like bars from `settings.status_bars`
 //! ([`ink_store::prefs::StatusBars`]): the top bar [`BAR_EDGE`] below the top screen

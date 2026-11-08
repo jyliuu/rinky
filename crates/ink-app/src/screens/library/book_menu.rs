@@ -45,7 +45,7 @@ impl LibraryScreen {
                 let entry = self.lib.as_ref().and_then(|l| l.index.get(&p)).cloned();
                 let paths = self.paths.clone();
                 self.toast = Some(match (entry, paths) {
-                    (Some(e), Some(paths)) => crate::export::export_one(&paths, &e, &ink_store::export::Locator::none()),
+                    (Some(e), Some(paths)) => crate::export::export_one(&paths, &e, &ink_store::export::Locator::none(), self.export_format),
                     _ => "Export failed: the library is not loaded".to_string(),
                 });
                 self.redraw();

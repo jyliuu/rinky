@@ -519,7 +519,7 @@ impl super::ReaderScreen {
                 self.open_overlay(o, cx);
             }
             "export" => {
-                let text = self.export_highlights(cx.paths);
+                let text = self.export_highlights(cx.paths, cx.settings.export_format());
                 crate::export::toast(cx.plugins, text);
             }
             _ if a.starts_with("hl:") => {
@@ -531,9 +531,10 @@ impl super::ReaderScreen {
         Ok(Some(Transition::None))
     }
 
-    /// Writes this book's highlights, notes and bookmarks to `exports/<title>.md` and
-    /// returns the toast text. The open document gives the page numbers and percents.
-    fn export_highlights(&mut self, paths: &ink_store::Paths) -> String {
+    /// Writes this book's highlights, notes and bookmarks to `exports/<title>.<ext>` in
+    /// `format` and returns the toast text. The open document gives the page numbers and
+    /// percents.
+    fn export_highlights(&mut self, paths: &ink_store::Paths, format: ink_store::export::ExportFormat) -> String {
         let (title, authors, total) = match self.doc.as_deref() {
             Some(d) => (d.metadata().title.clone(), d.metadata().authors.clone(), d.page_count().pages as u32),
             None => (String::new(), Vec::new(), 0),
@@ -545,7 +546,7 @@ impl super::ReaderScreen {
             let pos = s.parse::<Position>().ok()?;
             doc?.page_of(&pos).ok().map(|p| p as u32)
         };
-        crate::export::export_one(paths, &entry, &ink_store::export::Locator { page_of: &page_of, total: (total > 0).then_some(total) })
+        crate::export::export_one(paths, &entry, &ink_store::export::Locator { page_of: &page_of, total: (total > 0).then_some(total) }, format)
     }
 }
 

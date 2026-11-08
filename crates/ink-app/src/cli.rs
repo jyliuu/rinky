@@ -41,9 +41,11 @@ pub const USAGE: &str = "usage:
                                             reader's position wins; KOReader's files are only read)
   rinky plugins [list|enable NAME|disable NAME]
                                             plugins in $RINKY_HOME/plugins; on/off at next start
-  rinky export-highlights [--all | BOOK]
-                                            highlights, notes and bookmarks as Markdown in
-                                            $RINKY_HOME/exports/<title>.md; BOOK: file or title
+  rinky export-highlights [--format markdown|clippings|json] [--all | BOOK]
+                                            highlights, notes and bookmarks in $RINKY_HOME/exports:
+                                            <title>.md (default), Kindle's My Clippings.txt
+                                            layout (<title>.txt; --all: My Clippings.txt) or
+                                            <title>.json; BOOK: file or title
   rinky perf library DIR HOME           time the library's first scan of DIR (metadata, covers)
                                             into an empty HOME, then a second open
   rinky version
@@ -743,6 +745,6 @@ mod tests {
     fn usage_and_unknown_commands() {
         assert_eq!(run(&["rinky".into()]).unwrap(), 2);
         assert_eq!(run(&["rinky".into(), "version".into()]).unwrap(), 0);
-        assert!(USAGE.contains("export-highlights [--all | BOOK]"));
+        assert!(USAGE.contains("export-highlights [--format markdown|clippings|json] [--all | BOOK]"));
     }
 }

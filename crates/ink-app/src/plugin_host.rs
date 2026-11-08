@@ -1,4 +1,4 @@
-//! Glue between the app and `ink-plugin` (owner: the `plugin` agent).
+//! Glue between the app and `ink-plugin`.
 //!
 //! [`PluginHost`] owns the [`PluginManager`] with the compiled-in Rust plugins and the
 //! Lua plugins found in `<RINKY_HOME>/plugins/<name>/` (`plugin.toml` + `main.lua`),
@@ -500,9 +500,10 @@ impl PluginHost {
             self.notifications.push(Notification { plugin: plugin.clone(), text: text.clone(), read: false });
             self.ui.push(&plugin, UiRequest::Toast { text });
         }
-        // A disabled plugin's requests stop.
+        // A disabled plugin's requests stop. This runs after every call, page-turn
+        // broadcasts included, so the names are borrowed, not copied.
         if let Some(w) = self.net.worker.as_mut() {
-            for (name, _) in self.manager.list().iter().filter(|(_, e)| !*e) {
+            for name in self.manager.disabled() {
                 w.cancel_plugin(name);
             }
         }

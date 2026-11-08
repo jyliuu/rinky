@@ -1,4 +1,4 @@
-//! Settings page "Diagnostics" (owner: trace): the log level (`info` or `debug`, stored
+//! Settings page "Diagnostics": the log level (`info` or `debug`, stored
 //! as `[plugins.diagnostics] log_level`, applied at once unless `RINKY_LOG` or
 //! `RUST_LOG` is set), "View log" (the last [`VIEW_LINES`] lines of the log file, newest
 //! first, in the scrolling list), the crash logs (`crash-*.log`: open, delete) and

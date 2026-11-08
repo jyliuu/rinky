@@ -1,4 +1,4 @@
-//! In-app update from a GitHub release (phase 11; owner: the `packaging` agent).
+//! In-app update from a GitHub release.
 //!
 //! [`update`] does, in order:
 //!

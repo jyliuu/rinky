@@ -427,12 +427,8 @@ impl Library {
             .filter(|b| q.status.matches(b))
             .filter(|b| q.format.as_deref().is_none_or(|f| b.format == f))
             .filter(|b| q.collection.as_deref().is_none_or(|c| b.collections.iter().any(|n| n == c)))
-            .filter(|b| {
-                s.is_empty()
-                    || b.title.to_lowercase().contains(&s)
-                    || b.authors.iter().any(|a| a.to_lowercase().contains(&s))
-                    || b.series.as_deref().is_some_and(|x| x.to_lowercase().contains(&s))
-            })
+            // The lowercase text of each book is cached in the index (search_key).
+            .filter(|b| s.is_empty() || b.matches(&s))
             .collect()
     }
 

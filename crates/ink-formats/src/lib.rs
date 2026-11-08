@@ -16,8 +16,6 @@
 //! - [`open`]: the plain engine document ([`HtmlDocument`], kept for golden tests).
 //! - [`load`]: the converted [`Book`] (chapters, TOC, page list, resources, info).
 //! - [`read_info`]: metadata and cover for the library, without laying anything out.
-//!
-//! Owner from wave A: the `formats` agent (also owns `testdata/formats`).
 
 #![warn(missing_docs)]
 

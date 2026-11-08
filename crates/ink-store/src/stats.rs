@@ -518,16 +518,39 @@ fn update_book_totals(conn: &Connection, book: i64) -> Result<()> {
     Ok(())
 }
 
+/// `spans` (inclusive `(start, end)`, any order, may overlap) sorted by start with the
+/// overlapping ones joined, so [`covers`] can binary search them.
+fn merge_spans(mut spans: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    spans.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(spans.len());
+    for (a, b) in spans {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// True when `t` lies in one of `merged` (from [`merge_spans`]); O(log n).
+fn covers(merged: &[(i64, i64)], t: i64) -> bool {
+    let i = merged.partition_point(|&(a, _)| a <= t);
+    i > 0 && t <= merged[i - 1].1
+}
+
 /// Replaces the `koreader` sessions of `book` with sessions built from its page records
 /// that no rinky session covers. Returns the number of sessions.
 fn rebuild_koreader_sessions(conn: &Connection, book: i64) -> Result<usize> {
     conn.execute("DELETE FROM session WHERE id_book = ?1 AND source = 'koreader'", [book])?;
+    // Sorted and joined once, so each page record is checked in O(log sessions) rather
+    // than against every session (an imported history has thousands of each).
     let ours: Vec<(i64, i64)> = crate::query_all(conn, "SELECT start_time, end_time FROM session WHERE id_book = ?1", [book], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let ours = merge_spans(ours);
     let sql = "SELECT start_time, duration, page FROM page_stat_data WHERE id_book = ?1 ORDER BY start_time, page";
     let rows: Vec<(i64, i64, i64)> = crate::query_all(conn, sql, [book], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     let mut sessions: Vec<(i64, i64, i64, std::collections::HashSet<i64>)> = Vec::new();
     for (start, dur, page) in rows {
-        if ours.iter().any(|&(a, b)| start >= a && start <= b) {
+        if covers(&ours, start) {
             continue;
         }
         match sessions.last_mut() {
@@ -554,6 +577,19 @@ mod tests {
 
     fn juliet() -> StatsBook {
         StatsBook { md5: "cf7ce9b8d4e135c8ac340f18d1e58c85".into(), title: "Romeo and Juliet".into(), authors: "William Shakespeare".into(), pages: Some(180), ..Default::default() }
+    }
+
+    #[test]
+    fn covered_times_match_a_linear_scan() {
+        // Unsorted, overlapping, touching, nested and single-instant spans.
+        let spans = vec![(50, 60), (10, 20), (15, 30), (31, 31), (100, 200), (120, 130), (30, 30), (70, 70), (-5, 0)];
+        let merged = merge_spans(spans.clone());
+        assert!(merged.windows(2).all(|w| w[0].1 < w[1].0), "{merged:?}");
+        for t in -10..=210 {
+            let linear = spans.iter().any(|&(a, b)| t >= a && t <= b);
+            assert_eq!(covers(&merged, t), linear, "t = {t}");
+        }
+        assert!(!covers(&merge_spans(Vec::new()), 0));
     }
 
     #[test]

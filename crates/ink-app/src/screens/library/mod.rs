@@ -1,4 +1,4 @@
-//! Library and home screen (owner: the `library` agent, wave B).
+//! Library and home screen.
 //!
 //! - The book folders from the settings (`/mnt/us/Books`, `/mnt/us/documents`) are
 //!   scanned into ink-store's `library.json`; metadata comes from `ink_formats::read_info`
@@ -22,7 +22,10 @@
 //!   finished/unread, collections, delete with confirmation). A book that cannot be
 //!   opened shows the reader's error screen; a tap there pops back here.
 //! - The power key and `UiEvent::Quit` leave the app. There is no exit button here: the
-//!   only exit in the UI is Settings > "Exit to Kindle". The device's "library rescan" event (after USB drive mode) rescans.
+//!   only exit in the UI is Settings > "Exit to Kindle".
+//! - A `PowerEvent::LibraryRescan` from the device backend (sent when the userstore
+//!   comes back from the computer) starts a rescan. rinky has no screen of its own for
+//!   USB drive mode.
 
 mod book_menu;
 mod browse;
@@ -309,6 +312,8 @@ pub struct LibraryScreen {
     run_action: Option<(ink_plugin::registry::LibraryAction, PathBuf)>,
     /// A toast to show in `handle` (needs `cx`): the result of "Export highlights".
     toast: Option<String>,
+    /// File format of "Export highlights" (from the settings, read on enter).
+    export_format: ink_store::export::ExportFormat,
     /// Rescan or KOReader import on a worker thread; it owns the library meanwhile
     /// (`lib` is `None`) and the screen shows only a progress line.
     pub(crate) job: Option<Job<LibJob>>,
@@ -385,6 +390,7 @@ impl LibraryScreen {
             plugin_actions: Vec::new(),
             run_action: None,
             toast: None,
+            export_format: ink_store::export::ExportFormat::default(),
             job: None,
             busy_text: String::new(),
             busy_dirty: false,
@@ -1111,6 +1117,7 @@ impl AppScreen for LibraryScreen {
             }
         }
         self.plugin_actions = cx.plugins.library_actions().to_vec();
+        self.export_format = cx.settings.export_format();
         // Nothing of the previous screen may stay on the panel.
         self.dirty = Some(RefreshClass::Gc16);
         // A plugin added books (OPDS download).

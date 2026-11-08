@@ -1,7 +1,7 @@
 //! Compiled-in plugins.
 //!
-//! Each wave C plugin agent adds exactly one line to the list below (and its crate as a
-//! dependency through an api-request), for example:
+//! A plugin crate is compiled in by one line in the list below (and its crate as a
+//! dependency of `ink-app`), for example:
 //!
 //! ```text
 //! Box::new(insightful::InsightfulPlugin::default()),
@@ -15,8 +15,6 @@ pub fn compiled_in() -> Vec<Box<dyn Plugin>> {
         Box::new(kosync::KoSyncPlugin::default()),
         Box::new(opds::OpdsPlugin::default()),
         Box::new(calibre::CalibrePlugin::default()),
-        // One line per plugin (wave C): insightful, dictionary, stats, vocab, opds,
-        // kosync, calibre, wikipedia.
         Box::new(dictionary::DictionaryPlugin::default()),
         Box::new(ink_stats::StatsPlugin::default()),
         Box::new(insightful::InsightfulPlugin::default()),
