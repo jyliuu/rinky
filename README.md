@@ -40,9 +40,9 @@
   </tr>
 </table>
 
-rinky replaces the Kindle's reading screens while it runs and gives the Kindle back when
-you exit. It is a single static binary that draws directly to the e-ink display and reads
-the touchscreen from the kernel.
+rinky takes over the e-reader's screen while it runs and hands it back to the Kindle or
+Kobo software when you exit. It is a single static binary that draws directly to the
+e-ink display and reads the touchscreen from the kernel.
 
 ## Features
 
@@ -57,7 +57,7 @@ the touchscreen from the kernel.
   positions and highlights.
 - Plugins in Lua or Rust.
 
-rinky never modifies the Kindle's own library or KOReader's files.
+rinky never changes the e-reader's own library or KOReader's files.
 
 <table>
   <tr>
@@ -69,11 +69,12 @@ rinky never modifies the Kindle's own library or KOReader's files.
 
 ## Performance
 
-rinky is written in Rust, from the touch input to the pixels on the screen (PDFs and
-comics are drawn by MuPDF). Rust programs run as fast, compact native code, so the
-reader stays quick on the Kindle's modest processor and memory: books open fast, page
-turns don't stall, and long books are paginated in the background while you start
-reading.
+rinky is written in Rust from the touch input to the pixels on the screen; only PDFs
+and comics are drawn by MuPDF. It is native code with no interpreter or framework
+underneath (Lua runs only for plugins you add), which keeps it quick on an e-reader's
+small processor. Long books are
+paginated in the background, so you can start reading before the page count is
+known.
 
 ## Install
 
@@ -88,9 +89,9 @@ each step; in short:
 | Copy over USB | `rinky` and `extensions` to the top of the Kindle drive | `.adds` to the top of the Kobo drive (hidden folder) |
 | Start | KUAL › rinky › Start rinky | NickelMenu › rinky |
 
-Downloads are on the [latest release](../../releases/latest). **Settings › Update** in
+Downloads are on the [latest release](../../releases/latest). *Settings › Update* in
 rinky installs newer versions over Wi-Fi, keeping settings, notes and positions.
-**Settings › Exit to Kindle** (or *to Kobo*) returns to the e-reader's own screens.
+*Settings › Exit to Kindle* (or *to Kobo*) returns to the e-reader's own screens.
 
 Dictionaries go in rinky's folder under `dict/<name>/`, as StarDict files (`.ifo`,
 `.idx`, `.dict` or `.dict.dz`). If you try rinky on a model marked untested, please
@@ -104,11 +105,13 @@ The [user guide](docs/user-guide.md) covers everything else, including troublesh
 rustup target add armv7-unknown-linux-musleabihf
 brew install zig            # or your package manager; zig 0.17
 cargo install cargo-zigbuild
-scripts/package.sh          # → out/package/rinky-<version>-kindle{hf.tar.gz,.zip}
+scripts/package.sh          # → out/package/rinky-<version>-{kindlehf.tar.gz,kindle.zip,kobo.tar.gz,kobo.zip}
 ```
 
-The result is a static ARMv7 binary plus the launcher, watchdog and KUAL menu. Try the
-reader on your computer without a Kindle:
+Each package holds the same static ARMv7 binary, plus the launcher and menu entry for
+its e-reader. The Kindle package also has the watchdog and the SSH server, which
+`scripts/build-dropbear.sh` builds on the first run (it needs curl, patch and make).
+Try the reader on your computer without an e-reader:
 
 ```sh
 cargo run --release -p ink-app -- sim path/to/books/   # simulator window
