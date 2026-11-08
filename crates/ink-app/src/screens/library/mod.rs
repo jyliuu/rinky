@@ -1061,7 +1061,10 @@ impl AppScreen for LibraryScreen {
                 if let Some(p) = &self.prefs {
                     self.mode = if model::load_prefs(p, &mut self.query) { ViewMode::Grid } else { ViewMode::List };
                 }
-                let mut lib = Library::open(cx.paths, &self.dirs);
+                // The saved books are shown first; the folders are read on a thread
+                // and the changes come in with the timer (it took 0.8 s for 3000 books
+                // on the Kindle emulator before the first frame).
+                let mut lib = Library::open_saved(cx.paths, &self.dirs);
                 // The "Book cover" screensaver shows the last book read until one is opened.
                 if let Some(b) = lib.index.recent(1).first() {
                     crate::sleep_cover::prepare(cx.paths, &b.path, cx.screen.panel_size());
@@ -1173,7 +1176,7 @@ impl AppScreen for LibraryScreen {
             return Some(worker::POLL);
         }
         let search = self.search_due.map(|t| t.saturating_duration_since(Instant::now()));
-        let extract = self.lib.as_ref().filter(|l| l.pending() > 0).map(|_| META_POLL);
+        let extract = self.lib.as_ref().filter(|l| l.pending() > 0 || l.scanning()).map(|_| META_POLL);
         match (search, extract) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -1196,6 +1199,11 @@ impl LibraryScreen {
                     if self.dirty.is_none() {
                         self.dirty = Some(RefreshClass::Du);
                     }
+                }
+                // The folders read on a thread since the library opened.
+                if self.lib.as_mut().is_some_and(Library::take_scan) {
+                    log::info!("library: the folder scan added or removed books; repainted");
+                    self.redraw();
                 }
                 if let Some(lib) = self.lib.as_mut() {
                     // Books queued by a rescan while the thread ran start the next one.

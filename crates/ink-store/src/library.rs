@@ -367,10 +367,13 @@ impl LibraryIndex {
     /// are in no scanned folder are dropped. Symbolic links to book files are followed;
     /// links to folders are not.
     pub fn scan_report<P: AsRef<Path>>(&mut self, dirs: &[P], now: u64) -> ScanReport {
-        let mut w = Walk::default();
-        for d in dirs {
-            walk(d.as_ref(), 0, &mut w);
-        }
+        self.apply_scan(FolderScan::read(dirs), now)
+    }
+
+    /// [`LibraryIndex::scan_report`] with folders read before (possibly on another
+    /// thread, while the index was shown).
+    pub fn apply_scan(&mut self, scan: FolderScan, now: u64) -> ScanReport {
+        let mut w = scan.0;
         let found = std::mem::take(&mut w.found);
         let present: HashSet<&Path> = found.iter().map(|(p, _)| p.as_path()).collect();
         let before = self.books.len();
@@ -600,6 +603,22 @@ pub struct ScanReport {
     pub errors: Vec<String>,
 }
 
+/// The book files under some folders, read without an index
+/// ([`FolderScan::read`]) and put into one by [`LibraryIndex::apply_scan`].
+pub struct FolderScan(Walk);
+
+impl FolderScan {
+    /// Lists `dirs` recursively as [`LibraryIndex::scan_report`] does (it opens no
+    /// file and touches no index, so it can run on another thread).
+    pub fn read<P: AsRef<Path>>(dirs: &[P]) -> FolderScan {
+        let mut w = Walk::default();
+        for d in dirs {
+            walk(d.as_ref(), 0, &mut w);
+        }
+        FolderScan(w)
+    }
+}
+
 #[derive(Default)]
 struct Walk {
     found: Vec<(PathBuf, std::fs::Metadata)>,
@@ -748,6 +767,33 @@ mod tests {
         expect.version = LibraryIndex::VERSION;
         assert_eq!(LibraryIndex::load(&file).unwrap(), expect);
         assert_eq!(LibraryIndex::load(&dir.join("none.json")).unwrap(), LibraryIndex::default());
+    }
+
+    /// Folders read on another thread and applied later give the index the same books
+    /// as a scan; a book added to the folders after the read waits for the next scan.
+    #[test]
+    fn folders_read_on_a_thread_apply_like_a_scan() {
+        let tmp = TempDir::new("lib-apply");
+        let dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.epub"), b"1").unwrap();
+        std::fs::write(dir.join("sub/b.pdf"), b"22").unwrap();
+        let mut scanned = LibraryIndex::default();
+        scanned.scan(&[&dir], 100);
+        let mut applied = LibraryIndex::default();
+        let d = dir.clone();
+        let read = std::thread::spawn(move || FolderScan::read(&[d])).join().unwrap();
+        std::fs::write(dir.join("c.epub"), b"3").unwrap();
+        let r = applied.apply_scan(read, 100);
+        assert_eq!((r.added, r.removed), (2, 0));
+        let paths = |l: &LibraryIndex| {
+            let mut v: Vec<PathBuf> = l.books.iter().map(|b| b.path.clone()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(paths(&applied), paths(&scanned));
+        assert_eq!(applied.get(&dir.join("sub/b.pdf")).unwrap().size, 2);
+        assert_eq!(applied.scan(&[&dir], 200), (1, 0), "the later book on the next scan");
     }
 
     /// `get` finds books by path however `books` was changed since the last lookup: in
