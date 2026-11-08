@@ -150,23 +150,23 @@ impl MapState {
 
     /// Pages known in the contiguous prefix of chapters, and whether that is all.
     pub fn known_pages(&self) -> (usize, bool) {
-        let mut n = 0;
-        for c in &self.chapters {
-            match c {
-                Some(p) => n += p.keys.len(),
-                None => return (n, false),
-            }
-        }
-        (n, true)
+        let n = self.chapters.iter().map_while(Option::as_ref).map(|c| c.keys.len()).sum();
+        (n, self.chapters.iter().all(Option::is_some))
     }
 
     /// First global page of chapter `i`, when all chapters before it are known.
     pub fn first_page(&self, i: usize) -> Option<usize> {
-        let mut n = 0;
-        for c in &self.chapters[..i] {
-            n += c.as_ref()?.keys.len();
-        }
-        Some(n)
+        self.chapters[..i].iter().map(|c| Some(c.as_ref()?.keys.len())).sum()
+    }
+
+    /// [`MapState::first_page`] of every chapter, in one pass.
+    pub fn first_pages(&self) -> Vec<Option<usize>> {
+        let firsts = self.chapters.iter().scan(Some(0), |next, c| {
+            let first = *next;
+            *next = first.zip(c.as_ref()).map(|(n, c)| n + c.keys.len());
+            Some(first)
+        });
+        firsts.collect()
     }
 
     /// (chapter, local page) of global page `p`, within the known prefix.
@@ -736,5 +736,10 @@ mod tests {
         assert_eq!(m.locate(2), None);
         assert_eq!(m.first_page(2), None);
         assert_eq!(m.first_page(1), Some(2));
+        assert_eq!(m.first_pages(), vec![Some(0), Some(2), None]);
+        let full = MapState { chapters: vec![chapters[0].clone(), chapters[1].clone(), chapters[0].clone()], ..Default::default() };
+        assert_eq!(full.known_pages(), (4, true));
+        assert_eq!(full.first_pages(), vec![Some(0), Some(2), Some(2)]);
+        assert_eq!((full.first_page(3), full.locate(3)), (Some(4), Some((2, 1))));
     }
 }

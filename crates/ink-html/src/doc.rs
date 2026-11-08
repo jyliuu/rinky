@@ -680,26 +680,8 @@ impl HtmlDocument {
         }
     }
 
-    /// The first page of every chapter in the known prefix of the page map (`None` from
-    /// the first unknown chapter on). One pass, for queries over many chapters.
-    fn first_pages(&self) -> Vec<Option<usize>> {
-        let m = self.shared.map.lock().unwrap();
-        let mut n = Some(0usize);
-        m.chapters
-            .iter()
-            .map(|c| {
-                let first = n;
-                n = match (n, c) {
-                    (Some(k), Some(p)) => Some(k + p.keys.len()),
-                    _ => None,
-                };
-                first
-            })
-            .collect()
-    }
-
     /// The page of key `key` in chapter `c` when that chapter's pages are known (`firsts`
-    /// from [`Self::first_pages`]).
+    /// from [`MapState::first_pages`]).
     fn known_page_key(&self, firsts: &[Option<usize>], c: usize, key: (u32, u32)) -> Option<usize> {
         let first = (*firsts.get(c)?)?;
         let m = self.shared.map.lock().unwrap();
@@ -1231,7 +1213,7 @@ impl Document for HtmlDocument {
             *self.toc_cache.borrow_mut() = Some(entries);
         }
         let cache = self.toc_cache.borrow();
-        let firsts = self.first_pages();
+        let firsts = self.shared.map.lock().unwrap().first_pages();
         cache
             .as_ref()
             .unwrap()
@@ -1246,7 +1228,7 @@ impl Document for HtmlDocument {
             return Ok(Vec::new());
         }
         let mut hits = Vec::new();
-        let firsts = self.first_pages();
+        let firsts = self.shared.map.lock().unwrap().first_pages();
         for c in 0..self.book.chapters.len() {
             if self.book.chapters[c].fragment.is_none() {
                 continue;
@@ -1635,7 +1617,7 @@ impl Document for HtmlDocument {
         if !self.page_count().complete {
             return Vec::new();
         }
-        let mut v: Vec<usize> = self.first_pages().into_iter().flatten().collect();
+        let mut v: Vec<usize> = self.shared.map.lock().unwrap().first_pages().into_iter().flatten().collect();
         v.dedup();
         v
     }
