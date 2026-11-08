@@ -200,9 +200,7 @@ pub struct BookChats {
 }
 
 /// Seconds since 1970.
-pub fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
+pub use ink_store::now_secs as now;
 
 /// File name of a book's chats (in the data folder).
 pub fn file_name(book_id: &str) -> String {
