@@ -624,10 +624,10 @@ impl Fonts {
 
     /// Shapes `text` with kerning and ligatures.
     pub fn shape(&mut self, style: Style, px: f32, text: &str) -> TextRun {
-        let key = (style, px.to_bits());
-        if let Some(run) = self.runs.get(&key).and_then(|m| m.get(text)) {
+        if let Some(run) = self.kept_run(style, px, text) {
             return run.clone();
         }
+        let key = (style, px.to_bits());
         let run = self.shape_with(style, px, text, &ShapeOptions::default());
         if self.run_count >= RUN_CACHE {
             self.runs.clear();
@@ -636,6 +636,11 @@ impl Fonts {
         self.runs.entry(key).or_default().insert(text.into(), run.clone());
         self.run_count += 1;
         run
+    }
+
+    /// The run [`Fonts::shape`] kept for `text`, if any.
+    fn kept_run(&self, style: Style, px: f32, text: &str) -> Option<&TextRun> {
+        self.runs.get(&(style, px.to_bits())).and_then(|m| m.get(text))
     }
 
     /// Shapes `text`: splits it into runs per face (grapheme clusters stay together),
@@ -696,7 +701,10 @@ impl Fonts {
 
     /// Width of shaped `text`.
     pub fn shaped_width(&mut self, style: Style, px: f32, text: &str) -> f32 {
-        self.shape(style, px, text).width
+        match self.kept_run(style, px, text) {
+            Some(run) => run.width,
+            None => self.shape(style, px, text).width,
+        }
     }
 
     /// The cached bitmap of one shaped glyph with `extra` more pixels of stroke weight
