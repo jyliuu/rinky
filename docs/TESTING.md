@@ -119,13 +119,14 @@ Still slow (worth a look): `update::tests::verifier_two_concurrent_updates_leave
 
 ## Golden images
 
-Three sets, all exact pixel matches:
+Four sets, all exact pixel matches:
 
 | Set | Test | Goldens | What it draws |
 | --- | --- | --- | --- |
 | Page content | `crates/ink-html/tests/golden.rs` | `tests/golden/*.png` | book pages through ink-formats at 1272 x 1696, content only |
 | Reader footer | `crates/ink-app/tests/footer_golden.rs` | `crates/ink-app/tests/golden/footer-*.png` | the status bar band for fixed page totals and two font sizes; also checks that `screens::reader::render_page` equals page content plus footer |
 | Settings rows | `crates/ink-app/tests/settings_golden.rs` | `crates/ink-app/tests/golden/settings-*.png` | the settings popup and page, day and night |
+| Reader end card | `crates/ink-app/tests/end_card_golden.rs` | `crates/ink-app/tests/golden/end-card*.png` | the card shown past the last page: not finished, finished with a two-line title, nothing to suggest |
 
 The page goldens use ink-formats as a dev-dependency of ink-html. ink-formats depends
 on ink-html, but integration tests link the same library, so the cycle is harmless.
@@ -140,7 +141,7 @@ When a change alters pixels on purpose:
 scripts/golden-update.sh [DIFF_DIR]     # default DIFF_DIR: target/golden-diff
 ```
 
-It regenerates all three sets and writes a `*.diff.png` for every golden that changed.
+It regenerates all four sets and writes a `*.diff.png` for every golden that changed.
 A `DIFF_DIR` you pass must be new or empty; the script refuses a directory with other
 files in it and never empties one (only the default under `target/` is cleared). Look
 at every diff image, commit the goldens with the change that caused them, and say in

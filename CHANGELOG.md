@@ -4,6 +4,16 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- The end of a book: turning past the last page shows a card with the book's title.
+  It marks the book as finished, takes a rating of one to five stars (kept where
+  KOReader keeps its rating), suggests what to read next (the next book of the series,
+  or else the unfinished book opened last) and goes back to the library. Back, or
+  *Back to book*, returns to the last page. The card appears with one flash; taps on
+  it do not flash.
+
 ## [0.5.3] - 2026-11-07
 
 ### Changed

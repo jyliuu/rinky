@@ -1711,3 +1711,125 @@ fn session_highlights_of_an_unmappable_document() {
     assert!(r.highlight_at(Point::new(150, 185)).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Shows the last page of the book as a jump and returns its page number.
+fn to_last_page(h: &mut Harness) -> usize {
+    let last = h.reader.doc.as_ref().unwrap().page_count().pages - 1;
+    h.reader.go_to_page(last);
+    h.paint();
+    assert_eq!(h.reader.page(), last);
+    last
+}
+
+#[test]
+fn turning_past_the_last_page_shows_the_end_card_with_one_flash() {
+    let mut h = Harness::new("end-card", "synthetic.epub");
+    // Not at the end: a turn is a turn.
+    h.key(Key::PageNext);
+    assert_eq!((h.reader.page(), h.kind()), (1, None));
+    let last = to_last_page(&mut h);
+    let page = h.probe.panel().clone();
+    h.shot("01-last-page");
+    let before = h.probe.updates().len();
+    h.key(Key::PageNext);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End));
+    assert_eq!(h.reader.page(), last, "the page stays");
+    h.shot("02-end-card");
+    let ups = &h.probe.updates()[before..];
+    assert_eq!(ups.len(), 1, "one update: {ups:?}");
+    assert_eq!((ups[0].class, ups[0].rect), (RefreshClass::Gc16, FULL), "{ups:?}");
+    // More turns forward change nothing.
+    let before = h.probe.updates().len();
+    h.key(Key::PageNext);
+    assert_eq!(h.probe.updates().len(), before);
+    // Back: the last page again, exactly, without a flash.
+    h.key(Key::Back);
+    assert_eq!(h.kind(), None);
+    assert_eq!(h.reader.page(), last);
+    assert_eq!(h.panel_rows_differ(&page, 0, page.height), 0);
+    let ups = &h.probe.updates()[before..];
+    assert!(!ups.is_empty() && ups.iter().all(|u| u.class != RefreshClass::Gc16), "{ups:?}");
+    // A tap beside the card and the previous-page key also go back to the page.
+    h.key(Key::PageNext);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End));
+    let card = h.reader.overlay().unwrap().tree.bounds(h.reader.overlay().unwrap().ids["card"]).unwrap();
+    h.tap_at(636, card.y / 2);
+    assert_eq!(h.kind(), None);
+    h.key(Key::PageNext);
+    h.key(Key::PagePrev);
+    assert_eq!((h.kind(), h.reader.page()), (None, last));
+    // A tap on the right of the last page opens it too.
+    h.tap_at(1100, 900);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End));
+    assert!(h.transitions.is_empty(), "{:?}", h.transitions);
+}
+
+#[test]
+fn the_end_card_marks_finished_and_rates_without_flashing() {
+    let mut h = Harness::new("end-rate", "synthetic.epub");
+    to_last_page(&mut h);
+    h.key(Key::PageNext);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End));
+    let path = h.reader.path.clone();
+    let before = h.probe.updates().len();
+    h.tap_button("end-finished");
+    assert_eq!(BookState::load(&path).unwrap().status, ink_store::ReadingStatus::Complete);
+    assert!(h.reader.end.as_ref().unwrap().finished);
+    h.tap_button("end-star:4");
+    assert_eq!(BookState::load(&path).unwrap().rating, Some(4));
+    h.shot("03-finished-rated");
+    h.tap_button("end-star:2");
+    assert_eq!(BookState::load(&path).unwrap().rating, Some(2));
+    // Each tap refreshes the button pressed and what changed; nothing flashes.
+    let ups = &h.probe.updates()[before..];
+    assert!(!ups.is_empty(), "the card changed on screen");
+    assert!(ups.iter().all(|u| u.class != RefreshClass::Gc16 && u.rect != FULL), "{ups:?}");
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End), "the card stays open");
+    // A second tap undoes "finished"; the position saved later keeps status and rating.
+    h.tap_button("end-finished");
+    let s = BookState::load(&path).unwrap();
+    assert_eq!((s.status, s.rating), (ink_store::ReadingStatus::Reading, Some(2)));
+    h.key(Key::Back);
+    h.reader.position_unsaved = Some((Instant::now(), Instant::now()));
+    h.reader.flush_position();
+    let s = BookState::load(&path).unwrap();
+    assert_eq!((s.status, s.rating), (ink_store::ReadingStatus::Reading, Some(2)));
+    assert!(s.position.is_some());
+    // Opened again, the card shows what the sidecar holds.
+    h.key(Key::PageNext);
+    let e = h.reader.end.as_ref().unwrap();
+    assert_eq!((e.finished, e.rating), (false, Some(2)));
+}
+
+#[test]
+fn the_end_card_opens_the_next_book_of_the_series_or_goes_to_the_library() {
+    let mut h = Harness::new("end-next", "synthetic.epub");
+    let cur = h.reader.path.clone();
+    let next = h.dir.join("second.epub");
+    std::fs::copy(&cur, &next).unwrap();
+    let entry = |p: &Path, title: &str, i: f32| ink_store::BookEntry {
+        path: p.to_path_buf(),
+        title: title.into(),
+        series: Some("Synthetic".into()),
+        series_index: Some(i),
+        format: "epub".into(),
+        ..Default::default()
+    };
+    let index = ink_store::LibraryIndex { books: vec![entry(&cur, "First", 1.0), entry(&next, "Second", 2.0)], ..Default::default() };
+    std::fs::create_dir_all(&h.paths.root).unwrap();
+    index.save(&h.paths.library()).unwrap();
+    to_last_page(&mut h);
+    h.key(Key::PageNext);
+    let n = h.reader.end.as_ref().unwrap().next.clone().expect("a suggestion");
+    assert_eq!((n.path.as_path(), n.title.as_str(), n.why.as_str()), (next.as_path(), "Second", "Next in Synthetic · book 2"));
+    h.tap_button("end-next");
+    assert_eq!(h.transitions.last(), Some(&Transition::Replace(crate::router::Route::Reader(next.clone()))));
+    // Without a library index: no suggestion; "Back to library" leaves the reader.
+    std::fs::remove_file(h.paths.library()).unwrap();
+    h.transitions.clear();
+    h.key(Key::Back);
+    h.key(Key::PageNext);
+    assert!(h.reader.overlay().unwrap().button_rect("end-next").is_none());
+    h.tap_button("end-library");
+    assert_eq!(h.transitions, vec![Transition::Pop]);
+}

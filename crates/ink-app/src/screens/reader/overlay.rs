@@ -27,6 +27,8 @@ pub enum OverlayKind {
     Hits,
     /// The note editor of a selection (field and keyboard).
     Note,
+    /// The card shown past the last page (reader/end.rs).
+    End,
 }
 
 /// An open overlay.

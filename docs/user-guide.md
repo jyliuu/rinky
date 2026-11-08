@@ -121,6 +121,24 @@ and on Kobos that have them turn pages too.
 
 rinky saves your position after every page turn, and the book opens there next time.
 
+### The end of a book
+
+Turn the page once more on the last page and a card comes up over it with the book's
+title. On the card you can:
+
+- tap **Mark as finished**. The button turns black and says *Finished*; tap it again
+  if you change your mind. It is the same status as *Mark as finished* in the library.
+- give the book one to five stars under **Your rating**. Tap another star to change it.
+  The rating is kept with the book, where KOReader keeps its rating too.
+- tap the book under **Open next** to start reading it. rinky suggests the next book of
+  the same series from your library, or else the unfinished book you opened last. When
+  there is nothing to suggest, this part is left out.
+- tap **Back to library**, or **Back to book** to return to the last page. Back, the
+  previous-page key and a tap beside the card return to the last page too.
+
+The screen flashes once when the card appears, as it covers most of the page. Taps on
+the card change only what they touch.
+
 ### The reader menu
 
 A tap in the middle of the page opens the menu. The top bar has, from the left:

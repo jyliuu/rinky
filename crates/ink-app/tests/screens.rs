@@ -245,3 +245,32 @@ fn reader_menu_opens_and_closes_without_a_flash() {
     let full = ink_device::Rect::new(0, 0, 1272, 1696);
     assert!(after.iter().all(|u| u.class != RefreshClass::Gc16 && u.rect != full), "menu updates are partial, no flash: {after:?}");
 }
+
+#[test]
+fn reader_end_card_after_the_last_page_marks_finished_and_goes_back_to_the_page() {
+    let dir = tmp("end-card");
+    let book = dir.join("synthetic.epub");
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/synthetic.epub"), &book).unwrap();
+    let out = tmp("end-card-shots");
+    // Far more page turns than the book has pages: the last ones open the end card.
+    let mut script = "wait 100\n".to_string();
+    for _ in 0..40 {
+        script.push_str("key next\nwait 50\n");
+    }
+    // "Mark as finished" (centre of the screen, under the title), then Back.
+    script.push_str("shot end\ntap 636 780\nwait 100\nshot finished\nkey back\nwait 100\nshot page\nkey power\n");
+    let p = run(Route::Reader(book.clone()), &script, Settings::default(), Some(out.clone()));
+    let shot = |name: &str| ink_device::Canvas::load_png(&out.join(format!("{name}.png"))).unwrap();
+    // A strip inside the filled "Back to library" button, above its caption.
+    let dark_in_button = |c: &ink_device::Canvas| (1075..1090).flat_map(|y| (700..1040).map(move |x| (x, y))).filter(|&(x, y)| c.pixels[y * c.width + x] < 64).count();
+    let strip = 15 * 340;
+    assert!(dark_in_button(&shot("end")) > strip * 9 / 10, "the end card is on the panel");
+    assert!(dark_in_button(&shot("page")) < strip / 10, "Back closed the card");
+    assert_eq!(ink_store::BookState::load(&book).unwrap().status, ink_store::ReadingStatus::Complete);
+    // The button press changed only part of the screen, without a flash.
+    let ups = p.updates();
+    let last_flash = ups.iter().rposition(|u| u.class == RefreshClass::Gc16).unwrap();
+    assert!(ups[last_flash + 1..].iter().all(|u| u.rect != ink_device::Rect::new(0, 0, 1272, 1696)), "{ups:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+    std::fs::remove_dir_all(out).unwrap();
+}
