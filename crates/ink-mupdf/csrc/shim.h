@@ -25,7 +25,6 @@ typedef struct {
 	int c;              /* Unicode code point */
 	float x0, y0, x1, y1; /* bounding box of the character quad */
 	int line;           /* line number on the page, 0-based, in MuPDF's reading order */
-	int block;          /* text block number on the page, 0-based */
 } ink_char;
 
 /* One outline (TOC) entry, depth-first order. */
@@ -65,7 +64,6 @@ int ink_page_count(ink_doc *d);
  * length needed including the terminator, 0 if the key is missing, -1 on error. */
 int ink_metadata(ink_doc *d, const char *key, char *buf, size_t size);
 /* Anti-aliasing bits 0..8 for graphics and text. */
-void ink_set_aa(ink_doc *d, int bits);
 
 int ink_page_bound(ink_doc *d, int page, ink_rect *out);
 

@@ -247,7 +247,7 @@ mod tests {
             for (k, c) in text.chars().enumerate() {
                 let x = 10.0 * k as f32;
                 let y = 20.0 * l as f32;
-                chars.push(RawChar { c, rect: FRect::new(x, y, x + 10.0, y + 12.0), line: l as u32, block: 0 });
+                chars.push(RawChar { c, rect: FRect::new(x, y, x + 10.0, y + 12.0), line: l as u32 });
             }
         }
         PageText::new(0, chars)

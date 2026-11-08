@@ -160,11 +160,6 @@ int ink_metadata(ink_doc *d, const char *key, char *buf, size_t size)
 	return r < 0 ? 0 : r;
 }
 
-void ink_set_aa(ink_doc *d, int bits)
-{
-	fz_set_aa_level(d->ctx, bits);
-}
-
 int ink_page_bound(ink_doc *d, int page, ink_rect *out)
 {
 	fz_page *p = NULL;
@@ -252,7 +247,7 @@ int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w
 typedef struct {
 	ink_char *v;
 	int n, cap;
-	int line, block;
+	int line;
 	int oom;
 } char_vec;
 
@@ -280,7 +275,6 @@ static void push_char(char_vec *cv, const fz_stext_char *ch)
 	cv->v[cv->n].x1 = r.x1;
 	cv->v[cv->n].y1 = r.y1;
 	cv->v[cv->n].line = cv->line;
-	cv->v[cv->n].block = cv->block;
 	cv->n++;
 }
 
@@ -298,7 +292,6 @@ static void collect_blocks(char_vec *cv, fz_stext_block *block)
 					push_char(cv, ch);
 				cv->line++;
 			}
-			cv->block++;
 		}
 		else if (block->type == FZ_STEXT_BLOCK_STRUCT && block->u.s.down)
 			collect_blocks(cv, block->u.s.down->first_block);

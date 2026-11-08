@@ -21,8 +21,6 @@ pub struct RawChar {
     pub rect: FRect,
     /// Line number on the page.
     pub line: u32,
-    /// Block number on the page.
-    pub block: u32,
 }
 
 /// One outline entry.
@@ -172,12 +170,6 @@ impl RawDoc {
         }
     }
 
-    /// Anti-aliasing bits (0 = none, 8 = best).
-    pub fn set_aa(&mut self, bits: u8) {
-        // SAFETY: valid handle.
-        unsafe { ffi::ink_set_aa(self.ptr(), bits.min(8) as c_int) }
-    }
-
     /// Page bounds in page space.
     pub fn page_bound(&mut self, page: usize) -> Result<FRect> {
         if let Some(l) = self.lists.iter().find(|l| l.page == page) {
@@ -257,7 +249,6 @@ impl RawDoc {
                     c: char::from_u32(c.c as u32).unwrap_or('\u{fffd}'),
                     rect: FRect::new(c.x0, c.y0, c.x1, c.y1),
                     line: c.line as u32,
-                    block: c.block as u32,
                 })
                 .collect()
         };

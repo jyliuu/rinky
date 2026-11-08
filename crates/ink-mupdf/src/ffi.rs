@@ -35,7 +35,6 @@ pub struct InkChar {
     pub x1: c_float,
     pub y1: c_float,
     pub line: c_int,
-    pub block: c_int,
 }
 
 #[repr(C)]
@@ -71,7 +70,6 @@ extern "C" {
     pub fn ink_authenticate(d: *mut InkDoc, password: *const c_char) -> c_int;
     pub fn ink_page_count(d: *mut InkDoc) -> c_int;
     pub fn ink_metadata(d: *mut InkDoc, key: *const c_char, buf: *mut c_char, size: usize) -> c_int;
-    pub fn ink_set_aa(d: *mut InkDoc, bits: c_int);
     pub fn ink_page_bound(d: *mut InkDoc, page: c_int, out: *mut InkRect) -> c_int;
     pub fn ink_list_new(d: *mut InkDoc, page: c_int, bounds: *mut InkRect) -> *mut InkList;
     pub fn ink_list_drop(d: *mut InkDoc, list: *mut InkList);
