@@ -192,6 +192,7 @@ pub struct Notification {
 }
 
 /// What the stores need to open.
+#[derive(Default)]
 struct StoreCfg {
     paths: Option<Paths>,
     defaults: Map<String, Value>,
@@ -204,6 +205,7 @@ struct OpenBook {
 }
 
 /// The app's plugin host.
+#[derive(Default)]
 pub struct PluginHost {
     /// Loaded plugins and their registrations.
     pub manager: PluginManager,
@@ -404,27 +406,7 @@ impl PluginHost {
             log::info!("plugins: {n} registered {}", counts_text(registrations(r, |p| p == n)));
         }
         log::info!("plugins: registry: {} ({:?})", counts_text(registrations(r, |_| true)), t.elapsed());
-        let mut host = PluginHost {
-            manager,
-            ui: PluginUi::default(),
-            cfg: StoreCfg { paths, defaults },
-            stores: HashMap::new(),
-            net: Net::default(),
-            book: None,
-            out: Vec::new(),
-            notifications: Vec::new(),
-            errors_seen: 0,
-            suspended: false,
-            exited: false,
-            last_defer: None,
-            pending_goto: None,
-            rescan_wanted: false,
-            last_tick: HashMap::new(),
-            claimed: None,
-            claimed_out: Vec::new(),
-            off,
-            overlay_painted: false,
-        };
+        let mut host = PluginHost { manager, cfg: StoreCfg { paths, defaults }, off, ..PluginHost::default() };
         host.after_calls();
         host
     }
@@ -1536,6 +1518,7 @@ pub(crate) fn icon_named(name: &str) -> Option<Icon> {
 /// a replacing request opens the new text at its first page (tabs; otherwise a view
 /// that was on its last page follows the end of the new text). `:::back LINK` adds a Back
 /// button to the app bar (left of the title) that reports LINK.
+#[derive(Default)]
 pub struct MarkdownView {
     /// Title (a second line is the app bar's subtitle).
     pub title: String,
@@ -1829,28 +1812,7 @@ fn layout_blocks(cx: &mut Lay, blocks: &[Block], base: f32, width: f32) -> Vec<L
 impl MarkdownView {
     /// A viewer for `markdown`.
     pub fn new(title: &str, markdown: &str) -> Self {
-        let mut v = MarkdownView {
-            title: title.into(),
-            blocks: Vec::new(),
-            segs: Vec::new(),
-            input: None,
-            sheet: false,
-            back: None,
-            emphasis: false,
-            page: 0,
-            pages: Vec::new(),
-            groups: Vec::new(),
-            laid_for: None,
-            links: Vec::new(),
-            follow_end: false,
-            dock: 0,
-            draft: None,
-            scroll: 0.0,
-            content_h: 0.0,
-            window_h: 0.0,
-            anchor: None,
-            widths: WordWidths::default(),
-        };
+        let mut v = MarkdownView { title: title.into(), ..MarkdownView::default() };
         v.set_text(markdown);
         // A chat view opens at its newest message (`:::top`: at its start).
         v.follow_end = v.scrolls() && !markdown.lines().any(|l| l.trim() == ":::top");
