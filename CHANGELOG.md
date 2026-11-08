@@ -48,6 +48,8 @@ All notable changes to rinky are listed here. The format is based on
   rinky draws the next page (or the previous one, after turning back) while you read.
 - rinky starts faster: the first screen no longer waits for the interface font to be
   fully loaded.
+- Long EPUB books open sooner, above all when opened again: rinky unpacks the chapter
+  it shows first and the others while you read, not every chapter before the first page.
 
 ### Fixed
 - Reading settings (Aa): a preset or a font size step now also refreshes the preview
