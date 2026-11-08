@@ -534,6 +534,21 @@ fn cbz_two_page_spreads_in_landscape() {
 
 // --- 6. Page cache -----------------------------------------------------------------------
 
+/// `Document::prefetch_page` draws a screen into the cache once; the turn to it then
+/// shows the same pixels as a screen drawn on demand.
+#[test]
+fn prefetch_page_fills_the_cache_once() {
+    let path = cbz_path();
+    let mut d = open(&path, "", W, H);
+    let doc: &mut dyn Document = &mut d;
+    assert!(doc.prefetch_page(3), "drawn now");
+    assert!(!doc.prefetch_page(3), "already cached");
+    assert!(!doc.prefetch_page(12), "past the last screen");
+    assert!(d.is_cached(3) && !d.is_cached(2));
+    let fresh = screen(&mut open(&path, "", W, H), 3);
+    assert_eq!(screen(&mut d, 3).pixels, fresh.pixels);
+}
+
 #[test]
 fn page_cache_respects_its_memory_cap() {
     let path = pdf_path();

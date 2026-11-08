@@ -1711,3 +1711,58 @@ fn session_highlights_of_an_unmappable_document() {
     assert!(r.highlight_at(Point::new(150, 185)).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+impl Harness {
+    /// The reader's prefetch timer has run out: backdates it and delivers the timer the
+    /// reader asked for (as the app loop does once no input came).
+    fn rest_for_prefetch(&mut self) {
+        let at = self.reader.prefetch_at.as_mut().expect("a prefetch is due");
+        *at -= PREFETCH_IDLE;
+        assert!(self.reader.timeout().is_some_and(|t| t.is_zero()));
+        let p = providers();
+        self.handle_event(&UiEvent::Timer(0), &p);
+        self.paint();
+    }
+
+    /// Asks the document to prefetch `page`: true when it was not ready yet.
+    fn prefetch(&mut self, page: usize) -> bool {
+        self.reader.doc.as_deref_mut().unwrap().prefetch_page(page)
+    }
+}
+
+/// A comic: once the page shown has rested, the page after it in the direction of the
+/// last turn is drawn into the document's cache; a turn before that moves the timer on.
+#[test]
+fn idle_reader_prefetches_the_page_in_the_direction_of_the_last_turn() {
+    let src = tmp("prefetch-src").join("comic.cbz");
+    std::fs::write(&src, ink_mupdf::testgen::fixture_cbz(12)).unwrap();
+    let mut h = Harness::new("prefetch", src.to_str().unwrap());
+    assert!(h.reader.timeout().is_some_and(|t| t <= PREFETCH_IDLE), "the first page set the timer");
+    h.rest_for_prefetch();
+    assert!(h.reader.prefetch_at.is_none());
+    assert!(!h.prefetch(1), "page 2 was drawn ahead");
+    // A turn back: the page before is the one drawn ahead.
+    h.reader.go_to_page(10);
+    h.paint();
+    h.key(Key::PagePrev);
+    assert_eq!(h.reader.page(), 9);
+    h.rest_for_prefetch();
+    assert!(!h.prefetch(8), "page 9 was drawn ahead");
+    assert!(h.prefetch(7), "page 8 was not");
+    // A jump keeps the direction (page 4 would come next) but a turn forward before the
+    // timer ran out moves the timer on: page 4 is never drawn, page 7 is.
+    h.reader.go_to_page(4);
+    h.paint();
+    h.key(Key::PageNext);
+    assert_eq!(h.reader.page(), 5);
+    assert!(h.reader.prefetch_at.is_some_and(|d| d > Instant::now()));
+    assert!(h.prefetch(3), "page 4 was not drawn ahead");
+    h.rest_for_prefetch();
+    assert!(!h.prefetch(6), "page 7 was drawn ahead");
+    // The last page has nothing after it.
+    h.reader.go_to_page(11);
+    h.paint();
+    h.rest_for_prefetch();
+    assert!(h.reader.prefetch_at.is_none());
+    let _ = std::fs::remove_dir_all(src.parent().unwrap());
+}

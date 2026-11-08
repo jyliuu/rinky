@@ -1001,6 +1001,19 @@ impl Document for MupdfDocument {
         })
     }
 
+    fn prefetch_page(&mut self, page: usize) -> bool {
+        if page >= self.screens() || self.is_cached(page) {
+            return false;
+        }
+        match self.prefetch(page) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("mupdf: prefetch of screen {page}: {e}");
+                false
+            }
+        }
+    }
+
     fn position_of_page(&self, page: usize) -> Result<Position> {
         in_range(page, self.screens())?;
         if self.plan.per_page() > 1 {

@@ -10,6 +10,8 @@ All notable changes to rinky are listed here. The format is based on
 - PDF and comic pages draw about 10 % faster: rinky no longer runs colour management
   for a gray screen. Gray pages look exactly as before; in colour pages, saturated
   colours now come out darker (pure red is 77 of 255 instead of 129).
+- PDF and comic page turns are near instant when you rest on a page for a moment:
+  rinky draws the next page (or the previous one, after turning back) while you read.
 
 ## [0.5.3] - 2026-11-07
 

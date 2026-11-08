@@ -673,6 +673,11 @@ pub struct ReaderScreen {
     /// class is `Change::Jump` (REAGL; GC16 per the user's "full refresh every N pages"),
     /// not a flash of its own.
     jumped: bool,
+    /// The way the last page turn went (+1 next, -1 previous): the page expected next.
+    turn_dir: i64,
+    /// When the page after the one shown is drawn ahead ([`ReaderScreen::prefetch_next`]):
+    /// set when a page is drawn, once no input came for [`PREFETCH_IDLE`].
+    prefetch_at: Option<Instant>,
 }
 
 /// The sidecar gets the position once the page has rested this long. Page turns do no
@@ -681,6 +686,10 @@ pub struct ReaderScreen {
 pub const POSITION_SAVE_IDLE: Duration = Duration::from_secs(2);
 /// While pages keep turning, the position is still saved this often.
 pub const POSITION_SAVE_MAX: Duration = Duration::from_secs(10);
+/// A page drawn and no input for this long: the document draws the next page ahead
+/// (PDF and CBZ pages take most of a second on the Kindle). Short against reading a
+/// page, long enough that a quick second tap is read first.
+pub const PREFETCH_IDLE: Duration = Duration::from_millis(250);
 
 impl ReaderScreen {
     /// A reader for `path` (opened in `on_enter`).
@@ -743,6 +752,8 @@ impl ReaderScreen {
             position_unsaved: None,
             turned: false,
             jumped: false,
+            turn_dir: 1,
+            prefetch_at: None,
         }
     }
 
@@ -789,6 +800,7 @@ impl ReaderScreen {
             self.page = next;
             self.rerender = true;
             self.turned = true;
+            self.turn_dir = step.signum();
             self.dirty = Some(cx.refresh.page_turn());
             // No right-to-left books yet: a next page sweeps left.
             self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, false));
@@ -913,6 +925,27 @@ impl ReaderScreen {
     /// When the unsaved position is due to be written.
     fn position_due(&self) -> Option<Instant> {
         self.position_unsaved.map(|(first, last)| (last + POSITION_SAVE_IDLE).min(first + POSITION_SAVE_MAX))
+    }
+
+    /// Draws the page after the one shown, in the direction of the last turn, into the
+    /// document's page cache (bounded by the document: 16 MiB of screens for MuPDF), so
+    /// the next turn shows it at once. The target comes from the page shown now: a turn
+    /// made since the timer was set moved the timer on, so a stale page is never drawn.
+    /// Not while a selection is dragged or a half-page bridge is shown.
+    fn prefetch_next(&mut self) {
+        self.prefetch_at = None;
+        if self.selecting.is_some() || self.bridge.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.as_deref_mut() else { return };
+        let Some(next) = self.page.checked_add_signed(self.turn_dir as isize) else { return };
+        if next >= doc.page_count().pages {
+            return;
+        }
+        let t = Instant::now();
+        if doc.prefetch_page(next) {
+            log::debug!("reader: page {} prefetched in {:.2} ms", next + 1, t.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     /// Writes the reading position to the sidecar if it changed since the last write.
@@ -2232,6 +2265,9 @@ impl AppScreen for ReaderScreen {
         if matches!(ev, UiEvent::Power(_)) || self.position_due().is_some_and(|d| Instant::now() >= d) {
             self.flush_position();
         }
+        if matches!(ev, UiEvent::Timer(_)) && self.prefetch_at.is_some_and(|d| Instant::now() >= d) {
+            self.prefetch_next();
+        }
         // Plugin dialogs, menus, viewers and keyboards got the event first in the app
         // loop (plugin_host::hooks::app_handle).
         let t = if self.overlay.is_some() {
@@ -2283,7 +2319,11 @@ impl AppScreen for ReaderScreen {
         let edge = self.sel_edge.filter(|_| !self.sel_edge_lock && self.selecting.is_some()).map(|(_, since)| selection::EDGE_DWELL.saturating_sub(since.elapsed()));
         // Bars drawn while pagination counts: look again for the end of the count.
         let counting = (self.counting_shown && !self.status_bars_hidden && self.overlay.is_none()).then_some(COUNTING_POLL);
-        self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout()).into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting).min() // aa: debounce; statusbar: minute tick; position save; selection edge; page count
+        // The next page drawn ahead once the shown one rested.
+        let prefetch = self.prefetch_at.map(|d| d.saturating_duration_since(Instant::now()));
+        let expiry = self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout());
+        // aa: debounce; statusbar: minute tick; position save; selection edge; page count; prefetch
+        expiry.into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting).chain(prefetch).min()
     }
 }
 
@@ -2578,6 +2618,7 @@ impl ReaderScreen {
                 }
                 self.rerender = false;
                 save = true;
+                self.prefetch_at = Some(Instant::now() + PREFETCH_IDLE);
                 if let Some(t) = self.open_trace.as_mut() {
                     t.step("decorations+plugins");
                 }
