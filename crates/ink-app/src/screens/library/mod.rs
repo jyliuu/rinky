@@ -1,4 +1,4 @@
-//! Library and home screen (owner: the `library` agent, wave B).
+//! Library and home screen.
 //!
 //! - The book folders from the settings (`/mnt/us/Books`, `/mnt/us/documents`) are
 //!   scanned into ink-store's `library.json`; metadata comes from `ink_formats::read_info`
@@ -22,7 +22,10 @@
 //!   finished/unread, collections, delete with confirmation). A book that cannot be
 //!   opened shows the reader's error screen; a tap there pops back here.
 //! - The power key and `UiEvent::Quit` leave the app. There is no exit button here: the
-//!   only exit in the UI is Settings > "Exit to Kindle". The device's "library rescan" event (after USB drive mode) rescans.
+//!   only exit in the UI is Settings > "Exit to Kindle".
+//! - A `PowerEvent::LibraryRescan` from the device backend (sent when the userstore
+//!   comes back from the computer) starts a rescan. rinky has no screen of its own for
+//!   USB drive mode.
 
 mod book_menu;
 mod browse;

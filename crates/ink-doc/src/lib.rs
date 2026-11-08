@@ -8,8 +8,6 @@
 //! - Notes: [`Link::footnote`] marks note references, [`Document::note`] returns the note.
 //! - [`LayoutSettings`]: what a reflowable layout depends on (also the page-map cache key).
 //! - [`ResourceLoader`]: images, stylesheets and fonts referenced by a book.
-//!
-//! Owner from wave A: the `html` agent (with `ink-html` and `tests/golden`).
 
 #![warn(missing_docs)]
 

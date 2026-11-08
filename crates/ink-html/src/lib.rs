@@ -11,8 +11,6 @@
 //! - [`paginate`]: pages, the page map, its on-disk cache and the background thread.
 //! - [`xpointer`]: crengine xpointers for positions; [`nav`]: EPUB TOC and page list.
 //! - [`v1`]: the phase 0 parser, kept to read old `flow:` positions.
-//!
-//! Owner from wave A: the `html` agent.
 
 #![warn(missing_docs)]
 

@@ -110,7 +110,7 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# Release (owner v3: perf): fat LTO and one codegen unit (whole-program
+# Release: fat LTO and one codegen unit (whole-program
 # inlining across crates); panic = "unwind" so the panic hook and backtraces work and a
 # panicking background thread (pagination) does not take the reader down with it.
 [profile.release]

@@ -16,8 +16,6 @@
 //!
 //! This crate depends on no other ink crate: the app wires ink-device's Wi-Fi and power
 //! services into [`Connectivity`] and [`KeepAwake`].
-//!
-//! Owner from wave A: the `net` agent.
 
 #![warn(missing_docs)]
 

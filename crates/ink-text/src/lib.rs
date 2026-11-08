@@ -9,8 +9,6 @@
 //! - the shaped path (`shape`, `draw_run`, `draw_run_clipped`): `rustybuzz` shaping (kerning,
 //!   ligatures, marks), fallback faces for characters the main face lacks (CJK,
 //!   symbols), synthetic bold and italic, and a bounded glyph cache.
-//!
-//! Owner from wave A: the `ui` agent (with `ink-ui`).
 
 #![warn(missing_docs)]
 

@@ -1,4 +1,4 @@
-//! Settings screen (owner: the wave B `settings` agent).
+//! Settings screen.
 //!
 //! One screen with pages. The main page is ONE vertically scrolling list ([`rows`]: a
 //! swipe jumps half a page, a long swipe a whole page, one GL16 repaint) with sections:

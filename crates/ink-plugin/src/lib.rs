@@ -19,8 +19,6 @@
 //! The app side (presenting UI requests with ink-ui widgets, storage on disk, the network
 //! worker, loading `/mnt/us/rinky/plugins`) is `crates/ink-app/src/plugin_host.rs`;
 //! `docs/plugins.md` is the guide for plugin authors and for the screens that call it.
-//!
-//! Owner: the `plugin` agent (with `crates/ink-app/src/plugin_host.rs`).
 
 #![warn(missing_docs)]
 
