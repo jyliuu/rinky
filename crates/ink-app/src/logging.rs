@@ -239,6 +239,29 @@ impl Inner {
         let _ = writeln!(self.line, " +{} {target}] {args}", trace::uptime_ms());
     }
 
+    /// Formats one line, keeps it in the ring and writes it: to stderr at once, or into
+    /// the file buffer (written now when `flush` or when the buffer is full). True when
+    /// the line is the first one waiting in the buffer.
+    fn emit(&mut self, level: Level, target: &str, args: &std::fmt::Arguments, flush: bool) -> bool {
+        self.format(level, target, args);
+        self.push_ring();
+        match self.out {
+            // Not eprintln!: it panics (and with panic = "abort" kills rinky) when
+            // stderr cannot be written (read-only or full userstore log).
+            Output::Stderr => {
+                let _ = std::io::stderr().write_all(self.line.as_bytes());
+                false
+            }
+            Output::File { .. } => {
+                self.buf.extend_from_slice(self.line.as_bytes());
+                if flush || self.buf.len() >= BUF_LIMIT {
+                    self.flush();
+                }
+                self.buf.len() == self.line.len()
+            }
+        }
+    }
+
     fn push_ring(&mut self) {
         let text = self.line.trim_end();
         if self.ring.len() >= RING_LINES {
@@ -314,25 +337,8 @@ impl log::Log for Logger {
         if !self.enabled(r.metadata()) {
             return;
         }
-        let mut g = lock(&self.inner);
-        g.format(r.level(), r.target(), r.args());
-        g.push_ring();
-        let g = &mut *g;
-        match g.out {
-            // Not eprintln!: it panics (and with panic = "abort" kills rinky) when
-            // stderr cannot be written (read-only or full userstore log).
-            Output::Stderr => {
-                let _ = std::io::stderr().write_all(g.line.as_bytes());
-            }
-            Output::File { .. } => {
-                let was_empty = g.buf.is_empty();
-                g.buf.extend_from_slice(g.line.as_bytes());
-                if r.level() <= Level::Warn || g.buf.len() >= BUF_LIMIT {
-                    g.flush();
-                } else if was_empty {
-                    self.wake.notify_one();
-                }
-            }
+        if lock(&self.inner).emit(r.level(), r.target(), r.args(), r.level() <= Level::Warn) {
+            self.wake.notify_one();
         }
     }
 
@@ -432,18 +438,7 @@ fn emergency(level: Level, text: &str) {
     };
     match got {
         Some(mut g) => {
-            g.format(level, "ink_app::logging", &format_args!("{text}"));
-            g.push_ring();
-            let g = &mut *g;
-            match g.out {
-                Output::Stderr => {
-                    let _ = std::io::stderr().write_all(g.line.as_bytes());
-                }
-                Output::File { .. } => {
-                    g.buf.extend_from_slice(g.line.as_bytes());
-                    g.flush();
-                }
-            }
+            g.emit(level, "ink_app::logging", &format_args!("{text}"), true);
         }
         None => {
             let _ = writeln!(std::io::stderr(), "[{level} rinky] {text}");
