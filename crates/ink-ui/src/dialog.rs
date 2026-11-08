@@ -296,28 +296,37 @@ pub struct Popup {
 /// Wraps styled `spans` into lines no wider than `max` pixels: each line is a list of
 /// `(x offset, text, style)` pieces. Breaks only at spaces; a word that changes style
 /// inside (`foo<i>bar</i>`) stays whole; a word wider than `max` gets a line of its own.
+/// A `\n` ends a paragraph: the next word starts a new line, after an empty line (no
+/// pieces) that marks the paragraph break.
 pub fn wrap_spans(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32) -> Vec<Vec<(f32, String, Style)>> {
     span_lines(cx, spans, px, max).into_iter().map(|l| l.into_iter().map(|(x, t, s, _)| (x, t, s)).collect()).collect()
 }
 
 /// [`wrap_spans`] with each piece's shaped run, which measured it and draws it.
 fn span_lines(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32) -> Vec<Vec<(f32, String, Style, TextRun)>> {
-    // Words as pieces of one style each, and whether a space comes before the word.
-    let mut words: Vec<(bool, Vec<(String, Style)>)> = Vec::new();
-    let mut space = true;
+    // Words as pieces of one style each, whether a space comes before the word, and
+    // whether a paragraph ends before it.
+    type Word = (bool, bool, Vec<(String, Style)>);
+    let mut words: Vec<Word> = Vec::new();
+    let (mut space, mut para) = (true, false);
     for (text, style) in spans {
-        for (i, part) in text.split(' ').enumerate() {
-            if i > 0 {
-                space = true;
+        for (j, line) in text.split('\n').enumerate() {
+            if j > 0 {
+                (space, para) = (true, !words.is_empty());
             }
-            if part.is_empty() {
-                continue;
+            for (i, part) in line.split(' ').enumerate() {
+                if i > 0 {
+                    space = true;
+                }
+                if part.is_empty() {
+                    continue;
+                }
+                match words.last_mut() {
+                    Some((_, _, w)) if !space => w.push((part.to_string(), *style)),
+                    _ => words.push((!words.is_empty(), std::mem::take(&mut para), vec![(part.to_string(), *style)])),
+                }
+                space = false;
             }
-            match words.last_mut() {
-                Some((_, w)) if !space => w.push((part.to_string(), *style)),
-                _ => words.push((!words.is_empty(), vec![(part.to_string(), *style)])),
-            }
-            space = false;
         }
     }
     let fonts = &mut *cx.fonts;
@@ -325,9 +334,14 @@ fn span_lines(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32) ->
     let mut lines = Vec::new();
     let mut line = Vec::new();
     let mut x = 0.0f32;
-    for (gap, pieces) in words {
+    for (gap, para, pieces) in words {
         let runs: Vec<TextRun> = pieces.iter().map(|(t, s)| fonts.shape(*s, px, t)).collect();
         let w: f32 = runs.iter().map(|r| r.width).sum();
+        if para {
+            lines.push(std::mem::take(&mut line));
+            lines.push(Vec::new());
+            x = 0.0;
+        }
         let gap = if gap && !line.is_empty() { space_w } else { 0.0 };
         if !line.is_empty() && x + gap + w > max {
             lines.push(std::mem::take(&mut line));
@@ -406,6 +420,11 @@ impl Widget for Popup {
             }
         } else {
             for line in span_lines(cx, &self.spans, px, max) {
+                if line.is_empty() {
+                    // Between paragraphs: a third of a line of air.
+                    y += px * 0.4;
+                    continue;
+                }
                 if y > bottom as f32 - 8.0 {
                     break;
                 }
@@ -590,6 +609,24 @@ mod tests {
         let same_title = (0..90).all(|y| (0..800).all(|x| plain.get(x, y) == styled.get(x, y)));
         assert!(same_title, "the title is the same");
         assert!((90..200).any(|y| (0..800).any(|x| plain.get(x, y) != styled.get(x, y))), "the italic word differs");
+    }
+
+    #[test]
+    fn popup_text_keeps_paragraphs() {
+        let theme = Theme::day();
+        let mut fonts = Fonts::load();
+        let mut canvas = Canvas::new(800, 400);
+        let mut cx = crate::PaintCx { canvas: &mut canvas, fonts: &mut fonts, theme: &theme };
+        // A break inside a span and one at a span's end: each starts a new line after an
+        // empty one; the words of one paragraph share a line.
+        let spans: Vec<(String, Style)> = vec![("One two.\nThree ".into(), Style::Regular), ("four.\n".into(), Style::Italic), ("Five.".into(), Style::Regular)];
+        let lines = wrap_spans(&mut cx, &spans, 34.0, 10_000.0);
+        let text: Vec<String> = lines.iter().map(|l| l.iter().map(|p| p.1.as_str()).collect::<Vec<_>>().join(" ")).collect();
+        assert_eq!(text, ["One two.", "", "Three four.", "", "Five."]);
+        assert!(lines.iter().all(|l| l.first().is_none_or(|p| p.0 == 0.0)));
+        // No break before the first word or after the last.
+        let lines = wrap_spans(&mut cx, &[("\nOne.\n".into(), Style::Regular)], 34.0, 10_000.0);
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]
