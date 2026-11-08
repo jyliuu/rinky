@@ -484,19 +484,13 @@ pub fn read_cache(path: &Path, n: usize) -> Option<Vec<Option<ChapterPages>>> {
     (out.len() == n).then_some(out)
 }
 
-/// Number of background pagination threads: `RINKY_PAGINATE_THREADS` when set
-/// (1-8), else one per core, at most 2: one on a one-core device, both cores of a
-/// two-core one. The threads run at nice 10 ([`lower_priority`]), so the UI thread still
-/// gets a core as soon as it needs one. Each thread holds one chapter's DOM and slices
-/// (the page map is laid out without draw items, and the parsed font faces are
-/// shared), so the second thread costs little memory (big36 on the host: 1 thread
-/// 247 ms / 88 MB peak RSS, 2 threads 165 ms / 89 MB).
+/// Number of background pagination threads: `RINKY_PAGINATE_THREADS` when set (1-8),
+/// else one. Two threads crashed with corrupted memory in 2 of 16 cold opens of a long
+/// book on the Kindle emulator (never with one thread, never on the host); until that
+/// is understood, more than one is opt-in. The threads run at nice 10
+/// ([`lower_priority`]), so the UI thread still gets a core as soon as it needs one.
 pub fn worker_threads() -> usize {
-    if let Some(n) = std::env::var("RINKY_PAGINATE_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
-        return n.clamp(1, 8);
-    }
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    cores.clamp(1, 2)
+    std::env::var("RINKY_PAGINATE_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).map_or(1, |n| n.clamp(1, 8))
 }
 
 /// Lowers the calling thread's scheduling priority (nice 10 on Linux) so page turns on
