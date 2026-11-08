@@ -467,45 +467,35 @@ impl PluginHost {
     /// errors into toasts and notifications.
     fn after_calls(&mut self) {
         for (plugin, req) in std::mem::take(&mut self.out) {
+            let what = describe_request(&req);
             match req {
-                UiRequest::Status { id, text } => {
-                    if self.manager.registry.set_status_text(&plugin, &id, &text) {
-                        log::info!("plugins: {plugin}: status {id} = {text:?}");
-                    } else {
-                        log::warn!("plugins: {plugin}: status widget {id:?} is not registered");
-                    }
+                UiRequest::Status { id, text } if !self.manager.registry.set_status_text(&plugin, &id, &text) => {
+                    log::warn!("plugins: {plugin}: status widget {id:?} is not registered");
+                    continue;
                 }
-                UiRequest::TileState { id, text } => {
-                    if self.manager.registry.set_tile_state(&plugin, &id, &text) {
-                        log::info!("plugins: {plugin}: tile {id} = {text:?}");
-                    } else {
-                        log::warn!("plugins: {plugin}: control tile {id:?} is not registered");
-                    }
+                UiRequest::TileState { id, text } if !self.manager.registry.set_tile_state(&plugin, &id, &text) => {
+                    log::warn!("plugins: {plugin}: control tile {id:?} is not registered");
+                    continue;
                 }
+                UiRequest::Status { .. } | UiRequest::TileState { .. } => {}
                 UiRequest::GoTo { position } => {
-                    log::info!("plugins: {plugin}: go to {position}");
                     if self.book.is_some() {
                         self.pending_goto = Some(position);
                     }
                 }
-                UiRequest::LibraryRescan => {
-                    log::info!("plugins: {plugin}: library rescan");
-                    self.rescan_wanted = true;
-                }
+                UiRequest::LibraryRescan => self.rescan_wanted = true,
                 UiRequest::Notification { text } => {
-                    log::info!("plugins: {plugin}: notification {text:?}");
                     self.notifications.push(Notification { plugin: plugin.clone(), text: text.clone(), read: false });
                     self.ui.push(&plugin, UiRequest::Notification { text });
                 }
                 req @ (UiRequest::Menu { .. } | UiRequest::MenuLabel { .. }) if self.claimed.as_deref() == Some(plugin.as_str()) => {
-                    log::info!("plugins: {plugin}: {} (shown by the screen)", describe_request(&req));
+                    log::info!("plugins: {plugin}: {what} (shown by the screen)");
                     self.claimed_out.push(req);
+                    continue;
                 }
-                other => {
-                    log::info!("plugins: {plugin}: {}", describe_request(&other));
-                    self.ui.push(&plugin, other);
-                }
+                other => self.ui.push(&plugin, other),
             }
+            log::info!("plugins: {plugin}: {what}");
         }
         let errors: Vec<(String, String)> = self.manager.errors[self.errors_seen..].to_vec();
         self.errors_seen = self.manager.errors.len();
