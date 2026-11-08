@@ -399,6 +399,15 @@ pub trait Document {
         None
     }
 
+    /// After [`Document::zoom_step`]: draws `page` at once by scaling the screen shown
+    /// before the zoom (coarse, without the detail of the new zoom), for the reader to
+    /// show until `render_page` has drawn the sharp page. False, with `canvas` left as
+    /// it was, when there is nothing to scale: no zoom since the last `render_page`, or
+    /// the page shown before is not at hand. Default: false.
+    fn render_zoom_preview(&mut self, _page: usize, _canvas: &mut Canvas) -> bool {
+        false
+    }
+
     /// The view options of a fixed-layout document; `None` for reflowable documents.
     fn fixed_view(&self) -> Option<FixedView> {
         None

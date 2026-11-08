@@ -31,7 +31,7 @@
 //! | `INK_MUPDF_LIB_DIR` | build | link prebuilt `libmupdf.a` + `libmupdf-third.a` from here |
 //! | `INK_MUPDF_JOBS` | build | `make -j` (default: cargo's job count) |
 //! | `RINKY_FIXED` | run | default [`FixedOptions`], e.g. `fit=width,crop=1,gamma=1.5` |
-//! | `INK_MUPDF_STORE_MB` | run | MuPDF store cap (fonts, images), default 48 |
+//! | `INK_MUPDF_STORE_MB` | run | MuPDF store cap (fonts, images), default 1/16 of memory, 24-48 |
 //! | `INK_MUPDF_CACHE_MB` | run | rendered-screen cache cap, default 16 |
 //! | `INK_MUPDF_WARNINGS` | run | print MuPDF errors and warnings to stderr |
 
