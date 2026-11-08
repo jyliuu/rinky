@@ -23,7 +23,7 @@
 //! asks first ("Exit to Kindle?") when `settings.ui.confirm_exit` is on.
 
 use super::overlay::{Overlay, OverlayKind};
-use super::ReaderScreen;
+use super::{light_gestures, ReaderScreen};
 use crate::router::{AppCtx, Transition};
 use crate::screens::settings::quick_light;
 use ink_device::{Point, Size};
@@ -247,7 +247,7 @@ impl ReaderScreen {
             "light_up" | "light_down" | "warmth_up" | "warmth_down" => light_step(action, cx),
             "light_toggle" | "warmth_toggle" => {
                 let now = cx.services.clock.local_now();
-                super::light_gestures::toggle(action == "warmth_toggle", &mut *cx.services.light, &now);
+                light_gestures::toggle(action == "warmth_toggle", &mut *cx.services.light, &now);
             }
             // Edge slides follow the finger (light_gestures); as a tap or swipe: nothing.
             "light_slide" | "warmth_slide" => {}
@@ -321,19 +321,11 @@ impl ReaderScreen {
 /// the control center's light code (auto warmth keeps the user's warmth).
 fn light_step(action: &str, cx: &mut AppCtx) {
     let warmth = action.starts_with("warmth");
-    let up = action.ends_with("_up");
-    let ((lo, hi), cur) = super::light_gestures::level(&*cx.services.light, warmth);
-    let cur = match cur {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("reader: {action}: {e}");
-            return;
-        }
-    };
+    let Some(((lo, hi), cur)) = light_gestures::level(&*cx.services.light, warmth, action) else { return };
     let step = ((hi.saturating_sub(lo)) * LIGHT_STEP_PERCENT / 100).max(1);
-    let v = if up { cur.saturating_add(step).min(hi) } else { cur.saturating_sub(step).max(lo) };
+    let v = if action.ends_with("_up") { cur.saturating_add(step).min(hi) } else { cur.saturating_sub(step).max(lo) };
     let now = cx.services.clock.local_now();
-    if let Some(text) = super::light_gestures::set_level(&mut *cx.services.light, warmth, v, &now) {
+    if let Some(text) = light_gestures::set_level(&mut *cx.services.light, warmth, v, &now) {
         log::info!("reader: {action}: {cur} -> {text}");
     }
 }
