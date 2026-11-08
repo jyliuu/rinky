@@ -2431,27 +2431,24 @@ impl Widget for MarkdownView {
             let emphasis = self.emphasis;
             body_fonts(emphasis, cx, |cx| self.paint_content(cx, x0, top, cw));
         }
-        // Footer: the input bar, or the page counter.
+        // Footer: the input bar (drawn by the docked keyboard panel while docked) with the
+        // page counter above it, or the page counter.
         let label = format!("{} / {}", self.page + 1, self.page_count());
         if self.sheet {
-        } else if self.dock > 0 {
-            // The docked panel draws the input bar; the page counter sits above it.
-            if self.page_count() > 1 {
-                let band = Rect::new(b.x, b.bottom() - self.dock as i32 - COUNTER_H, b.w, COUNTER_H as u32);
-                cx.text_centered(band, &label, t.caption.px, Style::Regular, fg);
-            }
         } else if let Some((_, placeholder)) = &self.input {
-            let ib = Self::input_rect(b);
+            let bar_top = b.bottom() - if self.dock > 0 { self.dock as i32 } else { INPUT_H };
             if self.page_count() > 1 {
-                let band = Rect::new(b.x, ib.y - COUNTER_H, b.w, COUNTER_H as u32);
+                let band = Rect::new(b.x, bar_top - COUNTER_H, b.w, COUNTER_H as u32);
                 cx.text_centered(band, &label, t.caption.px, Style::Regular, fg);
             }
-            // An unsent draft shows instead of the placeholder.
-            let (text, color) = match self.draft.as_deref().filter(|d| !d.trim().is_empty()) {
-                Some(d) => (d, fg),
-                None => (placeholder.as_str(), muted),
-            };
-            paint_input_bar(cx, ib, text, color, false);
+            if self.dock == 0 {
+                // An unsent draft shows instead of the placeholder.
+                let (text, color) = match self.draft.as_deref().filter(|d| !d.trim().is_empty()) {
+                    Some(d) => (d, fg),
+                    None => (placeholder.as_str(), muted),
+                };
+                paint_input_bar(cx, Self::input_rect(b), text, color, false);
+            }
         } else {
             let foot = Rect::new(b.x, b.bottom() - FOOT_H, b.w, FOOT_H as u32);
             cx.text_centered(foot, &label, cx.theme.small_px, Style::Regular, fg);
@@ -2459,40 +2456,29 @@ impl Widget for MarkdownView {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
+        let link_at = |pos: &Point| self.links.iter().find(|(r, _)| r.contains(*pos)).map(|(_, url)| url.clone());
         // A held link reports `hold:LINK` (a chat list deletes a chat that way).
         if let UiEvent::Gesture(Gesture::LongPress { pos, .. }) = ev {
-            return match self.links.iter().find(|(r, _)| r.contains(*pos)) {
-                Some((_, url)) => EventResult::Action(format!("hold:{url}")),
-                None => EventResult::Handled,
-            };
+            return link_at(pos).map_or(EventResult::Handled, |url| EventResult::Action(format!("hold:{url}")));
         }
         if self.sheet {
             return match ev {
-                UiEvent::Gesture(Gesture::Tap { pos }) => match self.links.iter().find(|(r, _)| r.contains(*pos)) {
-                    Some((_, url)) => EventResult::Action(url.clone()),
-                    None => EventResult::Handled,
-                },
+                UiEvent::Gesture(Gesture::Tap { pos }) => link_at(pos).map_or(EventResult::Handled, EventResult::Action),
                 UiEvent::Gesture(Gesture::Swipe { dir: Direction::Down, .. }) => EventResult::Action("closed".into()),
                 _ => EventResult::Handled,
             };
         }
         match ev {
             UiEvent::Gesture(Gesture::Tap { pos }) => {
-                if self.close_rect(b).contains(*pos) {
-                    return EventResult::Action("closed".into());
-                }
-                if let Some(link) = &self.back {
-                    if with_slack(AppBar::back_rect(Rect::new(b.x, b.y, b.w, APP_BAR_H))).contains(*pos) {
-                        return EventResult::Action(link.clone());
-                    }
-                }
-                if let Some((link, _)) = &self.input {
-                    if Self::input_rect(b).contains(*pos) {
-                        return EventResult::Action(link.clone());
-                    }
-                }
-                if let Some((_, url)) = self.links.iter().find(|(r, _)| r.contains(*pos)) {
-                    return EventResult::Action(url.clone());
+                // The Close button, the Back button, the input bar, then the links.
+                let buttons = [
+                    Some((self.close_rect(b), "closed")),
+                    self.back.as_deref().map(|l| (with_slack(AppBar::back_rect(Rect::new(b.x, b.y, b.w, APP_BAR_H))), l)),
+                    self.input.as_ref().map(|(l, _)| (Self::input_rect(b), l.as_str())),
+                ];
+                let hit = buttons.into_iter().flatten().find(|(r, _)| r.contains(*pos)).map(|(_, a)| a.to_string());
+                if let Some(action) = hit.or_else(|| link_at(pos)) {
+                    return EventResult::Action(action);
                 }
                 if pos.y > b.y + APP_BAR_H as i32 {
                     self.turn(if pos.x < b.x + b.w as i32 / 3 { -1 } else { 1 });
