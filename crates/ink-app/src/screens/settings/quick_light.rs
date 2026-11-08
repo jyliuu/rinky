@@ -2215,7 +2215,9 @@ mod tests {
         app.plugins = crate::plugin_entries::test_plugin::Drift::host();
         app.run(crate::router::Route::Demo).unwrap();
         // `late` is an "on" state: the tile is filled. (The first seconds after opening
-        // poll for the device state read; the tile poll follows it.)
+        // poll for the device state read, which the fakes never finish: the first tile
+        // poll comes STATE_WAIT + PLUGIN_POLL, just over 6 s, after opening, so the
+        // script sleeps 7 s.)
         assert!(probe.panel().get(x, y).is_some_and(|v| v < 0x40), "the tile shows the state from after the panel opened");
         let _ = std::fs::remove_dir_all(&root);
     }

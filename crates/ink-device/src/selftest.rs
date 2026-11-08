@@ -313,7 +313,7 @@ mod kindle {
         // USB.
         r.check("usb", || {
             let udc = crate::usb::read_udc(&sys);
-            let cable = crate::usb::cable_from(udc.as_ref().map(|u| u.1.as_str()), crate::battery::external_power(&sys), None);
+            let cable = crate::usb::read_cable(&sys, None);
             let transport = input::detect_transport(&lipc);
             Ok(format!("udc {udc:?}, cable {cable:?}, transport {transport:?}"))
         });

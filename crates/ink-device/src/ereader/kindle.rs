@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-const POWERD: &str = "com.lab126.powerd";
+pub(super) const POWERD: &str = "com.lab126.powerd";
 const WIFID: &str = "com.lab126.wifid";
 const CMD: &str = "com.lab126.cmd";
 
@@ -228,6 +228,23 @@ impl LipcServices {
             Err(DeviceError::Unsupported("warmth (no natural light on this model)"))
         }
     }
+
+    /// A brightness to set, clamped to the range and remembered.
+    fn new_brightness(&self, level: u32) -> u32 {
+        let (lo, hi) = self.brightness_range();
+        let level = level.clamp(lo, hi);
+        self.remember(|k| k.brightness = Some(level));
+        level
+    }
+
+    /// A warmth to set, clamped to the range and remembered.
+    fn new_warmth(&self, level: u32) -> Result<u32> {
+        self.check_warmth()?;
+        let (lo, hi) = self.warmth_range();
+        let level = level.clamp(lo, hi);
+        self.remember(|k| k.warmth = Some(level));
+        Ok(level)
+    }
 }
 
 impl std::fmt::Debug for LipcServices {
@@ -256,12 +273,17 @@ impl LipcServices {
         }
     }
 
-    /// A cached value when cached reads are on.
-    fn known<T>(&self, f: impl FnOnce(&Known) -> Option<T>) -> Option<T> {
-        if !self.cache.cached_reads.load(Ordering::Relaxed) {
-            return None;
+    /// A slow value: the one in `slot` when cached reads are on and it is known, else
+    /// `read` now (without holding the cache lock) and remembered.
+    fn cached<T: Clone>(&self, slot: fn(&mut Known) -> &mut Option<T>, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        if self.cache.cached_reads.load(Ordering::Relaxed) {
+            if let Some(v) = slot(&mut lock(&self.cache.known)).clone() {
+                return Ok(v);
+            }
         }
-        f(&lock(&self.cache.known))
+        let v = read()?;
+        *slot(&mut lock(&self.cache.known)) = Some(v.clone());
+        Ok(v)
     }
 
     fn remember(&self, f: impl FnOnce(&mut Known)) {
@@ -380,44 +402,27 @@ impl Light for LipcServices {
     }
 
     fn brightness(&self) -> Result<u32> {
-        if let Some(v) = self.known(|k| k.brightness) {
-            return Ok(v);
-        }
-        let v = self.lipc.get_int(POWERD, "flIntensity")?.max(0) as u32;
-        self.remember(|k| k.brightness = Some(v));
-        Ok(v)
+        self.cached(|k| &mut k.brightness, || Ok(self.lipc.get_int(POWERD, "flIntensity")?.max(0) as u32))
     }
 
     fn set_brightness(&mut self, level: u32) -> Result<()> {
-        let (lo, hi) = self.brightness_range();
-        let level = level.clamp(lo, hi);
-        self.remember(|k| k.brightness = Some(level));
+        let level = self.new_brightness(level);
         let _w = self.before_final_write(0);
         self.lipc.set_int(POWERD, "flIntensity", level as i64)
     }
 
     fn set_brightness_live(&mut self, level: u32) -> Result<()> {
-        let (lo, hi) = self.brightness_range();
-        let level = level.clamp(lo, hi);
-        self.remember(|k| k.brightness = Some(level));
+        let level = self.new_brightness(level);
         self.write_live(0, level)
     }
 
     fn warmth(&self) -> Result<u32> {
         self.check_warmth()?;
-        if let Some(v) = self.known(|k| k.warmth) {
-            return Ok(v);
-        }
-        let v = self.lipc.get_int(POWERD, "currentAmberLevel")?.max(0) as u32;
-        self.remember(|k| k.warmth = Some(v));
-        Ok(v)
+        self.cached(|k| &mut k.warmth, || Ok(self.lipc.get_int(POWERD, "currentAmberLevel")?.max(0) as u32))
     }
 
     fn set_warmth(&mut self, level: u32) -> Result<()> {
-        self.check_warmth()?;
-        let (lo, hi) = self.warmth_range();
-        let level = level.clamp(lo, hi);
-        self.remember(|k| k.warmth = Some(level));
+        let level = self.new_warmth(level)?;
         {
             let _w = self.before_final_write(1);
             self.lipc.set_int(POWERD, "currentAmberLevel", level as i64)?;
@@ -427,21 +432,13 @@ impl Light for LipcServices {
     }
 
     fn set_warmth_live(&mut self, level: u32) -> Result<()> {
-        self.check_warmth()?;
-        let (lo, hi) = self.warmth_range();
-        let level = level.clamp(lo, hi);
-        self.remember(|k| k.warmth = Some(level));
+        let level = self.new_warmth(level)?;
         self.write_live(1, level)
     }
 
     fn amber_schedule(&self) -> Result<AmberSchedule> {
         self.check_warmth()?;
-        if let Some(s) = self.known(|k| k.schedule.clone()) {
-            return Ok(s);
-        }
-        let s = read_amber_schedule(&self.lipc)?;
-        self.remember(|k| k.schedule = Some(s.clone()));
-        Ok(s)
+        self.cached(|k| &mut k.schedule, || read_amber_schedule(&self.lipc))
     }
 
     fn set_cached_reads(&self, on: bool) {
@@ -459,13 +456,17 @@ impl Light for LipcServices {
     fn set_amber_schedule(&mut self, s: &AmberSchedule) -> Result<()> {
         self.check_warmth()?;
         self.remember(|k| k.schedule = Some(s.clone()));
-        self.lipc.set_str(POWERD, "amberSchedMode", s.mode.as_powerd())?;
-        self.lipc.set_str(POWERD, "amberSchedStartTime", &s.start.to_powerd())?;
-        self.lipc.set_str(POWERD, "amberSchedEndTime", &s.end.to_powerd())?;
-        self.lipc.set_int(POWERD, "schedAmberLevel", s.level.min(24) as i64)?;
-        self.lipc.set_int(POWERD, "amberSchedEnable", s.enabled as i64)?;
+        let written = (|| {
+            self.lipc.set_str(POWERD, "amberSchedMode", s.mode.as_powerd())?;
+            self.lipc.set_str(POWERD, "amberSchedStartTime", &s.start.to_powerd())?;
+            self.lipc.set_str(POWERD, "amberSchedEndTime", &s.end.to_powerd())?;
+            self.lipc.set_int(POWERD, "schedAmberLevel", s.level.min(24) as i64)?;
+            self.lipc.set_int(POWERD, "amberSchedEnable", s.enabled as i64)
+        })();
+        // Also after a failed write: some properties may have changed, and the input
+        // loop keeps the schedule it read until this request.
         let _ = self.request(Request::AmberChanged);
-        Ok(())
+        written
     }
 }
 
@@ -498,7 +499,7 @@ impl Power for LipcServices {
 
     fn prevent_screensaver(&mut self, prevent: bool) -> Result<()> {
         if let Ok(v) = self.lipc.get_int(POWERD, "preventScreenSaver") {
-            self.journal(Entry::LipcInt { publisher: POWERD.into(), prop: "preventScreenSaver".into(), value: v });
+            self.journal(Entry::lipc_int(POWERD, "preventScreenSaver", v));
         }
         self.lipc.set_int(POWERD, "preventScreenSaver", prevent as i64)
     }
@@ -548,12 +549,7 @@ impl Power for LipcServices {
 
 impl Wifi for LipcServices {
     fn state(&self) -> Result<WifiState> {
-        if let Some(w) = self.known(|k| k.wifi.clone()) {
-            return Ok(w);
-        }
-        let w = read_wifi_state(&self.lipc)?;
-        self.remember(|k| k.wifi = Some(w.clone()));
-        Ok(w)
+        self.cached(|k| &mut k.wifi, || read_wifi_state(&self.lipc))
     }
 
     fn set_enabled(&mut self, on: bool) -> Result<()> {
@@ -636,18 +632,13 @@ impl Wifi for LipcServices {
     }
 
     fn airplane_mode(&self) -> Result<bool> {
-        if let Some(a) = self.known(|k| k.airplane) {
-            return Ok(a);
-        }
-        let a = self.lipc.get_int(CMD, "wirelessEnable")? == 0;
-        self.remember(|k| k.airplane = Some(a));
-        Ok(a)
+        self.cached(|k| &mut k.airplane, || Ok(self.lipc.get_int(CMD, "wirelessEnable")? == 0))
     }
 
     fn set_airplane_mode(&mut self, on: bool) -> Result<()> {
         self.remember(|k| (k.wifi, k.airplane) = (None, None));
         if let Ok(v) = self.lipc.get_int(CMD, "wirelessEnable") {
-            self.journal(Entry::LipcInt { publisher: CMD.into(), prop: "wirelessEnable".into(), value: v });
+            self.journal(Entry::lipc_int(CMD, "wirelessEnable", v));
         }
         self.lipc.set_int(CMD, "wirelessEnable", (!on) as i64)
     }

@@ -50,7 +50,7 @@ impl Epdc {
     /// The order in which an unknown Kindle's controller is probed (newest first).
     pub const PROBE_ORDER: [Epdc; 4] = [Epdc::Mtk, Epdc::Rex, Epdc::Zelda, Epdc::Legacy];
 
-    /// Index of the `flags` word in the refresh struct ([`super::fb::update_data_epdc`]).
+    /// Index of the `flags` word in the refresh struct ([`super::fb::update_data`]).
     pub fn flags_word(self) -> usize {
         match self {
             Epdc::Legacy => 10,

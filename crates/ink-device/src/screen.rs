@@ -236,30 +236,49 @@ pub fn copy_to_panel(
     if rect.is_empty() {
         return rect;
     }
-    let inv = |v: u8| if night { 255 - v } else { v };
-    if rotation == Rotation::Portrait {
-        for y in rect.y..rect.bottom() {
-            let s = y as usize * canvas.width + rect.x as usize;
-            let d = y as usize * dst_stride + rect.x as usize;
-            let src = &canvas.pixels[s..s + rect.w as usize];
-            let out = &mut dst[d..d + rect.w as usize];
-            if night {
-                for (o, v) in out.iter_mut().zip(src) {
-                    *o = 255 - v;
-                }
-            } else {
-                out.copy_from_slice(src);
-            }
-        }
-    } else {
-        for y in rect.y..rect.bottom() {
-            for x in rect.x..rect.right() {
-                let p = rotation.to_panel(Point::new(x, y), panel);
-                dst[p.y as usize * dst_stride + p.x as usize] = inv(canvas.pixels[y as usize * canvas.width + x as usize]);
+    let panel_rect = rotation.rect_to_panel(rect, panel);
+    // The panel is written row by row (the framebuffer may be uncached memory). Along a
+    // panel row the canvas is read forwards or backwards, along a canvas row (half
+    // turns) or down a canvas column (quarter turns, in bands of 64 panel columns so
+    // the canvas rows they read stay in the cache).
+    let n = canvas.width;
+    let quarter = matches!(rotation, Rotation::Clockwise | Rotation::CounterClockwise);
+    let band = if quarter { 64 } else { panel_rect.w as usize };
+    for x0 in (panel_rect.x..panel_rect.right()).step_by(band) {
+        let w = band.min((panel_rect.right() - x0) as usize);
+        for py in panel_rect.y..panel_rect.bottom() {
+            let d = py as usize * dst_stride + x0 as usize;
+            let out = &mut dst[d..d + w];
+            // The canvas pixel the first panel pixel shows, and the lowest address read.
+            let first = rotation.from_panel(Point::new(x0, py), panel);
+            let s = first.y as usize * n + first.x as usize;
+            let (lo, step, backwards) = match rotation {
+                Rotation::Portrait => (s, 1, false),
+                Rotation::UpsideDown => (s + 1 - w, 1, true),
+                Rotation::CounterClockwise => (s, n, false),
+                Rotation::Clockwise => (s - (w - 1) * n, n, true),
+            };
+            let src = &canvas.pixels[lo..=lo + (w - 1) * step];
+            match (step, backwards) {
+                // memcpy, also in unoptimised test builds.
+                (1, false) if !night => out.copy_from_slice(src),
+                (1, false) => copy_pixels(out.iter_mut(), src.iter(), night),
+                (1, true) => copy_pixels(out.iter_mut().rev(), src.iter(), night),
+                (_, false) => copy_pixels(out.iter_mut(), src.iter().step_by(step), night),
+                (_, true) => copy_pixels(out.iter_mut().rev(), src.iter().step_by(step), night),
             }
         }
     }
-    rotation.rect_to_panel(rect, panel)
+    panel_rect
+}
+
+/// Copies `src` into `out`, inverted for night mode.
+fn copy_pixels<'a>(out: impl Iterator<Item = &'a mut u8>, src: impl Iterator<Item = &'a u8>, night: bool) {
+    if night {
+        out.zip(src).for_each(|(o, v)| *o = 255 - v);
+    } else {
+        out.zip(src).for_each(|(o, v)| *o = *v);
+    }
 }
 
 #[cfg(test)]
@@ -278,6 +297,35 @@ mod tests {
         assert_eq!(Wave::for_turn(true, false), Wave::Left);
         assert_eq!(Wave::for_turn(false, false), Wave::Right);
         assert_eq!(Wave::for_turn(true, true), Wave::Right);
+    }
+
+    /// Every rotation, night or day, clipped or not, into a padded buffer: the same
+    /// pixels as mapping each logical pixel on its own.
+    #[test]
+    fn copy_matches_a_pixel_by_pixel_copy() {
+        let (panel, stride) = (Size::new(70, 150), 75);
+        for rotation in Rotation::ALL {
+            let l = rotation.logical_size(panel);
+            let mut c = Canvas::new(l.w as usize, l.h as usize);
+            c.pixels.iter_mut().enumerate().for_each(|(i, p)| *p = (i * 31 % 251) as u8);
+            for rect in [c.bounds(), Rect::new(3, 5, 1, 1), Rect::new(-4, 9, 66, 70), Rect::new(10, 2, 200, 1)] {
+                for night in [false, true] {
+                    let mut got = vec![7u8; stride * panel.h as usize];
+                    let changed = copy_to_panel(&c, rect, rotation, night, panel, &mut got, stride);
+                    let mut want = vec![7u8; got.len()];
+                    let r = rect.intersect(&c.bounds());
+                    for y in r.y..r.bottom() {
+                        for x in r.x..r.right() {
+                            let p = rotation.to_panel(Point::new(x, y), panel);
+                            let v = c.get(x, y).unwrap();
+                            want[p.y as usize * stride + p.x as usize] = if night { 255 - v } else { v };
+                        }
+                    }
+                    assert!(got == want, "{rotation:?} {rect:?} night {night}");
+                    assert_eq!(changed, rotation.rect_to_panel(r, panel));
+                }
+            }
+        }
     }
 
     #[test]
@@ -319,16 +367,5 @@ mod tests {
         assert_eq!(f.len(), MAX_IN_FLIGHT);
         assert_eq!(f.drain(t0).submission, (12..20).collect::<Vec<u32>>());
         assert!(f.is_empty());
-    }
-
-    #[test]
-    fn portrait_copy_is_clipped() {
-        let panel = Size::new(4, 4);
-        let mut c = Canvas::new(4, 4);
-        c.clear(7);
-        let mut dst = vec![0u8; 16];
-        let r = copy_to_panel(&c, Rect::new(2, 2, 10, 10), Rotation::Portrait, false, panel, &mut dst, 4);
-        assert_eq!(r, Rect::new(2, 2, 2, 2));
-        assert_eq!(dst.iter().filter(|v| **v == 7).count(), 4);
     }
 }

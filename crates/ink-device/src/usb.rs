@@ -20,6 +20,7 @@
 //! So the cable is detected from several sources ([`cable_from`]), and drive mode is a
 //! state machine over volumd ([`UsbManager`]) whose real export is a device test.
 
+use crate::journal::Entry;
 use crate::sysfs::SysRoot;
 use std::time::{Duration, Instant};
 
@@ -60,6 +61,13 @@ pub fn cable_from(udc_state: Option<&str>, external_power: bool, hal_plugged: Op
         _ if external_power || hal_plugged == Some(true) => UsbCable::Charger,
         _ => UsbCable::None,
     }
+}
+
+/// The cable now, from the UDC state, the charger supply and the last hal plug event
+/// (`hal_plugged`).
+pub fn read_cable(root: &SysRoot, hal_plugged: Option<bool>) -> UsbCable {
+    let udc = read_udc(root).map(|(_, state)| state);
+    cable_from(udc.as_deref(), crate::battery::external_power(root), hal_plugged)
 }
 
 /// volumd's `driveModeState`.
@@ -144,9 +152,8 @@ pub enum UsbAction {
     Emit(crate::input::PowerEvent),
     /// Deliver a cable change to the app (`InputEvent::Usb`).
     Cable(bool),
-    /// Record a property change for the launcher to undo after a crash
-    /// (`publisher property value`).
-    Journal(String, String, i64),
+    /// Record a property change for the launcher to undo after a crash.
+    Journal(Entry),
     /// A message for the log.
     Log(String),
 }
@@ -185,11 +192,7 @@ impl<V: Volumd> UsbManager<V> {
         if original.is_some() && original != Some(want) {
             match volumd.set_disable_mounting(want) {
                 Ok(()) => {
-                    acts.push(UsbAction::Journal(
-                        "com.lab126.volumd".into(),
-                        "disableMounting".into(),
-                        original.unwrap_or(false) as i64,
-                    ));
+                    acts.push(UsbAction::Journal(Entry::lipc_int("com.lab126.volumd", "disableMounting", original.unwrap_or(false) as i64)));
                     acts.push(UsbAction::Log(format!("usb: disableMounting {} (was {})", want as i64, original.unwrap_or(false) as i64)));
                 }
                 Err(e) => acts.push(UsbAction::Log(format!("usb: cannot set disableMounting: {e}"))),
@@ -470,7 +473,7 @@ mod tests {
     fn startup_takes_and_release_restores_disable_mounting() {
         let (mut m, acts) = UsbManager::new(fake(), UsbPolicy::Ask, UsbTransport::Mtp, UsbCable::None);
         assert!(m.volumd().disable);
-        assert!(acts.contains(&UsbAction::Journal("com.lab126.volumd".into(), "disableMounting".into(), 0)));
+        assert!(acts.contains(&UsbAction::Journal(Entry::lipc_int("com.lab126.volumd", "disableMounting", 0))));
         m.release();
         assert!(!m.volumd().disable);
         // Policy DriveMode leaves volumd alone.
