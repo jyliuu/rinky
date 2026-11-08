@@ -233,7 +233,8 @@ impl Response {
 
     /// Reads the body as UTF-8 text (lossy), at most `limit` bytes.
     pub fn text(self, limit: usize) -> Result<String> {
-        Ok(String::from_utf8_lossy(&self.bytes(limit)?).into_owned())
+        // A valid body becomes the string without a copy.
+        Ok(String::from_utf8(self.bytes(limit)?).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
     }
 
     /// Reads and parses a JSON body (at most `limit` bytes).
