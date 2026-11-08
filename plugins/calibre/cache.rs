@@ -58,7 +58,7 @@ impl Cache {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = self.path.with_extension("json.tmp");
-        let text = serde_json::to_vec_pretty(&Value::Array(self.books.clone())).map_err(std::io::Error::other)?;
+        let text = serde_json::to_vec_pretty(&self.books).map_err(std::io::Error::other)?;
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, &self.path)
     }

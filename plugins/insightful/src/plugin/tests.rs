@@ -1,5 +1,6 @@
 use super::*;
 use crate::testutil::{CannedClient, FakeBook};
+use ink_plugin::testing::TempDir;
 use ink_plugin::{MemoryStorage, NetWorker, UiQueue, UiRequest};
 use std::sync::Arc;
 
@@ -39,13 +40,12 @@ struct Env {
     book: FakeBook,
     worker: NetWorker,
     client: Arc<CannedClient>,
-    dir: PathBuf,
+    dir: TempDir,
 }
 
 impl Env {
     fn new(test: &str, toml: &str, answers: &[(u16, &str)]) -> Env {
-        let dir = std::env::temp_dir().join(format!("insightful-plugin-{}-{test}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TempDir::new(&format!("insightful-plugin-{test}"));
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::write(dir.join("data/insightful.toml"), toml).unwrap();
         let client = Arc::new(CannedClient::seq(answers));

@@ -296,70 +296,34 @@ impl Plugin for StatsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ink_doc::{Metadata, Position, Selection, TocEntry};
-    use ink_plugin::{DocumentAccess, MemoryStorage, UiQueue};
+    use ink_doc::Metadata;
+    use ink_plugin::testing::{FakeBook, TempDir};
+    use ink_plugin::{MemoryStorage, UiQueue};
     use std::cell::Cell;
     use std::rc::Rc;
-
-    struct Book {
-        id: Option<String>,
-        page: usize,
-    }
-
-    impl DocumentAccess for Book {
-        fn metadata(&self) -> Metadata {
-            Metadata { title: "Romeo and Juliet".into(), authors: vec!["William Shakespeare".into()], ..Metadata::default() }
-        }
-        fn book_id(&self) -> Option<String> {
-            self.id.clone()
-        }
-        fn toc(&self) -> Vec<TocEntry> {
-            Vec::new()
-        }
-        fn search(&mut self, _q: &str, _l: usize) -> Result<Vec<ink_doc::SearchHit>> {
-            Ok(Vec::new())
-        }
-        fn read_around(&mut self, _p: &Position, _c: usize) -> Result<String> {
-            Ok(String::new())
-        }
-        fn links(&mut self, _p: &Position) -> Result<Vec<ink_doc::Link>> {
-            Ok(Vec::new())
-        }
-        fn current_position(&self) -> Result<Position> {
-            Err(ink_plugin::PluginError::Unsupported("x".into()))
-        }
-        fn selection(&self) -> Option<Selection> {
-            None
-        }
-        fn current_page(&self) -> Option<usize> {
-            Some(self.page)
-        }
-        fn page_count(&self) -> Option<usize> {
-            Some(100)
-        }
-    }
 
     struct Env {
         ui: UiQueue,
         store: MemoryStorage,
-        book: Book,
+        book: FakeBook,
         plugin: StatsPlugin,
         t: Rc<Cell<u64>>,
         db: PathBuf,
+        _dir: TempDir,
     }
 
     const MD5: &str = "0123456789abcdef0123456789abcdef";
 
     impl Env {
         fn new(test: &str, id: Option<&str>) -> Self {
-            let dir = std::env::temp_dir().join(format!("ink-stats-rec-{}-{test}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir = TempDir::new(&format!("stats-rec-{test}"));
             let db = dir.join("statistics.sqlite3");
             let t = Rc::new(Cell::new(1_700_000_000));
             let t2 = t.clone();
             let plugin = StatsPlugin::with(db.clone(), Box::new(move || t2.get()));
-            Env { ui: UiQueue::default(), store: MemoryStorage::default(), book: Book { id: id.map(String::from), page: 0 }, plugin, t, db }
+            let metadata = Metadata { title: "Romeo and Juliet".into(), authors: vec!["William Shakespeare".into()], ..Metadata::default() };
+            let book = FakeBook { metadata, id: id.map(String::from), page: Some(0), pages: Some(100), ..FakeBook::default() };
+            Env { ui: UiQueue::default(), store: MemoryStorage::default(), book, plugin, t, db, _dir: dir }
         }
         fn call(&mut self, f: impl FnOnce(&mut StatsPlugin, &mut HostCtx) -> Result<()>) {
             let perms = self.plugin.manifest().permissions.clone();
@@ -367,7 +331,7 @@ mod tests {
             f(&mut self.plugin, &mut cx).unwrap();
         }
         fn page(&mut self, p: usize, wait: u64) {
-            self.book.page = p;
+            self.book.page = Some(p);
             self.call(|pl, cx| pl.on_page_change(cx, p));
             self.t.set(self.t.get() + wait);
         }

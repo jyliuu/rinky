@@ -12,6 +12,7 @@
 //!   `== Heading ==`.
 
 use ink_net::url::encode_component;
+pub use ink_plugin::kit::{cut_at, md_escape, squeeze};
 use ink_plugin::serde_json::{json, Map, Value};
 use std::path::Path;
 
@@ -69,26 +70,11 @@ pub fn article_url(lang: &str, title: &str) -> String {
 /// The selected text as a search term: whitespace collapsed, quotes and sentence
 /// punctuation cut off both ends, at most 120 characters.
 pub fn clean_query(sel: &str) -> String {
-    let joined = sel.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = squeeze(sel);
     let t = joined.trim_matches(|c: char| {
         matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '«' | '»' | '(' | ')' | '[' | ']' | '{' | '}' | '.' | ',' | ';' | ':' | '!' | '?' | '…' | '*' | '—' | '–' | '-')
     });
     t.chars().take(120).collect::<String>().trim().to_string()
-}
-
-/// Cuts `text` at `max` characters on a word boundary with an ellipsis.
-pub fn cut_at(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut body: String = text.chars().take(max).collect();
-    if let Some(sp) = body.rfind(' ').filter(|n| *n > max / 2) {
-        body.truncate(sp);
-    }
-    let keep = body.trim_end_matches([' ', ',', ';', ':']).len();
-    body.truncate(keep);
-    body.push('…');
-    body
 }
 
 /// A page summary.
@@ -201,24 +187,7 @@ pub fn strip_html(s: &str) -> String {
         }
     }
     res.push_str(rest);
-    res.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Escapes Markdown punctuation so article text shows as written.
-pub fn md_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        if matches!(c, '\\' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '|' | '-' | '+' | '!') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    if let Some(dot) = out.find(". ") {
-        if dot > 0 && out[..dot].chars().all(|c| c.is_ascii_digit()) {
-            out.insert(dot, '\\');
-        }
-    }
-    out
+    squeeze(&res)
 }
 
 /// `== Heading ==` as `(level, text)`; level 1 is `==`.
@@ -288,17 +257,21 @@ pub fn article_html(lang: &str, title: &str, description: Option<&str>, text: &s
     h
 }
 
-/// A file name for a saved article: the title without path and shell characters.
+/// A file name for a saved article: the title without path and shell characters, at
+/// most 80 characters of it, without dots or spaces at its ends.
 pub fn file_name(title: &str, lang: &str) -> String {
     let clean: String = title.chars().map(|c| if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect();
-    let clean: String = clean.trim().trim_matches('.').chars().take(80).collect();
-    let clean = if clean.is_empty() { "Article".to_string() } else { clean };
+    let clean: String = clean.trim_matches(|c: char| c.is_whitespace() || c == '.').chars().take(80).collect();
+    let clean = match clean.trim_end() {
+        "" => "Article",
+        c => c,
+    };
     format!("{clean} (Wikipedia {lang}).html")
 }
 
 /// Cache key: lowercase, whitespace collapsed.
 pub fn norm(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    squeeze(s).to_lowercase()
 }
 
 /// The last [`CACHE_SIZE`] summaries, newest first, in `cache.json` of the plugin's data

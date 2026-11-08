@@ -43,7 +43,8 @@ use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 
 use ink_dict::{Dictionary, Hit, Library, LookupResult};
-use ink_plugin::{HostCtx, Permission, Plugin, PluginManifest, Registrar, Result};
+use ink_plugin::kit::{cut_at, md_escape, squeeze};
+use ink_plugin::{DocumentAccess, HostCtx, Permission, Plugin, PluginManifest, Registrar, Result};
 use ink_store::vocab::{Lookup, VocabDb};
 
 /// Plugin name.
@@ -78,6 +79,13 @@ struct BookRef {
     md5: Option<String>,
     title: Option<String>,
     context: Option<String>,
+}
+
+impl BookRef {
+    /// The open book, with the text around the lookup.
+    fn of(doc: &dyn DocumentAccess, context: Option<String>) -> BookRef {
+        BookRef { md5: doc.book_id(), title: Some(doc.metadata().title).filter(|t| !t.is_empty()), context }
+    }
 }
 
 /// The dictionary plugin.
@@ -116,30 +124,7 @@ const POPUP_BUTTONS: [(&str, &str); 3] = [("Close", "close"), ("Add to vocabular
 
 /// The rinky home for a plugin data folder `<root>/plugins/dictionary/data`.
 fn root_of(data_dir: &Path) -> PathBuf {
-    if data_dir.ends_with(Path::new("plugins").join(NAME).join("data")) {
-        if let Some(r) = data_dir.ancestors().nth(3) {
-            return r.to_path_buf();
-        }
-    }
-    PathBuf::from("/mnt/us/rinky")
-}
-
-/// Escapes Markdown punctuation so definition text shows as typed.
-fn md_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        if matches!(c, '\\' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '|' | '-' | '+' | '!') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    // "1. " at the start would become a numbered list.
-    if let Some(dot) = out.find(". ") {
-        if dot > 0 && out[..dot].chars().all(|c| c.is_ascii_digit()) {
-            out.insert(dot, '\\');
-        }
-    }
-    out
+    ink_stats::root_from_data_dir(data_dir).unwrap_or_else(|| PathBuf::from("/mnt/us/rinky"))
 }
 
 /// Parts-of-speech words that open an entry or a new sense.
@@ -172,7 +157,7 @@ fn take_pron(meta: &str) -> (Option<String>, String) {
                 let p = meta[a + 1..a + 1 + len].trim().to_string();
                 if !p.is_empty() {
                     let rest = format!("{} {}", &meta[..a], &meta[a + 2 + len..]);
-                    return (Some(p), rest.split_whitespace().collect::<Vec<_>>().join(" "));
+                    return (Some(p), squeeze(&rest));
                 }
             }
         }
@@ -212,20 +197,6 @@ pub fn parse_entry(hit: &Hit) -> Entry {
 /// Cuts `text` at [`POPUP_CHARS`] on a word boundary with an ellipsis.
 fn cut(text: &str) -> String {
     cut_at(text, POPUP_CHARS)
-}
-
-/// Cuts `text` at `max` characters on a word boundary with an ellipsis.
-fn cut_at(text: &str, max: usize) -> String {
-    let mut body: String = text.chars().take(max).collect();
-    if text.chars().count() > max {
-        if let Some(sp) = body.rfind(' ').filter(|n| *n > max / 2) {
-            body.truncate(sp);
-        }
-        let keep = body.trim_end_matches([' ', '•', ',', ';', ':']).len();
-        body.truncate(keep);
-        body.push('…');
-    }
-    body
 }
 
 /// Footer of the "no definition" card: how many dictionaries were searched.
@@ -496,15 +467,15 @@ impl DictionaryPlugin {
     }
 
     /// A list of names from storage.
-    fn names(cx: &mut HostCtx, key: &str) -> Result<Vec<String>> {
-        let v = cx.storage()?.get(key);
-        Ok(v.as_ref().and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()).unwrap_or_default())
+    fn names(cx: &mut HostCtx, key: &str) -> Vec<String> {
+        let v = cx.setting(key);
+        v.as_ref().and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()).unwrap_or_default()
     }
 
     /// Puts the open dictionaries in the stored order (unknown ones after, in folder
     /// order) and moves the turned-off ones out of the lookup.
     fn arrange(&mut self, cx: &mut HostCtx) -> Result<()> {
-        let (order, off) = (Self::names(cx, KEY_ORDER)?, Self::names(cx, KEY_OFF)?);
+        let (order, off) = (Self::names(cx, KEY_ORDER), Self::names(cx, KEY_OFF));
         let Some(lib) = self.lib.as_mut() else { return Ok(()) };
         let mut all: Vec<Dictionary> = lib.dicts.drain(..).chain(self.off.drain(..)).collect();
         all.sort_by_key(|d| order.iter().position(|n| *n == d.name).unwrap_or(usize::MAX));
@@ -527,11 +498,8 @@ impl DictionaryPlugin {
             cx.ui()?.dialog(0, "Dictionaries", &body, &[("OK", "ok")]);
             return Ok(());
         }
-        let items: Vec<(String, String)> =
-            self.order.iter().enumerate().map(|(i, (name, title, on))| (format!("{}. {title}\t{}", i + 1, if *on { "on" } else { "off" }), name.clone())).collect();
-        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        cx.ui()?.menu(ID_DICTS, "Dictionaries", &refs);
-        Ok(())
+        let items = self.order.iter().enumerate().map(|(i, (name, title, on))| (format!("{}. {title}\t{}", i + 1, if *on { "on" } else { "off" }), name.as_str()));
+        cx.menu(ID_DICTS, "Dictionaries", items)
     }
 
     /// The menu of one dictionary: on/off and its place in the order.
@@ -551,8 +519,7 @@ impl DictionaryPlugin {
         items.push(("< Dictionaries", "back"));
         self.editing = Some(name.to_string());
         let title = format!("{title} · {} of {}", i + 1, self.order.len());
-        cx.ui()?.menu(ID_DICT, &title, &items);
-        Ok(())
+        cx.menu(ID_DICT, &title, items)
     }
 
     /// Applies a choice from [`Self::show_dict`], saves the order and shows the list again.
@@ -611,7 +578,7 @@ impl DictionaryPlugin {
             self.record(cx, &r, book)?;
         }
         let book = from_book;
-        let auto_add = cx.storage()?.get("auto_add").and_then(|v| v.as_bool()).unwrap_or(false);
+        let auto_add = cx.setting_bool("auto_add", false);
         let Some((title, body)) = popup_page(&r, 0) else {
             self.last = None;
             let body = format!("No definition found for “{}”.\n— {}", r.query, searched(ndicts));
@@ -645,6 +612,15 @@ impl DictionaryPlugin {
         Ok(())
     }
 
+    /// The full view of the last lookup on dictionary page `tab` (see
+    /// [`full_markdown_tab`]); nothing without a lookup.
+    fn full_view(&self, cx: &mut HostCtx, tab: usize) -> Result<()> {
+        if let Some(l) = &self.last {
+            cx.ui()?.view_markdown(ID_VIEW, &l.word.word, &format!(":::emphasis\n{}", full_markdown_tab(&l.result, tab)));
+        }
+        Ok(())
+    }
+
     /// Writes the last popup's word to the vocabulary list (worker thread); `toast`
     /// confirms it.
     fn add_word(&mut self, cx: &mut HostCtx, toast: bool) -> Result<()> {
@@ -670,8 +646,7 @@ impl DictionaryPlugin {
     }
 
     fn record(&mut self, cx: &mut HostCtx, r: &LookupResult, book: BookRef) -> Result<()> {
-        let on = cx.storage()?.get("record").and_then(|v| v.as_bool()).unwrap_or(true);
-        if !on {
+        if !cx.setting_bool("record", true) {
             return Ok(());
         }
         let path = Self::setting_path(cx, "vocab_db", "vocabulary.sqlite3")?;
@@ -705,7 +680,8 @@ impl Plugin for DictionaryPlugin {
                     cx.ui()?.toast("Select a word to look up");
                     return Ok(());
                 };
-                let snap = BookRef { md5: doc.book_id(), title: Some(doc.metadata().title).filter(|t| !t.is_empty()), context: doc.read_around(&sel.start, 200).ok().map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")) };
+                let context = doc.read_around(&sel.start, 200).ok().map(|s| squeeze(&s));
+                let snap = BookRef::of(doc, context);
                 self.lookup(cx, &sel.text, Some(snap))
             }
             ACTION_TYPE => {
@@ -721,21 +697,13 @@ impl Plugin for DictionaryPlugin {
         match (id, result) {
             (ID_POPUP, "next") => self.turn_card(cx, 1)?,
             (ID_POPUP, "prev") => self.turn_card(cx, -1)?,
-            (ID_POPUP, "full") => {
-                if let Some(l) = &self.last {
-                    let title = l.word.word.clone();
-                    // The full view opens on the dictionary the card shows.
-                    let md = format!(":::emphasis\n{}", full_markdown_tab(&l.result, l.shown));
-                    cx.ui()?.view_markdown(ID_VIEW, &title, &md);
-                }
-            }
+            // The full view opens on the dictionary the card shows.
+            (ID_POPUP, "full") => self.full_view(cx, self.last.as_ref().map_or(0, |l| l.shown))?,
             (ID_POPUP, "add") => self.add_word(cx, true)?,
-            (ID_VIEW, tab) if tab.starts_with("dict:") => {
-                // A dictionary tab: the open viewer takes the new text.
-                if let (Some(l), Ok(i)) = (&self.last, tab["dict:".len()..].parse::<usize>()) {
-                    let title = l.word.word.clone();
-                    let md = format!(":::emphasis\n{}", full_markdown_tab(&l.result, i));
-                    cx.ui()?.view_markdown(ID_VIEW, &title, &md);
+            // A dictionary tab: the open viewer takes the new text.
+            (ID_VIEW, tab) => {
+                if let Some(i) = tab.strip_prefix("dict:").and_then(|i| i.parse().ok()) {
+                    self.full_view(cx, i)?;
                 }
             }
             (ID_DICTS, name) if !name.is_empty() && name != "closed" => self.show_dict(cx, name)?,
@@ -747,7 +715,7 @@ impl Plugin for DictionaryPlugin {
             }
             (ID_INPUT, text) if !text.trim().is_empty() => {
                 // A typed word is recorded with the open book, if any.
-                let snap = cx.document().ok().map(|d| BookRef { md5: d.book_id(), title: Some(d.metadata().title).filter(|t| !t.is_empty()), context: None });
+                let snap = cx.document().ok().map(|d| BookRef::of(d, None));
                 self.lookup(cx, text, snap)?;
             }
             _ => {}

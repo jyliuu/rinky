@@ -448,11 +448,7 @@ impl SshPlugin {
     }
 
     fn port(cx: &mut HostCtx) -> u16 {
-        cx.storage().ok().and_then(|s| s.get("port")).and_then(|v| v.as_u64()).and_then(|p| u16::try_from(p).ok()).filter(|&p| p > 0).unwrap_or(DEFAULT_PORT)
-    }
-
-    fn flag(cx: &mut HostCtx, key: &str) -> bool {
-        cx.storage().ok().and_then(|s| s.get(key)).and_then(|v| v.as_bool()).unwrap_or(false)
+        cx.setting_u64("port").and_then(|p| u16::try_from(p).ok()).filter(|&p| p > 0).unwrap_or(DEFAULT_PORT)
     }
 
     /// Stores a setting; a failed write is a toast, not an error.
@@ -485,7 +481,7 @@ impl SshPlugin {
             return;
         }
         let port = Self::port(cx);
-        let no_password = Self::flag(cx, "no_password");
+        let no_password = cx.setting_bool("no_password", false);
         self.failure = None;
         if !self.paths.dropbear.is_file() {
             return self.fail(cx, "Not installed", format!("The SSH server is not installed ({} is missing)", self.paths.dropbear.display()));
@@ -501,29 +497,11 @@ impl SshPlugin {
             let tried: Vec<String> = self.paths.key_dirs.iter().map(|d| d.display().to_string()).collect();
             return self.fail(cx, "No safe folder for keys", format!("No safe folder for keys: none of {} is root-only", tried.join(", ")));
         };
-        let keys = match install_keys(&self.paths, &key_dir) {
-            Ok(n) => n,
-            Err(e) => {
+        let (keys, child) = match self.launch(&key_dir, port, no_password) {
+            Ok(started) => started,
+            Err(m) => {
                 remove_key_dir(&key_dir);
-                return self.fail(cx, "Start failed", format!("Cannot prepare the SSH keys: {e}"));
-            }
-        };
-        let log_path = self.paths.log();
-        trim_log(&log_path);
-        let log = match OpenOptions::new().create(true).append(true).open(&log_path) {
-            Ok(f) => f,
-            Err(e) => {
-                remove_key_dir(&key_dir);
-                return self.fail(cx, "Start failed", format!("Cannot open {}: {e}", log_path.display()));
-            }
-        };
-        let args = dropbear_args(&self.paths, &key_dir, port, no_password);
-        log::info!("ssh: starting {} {}", self.paths.dropbear.display(), args.join(" "));
-        let child = match self.sys.spawn(&self.paths.dropbear, &args, log) {
-            Ok(c) => c,
-            Err(e) => {
-                remove_key_dir(&key_dir);
-                return self.fail(cx, "Start failed", format!("Cannot start the SSH server: {e}"));
+                return self.fail(cx, "Start failed", m);
             }
         };
         let firewall = self.open_firewall(port);
@@ -537,6 +515,19 @@ impl SshPlugin {
         }
         log::info!("ssh: {msg} (pid {:?}, {keys} keys)", self.pid());
         toast(cx, &msg);
+    }
+
+    /// Puts the keys into `key_dir` and starts dropbear with its log; returns the number
+    /// of keys and the process, or the message of the step that failed.
+    fn launch(&mut self, key_dir: &Path, port: u16, no_password: bool) -> std::result::Result<(usize, Child), String> {
+        let keys = install_keys(&self.paths, key_dir).map_err(|e| format!("Cannot prepare the SSH keys: {e}"))?;
+        let log_path = self.paths.log();
+        trim_log(&log_path);
+        let log = OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| format!("Cannot open {}: {e}", log_path.display()))?;
+        let args = dropbear_args(&self.paths, key_dir, port, no_password);
+        log::info!("ssh: starting {} {}", self.paths.dropbear.display(), args.join(" "));
+        let child = self.sys.spawn(&self.paths.dropbear, &args, log).map_err(|e| format!("Cannot start the SSH server: {e}"))?;
+        Ok((keys, child))
     }
 
     /// Makes each missing host key with `dropbearkey` (the first start takes a few
@@ -597,17 +588,17 @@ impl SshPlugin {
     /// keep running until they log out. No UI.
     fn halt(&mut self) {
         let Some(mut s) = self.server.take() else { return };
-        if s.child.try_wait().ok().flatten().is_none() {
+        if alive(&mut s.child) {
             log::info!("ssh: stopping the server (pid {})", s.child.id());
             if let Ok(pid) = libc::pid_t::try_from(s.child.id()) {
                 // SAFETY: plain kill(2) on our own child, which has not been reaped yet.
                 unsafe { libc::kill(pid, libc::SIGTERM) };
             }
             let deadline = Instant::now() + STOP_WAIT;
-            while s.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+            while alive(&mut s.child) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            if s.child.try_wait().ok().flatten().is_none() {
+            if alive(&mut s.child) {
                 log::warn!("ssh: the server did not stop; killing it");
                 let _ = s.child.kill();
                 let _ = s.child.wait();
@@ -636,7 +627,7 @@ impl SshPlugin {
     /// After a port or password setting changed: restarts a running server.
     fn restart_if_running(&mut self, cx: &mut HostCtx, why: &str) {
         let Some(s) = &self.server else { return };
-        if s.port == Self::port(cx) && s.no_password == Self::flag(cx, "no_password") {
+        if s.port == Self::port(cx) && s.no_password == cx.setting_bool("no_password", false) {
             return;
         }
         log::info!("ssh: {why}; restarting");
@@ -682,8 +673,8 @@ impl SshPlugin {
 
     fn show_menu(&mut self, cx: &mut HostCtx) -> Result<()> {
         let port = Self::port(cx);
-        let no_password = Self::flag(cx, "no_password");
-        let autostart = Self::flag(cx, "autostart");
+        let no_password = cx.setting_bool("no_password", false);
+        let autostart = cx.setting_bool("autostart", false);
         let status = self.status_text();
         self.menu_status = Some(status.clone());
         let mut items: Vec<(String, &str)> = vec![(status, "status")];
@@ -699,9 +690,7 @@ impl SshPlugin {
         items.push((format!("Login without password\t{}", on_off(no_password)), "no_password"));
         items.push((format!("Start when rinky starts\t{}", on_off(autostart)), "autostart"));
         items.push(("How to log in".into(), "help"));
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), *a)).collect();
-        cx.ui()?.menu(MENU, "SSH server", &items);
-        Ok(())
+        cx.menu(MENU, "SSH server", items)
     }
 
     /// While the settings menu is open, shows a changed status in its first row.
@@ -715,8 +704,9 @@ impl SshPlugin {
     }
 
     fn help_markdown(&self, port: u16) -> String {
-        let addr = usable_addrs(&self.addrs).first().map_or_else(|| format!("{USB_ADDRESS} (USB) or the Wi-Fi address"), |(_, ip)| ip.to_string());
-        let host = usable_addrs(&self.addrs).first().map_or_else(|| "ADDRESS".to_string(), |(_, ip)| ip.to_string());
+        let best = usable_addrs(&self.addrs).first().map(|(_, ip)| ip.to_string());
+        let addr = best.clone().unwrap_or_else(|| format!("{USB_ADDRESS} (USB) or the Wi-Fi address"));
+        let host = best.unwrap_or_else(|| "ADDRESS".into());
         let keys = self.paths.user_keys();
         let hostkey = self.paths.host_key();
         let p = format!("-p {port} ");
@@ -764,6 +754,11 @@ impl SshPlugin {
             _ => Ok(()),
         }
     }
+}
+
+/// The process has not exited (as far as `try_wait` can tell).
+fn alive(child: &mut Child) -> bool {
+    child.try_wait().ok().flatten().is_none()
 }
 
 fn toast(cx: &mut HostCtx, text: &str) {
@@ -844,7 +839,7 @@ impl Plugin for SshPlugin {
                     cx.ui()?.input(IN_PORT, "SSH port (1-65535)", &port.to_string());
                     Ok(())
                 }
-                "no_password" if Self::flag(cx, "no_password") => {
+                "no_password" if cx.setting_bool("no_password", false) => {
                     Self::set(cx, "no_password", json!(false));
                     self.restart_if_running(cx, "Login without password is off");
                     self.show_menu(cx)
@@ -859,7 +854,7 @@ impl Plugin for SshPlugin {
                     Ok(())
                 }
                 "autostart" => {
-                    let on = !Self::flag(cx, "autostart");
+                    let on = !cx.setting_bool("autostart", false);
                     Self::set(cx, "autostart", json!(on));
                     self.show_menu(cx)
                 }
@@ -922,11 +917,11 @@ impl Plugin for SshPlugin {
 
     fn on_tick(&mut self, cx: &mut HostCtx) -> Result<()> {
         if std::mem::take(&mut self.autostart_pending) {
-            let resume = Self::flag(cx, RESUME);
+            let resume = cx.setting_bool(RESUME, false);
             if resume {
                 Self::set(cx, RESUME, Value::Null);
             }
-            if (resume || Self::flag(cx, "autostart")) && self.server.is_none() {
+            if (resume || cx.setting_bool("autostart", false)) && self.server.is_none() {
                 log::info!("ssh: {}", if resume { "resuming after a restart" } else { "autostart" });
                 self.start(cx);
             }

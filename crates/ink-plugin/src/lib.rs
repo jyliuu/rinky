@@ -25,11 +25,13 @@
 #![warn(missing_docs)]
 
 pub mod host;
+pub mod kit;
 pub mod lua;
 pub mod manifest;
 pub mod markdown;
 pub mod net;
 pub mod registry;
+pub mod testing;
 
 pub use host::{data_path, DocAccess, DocumentAccess, HostCtx, MemoryStorage, PluginStorage, UiHost, UiQueue, UiRequest};
 pub use manifest::{Permission, PluginManifest};

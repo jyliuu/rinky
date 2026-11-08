@@ -2,17 +2,15 @@
 //! fake iptables and interface list.
 
 use super::*;
+use ink_plugin::testing::TempDir;
 use ink_plugin::{MemoryStorage, Registrar, UiQueue, UiRequest};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 const PERMS: [Permission; 2] = [Permission::Ui, Permission::Storage];
 
-fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ssh-test-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).unwrap();
-    d
+fn tmp(tag: &str) -> TempDir {
+    TempDir::new(&format!("ssh-{tag}"))
 }
 
 /// Two key folder candidates, `root/a/keys` and `root/b/keys` (parents exist); no
@@ -104,7 +102,7 @@ impl System for Fake {
 }
 
 struct Rig {
-    root: PathBuf,
+    root: TempDir,
     paths: Paths,
     world: Arc<Mutex<World>>,
     plugin: SshPlugin,
@@ -151,11 +149,6 @@ impl Rig {
     }
 }
 
-impl Drop for Rig {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
 
 /// A process that is still alive (not a zombie we already reaped).
 fn alive(pid: u32) -> bool {
@@ -222,7 +215,6 @@ fn keys_are_copied_root_only_and_a_template_is_made() {
     fs::write(dir.join("dropbear.pid"), b"1").unwrap();
     remove_key_dir(&dir);
     assert!(!dir.exists() && root.join("a").is_dir());
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -250,7 +242,6 @@ fn key_dir_skips_untrusted_chains() {
         assert!(!root_only(&root));
     }
     assert!(root_only(Path::new("/")));
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -268,7 +259,6 @@ fn log_trim_and_last_line() {
     let after = fs::read_to_string(&log).unwrap();
     assert!(after.len() as u64 <= LOG_KEEP && after.starts_with("[1]"), "cut at a line start");
     assert_eq!(last_log_line(&log).as_deref(), Some("[1] Nov 02 10:00:01 Early exit: Error listening: Address already in use"));
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

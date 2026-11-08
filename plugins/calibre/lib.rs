@@ -253,7 +253,7 @@ impl CalibrePlugin {
     }
 
     fn setting(cx: &mut HostCtx, key: &str) -> String {
-        cx.storage().ok().and_then(|s| s.get(key)).and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+        cx.setting_str(key).unwrap_or_default()
     }
 
     fn books_dir(cx: &mut HostCtx) -> PathBuf {
@@ -262,7 +262,7 @@ impl CalibrePlugin {
     }
 
     fn config(cx: &mut HostCtx) -> Result<Config> {
-        let idle = cx.storage().ok().and_then(|s| s.get("idle_minutes")).and_then(|v| v.as_u64()).unwrap_or(DEFAULT_IDLE_MINUTES).max(1);
+        let idle = cx.setting_u64("idle_minutes").unwrap_or(DEFAULT_IDLE_MINUTES).max(1);
         Ok(Config {
             books_dir: Self::books_dir(cx),
             password: Self::setting(cx, "password"),
@@ -315,25 +315,23 @@ impl CalibrePlugin {
         let password = Self::setting(cx, "password");
         let dir = Self::books_dir(cx);
         self.menu_status = Some(self.status.text());
-        let mut items: Vec<(String, String)> = vec![(self.status.text(), "status".into())];
+        let mut items = vec![(self.status.text(), "status")];
         if self.conn.is_some() {
-            items.push(("Disconnect".into(), "disconnect".into()));
+            items.push(("Disconnect".into(), "disconnect"));
         } else {
-            items.push(("Connect to calibre".into(), "connect".into()));
+            items.push(("Connect to calibre".into(), "connect"));
         }
-        let shown = if server.trim().is_empty() { "find automatically".to_string() } else { server.trim().to_string() };
-        items.push((format!("Server\t{shown}"), "server".into()));
-        if !server.trim().is_empty() {
-            items.push(("Find the server automatically".into(), "auto".into()));
+        let server = server.trim();
+        items.push((format!("Server\t{}", if server.is_empty() { "find automatically" } else { server }), "server"));
+        if !server.is_empty() {
+            items.push(("Find the server automatically".into(), "auto"));
         }
-        items.push((format!("Password\t{}", if password.is_empty() { "none" } else { "set" }), "password".into()));
+        items.push((format!("Password\t{}", if password.is_empty() { "none" } else { "set" }), "password"));
         if !password.is_empty() {
-            items.push(("Remove the password".into(), "nopassword".into()));
+            items.push(("Remove the password".into(), "nopassword"));
         }
-        items.push((format!("Books folder\t{}", dir.display()), "dir".into()));
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), a.as_str())).collect();
-        cx.ui()?.menu(MENU, "Calibre wireless", &items);
-        Ok(())
+        items.push((format!("Books folder\t{}", dir.display()), "dir"));
+        cx.menu(MENU, "Calibre wireless", items)
     }
 
     fn handle(&mut self, cx: &mut HostCtx, m: Msg) -> Result<()> {
@@ -349,10 +347,7 @@ impl CalibrePlugin {
             Msg::Event(ev) => self.event(cx, ev)?,
             Msg::End(end) => {
                 self.conn = None;
-                if self.unscanned > 0 {
-                    self.unscanned = 0;
-                    cx.ui()?.rescan_library();
-                }
+                self.rescan(cx)?;
                 let ui = cx.ui()?;
                 match &end {
                     End::Cancelled => {
@@ -413,6 +408,15 @@ impl CalibrePlugin {
         }
     }
 
+    /// Asks the library to rescan when books arrived since the last rescan.
+    fn rescan(&mut self, cx: &mut HostCtx) -> Result<()> {
+        if self.unscanned > 0 {
+            self.unscanned = 0;
+            cx.ui()?.rescan_library();
+        }
+        Ok(())
+    }
+
     /// While the settings menu is open, shows a changed status in its first row (one row
     /// repainted, no new menu).
     fn refresh_status_row(&mut self, cx: &mut HostCtx) -> Result<()> {
@@ -447,10 +451,7 @@ impl CalibrePlugin {
                 if self.status != Status::Disconnecting {
                     self.status = Status::Connected { host, this: 0, total: 0 };
                 }
-                if self.unscanned > 0 {
-                    self.unscanned = 0;
-                    cx.ui()?.rescan_library();
-                }
+                self.rescan(cx)?;
             }
             Event::Deleted(titles) => {
                 let ui = cx.ui()?;
@@ -573,10 +574,7 @@ impl Plugin for CalibrePlugin {
             self.disconnect();
             self.conn = None;
             self.status = Status::Ended("the reader went to sleep".into());
-            if self.unscanned > 0 {
-                self.unscanned = 0;
-                cx.ui()?.rescan_library();
-            }
+            self.rescan(cx)?;
         }
         Ok(())
     }

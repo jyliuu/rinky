@@ -1,8 +1,8 @@
 //! Wikipedia plugin tests: recorded-shape fixtures written by hand from the documented
 //! API, a fake request runner (no threads, no network) and a temporary data folder.
 
-use ink_doc::{Metadata, Position, Selection, TocEntry};
 use ink_plugin::serde_json::json;
+use ink_plugin::testing::{selection, FakeBook, TempDir};
 use ink_plugin::{DocumentAccess, HostCtx, MemoryStorage, NetHost, PluginError, Registrar, Registry, UiQueue, UiRequest};
 
 use super::*;
@@ -45,42 +45,6 @@ const ARTICLE_MISSING: &str = r#"{"batchcomplete":true,"query":{"pages":[{"ns":0
 
 // ---- fakes ----
 
-struct Book {
-    selection: Option<Selection>,
-}
-
-impl DocumentAccess for Book {
-    fn metadata(&self) -> Metadata {
-        Metadata { title: "A Book".into(), ..Metadata::default() }
-    }
-    fn book_id(&self) -> Option<String> {
-        None
-    }
-    fn toc(&self) -> Vec<TocEntry> {
-        Vec::new()
-    }
-    fn search(&mut self, _q: &str, _l: usize) -> Result<Vec<ink_doc::SearchHit>> {
-        Ok(Vec::new())
-    }
-    fn read_around(&mut self, _p: &Position, _c: usize) -> Result<String> {
-        Ok(String::new())
-    }
-    fn links(&mut self, _p: &Position) -> Result<Vec<ink_doc::Link>> {
-        Ok(Vec::new())
-    }
-    fn current_position(&self) -> Result<Position> {
-        Ok("/body/DocFragment[3]/body/p[1]/text().0".parse().unwrap())
-    }
-    fn selection(&self) -> Option<Selection> {
-        self.selection.clone()
-    }
-}
-
-fn sel(text: &str) -> Selection {
-    let p: Position = "/body/DocFragment[3]/body/p[1]/text().4".parse().unwrap();
-    Selection { start: p.clone(), end: p, text: text.into(), page: 0, rects: vec![] }
-}
-
 /// Records requests; no thread runs.
 #[derive(Default)]
 struct FakeJobs {
@@ -109,23 +73,16 @@ struct Env {
     ui: UiQueue,
     st: MemoryStorage,
     jobs: FakeJobs,
-    book: Book,
-    root: PathBuf,
-}
-
-impl Drop for Env {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
+    book: FakeBook,
+    root: TempDir,
 }
 
 impl Env {
     fn new(tag: &str) -> Env {
-        let root = std::env::temp_dir().join(format!("ink-wikipedia-test-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = TempDir::new(&format!("wikipedia-{tag}"));
         let mut st = MemoryStorage { dir: root.join("plugins/wikipedia/data"), ..MemoryStorage::default() };
         st.settings.insert("save_dir".into(), json!(root.join("Books").to_str().unwrap()));
-        Env { p: WikipediaPlugin::new(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: Book { selection: None }, root }
+        Env { p: WikipediaPlugin::new(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: FakeBook::titled("A Book"), root }
     }
 
     fn call(&mut self, f: impl FnOnce(&mut WikipediaPlugin, &mut HostCtx) -> Result<()>) {
@@ -136,7 +93,7 @@ impl Env {
 
     /// Selects `text` and triggers the selection action.
     fn select(&mut self, text: &str) {
-        self.book.selection = Some(sel(text));
+        self.book.selection = Some(selection(text));
         self.call(|p, cx| p.on_action(cx, ACTION_LOOKUP));
     }
 
@@ -283,6 +240,10 @@ fn parses_the_article_and_builds_text() {
     assert!(html.contains("<h2>Background</h2>") && html.contains("<h3>Voyage</h3>") && html.contains("<p><i>desc</i></p>"), "{html}");
     assert!(html.contains("CC BY-SA"), "{html}");
     assert_eq!(api::file_name("AC/DC: live?", "de"), "AC_DC_ live_ (Wikipedia de).html");
+    // No space where the title is cut or after a leading dot.
+    assert_eq!(api::file_name(&format!("{} yyy", "x".repeat(79)), "en"), format!("{} (Wikipedia en).html", "x".repeat(79)));
+    assert_eq!(api::file_name(" . Hidden", "en"), "Hidden (Wikipedia en).html");
+    assert_eq!(api::file_name(" .. ", "en"), "Article (Wikipedia en).html");
 }
 
 #[test]
@@ -335,9 +296,7 @@ fn network_errors_get_clear_messages() {
 
 #[test]
 fn cache_keeps_fifty_and_survives_a_restart() {
-    let dir = std::env::temp_dir().join(format!("ink-wikipedia-cache-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TempDir::new("wikipedia-cache");
     let path = dir.join("cache.json");
     let mut c = Cache::default();
     for i in 0..60 {
@@ -359,7 +318,6 @@ fn cache_keeps_fifty_and_survives_a_restart() {
     std::fs::write(&path, "{ not json").unwrap();
     assert!(Cache::load(&path).is_empty());
     assert!(Cache::load(&dir.join("missing.json")).is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- the plugin ----
