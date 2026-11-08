@@ -776,13 +776,25 @@ pub(crate) fn follow_press<T: Copy + PartialEq>(t: &Touch, pressed: &mut Option<
     }
 }
 
-/// [`follow_press`] for a widget that shows pressed as a whole (a button, a card, an
-/// icon): `inside` tells whether the finger is on it; it takes every touch-down.
-pub(crate) fn follow_press_on(t: &Touch, pressed: &mut bool, inside: bool) -> (EventResult, bool) {
-    let mut p = pressed.then_some(());
-    let res = follow_press(t, &mut p, inside.then_some(()), true);
-    *pressed = p.is_some();
-    res
+/// The events of a widget in `b` that shows pressed as a whole (a button, a card, an
+/// icon) and reports `action` on a tap: [`follow_press`] for its touches (it takes every
+/// touch-down), the action for a tap; `None` for any other event. `changed` records a
+/// change of `pressed`.
+pub(crate) fn press_or_tap(ev: &UiEvent, b: Rect, pressed: &mut bool, changed: &mut bool, action: &str) -> Option<EventResult> {
+    match ev {
+        UiEvent::Touch(t) => {
+            let mut p = pressed.then_some(());
+            let (res, c) = follow_press(t, &mut p, b.contains(t.pos).then_some(()), true);
+            *pressed = p.is_some();
+            *changed |= c;
+            Some(res)
+        }
+        UiEvent::Gesture(Gesture::Tap { .. }) => {
+            *changed |= std::mem::take(pressed);
+            Some(EventResult::Action(action.to_string()))
+        }
+        _ => None,
+    }
 }
 
 /// The refresh class of a widget with press feedback: DU while pressed (fast black and
@@ -879,18 +891,7 @@ impl Widget for Button {
                 _ => EventResult::Ignored,
             };
         }
-        match ev {
-            UiEvent::Touch(t) => {
-                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
-                self.changed |= changed;
-                res
-            }
-            UiEvent::Gesture(Gesture::Tap { .. }) => {
-                self.changed |= std::mem::take(&mut self.pressed);
-                EventResult::Action(self.action.clone())
-            }
-            _ => EventResult::Ignored,
-        }
+        press_or_tap(ev, b, &mut self.pressed, &mut self.changed, &self.action).unwrap_or(EventResult::Ignored)
     }
 
     fn refresh_class(&self) -> RefreshClass {

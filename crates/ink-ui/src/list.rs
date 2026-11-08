@@ -15,7 +15,7 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Direction, Gesture, TouchKind};
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{follow_press, follow_press_on, look_damage, press_class, EventResult, PaintCx, Widget};
+use crate::widget::{follow_press, look_damage, press_class, press_or_tap, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Canvas, Rect, RefreshClass};
 use ink_text::Style;
@@ -281,24 +281,12 @@ impl Widget for Card {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        if self.action.is_empty() {
-            return match ev {
-                UiEvent::Gesture(_) => EventResult::Handled,
-                _ => EventResult::Ignored,
-            };
-        }
-        match ev {
-            UiEvent::Touch(t) => {
-                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
-                self.changed |= changed;
-                res
-            }
-            UiEvent::Gesture(Gesture::Tap { .. }) => {
-                self.changed |= std::mem::take(&mut self.pressed);
-                EventResult::Action(self.action.clone())
-            }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+        // Without an action taps are only consumed.
+        let res = if self.action.is_empty() { None } else { press_or_tap(ev, b, &mut self.pressed, &mut self.changed, &self.action) };
+        match res {
+            Some(res) => res,
+            None if matches!(ev, UiEvent::Gesture(_)) => EventResult::Handled,
+            None => EventResult::Ignored,
         }
     }
 

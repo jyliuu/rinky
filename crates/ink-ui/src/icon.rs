@@ -2,8 +2,8 @@
 //! no image files or symbol fonts, and an [`IconView`] widget.
 
 use crate::draw::Path;
-use crate::widget::{follow_press_on, look_damage, EventResult, PaintCx, Widget};
-use crate::{Gesture, UiEvent};
+use crate::widget::{look_damage, press_or_tap, EventResult, PaintCx, Widget};
+use crate::UiEvent;
 use ink_device::{Canvas, Rect, RefreshClass};
 use std::f32::consts::PI;
 
@@ -544,18 +544,7 @@ impl Widget for IconView {
         if self.action.is_empty() {
             return EventResult::Ignored;
         }
-        match ev {
-            UiEvent::Touch(t) => {
-                let (res, changed) = follow_press_on(t, &mut self.pressed, b.contains(t.pos));
-                self.changed |= changed;
-                res
-            }
-            UiEvent::Gesture(Gesture::Tap { .. }) => {
-                self.changed |= std::mem::take(&mut self.pressed);
-                EventResult::Action(self.action.clone())
-            }
-            _ => EventResult::Ignored,
-        }
+        press_or_tap(ev, b, &mut self.pressed, &mut self.changed, &self.action).unwrap_or(EventResult::Ignored)
     }
 
     fn refresh_class(&self) -> RefreshClass {
