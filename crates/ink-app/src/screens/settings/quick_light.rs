@@ -28,15 +28,16 @@
 //!
 //! The app opens it on every screen: on [`is_trigger`] it pushes
 //! [`crate::router::Route::QuickLight`] ([`ControlCenterScreen`], route kind and screen
-//! name `quicklight`). The older [`QuickLight`] widget (two sliders) stays for the
-//! settings page; its actions go to [`apply`].
+//! name `quicklight`). [`QuickLight`] reads the two light sliders for the panel and the
+//! settings page; their actions go to [`apply`].
 
-use super::advanced;
+use super::{advanced, current_settings, edit_settings};
 use super::popup::{self, Anchor, PopupCatcher, SettingsPopup};
+use crate::screens::common::paint_cx;
 use crate::router::{AppCtx, Route, Services, Transition};
 use ink_device::clock::DateTime;
 use ink_device::light::{AmberMode, AmberSchedule, AmberScheduler, DayTime};
-use ink_device::{Clock, Light, Point, Rect, RefreshClass, Rotation, Size};
+use ink_device::{Clock, Light, Rect, RefreshClass, Rotation, Size};
 use ink_store::prefs::{label, CONTROL_BUTTONS};
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
@@ -104,7 +105,7 @@ pub fn apply(action: &str, light: &mut dyn Light) -> Option<String> {
     })
 }
 
-/// The panel.
+/// The light sliders of the device.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuickLight {
     /// Brightness slider; `None` when the device has no frontlight.
@@ -114,7 +115,7 @@ pub struct QuickLight {
 }
 
 impl QuickLight {
-    /// A panel showing the light's current levels.
+    /// Sliders at the light's current levels.
     pub fn read(light: &dyn Light) -> Self {
         let slider = |label: &str, range: (u32, u32), v: ink_device::Result<u32>, action: &str| {
             v.ok().map(|v| Slider::new(label, range.0 as f32, range.1 as f32, 1.0, v as f32, action))
@@ -128,84 +129,6 @@ impl QuickLight {
     /// Same as [`QuickLight::read`] for the services of a screen context.
     pub fn from_services(s: &Services) -> Self {
         QuickLight::read(&*s.light)
-    }
-
-    /// Where the panel goes on a screen of `size`: the top of the screen.
-    pub fn frame(size: Size) -> Rect {
-        Rect::new(0, 0, size.w, 640.min(size.h))
-    }
-
-    /// (title, brightness, warmth, done button) inside the panel `b`.
-    pub fn parts(b: Rect) -> (Rect, Rect, Rect, Rect) {
-        let x = b.x + 48;
-        let w = b.w.saturating_sub(96);
-        let title = Rect::new(x, b.y + 24, w, 80);
-        let bright = Rect::new(x, b.y + 110, w, 200);
-        let warm = Rect::new(x, b.y + 320, w, 200);
-        let done = Rect::new(b.right() - 48 - 260, b.bottom() - 110, 260, 90);
-        (title, bright, warm, done)
-    }
-}
-
-impl Widget for QuickLight {
-    fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let (fg, bg) = (cx.theme.fg, cx.theme.bg);
-        fill_round_rect(cx.canvas, b, 0.0, bg);
-        // The bottom edge separates the panel from the page under it.
-        let edge = Rect::new(b.x, b.bottom() - 6, b.w, 6);
-        fill_round_rect(cx.canvas, edge, 0.0, fg);
-        let (title, bright, warm, done) = QuickLight::parts(b);
-        let px = cx.theme.font_px;
-        cx.text_left(title, "Light", px * 1.1, Style::Bold, fg);
-        match &mut self.brightness {
-            Some(s) => s.paint(cx, bright),
-            None => cx.text_left(bright, "Frontlight not available", px, Style::Regular, cx.theme.muted),
-        }
-        match &mut self.warmth {
-            Some(s) => s.paint(cx, warm),
-            None => cx.text_left(warm, "Warm light not available", px, Style::Regular, cx.theme.muted),
-        }
-        stroke_round_rect(cx.canvas, done, cx.theme.radius, cx.theme.border_px as f32, fg);
-        cx.text_centered(done, "Done", px, Style::Regular, fg);
-    }
-
-    fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        let (_, bright, warm, done) = QuickLight::parts(b);
-        let pos: Option<Point> = match ev {
-            UiEvent::Gesture(g) => ink_ui::widget::gesture_pos(g),
-            UiEvent::Touch(t) => Some(t.pos),
-            _ => None,
-        };
-        if let (UiEvent::Gesture(Gesture::Tap { .. }), Some(p)) = (ev, pos) {
-            if done.contains(p) {
-                return EventResult::Action(CLOSE.into());
-            }
-        }
-        // Touch moves and lifts go to the slider that took the touch-down, wherever they are.
-        let touch_follow = matches!(ev, UiEvent::Touch(t) if t.kind != ink_ui::TouchKind::Down);
-        for (slider, r) in [(&mut self.brightness, bright), (&mut self.warmth, warm)] {
-            let Some(s) = slider else { continue };
-            if touch_follow || pos.is_some_and(|p| r.contains(p)) {
-                match s.event(ev, r) {
-                    EventResult::Ignored => {}
-                    other => return other,
-                }
-            }
-        }
-        // The panel is modal: everything else on it is consumed.
-        match ev {
-            UiEvent::Gesture(_) | UiEvent::Touch(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
-        }
-    }
-
-    fn refresh_class(&self) -> RefreshClass {
-        let dragging = [&self.brightness, &self.warmth].iter().any(|s| s.as_ref().is_some_and(|s| s.refresh_class() == RefreshClass::Du));
-        if dragging {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
     }
 }
 
@@ -1128,7 +1051,7 @@ fn on_off(on: bool) -> &'static str {
 impl ControlCenterScreen {
     /// The tile of button `name` (a name of [`CONTROL_BUTTONS`]) with its current state.
     fn make_tile(name: &str, cx: &mut AppCtx) -> Tile {
-        let settings = cx.settings_update.as_ref().unwrap_or(cx.settings);
+        let settings = current_settings(cx);
         let rot = crate::app::settings_rotation(settings);
         let bars_on = match crate::screens::reader::reader_bars_hidden() {
             Some(hidden) => !hidden && (settings.status_bars.top.enabled || settings.status_bars.bottom.enabled),
@@ -1205,7 +1128,7 @@ impl ControlCenterScreen {
 
     fn build(&mut self, cx: &mut AppCtx) {
         let size = cx.screen.size();
-        let names = buttons(cx.settings_update.as_ref().unwrap_or(cx.settings), cx.plugins);
+        let names = buttons(current_settings(cx), cx.plugins);
         let lay = layout(size, names.len());
         let mut tree = WidgetTree::new();
         tree.add(None, Box::new(Backdrop { panel: lay.panel }), Rect::from_size(size));
@@ -1370,13 +1293,6 @@ impl ControlCenterScreen {
         self.live = Some((id, v, now));
     }
 
-    /// Changes the settings with `f` (stored and saved by the app after this event).
-    fn edit(cx: &mut AppCtx, f: impl FnOnce(&mut ink_store::Settings)) {
-        let mut s = cx.settings_update.take().unwrap_or_else(|| cx.settings.clone());
-        f(&mut s);
-        *cx.settings_update = Some(s);
-    }
-
     /// Saves the screen as a PNG in `<root>/screenshots/` and returns its path.
     fn screenshot(cx: &mut AppCtx) -> anyhow::Result<std::path::PathBuf> {
         let t0 = Instant::now();
@@ -1394,7 +1310,7 @@ impl ControlCenterScreen {
     /// Shows `text` in the status line at once (before a call that blocks).
     fn say_now(&mut self, text: &str, cx: &mut AppCtx) {
         self.set_status(text);
-        for d in self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme }) {
+        for d in self.tree.paint(&mut paint_cx(cx)) {
             if let Err(e) = cx.show(d.rect, d.class) {
                 log::warn!("control center: show: {e}");
             }
@@ -1635,7 +1551,7 @@ impl ControlCenterScreen {
             }
             "night_mode" => {
                 let on = !cx.screen.night_mode();
-                Self::edit(cx, |s| s.device.night_mode = on);
+                edit_settings(cx, |s| s.device.night_mode = on);
                 match cx.screen.set_night_mode(on) {
                     Ok(()) => self.set_status(if on { "Night mode on" } else { "Night mode off" }),
                     Err(e) => self.set_status(format!("Night mode: {e}")),
@@ -1668,9 +1584,9 @@ impl ControlCenterScreen {
                 self.refresh_tiles(cx);
             }
             "status_bars" => {
-                let s = cx.settings_update.as_ref().unwrap_or(cx.settings);
+                let s = current_settings(cx);
                 let on = !(s.status_bars.top.enabled || s.status_bars.bottom.enabled);
-                Self::edit(cx, |s| {
+                edit_settings(cx, |s| {
                     s.status_bars.top.enabled = on;
                     s.status_bars.bottom.enabled = on;
                 });
@@ -1684,15 +1600,15 @@ impl ControlCenterScreen {
             other if ink_plugin::registry::parse_saved_id(other).is_some() => self.plugin_tile(other, cx),
             "rotate" => {
                 // Upright to the chosen angle, any other angle back upright (advanced::rotate_tap).
-                let s = cx.settings_update.as_ref().unwrap_or(cx.settings);
+                let s = current_settings(cx);
                 let (now, deg) = (s.device.rotation, s.ui.rotate_degrees());
                 let to = advanced::rotate_tap(now, deg);
                 if to == now % 4 {
                     self.set_status("Rotate angle is 0°: hold Rotate to choose one");
                     return Ok(Transition::None);
                 }
-                Self::edit(cx, |s| s.device.rotation = to);
-                log::info!("control center: rotate to {:?} (angle {deg})", crate::app::settings_rotation(cx.settings_update.as_ref().unwrap_or(cx.settings)));
+                edit_settings(cx, |s| s.device.rotation = to);
+                log::info!("control center: rotate to {:?} (angle {deg})", crate::app::settings_rotation(current_settings(cx)));
                 // The app turns the screen after this event; on_resize lays the panel out.
             }
             "sleep" => {
@@ -1903,7 +1819,7 @@ impl crate::router::AppScreen for ControlCenterScreen {
         if let Some(name) = self.picker.as_ref().filter(|p| matches!(p.rows, PickerRows::Plugin { .. })).map(|p| p.name.clone()) {
             self.take_plugin_menus(&name, cx);
         }
-        let damage = self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme });
+        let damage = self.tree.paint(&mut paint_cx(cx));
         if std::mem::take(&mut self.flash_all) {
             return Ok(vec![Damage { rect: cx.canvas.bounds(), class: RefreshClass::Gc16 }]);
         }
@@ -1928,6 +1844,7 @@ impl crate::router::AppScreen for ControlCenterScreen {
 mod tests {
     use super::*;
     use crate::screens::settings::fakes::Fake;
+    use ink_device::Point;
 
     #[test]
     fn trigger_needs_a_swipe_down_from_the_top_edge() {

@@ -6,7 +6,8 @@ use ink_device::Rect;
 use ink_store::BookEntry;
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
-use ink_ui::{paint_button, ButtonKind, PaintCx, Widget};
+use crate::screens::common::pill;
+use ink_ui::{PaintCx, Widget};
 
 /// Header height (title, back, actions): the shared app bar's height, so its rule sits
 /// where the other screens' rules do.
@@ -21,12 +22,6 @@ pub const MARGIN: i32 = 32;
 pub const GRID_COLS: i32 = 3;
 /// Grid rows.
 pub const GRID_ROWS: i32 = 3;
-
-/// Draws a pill button (`ink_ui::paint_button`); `primary` makes it filled.
-pub fn button(p: &mut PaintCx, r: Rect, label: &str, primary: bool) {
-    let kind = if primary { ButtonKind::Filled } else { ButtonKind::Outlined };
-    paint_button(p, r, label, None, kind, true, false);
-}
 
 impl LibraryScreen {
     /// Paints everything into `p.canvas`.
@@ -44,7 +39,10 @@ impl LibraryScreen {
             View::Files => "Files".into(),
         };
         let back = matches!(self.view, View::Details(_) | View::Files) || (self.view == View::Books && self.query.collection.is_some());
-        self.draw_app_bar(p, w, &title, back);
+        // The library view's query (sort, filter, search over every book) runs once per
+        // frame: the app bar's count and the rows both come from it.
+        let shelf = (self.view == View::Books).then(|| self.page_books(h));
+        self.draw_app_bar(p, w, &title, back, shelf.as_ref().map(|s| s.1));
         if self.job.is_some() {
             let fg = p.theme.fg;
             let r = Rect::new(MARGIN, HEADER_H + 120, (w - 2 * MARGIN) as u32, 80);
@@ -55,7 +53,7 @@ impl LibraryScreen {
 
         match self.view.clone() {
             View::Home => self.draw_home(p, w, h),
-            View::Books => self.draw_books(p, w, h),
+            View::Books => self.draw_books(p, w, h, shelf.unwrap_or_default()),
             View::Collections => self.draw_collections(p, w, h),
             View::Details(path) => self.draw_details(p, w, h, &path),
             View::Import => self.draw_import(p, w, h),
@@ -77,17 +75,17 @@ impl LibraryScreen {
 
     /// Books on the current screenful of the library view, the number of books that
     /// match, and the (clamped) screen index.
-    pub(super) fn page_books(&self, w: i32, h: i32) -> (Vec<BookEntry>, usize, usize) {
+    pub(super) fn page_books(&self, h: i32) -> (Vec<BookEntry>, usize, usize) {
         let Some(lib) = self.lib.as_ref() else { return (Vec::new(), 0, 0) };
         let all = lib.query(&self.query);
-        let per = self.per_page(w, h).max(1);
+        let per = self.per_page(h).max(1);
         let page = self.page.min(ink_ui::ScrollBar::pages_of(all.len(), per) - 1);
         let total = all.len();
         (all.into_iter().skip(page * per).take(per).cloned().collect(), total, page)
     }
 
     /// Books per screenful in the current mode.
-    pub(super) fn per_page(&self, _w: i32, h: i32) -> usize {
+    pub(super) fn per_page(&self, h: i32) -> usize {
         let content = h - HEADER_H - TOOLBAR_H - TAB_H;
         match self.mode {
             ViewMode::List => (content / super::browse::LIST_ROW_H).max(1) as usize,
@@ -109,15 +107,15 @@ impl LibraryScreen {
         }
         y += 30;
         let r = Rect::new(MARGIN, y, (w - 2 * MARGIN) as u32, 104);
-        button(p, r, "Import from KOReader", true);
+        pill(p, r, "Import from KOReader", None, true);
         self.hits.push((r, Hit::Import));
         y += 130;
         let half = ((w - 2 * MARGIN - 30) / 2) as u32;
         let r = Rect::new(MARGIN, y, half, 104);
-        button(p, r, "Rescan library", false);
+        pill(p, r, "Rescan library", None, false);
         self.hits.push((r, Hit::Rescan));
         let r = Rect::new(MARGIN + half as i32 + 30, y, half, 104);
-        button(p, r, "Browse files", false);
+        pill(p, r, "Browse files", None, false);
         self.hits.push((r, Hit::Browse));
         y += 140;
         if let Some(lib) = self.lib.as_ref() {
@@ -173,21 +171,12 @@ impl LibraryScreen {
                     let fg = p.theme.fg;
                     p.text_left(Rect::new(panel.x + 24, panel.y + 10, panel.w - 48, 60), title, p.theme.font_px, Style::Bold, fg);
                     let (cancel, ok) = super::name_buttons(size);
-                    button(p, cancel, "Cancel", false);
-                    button(p, ok, "OK", true);
+                    pill(p, cancel, "Cancel", None, false);
+                    pill(p, ok, "OK", None, true);
                 }
                 p.canvas.fill_rect(field.x, field.y, field.w as i32, field.h as i32, p.theme.bg);
                 input.paint(p, field);
             }
         }
-    }
-}
-
-/// `1.2 MB`, `340 KB`.
-pub fn human_size(n: u64) -> String {
-    if n >= 1 << 20 {
-        format!("{:.1} MB", n as f64 / (1u64 << 20) as f64)
-    } else {
-        format!("{} KB", n.div_ceil(1024))
     }
 }

@@ -583,7 +583,7 @@ fn library_view_sort_filter_search_grid_and_pages() {
     assert_eq!(h.screen.view, View::Books);
     h.shot("01-list");
     let rows = h.screen.hits.iter().filter(|(_, x)| matches!(x, Hit::Book(_))).count();
-    assert_eq!(rows, h.screen.per_page(1272, 1696).min(9));
+    assert_eq!(rows, h.screen.per_page(1696).min(9));
     // Sort by title through the menu.
     h.tap(|x| *x == Hit::Sort);
     assert!(matches!(h.screen.overlay, Some(Overlay::Menu { .. })));
@@ -593,7 +593,7 @@ fn library_view_sort_filter_search_grid_and_pages() {
     let p = Point::new(rect.x + 100, rect.y + i * menu.row_h as i32 + 40);
     h.tap_at(p);
     assert_eq!(h.screen.query.sort, SortKey::Title);
-    let firsts: Vec<String> = h.screen.page_books(1272, 1696).0.iter().map(|b| b.title.to_lowercase()).collect();
+    let firsts: Vec<String> = h.screen.page_books(1696).0.iter().map(|b| b.title.to_lowercase()).collect();
     let mut s = firsts.clone();
     s.sort();
     assert_eq!(firsts, s);
@@ -604,7 +604,7 @@ fn library_view_sort_filter_search_grid_and_pages() {
     let p = Point::new(rect.x + 100, rect.y + i * menu.row_h as i32 + 40);
     h.tap_at(p);
     assert_eq!(h.screen.query.format.as_deref(), Some("fb2"));
-    assert!(h.screen.page_books(1272, 1696).0.iter().all(|b| b.format == "fb2"));
+    assert!(h.screen.page_books(1696).0.iter().all(|b| b.format == "fb2"));
     h.shot("03-filter-fb2");
     // Back to all; grid with pages.
     h.tap(|x| *x == Hit::Filter);
@@ -616,13 +616,13 @@ fn library_view_sort_filter_search_grid_and_pages() {
     assert_eq!(h.screen.mode, ViewMode::Grid);
     h.shot("04-grid");
     // Nine books fill one screen of covers: no scroll bar.
-    assert_eq!(h.screen.page_books(1272, 1696).0.len(), 9);
+    assert_eq!(h.screen.page_books(1696).0.len(), 9);
     assert!(h.screen.bar.is_none());
     // Search with the on-screen keyboard.
     h.tap(|x| *x == Hit::Search);
     h.type_text("alice");
     assert_eq!(h.screen.query.search, "alice");
-    let found = h.screen.page_books(1272, 1696).0;
+    let found = h.screen.page_books(1696).0;
     assert!(!found.is_empty() && found.iter().all(|b| b.title.to_lowercase().contains("alice")), "{found:?}");
     h.shot("06-search");
     // Done closes the keyboard and keeps the search.
@@ -700,7 +700,7 @@ fn collections_tab_opens_a_collection_and_renames_it() {
     h.shot("01-collections");
     h.tap(|x| *x == Hit::Collection("tests".into()));
     assert_eq!((h.screen.view.clone(), h.screen.query.collection.as_deref()), (View::Books, Some("tests")));
-    let shown = h.screen.page_books(1272, 1696).0;
+    let shown = h.screen.page_books(1696).0;
     assert_eq!(shown.len(), 1);
     h.shot("02-collection-books");
     h.tap(|x| *x == Hit::Back);
@@ -920,7 +920,7 @@ fn status_chips_clear_search_badges_and_one_chip_row() {
     h.screen.lib.as_mut().unwrap().set_status(&j, ReadingStatus::Complete);
     h.tap(|x| *x == Hit::StatusFilter(3));
     assert_eq!(h.screen.query.status, StatusFilter::Finished);
-    let shown = h.screen.page_books(1272, 1696).0;
+    let shown = h.screen.page_books(1696).0;
     assert_eq!(shown.iter().map(|b| b.path.clone()).collect::<Vec<_>>(), vec![j.clone()]);
     h.shot("01-finished");
     assert_eq!(super::browse::book_state(&shown[0]), Err(super::browse::Badge::Finished));
@@ -930,10 +930,10 @@ fn status_chips_clear_search_badges_and_one_chip_row() {
     h.screen.query.search = "zzz".into();
     h.screen.redraw();
     h.paint();
-    assert!(h.screen.page_books(1272, 1696).0.is_empty());
+    assert!(h.screen.page_books(1696).0.is_empty());
     h.tap(|x| *x == Hit::ClearSearch);
     assert_eq!(h.screen.query.search, "");
-    assert_eq!(h.screen.page_books(1272, 1696).0.len(), 3);
+    assert_eq!(h.screen.page_books(1696).0.len(), 3);
     // Grid: one book cell per book, the mode button in the app bar switches back.
     h.tap(|x| *x == Hit::ToggleMode);
     assert_eq!(h.screen.mode, ViewMode::Grid);
@@ -1198,7 +1198,7 @@ fn library_list_scrolls_a_screen_at_a_time_with_a_scroll_bar() {
     let mut h = Harness::new("scroll", &dir, paths);
     h.tap(|x| *x == Hit::Tab(1));
     assert_eq!((h.screen.view.clone(), h.screen.mode), (View::Books, ViewMode::List));
-    let per = h.screen.per_page(1272, 1696);
+    let per = h.screen.per_page(1696);
     assert!(per < 9, "the test needs two screens of rows ({per} per screen)");
     let g = h.screen.bar.expect("scroll bar with two screens");
     assert_eq!((g.bar.total, g.bar.first, g.bar.shown), (9, 0, per));
@@ -1219,7 +1219,7 @@ fn library_list_scrolls_a_screen_at_a_time_with_a_scroll_bar() {
     let n = h.probe.updates().len();
     h.swipe(true);
     h.assert_scrolled(n, 1);
-    assert_eq!(h.screen.page_books(1272, 1696).0.len(), 9 - per);
+    assert_eq!(h.screen.page_books(1696).0.len(), 9 - per);
     h.shot("02-second-screen");
     // At the end a swipe up does nothing (no refresh).
     let n = h.probe.updates().len();
@@ -1259,7 +1259,7 @@ fn library_list_scrolls_a_screen_at_a_time_with_a_scroll_bar() {
     h.assert_scrolled(n, 0);
     assert!(h.pushed().is_empty() && h.screen.overlay.is_none());
     // A tap on a row still opens its book.
-    let first = h.screen.page_books(1272, 1696).0[0].path.clone();
+    let first = h.screen.page_books(1696).0[0].path.clone();
     h.tap(|x| *x == Hit::Book(first.clone()));
     assert_eq!(h.pushed().last(), Some(&Route::Reader(first)));
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();

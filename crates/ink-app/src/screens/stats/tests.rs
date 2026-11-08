@@ -159,3 +159,19 @@ fn stats_plugin_writes_paths_statistics() {
     assert_eq!(again.plugins().len(), crate::plugins::compiled_in().len());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn page_keys_and_swipes_step_books_and_months() {
+    use super::{Hit, StatsScreen, Tab};
+    let mut s = StatsScreen::default();
+    assert_eq!((s.step(true), s.step(false)), (None, None), "the overview has no pages");
+    s.tab = Tab::Calendar;
+    assert_eq!((s.step(true), s.step(false)), (Some(Hit::NextMonth), Some(Hit::PrevMonth)));
+    s.tab = Tab::Books;
+    assert_eq!((s.step(true), s.step(false)), (Some(Hit::NextPage), Some(Hit::PrevPage)));
+    s.month = (2026, 12);
+    s.shift_month(1);
+    assert_eq!(s.month, (2027, 1));
+    s.shift_month(-2);
+    assert_eq!(s.month, (2026, 11));
+}

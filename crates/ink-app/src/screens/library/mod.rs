@@ -38,11 +38,12 @@ mod view;
 pub use model::{ImportResult, Library, Query, StatusFilter};
 
 use crate::router::{AppCtx, AppScreen, Route, ScreenRegistry, Transition};
+use crate::screens::common::paint_cx;
 use crate::screens::settings::worker::{self, Job, Poll, Reporter};
 use ink_device::{Key, PowerEvent, Rect, RefreshClass, Size};
 use ink_store::koreader::KoreaderDirs;
 use ink_store::ReadingStatus;
-use ink_ui::{Damage, Dialog, EventResult, Gesture, KeyAction, Keyboard, Menu, PaintCx, ScrollBar, TextInput, UiEvent, Widget};
+use ink_ui::{Damage, Dialog, EventResult, Gesture, KeyAction, Keyboard, Menu, ScrollBar, TextInput, UiEvent, Widget};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -483,12 +484,7 @@ impl LibraryScreen {
                 return self.open_nav(&name, size);
             }
             Hit::More => {
-                let items = vec![
-                    ("Settings".to_string(), "settings".to_string()),
-                    ("Reading statistics".to_string(), "stats".to_string()),
-                    ("KOReader import".to_string(), "import".to_string()),
-                ];
-                let mut items = items;
+                let mut items = menu_items(&[("Settings", "settings"), ("Reading statistics", "stats"), ("KOReader import", "import")]);
                 items.extend(self.plugin_entries.iter().map(|e| (e.label.clone(), format!("{LIB_ENTRY}{}", ink_plugin::registry::saved_id(&e.plugin, &e.id)))));
                 self.open_menu(items, MenuKind::More, Hit::More, size);
             }
@@ -538,7 +534,7 @@ impl LibraryScreen {
                 self.redraw();
             }
             Hit::SetStatus(p, i) => {
-                if let (Some(st), Some(lib)) = (details::status_at(i), self.lib.as_mut()) {
+                if let (Some(st), Some(lib)) = (STATUSES.get(i).copied(), self.lib.as_mut()) {
                     lib.set_status(&p, st);
                 }
                 self.redraw();
@@ -552,13 +548,8 @@ impl LibraryScreen {
             }
             Hit::Delete(p) => {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let dialog = Dialog {
-                    title: "Delete this book?".into(),
-                    body: format!("{name} and rinky's notes for it are removed from the device. This cannot be undone."),
-                    buttons: vec![("Cancel".into(), "cancel".into()), ("Delete".into(), "ok".into())],
-                };
-                self.overlay = Some(Overlay::Confirm { dialog, kind: Confirm::DeleteBook(p) });
-                self.redraw();
+                let body = format!("{name} and rinky's notes for it are removed from the device. This cannot be undone.");
+                self.confirm_delete("Delete this book?", body, Confirm::DeleteBook(p));
             }
             Hit::PluginMenu(p) => {
                 let items = self.plugin_actions.iter().enumerate().map(|(i, a)| (a.label.clone(), format!("{i}"))).collect();
@@ -566,7 +557,7 @@ impl LibraryScreen {
             }
             Hit::NewCollection => self.open_input(InputFor::NewCollection(None), "New collection", ""),
             Hit::Collection(name) if long => {
-                let items = vec![("Rename".to_string(), "rename".to_string()), ("Delete".to_string(), "delete".to_string())];
+                let items = menu_items(&[("Rename", "rename"), ("Delete", "delete")]);
                 self.open_menu(items, MenuKind::CollectionActions(name.clone()), Hit::Collection(name), size);
             }
             Hit::Collection(name) => {
@@ -651,7 +642,7 @@ impl LibraryScreen {
     pub(crate) fn poll_job(&mut self) {
         let Some(job) = self.job.as_mut() else { return };
         match job.poll() {
-            Poll::Running(_) => {
+            Poll::Running => {
                 let text = job.status();
                 if text != self.busy_text {
                     self.busy_text = text;
@@ -685,12 +676,9 @@ impl LibraryScreen {
     /// The scroll position of the current view: (items, items per screen, screen).
     /// `None` for views that do not scroll.
     fn scroll_state(&self, size: Size) -> Option<(usize, usize, usize)> {
-        let (w, h) = (size.w as i32, size.h as i32);
+        let h = size.h as i32;
         match self.view {
-            View::Books => {
-                let (_, total, page) = self.page_books(w, h);
-                Some((total, self.per_page(w, h).max(1), page))
-            }
+            View::Books => Some((self.lib.as_ref().map_or(0, |l| l.query(&self.query).len()), self.per_page(h).max(1), self.page)),
             View::Files => Some((self.files_rows(), Self::files_per_page(h), self.files_page)),
             View::Collections => Some((self.lib.as_ref().map_or(0, |l| l.index.collections.len()), Self::coll_per_page(h), self.coll_page)),
             _ => None,
@@ -700,7 +688,12 @@ impl LibraryScreen {
     /// Shows screen `page` of the current view (clamped); only the scrolling region is
     /// repainted. False when the view does not scroll or is there already.
     fn scroll_to(&mut self, page: usize, size: Size) -> bool {
-        let Some((total, per, now)) = self.scroll_state(size) else { return false };
+        self.scroll_state(size).is_some_and(|state| self.scroll_from(state, page))
+    }
+
+    /// [`Self::scroll_to`] from the view's [`Self::scroll_state`] (the library view's
+    /// query runs once per step).
+    fn scroll_from(&mut self, (total, per, now): (usize, usize, usize), page: usize) -> bool {
         let last = ScrollBar::pages_of(total, per) - 1;
         let (page, now) = (page.min(last), now.min(last));
         if page == now {
@@ -719,9 +712,9 @@ impl LibraryScreen {
 
     /// Moves the current view by `step` screens.
     fn turn(&mut self, step: i64, size: Size) {
-        let Some((total, per, now)) = self.scroll_state(size) else { return };
+        let Some(state @ (total, per, now)) = self.scroll_state(size) else { return };
         let now = now.min(ScrollBar::pages_of(total, per) - 1);
-        self.scroll_to((now as i64 + step).max(0) as usize, size);
+        self.scroll_from(state, (now as i64 + step).max(0) as usize);
     }
 
     /// Touches on the scroll bar: a press there takes the touch; moving shows the
@@ -959,17 +952,20 @@ impl LibraryScreen {
                 if a == "rename" {
                     self.open_input(InputFor::Rename(name.clone()), "Rename collection", &name);
                 } else if a == "delete" {
-                    let dialog = Dialog {
-                        title: "Delete this collection?".into(),
-                        body: format!("“{name}” is removed. Its books stay in the library."),
-                        buttons: vec![("Cancel".into(), "cancel".into()), ("Delete".into(), "ok".into())],
-                    };
-                    self.overlay = Some(Overlay::Confirm { dialog, kind: Confirm::DeleteCollection(name) });
+                    let body = format!("“{name}” is removed. Its books stay in the library.");
+                    self.confirm_delete("Delete this collection?", body, Confirm::DeleteCollection(name));
                 }
             }
         }
         self.redraw();
         Transition::None
+    }
+
+    /// Asks before a delete: Cancel or Delete, then [`Self::confirmed`].
+    fn confirm_delete(&mut self, title: &str, body: String, kind: Confirm) {
+        let dialog = Dialog { title: title.into(), body, buttons: menu_items(&[("Cancel", "cancel"), ("Delete", "ok")]) };
+        self.overlay = Some(Overlay::Confirm { dialog, kind });
+        self.redraw();
     }
 
     fn confirmed(&mut self, kind: Confirm) {
@@ -1026,6 +1022,11 @@ impl LibraryScreen {
 
 /// Status choices on the details page, in menu order.
 const STATUSES: [ReadingStatus; 4] = [ReadingStatus::New, ReadingStatus::Reading, ReadingStatus::Complete, ReadingStatus::Abandoned];
+
+/// Owned `(label, action)` rows for a menu or dialog.
+fn menu_items(items: &[(&str, &str)]) -> Vec<(String, String)> {
+    items.iter().map(|(l, a)| (l.to_string(), a.to_string())).collect()
+}
 
 /// A menu label with a leading "\u{2713} " when `on` (`ink_ui::Menu` draws it as an icon).
 fn mark(on: bool, label: &str) -> String {
@@ -1254,11 +1255,9 @@ impl LibraryScreen {
                 Some(h) => self.act(h, false, size),
                 None => Transition::None,
             },
-            UiEvent::Gesture(g @ Gesture::Swipe { .. }) => {
+            UiEvent::Gesture(Gesture::Swipe { .. }) => {
                 // Up (or left) shows the next screen, down (or right) the previous one.
-                let (dx, dy) = g.delta();
-                let d = if dx.abs() > dy.abs() { dx } else { dy };
-                self.turn(if d < 0 { 1 } else { -1 }, size);
+                self.turn(crate::screens::common::swipe_step(ev).unwrap_or(0).into(), size);
                 Transition::None
             }
             _ => Transition::None,
@@ -1314,7 +1313,7 @@ impl LibraryScreen {
             // the rows and the scroll bar are sent to the panel.
             self.bar_dirty = false;
             self.last_paint = Instant::now();
-            let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+            let mut p = paint_cx(cx);
             self.draw(&mut p);
             let s = cx.screen.size();
             let r = Self::scroll_region(s.w as i32, s.h as i32);
@@ -1322,7 +1321,7 @@ impl LibraryScreen {
         }
         if std::mem::take(&mut self.bar_dirty) {
             if let (Some(g), Some(d)) = (self.bar, self.bar_drag) {
-                let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+                let mut p = paint_cx(cx);
                 let track = ScrollBar::track(g.region);
                 ScrollBar::paged(g.bar.total, g.per, d.page).paint_drag(&mut p, track);
                 return Ok(vec![Damage { rect: track, class: RefreshClass::Du }]);
@@ -1343,7 +1342,7 @@ impl LibraryScreen {
                 }
                 _ => None,
             };
-            let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+            let mut p = paint_cx(cx);
             self.draw(&mut p);
             let bounds = cx.canvas.bounds();
             if let Some(keys) = keys {
@@ -1354,14 +1353,14 @@ impl LibraryScreen {
             return Ok(vec![Damage { rect: bounds, class }]);
         }
         if std::mem::take(&mut self.busy_dirty) && self.job.is_some() {
-            let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+            let mut p = paint_cx(cx);
             let r = self.draw_busy_line(&mut p);
             return Ok(vec![Damage { rect: r, class: RefreshClass::Du }]);
         }
         if std::mem::take(&mut self.keyboard_dirty) {
             let size = cx.screen.size();
             if let Some(Overlay::Input { search, input, keyboard, .. }) = self.overlay.as_mut() {
-                let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+                let mut p = paint_cx(cx);
                 let kb = keyboard_rect(size);
                 p.canvas.fill_rect(kb.x, kb.y, kb.w as i32, kb.h as i32, p.theme.bg);
                 keyboard.paint(&mut p, kb);

@@ -3,13 +3,15 @@
 //! shows the word large; a tap on it flips it to the meaning and the context (only the
 //! card is refreshed).
 
-use super::{button, header, now_and_offset, pager, swipe_step, tap_pos, HEADER_H, MARGIN, PAGER_H};
+use super::{header, now_and_offset, pager, HEADER_H, MARGIN, PAGER_H};
+use crate::screens::common::{paint_cx, pill, swipe_step, tap_pos};
 use crate::router::{AppCtx, AppScreen, Transition};
 use ink_device::{Key, Rect, RefreshClass, Size};
 use ink_stats::{VocabDb, VocabWord};
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::theme::space;
+use ink_ui::dialog::wrap_lines;
 use ink_ui::{Damage, PaintCx, ProgressBar, UiEvent, Widget};
 use std::path::PathBuf;
 
@@ -282,7 +284,7 @@ impl VocabScreen {
             let msg = format!("{} words reviewed. The next ones are due later.", round.total);
             p.text_centered(Rect::new(MARGIN, y + 120, tw, 60), &msg, t.label.px, t.label.style, t.muted);
             let r = Rect::new(w / 2 - 220, y + 240, 440, 104);
-            button(p, r, "Back to the list", true);
+            pill(p, r, "Back to the list", None, true);
             self.hits.push((r, Hit::Back));
             return;
         };
@@ -290,8 +292,8 @@ impl VocabScreen {
         self.paint_card(p, cr, card, round.shown);
         self.hits.push((cr, Hit::Show));
         let (no, yes) = answer_rects(w, h);
-        button(p, no, "Don't know", false);
-        button(p, yes, "Know", true);
+        pill(p, no, "Don't know", None, false);
+        pill(p, yes, "Know", None, true);
         self.hits.push((no, Hit::Know(false)));
         self.hits.push((yes, Hit::Know(true)));
     }
@@ -328,7 +330,7 @@ impl VocabScreen {
         p.canvas.fill_rect(x, y, iw as i32, t.rule_px, t.light);
         y += space(4);
         if let Some(d) = &card.definition {
-            for line in wrap(p, d, t.body.px, iw as f32).into_iter().take(6) {
+            for line in wrap_lines(p, &one_paragraph(d), t.body.px, t.body.style, iw as f32).into_iter().take(6) {
                 p.text_left(Rect::new(x, y, iw, 56), &line, t.body.px, t.body.style, t.fg);
                 y += 56;
             }
@@ -336,7 +338,7 @@ impl VocabScreen {
         }
         let ctx = context_line(card);
         if !ctx.is_empty() {
-            for line in wrap(p, &ctx, t.label.px, iw as f32).into_iter().take(4) {
+            for line in wrap_lines(p, &one_paragraph(&ctx), t.label.px, Style::Italic, iw as f32).into_iter().take(4) {
                 p.text_left(Rect::new(x, y, iw, 52), &line, t.label.px, Style::Italic, t.muted);
                 y += 52;
             }
@@ -352,22 +354,11 @@ impl VocabScreen {
     }
 }
 
-/// Greedy word wrap of `text` to lines at most `max` pixels wide.
-fn wrap(p: &mut PaintCx, text: &str, px: f32, max: f32) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut cur = String::new();
-    for word in text.split_whitespace() {
-        let cand = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-        if !cur.is_empty() && p.text_width(Style::Regular, px, &cand) > max {
-            lines.push(std::mem::replace(&mut cur, word.to_string()));
-        } else {
-            cur = cand;
-        }
-    }
-    if !cur.is_empty() {
-        lines.push(cur);
-    }
-    lines
+/// `text` with every run of whitespace (newlines too) as one space: the card shows the
+/// meaning and the context as one flowing paragraph each, as the card's own wrap did
+/// before it used [`wrap_lines`], which starts a new line at every `\n`.
+fn one_paragraph(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl AppScreen for VocabScreen {
@@ -417,7 +408,7 @@ impl AppScreen for VocabScreen {
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {
         let Some(class) = self.dirty.take() else { return Ok(Vec::new()) };
-        let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+        let mut p = paint_cx(cx);
         self.draw(&mut p);
         let rect = self.dirty_rect.take().unwrap_or_else(|| cx.canvas.bounds());
         Ok(vec![Damage { rect, class }])
@@ -427,6 +418,11 @@ impl AppScreen for VocabScreen {
 #[cfg(test)]
 mod unit {
     use super::*;
+
+    #[test]
+    fn card_text_flows_as_one_paragraph() {
+        assert_eq!(one_paragraph("a long-standing\n\n resentment\t"), "a long-standing resentment");
+    }
 
     #[test]
     fn context_lines() {
