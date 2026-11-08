@@ -653,18 +653,9 @@ fn same_time(a: &Table, b: &Table) -> bool {
 fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, paging: bool, import_old: bool) -> Vec<KoAnnotation> {
     // Highlights by page, with their table (for the drawer and pboxes).
     let mut hls: Vec<(i64, &Table)> = Vec::new();
-    if let Some(h) = highlights {
-        for (k, v) in &h.entries {
-            let page = match k {
-                lua::Key::Int(i) => *i,
-                _ => 0,
-            };
-            if let Some(list) = v.as_table() {
-                for hl in list.seq().into_iter().filter_map(|x| x.as_table()) {
-                    hls.push((page, hl));
-                }
-            }
-        }
+    for (k, list) in highlights.iter().flat_map(|h| &h.entries).filter_map(|(k, v)| Some((k, v.as_table()?))) {
+        let page = if let lua::Key::Int(i) = k { *i } else { 0 };
+        hls.extend(list.seq().into_iter().filter_map(|x| x.as_table()).map(|hl| (page, hl)));
     }
     // A highlighted bookmark and a highlight are the same when their positions are
     // equal and their datetimes do not differ; the highlights are indexed by position so
