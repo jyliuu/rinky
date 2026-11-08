@@ -104,7 +104,12 @@ pub struct App {
     revealed_part: bool,
     /// The last network status reported (toasts only on a change).
     net_shown: Option<ink_device::NetStatus>,
+    /// The network last connected to and when the connection ended.
+    net_lost: Option<(String, Instant)>,
 }
+
+/// A connection back to the same network this soon after it ended gets no toast.
+pub const RECONNECT_QUIET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The toast for network event `e` after status `shown`: a new connection, a failed
 /// join, or a search after a start that found nothing. `None` for everything else (a
@@ -312,6 +317,7 @@ impl App {
             shown,
             revealed_part: false,
             net_shown: None,
+            net_lost: None,
         }
     }
 
@@ -320,11 +326,25 @@ impl App {
     /// and keeps what must outlive the process ("Wi-Fi was on", for the next start).
     fn network_event(&mut self, e: &ink_device::NetEvent) {
         let awake = self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake;
-        if let Some(text) = network_toast(self.net_shown.as_ref(), e).filter(|_| awake) {
+        let now = Instant::now();
+        // The same network back within a few seconds (wifid rejoins by itself after a
+        // drop): nothing to tell.
+        let blip = match (e, &self.net_lost) {
+            (ink_device::NetEvent::Status(ink_device::NetStatus::Connected { essid, .. }), Some((lost, at))) => {
+                lost == essid && now.duration_since(*at) < RECONNECT_QUIET
+            }
+            _ => false,
+        };
+        if let Some(text) = network_toast(self.net_shown.as_ref(), e).filter(|_| awake && !blip) {
             log::info!("wifi: toast {text:?}");
             crate::export::toast(&mut self.plugins, text);
         }
         if let ink_device::NetEvent::Status(s) = e {
+            if let Some(was) = self.net_shown.as_ref().and_then(|s| s.connected_to()) {
+                if s.connected_to() != Some(was) {
+                    self.net_lost = Some((was.to_string(), now));
+                }
+            }
             self.net_shown = Some(s.clone());
         }
         if let ink_device::NetEvent::WasOn(on) = e {
@@ -773,6 +793,13 @@ mod network_tests {
         assert!(Settings::load(&paths.settings()).unwrap().device.wifi_was_on);
         app.network_event(&NetEvent::WasOn(false));
         assert!(!Settings::load(&paths.settings()).unwrap().device.wifi_was_on);
+        // A short drop and rejoin of the same network: remembered as lost, no new toast.
+        let home = NetStatus::Connected { essid: "Home".into(), signal: None };
+        app.network_event(&NetEvent::Status(home.clone()));
+        app.network_event(&NetEvent::Status(NetStatus::Connecting { essid: None }));
+        assert_eq!(app.net_lost.as_ref().map(|(e, _)| e.as_str()), Some("Home"));
+        app.network_event(&NetEvent::Status(home));
+        assert_eq!(app.net_shown.as_ref().and_then(NetStatus::connected_to), Some("Home"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
