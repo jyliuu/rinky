@@ -841,36 +841,6 @@ impl Widget for Tile {
     }
 }
 
-/// The layer under the panel: a tap below the panel closes it ([`CLOSE`]). Every other
-/// touch and gesture is ignored, so a touch on an empty part of the panel marks nothing
-/// dirty (a `Scrim` would repaint and refresh the whole screen with GL16 on every touch).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Backdrop {
-    /// The panel; taps inside it do not close.
-    pub panel: Rect,
-}
-
-impl Widget for Backdrop {
-    fn paint(&mut self, _cx: &mut PaintCx, _b: Rect) {}
-
-    fn opaque(&self) -> bool {
-        false
-    }
-
-    /// It draws nothing: being added (full screen) must not refresh the whole screen,
-    /// which would make the opening a screen-change flash.
-    fn adds_damage(&self) -> bool {
-        false
-    }
-
-    fn event(&mut self, ev: &UiEvent, _b: Rect) -> EventResult {
-        match ev {
-            UiEvent::Gesture(Gesture::Tap { pos }) if !self.panel.contains(*pos) => EventResult::Action(CLOSE.into()),
-            _ => EventResult::Ignored,
-        }
-    }
-}
-
 /// The panel's background: paper, a black edge along the bottom, the grab handle and
 /// the status line.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1095,7 +1065,7 @@ impl ControlCenterScreen {
         let names = buttons(current_settings(cx), cx.plugins);
         let lay = layout(size, names.len());
         let mut tree = WidgetTree::new();
-        tree.add(None, Box::new(Backdrop { panel: lay.panel }), Rect::from_size(size));
+        tree.add(None, Box::new(PopupCatcher { modal: false, ..PopupCatcher::new(lay.panel, CLOSE) }), Rect::from_size(size));
         // Only the edge strip: a removed picker repaints its own rect, not the whole panel
         // (the panel is cleared by `invalidate` on enter and resize).
         let rule = cx.theme.rule_px;
@@ -1326,7 +1296,7 @@ impl ControlCenterScreen {
             self.tree.remove(p.catcher);
         }
         let close = popup.close_action.clone();
-        let catcher = self.tree.add(None, Box::new(PopupCatcher { popup: r, action: close }), Rect::from_size(cx.screen.size()));
+        let catcher = self.tree.add(None, Box::new(PopupCatcher::new(r, close)), Rect::from_size(cx.screen.size()));
         let n = popup.list.rows.len();
         let id = self.tree.add(None, Box::new(popup), r);
         log::info!("control center: popup {name} with {n} rows at {r:?}");
