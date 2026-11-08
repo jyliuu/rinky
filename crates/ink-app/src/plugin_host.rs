@@ -1039,7 +1039,7 @@ pub mod hooks {
     use crate::router::{AppCtx, AppScreen};
     use ink_doc::Document;
     use ink_plugin::registry::StatusSlot;
-    use ink_device::{Canvas, Rect, RefreshClass, Rotation, Screen, Size};
+    use ink_device::{Canvas, Rect, RefreshClass};
     use ink_ui::{Damage, Gesture, PaintCx, UiEvent};
     use std::path::Path;
     use std::time::Duration;
@@ -1121,49 +1121,17 @@ pub mod hooks {
         }
     }
 
-    /// A [`Screen`] that records the rectangles shown through it.
-    struct Recorder<'a> {
-        inner: &'a mut dyn Screen,
+    /// Records the rectangles a screen shows through `cx.screen` while it paints.
+    #[derive(Default)]
+    struct Recorder {
         shown: Vec<Damage>,
         wave: Option<ink_device::Wave>,
     }
 
-    impl Screen for Recorder<'_> {
-        fn panel_size(&self) -> Size {
-            self.inner.panel_size()
-        }
-        fn rotation(&self) -> Rotation {
-            self.inner.rotation()
-        }
-        fn set_rotation(&mut self, rotation: Rotation) -> ink_device::Result<()> {
-            self.inner.set_rotation(rotation)
-        }
-        fn size(&self) -> Size {
-            self.inner.size()
-        }
-        fn night_mode(&self) -> bool {
-            self.inner.night_mode()
-        }
-        fn set_night_mode(&mut self, on: bool) -> ink_device::Result<()> {
-            self.inner.set_night_mode(on)
-        }
-        fn update(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass) -> ink_device::Result<()> {
+    impl crate::shown::Watch for Recorder {
+        fn sent(&mut self, _canvas: &Canvas, rect: Rect, class: RefreshClass, wave: Option<ink_device::Wave>) {
             self.shown.push(Damage { rect, class });
-            self.inner.update(canvas, rect, class)
-        }
-        fn update_wave(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass, wave: ink_device::Wave) -> ink_device::Result<()> {
-            self.shown.push(Damage { rect, class });
-            self.wave = Some(wave);
-            self.inner.update_wave(canvas, rect, class, wave)
-        }
-        fn frame_done(&mut self, canvas: &Canvas) {
-            self.inner.frame_done(canvas)
-        }
-        fn refresh_all(&mut self) -> ink_device::Result<()> {
-            self.inner.refresh_all()
-        }
-        fn screenshot(&self) -> ink_device::Result<Canvas> {
-            self.inner.screenshot()
+            self.wave = wave.or(self.wave);
         }
     }
 
@@ -1192,7 +1160,7 @@ pub mod hooks {
         cx.plugins.poll(top.document());
         apply_goto(top, cx);
         cx.plugins.overlay_painted = false;
-        let mut rec = Recorder { inner: &mut *cx.screen, shown: Vec::new(), wave: None };
+        let mut rec = crate::shown::Tap::new(&mut *cx.screen, Recorder::default());
         let mut damage = {
             let mut sub = AppCtx {
                 canvas: &mut *cx.canvas,
@@ -1211,7 +1179,7 @@ pub mod hooks {
         };
         // A screen that still paints the overlay itself (older docs) did it already;
         // composing again would save the overlay's own pixels as its background.
-        let (shown, wave) = (rec.shown, rec.wave);
+        let Recorder { shown, wave } = rec.watch;
         if cx.plugins.overlay_painted {
             return Ok(Frame { shown, damage, wave });
         }
