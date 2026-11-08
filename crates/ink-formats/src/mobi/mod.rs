@@ -103,14 +103,10 @@ pub const MAX_TEXT: usize = 64 << 20;
 pub const MAX_FONT: usize = 32 << 20;
 
 /// Decodes a `FONT` record (KindleUnpack `read_font_record`): optional XOR of the first
-/// 1040 bytes with the key in the record, then optional zlib.
-pub fn decode_font(rec: &[u8]) -> Option<Vec<u8>> {
-    decode_font_max(rec, MAX_FONT)
-}
-
-/// [`decode_font`] stopping after `max` bytes (`None` when the font is larger, unless
-/// `max` is below [`MAX_FONT`], which reads only a prefix for sniffing the type).
-fn decode_font_max(rec: &[u8], max: usize) -> Option<Vec<u8>> {
+/// 1040 bytes with the key in the record, then optional zlib. Stops after `max` bytes:
+/// `None` when the font is larger, unless `max` is below [`MAX_FONT`], which reads only
+/// a prefix (enough to tell the font type).
+pub fn decode_font(rec: &[u8], max: usize) -> Option<Vec<u8>> {
     use crate::util::be32;
     if rec.get(..4) != Some(b"FONT") {
         return None;
@@ -145,11 +141,6 @@ fn decode_font_max(rec: &[u8], max: usize) -> Option<Vec<u8>> {
     }
     data.truncate(max);
     Some(data)
-}
-
-/// The first bytes of a `FONT` record's font, enough to tell its type.
-fn font_head(rec: &[u8]) -> Option<Vec<u8>> {
-    decode_font_max(rec, 64)
 }
 
 impl Mobi {
@@ -246,7 +237,7 @@ impl Mobi {
                 break;
             }
             let (kind, media) = if magic == b"FONT" {
-                match font_head(data) {
+                match decode_font(data, 64) {
                     Some(f) => (ResKind::Font, sniff_media_type(&f).unwrap_or("font/ttf").to_string()),
                     None => continue,
                 }
@@ -412,7 +403,7 @@ impl ResourceLoader for MobiLoader {
         match r.kind {
             ResKind::Image => Ok(data.to_vec()),
             ResKind::Cres => Ok(data.get(12..).unwrap_or(&[]).to_vec()),
-            ResKind::Font => decode_font(data).ok_or_else(|| DocError::Format(format!("bad FONT record {path}"))),
+            ResKind::Font => decode_font(data, MAX_FONT).ok_or_else(|| DocError::Format(format!("bad FONT record {path}"))),
         }
     }
 
@@ -508,8 +499,8 @@ mod tests {
         }
         rec.extend_from_slice(&key);
         rec.extend_from_slice(&data);
-        assert_eq!(decode_font(&rec).unwrap(), font);
-        assert_eq!(decode_font(b"nope"), None);
+        assert_eq!(decode_font(&rec, MAX_FONT).unwrap(), font);
+        assert_eq!(decode_font(b"nope", MAX_FONT), None);
     }
 
     #[test]
