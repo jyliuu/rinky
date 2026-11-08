@@ -791,6 +791,16 @@ pub(crate) fn press_or_tap(ev: &UiEvent, b: Rect, pressed: &mut bool, changed: &
     }
 }
 
+/// What a widget answers to an event it has no use for: it takes gestures (nothing under
+/// it reacts to them) and ignores everything else.
+pub(crate) fn take_gestures(ev: &UiEvent) -> EventResult {
+    if matches!(ev, UiEvent::Gesture(_)) {
+        EventResult::Handled
+    } else {
+        EventResult::Ignored
+    }
+}
+
 /// The refresh class of a widget with press feedback: DU while pressed (fast black and
 /// white), GL16 otherwise (the released look gets its gray levels back).
 pub(crate) fn press_class(pressed: bool) -> RefreshClass {

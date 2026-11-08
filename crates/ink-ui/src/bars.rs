@@ -7,7 +7,7 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::Gesture;
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{follow_press, press_class, EventResult, PaintCx, Widget};
+use crate::widget::{follow_press, press_class, take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Point, Rect, RefreshClass};
 use ink_text::Style;
@@ -203,8 +203,7 @@ impl Widget for AppBar {
                     None => EventResult::Handled,
                 }
             }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 
@@ -322,8 +321,7 @@ impl Widget for NavBar {
                     None => EventResult::Handled,
                 }
             }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 

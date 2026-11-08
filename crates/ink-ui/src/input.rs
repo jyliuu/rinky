@@ -4,7 +4,7 @@
 use crate::draw::{fill_round_rect, stroke_round_rect};
 use crate::gesture::Gesture;
 use crate::keyboard::KeyAction;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Canvas, Rect, RefreshClass};
 use ink_text::Style;
@@ -195,8 +195,7 @@ impl Widget for TextInput {
                 self.focused = true;
                 EventResult::Action(format!("focus:{}", self.action))
             }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 

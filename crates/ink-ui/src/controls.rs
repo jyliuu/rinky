@@ -10,7 +10,7 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Gesture, TouchKind};
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{press_class, EventResult, PaintCx, Widget};
+use crate::widget::{press_class, take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Point, Rect, RefreshClass};
 use ink_text::hyphen::{hyphenator_for, Hyphenator};
@@ -241,8 +241,7 @@ impl Widget for Slider {
                 self.value = self.snap(self.value + d * step);
                 self.report()
             }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 
@@ -548,12 +547,7 @@ impl Widget for Segmented {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else {
-            return match ev {
-                UiEvent::Gesture(_) => EventResult::Handled,
-                _ => EventResult::Ignored,
-            };
-        };
+        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else { return take_gestures(ev) };
         select_tapped(&self.cells(b), *pos, &mut self.selected, &self.action)
     }
 }
@@ -665,12 +659,7 @@ impl Widget for Chips {
     }
 
     fn event(&mut self, ev: &UiEvent, _b: Rect) -> EventResult {
-        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else {
-            return match ev {
-                UiEvent::Gesture(_) => EventResult::Handled,
-                _ => EventResult::Ignored,
-            };
-        };
+        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else { return take_gestures(ev) };
         let Some(i) = self.rects.iter().position(|r| r.contains(*pos)) else { return EventResult::Handled };
         if self.single {
             if self.chips[i].selected {

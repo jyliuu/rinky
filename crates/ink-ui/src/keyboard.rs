@@ -25,7 +25,7 @@
 use crate::draw::{fill_round_rect, stroke_round_rect};
 use crate::gesture::{Touch, TouchKind};
 use crate::icon::Icon;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Point, Rect, Size};
 use ink_text::Style;
@@ -754,8 +754,7 @@ impl Widget for Keyboard {
         match ev {
             UiEvent::Touch(t) => self.touch(t, b),
             // Gestures are made of touches the keyboard already handled.
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 

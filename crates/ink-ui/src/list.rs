@@ -15,7 +15,7 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Direction, Gesture, TouchKind};
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{follow_press, look_damage, press_class, press_or_tap, EventResult, PaintCx, Widget};
+use crate::widget::{follow_press, look_damage, press_class, press_or_tap, take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Canvas, Rect, RefreshClass};
 use ink_text::Style;
@@ -245,11 +245,7 @@ impl Widget for Card {
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         // Without an action taps are only consumed.
         let res = if self.action.is_empty() { None } else { press_or_tap(ev, b, &mut self.pressed, &mut self.changed, &self.action) };
-        match res {
-            Some(res) => res,
-            None if matches!(ev, UiEvent::Gesture(_)) => EventResult::Handled,
-            None => EventResult::Ignored,
-        }
+        res.unwrap_or_else(|| take_gestures(ev))
     }
 
     fn refresh_class(&self) -> RefreshClass {
@@ -437,8 +433,7 @@ impl Widget for List {
                 Direction::Up | Direction::Left => self.turn(b, 1),
                 Direction::Down | Direction::Right => self.turn(b, -1),
             },
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 
@@ -616,13 +611,9 @@ impl Widget for ScrollView {
                 _ => self.touch_child,
             };
         }
-        match target {
-            Some((i, r)) => match self.children[i].0.event(ev, r) {
-                EventResult::Ignored if matches!(ev, UiEvent::Gesture(_)) => EventResult::Handled,
-                res => res,
-            },
-            None if matches!(ev, UiEvent::Gesture(_)) => EventResult::Handled,
-            None => EventResult::Ignored,
+        match target.map(|(i, r)| self.children[i].0.event(ev, r)) {
+            Some(EventResult::Ignored) | None => take_gestures(ev),
+            Some(res) => res,
         }
     }
 
