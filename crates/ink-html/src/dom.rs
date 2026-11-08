@@ -294,22 +294,13 @@ impl ElemRef<'_> {
         self.dom.element(self.id).expect("element")
     }
 
-    fn sibling(&self, dir: i32) -> Option<Self> {
-        let p = self.dom.node(self.id).parent;
-        if p == NONE {
-            return None;
-        }
-        let kids = &self.dom.node(p).children;
-        let pos = kids.iter().position(|&c| c == self.id)? as i32;
-        let mut i = pos + dir;
-        while i >= 0 && (i as usize) < kids.len() {
-            let c = kids[i as usize];
-            if self.dom.element(c).is_some() {
-                return Some(ElemRef { dom: self.dom, id: c });
-            }
-            i += dir;
-        }
-        None
+    /// The nearest element sibling before (`next` false) or after this element.
+    fn sibling(&self, next: bool) -> Option<Self> {
+        let kids = &self.dom.nodes.get(self.dom.node(self.id).parent as usize)?.children;
+        let pos = kids.iter().position(|&c| c == self.id)?;
+        let is_element = |c: &&NodeId| self.dom.element(**c).is_some();
+        let found = if next { kids[pos + 1..].iter().find(is_element) } else { kids[..pos].iter().rev().find(is_element) };
+        found.map(|&id| ElemRef { dom: self.dom, id })
     }
 }
 
@@ -325,10 +316,10 @@ impl SelectorElement for ElemRef<'_> {
         (p != NONE).then_some(ElemRef { dom: self.dom, id: p })
     }
     fn prev_sibling(&self) -> Option<Self> {
-        self.sibling(-1)
+        self.sibling(false)
     }
     fn next_sibling(&self) -> Option<Self> {
-        self.sibling(1)
+        self.sibling(true)
     }
     fn is_root(&self) -> bool {
         self.dom.node(self.id).parent == NONE
