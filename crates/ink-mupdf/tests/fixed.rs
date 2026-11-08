@@ -631,6 +631,63 @@ fn zoom_step_cuts_pages_into_more_screens_and_back() {
     assert_eq!(d.options().zoom, 4.0);
 }
 
+/// Share of pixels of `a` that differ by more than 64 levels from every pixel of `b`
+/// within one pixel (so a coarse but well placed preview passes, a shifted one not).
+fn misplaced(a: &Canvas, b: &Canvas) -> f64 {
+    let (w, h) = (a.width as i32, a.height as i32);
+    let mut n = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let v = a.pixels[(y * w + x) as usize];
+            let near = (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (x + dx, y + dy)));
+            if near.filter_map(|(x, y)| b.get(x, y)).all(|u| u.abs_diff(v) > 64) {
+                n += 1;
+            }
+        }
+    }
+    n as f64 / a.pixels.len() as f64
+}
+
+/// A zoom step scales the page shown before it as a preview of the new screen: close
+/// to the sharp render (in and out, two steps at once too, on a PDF and a CBZ), and gone
+/// once the sharp page was drawn or the options changed.
+#[test]
+fn zoom_preview_scales_the_screen_shown_before() {
+    for path in [pdf_path(), cbz_path()] {
+        let mut d = open(&path, "", W, H);
+        let mut c = Canvas::new(W as usize, H as usize);
+        assert!(!d.render_zoom_preview(0, &mut c), "no zoom yet");
+        d.set_current_page(2);
+        assert!(d.zoom_step(1).is_some());
+        let page = d.current_page();
+        assert!(!d.render_zoom_preview(page, &mut c), "the page shown was never drawn");
+
+        d.set_options(FixedOptions::default());
+        screen(&mut d, 2);
+        d.set_current_page(2);
+        for (steps, name) in [(1, "x1.25"), (2, "x1.5 then x2")] {
+            for _ in 0..steps {
+                assert!(d.zoom_step(1).is_some());
+            }
+            let page = d.current_page();
+            assert!(d.render_zoom_preview(page, &mut c), "{name}");
+            let sharp = screen(&mut d, page);
+            let diff = misplaced(&c, &sharp);
+            assert!(diff < 0.01, "{}: {name}: {:.2} % of the preview is off", path.display(), diff * 100.0);
+            assert!(c.pixels.iter().any(|&v| v < 100), "{name}: the preview shows ink");
+            assert!(!d.render_zoom_preview(page, &mut c), "{name}: the sharp page replaced the preview");
+            d.set_current_page(page);
+        }
+        // Out again: the zoomed tile covers part of the page, the rest stays white.
+        assert!(d.zoom_step(-3).is_some());
+        let page = d.current_page();
+        assert!(d.render_zoom_preview(page, &mut c));
+        assert!(c.pixels.iter().any(|&v| v < 100) && c.pixels.contains(&255));
+        d.set_options(FixedOptions::default());
+        assert!(!d.render_zoom_preview(page, &mut c), "an option change drops the preview");
+    }
+}
+
 /// The trait's view options reach the engine: two columns cut each page into two
 /// screens, the current page stays on screen, and the engine's own gamma stays.
 #[test]

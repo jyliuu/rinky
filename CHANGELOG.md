@@ -48,6 +48,8 @@ All notable changes to rinky are listed here. The format is based on
   rinky draws the next page (or the previous one, after turning back) while you read.
 - On Kindles with 512 MB of memory, scanned PDFs and comics take about 20 MB less
   memory while reading, with no slower page turns.
+- Zooming a PDF or comic page with a pinch shows the zoomed page at once, a little
+  coarse, and sharpens it a moment after your fingers lift.
 
 ### Fixed
 - Reading settings (Aa): a preset or a font size step now also refreshes the preview

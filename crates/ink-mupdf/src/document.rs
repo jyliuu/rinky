@@ -186,6 +186,16 @@ pub struct MupdfDocument {
     selection: Option<Selection>,
     lut: Option<Box<[u8; 256]>>,
     inner: RefCell<Inner>,
+    /// The screen shown before a zoom step, kept until the next `render_page` for
+    /// [`Document::render_zoom_preview`].
+    zoom_from: Option<ZoomFrom>,
+}
+
+/// A rendered screen and the pieces it showed: the source of a zoom preview.
+struct ZoomFrom {
+    pieces: Vec<Piece>,
+    pixels: Vec<u8>,
+    width: usize,
 }
 
 /// The default MuPDF store cap for a device with `mem_total_kib` of memory (`MemTotal`;
@@ -199,6 +209,37 @@ pub fn default_store_mb(mem_total_kib: Option<u64>) -> usize {
         Some(kib) => usize::try_from(kib / 1024 / 16).unwrap_or(usize::MAX).clamp(MIN_STORE_MB, DEFAULT_STORE_MB),
         None => DEFAULT_STORE_MB,
     }
+}
+
+/// Scales the pixels piece `src` shows in `from` (a screen `w` pixels wide) to where
+/// piece `to` of the same page puts them in `dst`, nearest neighbour, within both
+/// clips. False when nothing overlaps or the mapping is not a scale and shift (the
+/// two pieces are rotated alike, so it always is).
+fn scale_piece(from: &[u8], w: usize, src: &Piece, to: &Piece, dst: &mut [u8]) -> bool {
+    // Pixel centres of `to`'s screen to `src`'s screen.
+    let m = to.ctm.invert().then(&src.ctm);
+    let [a, b, c, d, e, f] = m.m;
+    if b.abs() > 1e-4 || c.abs() > 1e-4 || a <= 0.0 || d <= 0.0 {
+        return false;
+    }
+    let region = to.ctm.map_rect(&to.region.intersect(&src.region));
+    let area = to.clip.intersect(&region.to_rect());
+    if area.is_empty() || src.clip.is_empty() {
+        return false;
+    }
+    let (sx0, sx1) = (src.clip.x as f32, (src.clip.right() - 1) as f32);
+    let (sy0, sy1) = (src.clip.y as f32, (src.clip.bottom() - 1) as f32);
+    let src_x = |x: i32| (a * (x as f32 + 0.5) + e).floor().clamp(sx0, sx1) as usize;
+    let xs: Vec<usize> = (area.x..area.right()).map(src_x).collect();
+    for y in area.y..area.bottom() {
+        let sy = (d * (y as f32 + 0.5) + f).floor().clamp(sy0, sy1) as usize;
+        let row = &from[sy * w..(sy + 1) * w];
+        let at = y as usize * w + area.x as usize;
+        for (p, &sx) in dst[at..at + xs.len()].iter_mut().zip(&xs) {
+            *p = row[sx];
+        }
+    }
+    true
 }
 
 fn env_mb(name: &str, default: usize) -> usize {
@@ -609,6 +650,7 @@ impl MupdfDocument {
             current: 0,
             selection: None,
             lut: lut(opts.contrast, opts.gamma),
+            zoom_from: None,
             inner: RefCell::new(Inner {
                 raw,
                 bounds: HashMap::new(),
@@ -648,6 +690,7 @@ impl MupdfDocument {
         self.opts = opts;
         self.lut = lut(opts.contrast, opts.gamma);
         self.inner.borrow_mut().screens.clear();
+        self.zoom_from = None;
         self.replan();
         if let Some(p) = pos {
             self.current = self.page_of(&p).unwrap_or(0);
@@ -873,6 +916,13 @@ impl MupdfDocument {
         Ok(r)
     }
 
+    /// The cached pixels of `screen` with its pieces, to scale for a zoom preview
+    /// (`None` when the screen is not in the cache).
+    fn zoom_source(&self, screen: usize) -> Option<ZoomFrom> {
+        let pixels = self.inner.borrow_mut().screens.get(&screen)?.clone();
+        Some(ZoomFrom { pieces: self.pieces(screen), pixels, width: self.layout.width as usize })
+    }
+
     /// Renders `screen` into the cache without showing it (call after a page turn for the
     /// next screen).
     pub fn prefetch(&self, screen: usize) -> Result<()> {
@@ -972,6 +1022,7 @@ impl Document for MupdfDocument {
         let pos = self.position_of_page(self.current).ok();
         self.layout = settings.clone();
         self.inner.borrow_mut().screens.clear();
+        self.zoom_from = None;
         self.replan();
         self.current = pos.and_then(|p| self.page_of(&p).ok()).unwrap_or(0).min(self.screens().saturating_sub(1));
         self.selection = None;
@@ -989,7 +1040,10 @@ impl Document for MupdfDocument {
             return None;
         }
         opts.zoom = LADDER[to];
+        // A second step before the sharp page was drawn scales the same sharp screen.
+        let from = self.zoom_from.take().or_else(|| self.zoom_source(self.current));
         self.set_options(opts);
+        self.zoom_from = from;
         Some(LADDER[to])
     }
 
@@ -1013,8 +1067,26 @@ impl Document for MupdfDocument {
         PageCount { pages: self.screens(), complete: true }
     }
 
+    fn render_zoom_preview(&mut self, page: usize, canvas: &mut Canvas) -> bool {
+        let Some(from) = self.zoom_from.as_ref() else { return false };
+        let (w, h) = (self.layout.width as usize, self.layout.height as usize);
+        if page >= self.screens() || (canvas.width, canvas.height) != (w, h) || from.width != w {
+            return false;
+        }
+        let pieces = self.pieces(page);
+        let mut drawn = false;
+        canvas.clear(255);
+        for to in pieces.iter().filter(|p| !p.clip.is_empty()) {
+            for src in from.pieces.iter().filter(|q| q.page == to.page && !q.clip.is_empty()) {
+                drawn |= scale_piece(&from.pixels, w, src, to, &mut canvas.pixels);
+            }
+        }
+        drawn
+    }
+
     fn render_page(&mut self, page: usize, canvas: &mut Canvas) -> Result<()> {
         in_range(page, self.screens())?;
+        self.zoom_from = None;
         let (w, h) = (self.layout.width as usize, self.layout.height as usize);
         self.with_screen(page, |px| {
             if canvas.width == w && canvas.height == h {
