@@ -529,8 +529,19 @@ fn clip_covers(clip: &usvg::ClipPath, abs: tiny_skia::Transform, canvas: tiny_sk
     }
     let data = p.data();
     let b = data.bounds();
+    // One closed outline of four corners of the bounds, each edge along one axis (a
+    // bow tie or two separate lines through the corners do not enclose the box).
+    use usvg::tiny_skia_path::PathVerb::{Close, Line, Move};
+    let pts = data.points();
+    if !matches!(data.verbs(), [Move, Line, Line, Line] | [Move, Line, Line, Line, Close]) || pts.len() != 4 || !p.is_visible() {
+        return false;
+    }
     let corner = |q: &tiny_skia::Point| (q.x == b.left() || q.x == b.right()) && (q.y == b.top() || q.y == b.bottom());
-    if data.points().len() != 4 || !data.points().iter().all(corner) {
+    let edge = |i: usize| {
+        let (q, r) = (pts[i], pts[(i + 1) % 4]);
+        (q.x == r.x) != (q.y == r.y)
+    };
+    if !pts.iter().all(corner) || !(0..4).all(edge) {
         return false;
     }
     let ts = abs.pre_concat(clip.transform());
@@ -979,6 +990,9 @@ mod tests {
             r#"viewBox="0 0 40 60"><g transform="rotate(10)"><image width="40" height="60" href="a.png"/></g>"#,
             r#"viewBox="0 0 40 60"><clipPath id="c"><circle r="20"/></clipPath><image clip-path="url(#c)" width="40" height="60" href="a.png"/>"#,
             r#"viewBox="0 0 40 60"><image width="40" height="60" href="missing.png"/>"#,
+            // Four points on the corners of a canvas-sized box that do not enclose it.
+            r#"viewBox="0 0 40 60"><clipPath id="c"><path d="M0 0L40 60L40 0L0 60Z"/></clipPath><image clip-path="url(#c)" width="40" height="60" href="a.png"/>"#,
+            r#"viewBox="0 0 40 60"><clipPath id="c"><path d="M0 0L40 60M0 0L40 60"/></clipPath><image clip-path="url(#c)" width="40" height="60" href="a.png"/>"#,
         ] {
             assert!(svg_raster_only(&svg_tree(markup), 80, 120).is_none(), "{markup}");
         }
