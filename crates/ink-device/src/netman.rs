@@ -176,6 +176,13 @@ pub trait NetBackend {
     fn radio_on(&mut self) -> bool;
     /// Turns the radio on (with whatever the platform needs to join networks) or off.
     fn set_radio(&mut self, on: bool) -> Result<()>;
+    /// The radio was on at start-up: completes what [`NetBackend::set_radio`] would have
+    /// set up (a Kobo starts `wpa_supplicant` when the launcher left only the interface
+    /// up). The default does nothing: switching a Kindle's radio on again could drop
+    /// the connection it has.
+    fn prepare(&mut self) -> Result<()> {
+        Ok(())
+    }
     /// Looks at the link.
     fn probe(&mut self) -> Probe;
     /// Scans and returns the networks found, strongest first.
@@ -283,8 +290,8 @@ impl NetMachine {
             Cmd::Boot { restore } => {
                 self.was_on = restore;
                 self.awake = true;
-                // A radio already on is turned on again: on a Kobo that starts
-                // wpa_supplicant when the launcher left the interface up without it.
+                // A radio already on is prepared: on a Kobo that starts wpa_supplicant
+                // when the launcher left the interface up without it.
                 self.bring_up(now, b, true);
             }
             Cmd::Enable => {
@@ -397,16 +404,22 @@ impl NetMachine {
     }
 
     /// Turns the radio on when it is off and Wi-Fi was on, then starts; else off.
-    fn bring_up(&mut self, now: Instant, b: &mut dyn NetBackend, ensure: bool) {
+    /// `prepare`: a radio found on is prepared ([`NetBackend::prepare`]).
+    fn bring_up(&mut self, now: Instant, b: &mut dyn NetBackend, prepare: bool) {
         let on = b.radio_on();
         if !on && !self.was_on {
             return self.off();
         }
-        if !on || ensure {
-            if let Err(e) = b.set_radio(true) {
-                log::warn!("net: radio on: {e}");
-                return self.off();
-            }
+        let r = if !on {
+            b.set_radio(true)
+        } else if prepare {
+            b.prepare()
+        } else {
+            Ok(())
+        };
+        if let Err(e) = r {
+            log::warn!("net: radio on: {e}");
+            return self.off();
         }
         self.start(now);
     }
@@ -736,6 +749,10 @@ mod tests {
             self.probe.radio = on;
             Ok(())
         }
+        fn prepare(&mut self) -> Result<()> {
+            self.calls.push("prepare".into());
+            Ok(())
+        }
         fn probe(&mut self) -> Probe {
             self.calls.push("probe".into());
             Probe { radio: self.radio, ..self.probe.clone() }
@@ -817,6 +834,16 @@ mod tests {
     }
 
     #[test]
+    fn a_radio_on_at_start_up_is_prepared_not_switched_again() {
+        let (mut m, t) = (NetMachine::new(), Instant::now());
+        let mut b = Fake { radio: true, probe: connected("Home"), ..Fake::default() };
+        let ev = m.handle(Cmd::Boot { restore: false }, t, &mut b);
+        assert_eq!(b.calls[..2], ["prepare".to_string(), "probe".into()]);
+        assert!(!b.calls.iter().any(|c| c.starts_with("radio")), "{:?}", b.calls);
+        assert_eq!(status(&ev).last(), Some(&NetStatus::Connected { essid: "Home".into(), signal: Some(4) }));
+    }
+
+    #[test]
     fn boot_without_wifi_was_on_leaves_the_radio_off() {
         let (mut m, mut b, t) = (NetMachine::new(), Fake::default(), Instant::now());
         let ev = m.handle(Cmd::Boot { restore: false }, t, &mut b);
@@ -831,8 +858,8 @@ mod tests {
         let mut b = Fake { radio: true, dhcp: true, ..Fake::default() };
         b.probe = Probe { radio: true, associated: true, essid: Some("Home".into()), ..Probe::default() };
         let ev = m.handle(Cmd::Boot { restore: false }, t, &mut b);
-        // The half-up radio is started again (wpa_supplicant), then DHCP runs once.
-        assert_eq!(b.calls, ["radio true", "probe", "dhcp"]);
+        // The half-up radio is prepared (wpa_supplicant), then DHCP runs once.
+        assert_eq!(b.calls, ["prepare", "probe", "dhcp"]);
         assert_eq!(status(&ev).last(), Some(&NetStatus::Connecting { essid: Some("Home".into()) }));
         b.probe.address = true;
         let ev = run(&mut m, &mut b, t, t + s(1));

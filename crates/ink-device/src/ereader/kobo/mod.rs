@@ -128,6 +128,10 @@ impl NetBackend for KoboNet {
         }
     }
 
+    fn prepare(&mut self) -> Result<()> {
+        wifi::start()
+    }
+
     fn probe(&mut self) -> Probe {
         wifi::probe()
     }
