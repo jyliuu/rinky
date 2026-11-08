@@ -321,10 +321,9 @@ impl ReaderScreen {
 /// Brighter, dimmer, warmer or cooler by [`LIGHT_STEP_PERCENT`] of the range, through
 /// the control center's light code (auto warmth keeps the user's warmth).
 fn light_step(action: &str, cx: &mut AppCtx) {
-    let light = &mut *cx.services.light;
     let warmth = action.starts_with("warmth");
     let up = action.ends_with("_up");
-    let ((lo, hi), cur) = if warmth { (light.warmth_range(), light.warmth()) } else { (light.brightness_range(), light.brightness()) };
+    let ((lo, hi), cur) = super::light_gestures::level(&*cx.services.light, warmth);
     let cur = match cur {
         Ok(v) => v,
         Err(e) => {
@@ -334,13 +333,9 @@ fn light_step(action: &str, cx: &mut AppCtx) {
     };
     let step = ((hi.saturating_sub(lo)) * LIGHT_STEP_PERCENT / 100).max(1);
     let v = if up { cur.saturating_add(step).min(hi) } else { cur.saturating_sub(step).max(lo) };
-    let name = if warmth { quick_light::WARMTH } else { quick_light::BRIGHTNESS };
-    if let Some(text) = quick_light::apply(&format!("{name}:{v}"), light) {
+    let now = cx.services.clock.local_now();
+    if let Some(text) = super::light_gestures::set_level(&mut *cx.services.light, warmth, v, &now) {
         log::info!("reader: {action}: {cur} -> {text}");
-    }
-    if warmth {
-        let now = cx.services.clock.local_now();
-        quick_light::with_auto_warmth(&mut *cx.services.light, |w, light| w.manual(v, light, &now));
     }
 }
 
@@ -366,6 +361,8 @@ mod tests {
         assert_eq!(r(tap(100, 900)), ("tap_left", "prev_page"));
         assert_eq!(r(tap(1000, 900)), ("tap_right", "next_page"));
         assert_eq!(r(tap(636, 848)), ("tap_center", "menu"));
+        // The top band opens the menu across the whole width.
+        assert_eq!(r(tap(400, 60)), ("tap_center", "menu"));
         assert_eq!(r(tap(50, 50)), ("tap_top_left", "bookmark"));
         // Unused corners fall back to their zone: no hidden exit top right.
         assert_eq!(r(tap(1250, 40)), ("tap_center", "menu"));

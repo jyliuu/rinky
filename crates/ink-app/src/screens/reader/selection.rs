@@ -110,17 +110,15 @@ fn scan_line(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect,
     let y = from.y + from.h as i32 / 2;
     let mut out: Vec<(char, Rect)> = Vec::new();
     let mut cur = from;
+    // `r` is the character right after (before) `cur` on the line, with no gap between.
+    let adjacent = |r: Rect, cur: Rect| r.y == from.y && if forward { r.right() > cur.right() && r.x <= cur.right() + 2 } else { r.x < cur.x && r.right() >= cur.x - 2 };
     while out.len() < 64 {
         let mut x = if forward { cur.right() } else { cur.x - 1 };
         let mut next = None;
         while if forward { x <= cur.right() + SCAN_PX } else { x >= (cur.x - SCAN_PX).max(0) } {
             match probe(Point::new(x, y)) {
                 Some((_, r)) if r == cur => x += if forward { SCAN_STEP } else { -SCAN_STEP },
-                Some((t, r)) if r.y == from.y && forward && r.right() > cur.right() && r.x <= cur.right() + 2 => {
-                    next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
-                    break;
-                }
-                Some((t, r)) if r.y == from.y && !forward && r.x < cur.x && r.right() >= cur.x - 2 => {
+                Some((t, r)) if adjacent(r, cur) => {
                     next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
                     break;
                 }
@@ -604,11 +602,6 @@ pub fn layout_tools(plugins: &[String], insightful: Option<usize>, highlighted: 
     (all, rest)
 }
 
-/// The tools shown in the card's main row for a card `w` wide (see [`layout_tools`]).
-pub fn tools(plugins: &[String], insightful: Option<usize>, w: u32) -> Vec<Tool> {
-    layout_tools(plugins, insightful, false, w).0
-}
-
 /// The selection card: the quoted text with a black bar on its left, a row of icon
 /// buttons, and (after "More") a page listing every plugin action as pills.
 pub struct SelectionCard {
@@ -713,7 +706,7 @@ impl Widget for SelectionCard {
         let body = SelectionCard::body(b);
         fill_round_rect(cx.canvas, body, t.radius_lg, t.bg);
         stroke_round_rect(cx.canvas, body, t.radius_lg, t.border_px as f32, t.fg);
-        let (fg, bg) = (t.fg, t.bg);
+        let fg = t.fg;
         if self.more {
             let (back, pills, next) = self.more_rects(b);
             stroke_round_rect(cx.canvas, back, back.w as f32 / 2.0, t.border_px as f32, fg);
@@ -728,7 +721,6 @@ impl Widget for SelectionCard {
             if let Some(r) = next {
                 paint_button(cx, r, "Next", Some(Icon::Forward), ButtonKind::Text, true, false);
             }
-            let _ = bg;
             return;
         }
         // The quote: a black bar on the left, italic text, at most the lines that fit.
@@ -850,7 +842,7 @@ pub fn note_editor(quote: &str, size: Size) -> Overlay {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -1020,7 +1012,7 @@ mod tests {
     /// A paged text: page `p` has lines at y 100 + 60 l (50 px high), characters 20 px
     /// wide from x 100; a point maps to the character containing it (clamped to the
     /// page's text). Positions are `flow:page.line.col`.
-    struct PagedDoc {
+    pub(in crate::screens::reader) struct PagedDoc {
         pages: Vec<Vec<&'static str>>,
         meta: ink_doc::Metadata,
         layout: ink_doc::LayoutSettings,
@@ -1099,7 +1091,7 @@ mod tests {
         }
     }
 
-    fn three_pages() -> PagedDoc {
+    pub(in crate::screens::reader) fn three_pages() -> PagedDoc {
         PagedDoc::new(vec![
             vec!["Two households, both", "alike in dignity, In"],
             vec!["fair Verona, where we", "lay our scene, From"],
