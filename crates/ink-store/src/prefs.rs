@@ -48,71 +48,59 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("exit", "Exit to Kindle (asks first)"),
 ];
 
+/// Reader gestures as (`trigger`, label, default action): [`GESTURES`] and
+/// [`DEFAULT_GESTURES`].
+const GESTURE_TABLE: [(&str, &str, &str); 27] = [
+    ("tap_left", "Tap left side", "prev_page"),
+    ("tap_right", "Tap right side", "next_page"),
+    ("tap_center", "Tap middle", "menu"),
+    ("tap_top_left", "Tap top-left corner", "bookmark"),
+    ("tap_top_right", "Tap top-right corner", "none"),
+    ("tap_bottom_left", "Tap bottom-left corner", "light_toggle"),
+    ("tap_bottom_right", "Tap bottom-right corner", "warmth_toggle"),
+    ("tap_bottom_center", "Tap bottom middle", "none"),
+    ("double_tap", "Double tap", "none"),
+    ("long_press", "Long press on a word", "dictionary"),
+    ("swipe_left", "Swipe left", "next_page"),
+    ("swipe_right", "Swipe right", "prev_page"),
+    ("swipe_up", "Swipe up", "none"),
+    ("swipe_down", "Swipe down", "none"),
+    ("swipe_up_from_bottom", "Swipe up from the bottom edge", "reading_settings"),
+    ("swipe_down_from_top", "Swipe down from the top edge", "control_center"),
+    ("swipe_right_from_left", "Swipe in from the left edge", "back"),
+    ("swipe_left_from_right", "Swipe in from the right edge", "none"),
+    ("slide_left_edge", "Slide up or down the left edge", "light_slide"),
+    ("slide_right_edge", "Slide up or down the right edge", "warmth_slide"),
+    ("two_finger_swipe_up", "Two-finger swipe up", "light_up"),
+    ("two_finger_swipe_down", "Two-finger swipe down", "light_down"),
+    ("two_finger_swipe_left", "Two-finger swipe left", "warmth_down"),
+    ("two_finger_swipe_right", "Two-finger swipe right", "warmth_up"),
+    ("two_finger_tap", "Two-finger tap", "status_bars"),
+    ("pinch_in", "Pinch in", "font_smaller"),
+    ("pinch_out", "Spread (pinch out)", "font_bigger"),
+];
+
 /// Reader gestures (`trigger`, label). Corners are squares of 1/8 of the screen width;
 /// the bottom-centre zone is the middle third across, bottom fifth down; edge swipes
 /// start within 1/20 of the screen height (or width) of that edge; edge slides are
 /// vertical drags that start in the left or right 1/8 of the screen (not in the top or
 /// bottom 1/20) and take [`SLIDE_ACTIONS`] only.
-pub const GESTURES: &[(&str, &str)] = &[
-    ("tap_left", "Tap left side"),
-    ("tap_right", "Tap right side"),
-    ("tap_center", "Tap middle"),
-    ("tap_top_left", "Tap top-left corner"),
-    ("tap_top_right", "Tap top-right corner"),
-    ("tap_bottom_left", "Tap bottom-left corner"),
-    ("tap_bottom_right", "Tap bottom-right corner"),
-    ("tap_bottom_center", "Tap bottom middle"),
-    ("double_tap", "Double tap"),
-    ("long_press", "Long press on a word"),
-    ("swipe_left", "Swipe left"),
-    ("swipe_right", "Swipe right"),
-    ("swipe_up", "Swipe up"),
-    ("swipe_down", "Swipe down"),
-    ("swipe_up_from_bottom", "Swipe up from the bottom edge"),
-    ("swipe_down_from_top", "Swipe down from the top edge"),
-    ("swipe_right_from_left", "Swipe in from the left edge"),
-    ("swipe_left_from_right", "Swipe in from the right edge"),
-    ("slide_left_edge", "Slide up or down the left edge"),
-    ("slide_right_edge", "Slide up or down the right edge"),
-    ("two_finger_swipe_up", "Two-finger swipe up"),
-    ("two_finger_swipe_down", "Two-finger swipe down"),
-    ("two_finger_swipe_left", "Two-finger swipe left"),
-    ("two_finger_swipe_right", "Two-finger swipe right"),
-    ("two_finger_tap", "Two-finger tap"),
-    ("pinch_in", "Pinch in"),
-    ("pinch_out", "Spread (pinch out)"),
-];
+pub const GESTURES: &[(&str, &str)] = &gesture_column(1);
 
 /// The default action of each gesture in [`GESTURES`].
-pub const DEFAULT_GESTURES: &[(&str, &str)] = &[
-    ("tap_left", "prev_page"),
-    ("tap_right", "next_page"),
-    ("tap_center", "menu"),
-    ("tap_top_left", "bookmark"),
-    ("tap_top_right", "none"),
-    ("tap_bottom_left", "light_toggle"),
-    ("tap_bottom_right", "warmth_toggle"),
-    ("tap_bottom_center", "none"),
-    ("double_tap", "none"),
-    ("long_press", "dictionary"),
-    ("swipe_left", "next_page"),
-    ("swipe_right", "prev_page"),
-    ("swipe_up", "none"),
-    ("swipe_down", "none"),
-    ("swipe_up_from_bottom", "reading_settings"),
-    ("swipe_down_from_top", "control_center"),
-    ("swipe_right_from_left", "back"),
-    ("swipe_left_from_right", "none"),
-    ("slide_left_edge", "light_slide"),
-    ("slide_right_edge", "warmth_slide"),
-    ("two_finger_swipe_up", "light_up"),
-    ("two_finger_swipe_down", "light_down"),
-    ("two_finger_swipe_left", "warmth_down"),
-    ("two_finger_swipe_right", "warmth_up"),
-    ("two_finger_tap", "status_bars"),
-    ("pinch_in", "font_smaller"),
-    ("pinch_out", "font_bigger"),
-];
+pub const DEFAULT_GESTURES: &[(&str, &str)] = &gesture_column(2);
+
+/// (`trigger`, label) when `c` is 1, else (`trigger`, default action), of every gesture.
+const fn gesture_column(c: usize) -> [(&'static str, &'static str); GESTURE_TABLE.len()] {
+    let mut out = [("", ""); GESTURE_TABLE.len()];
+    let mut i = 0;
+    while i < out.len() {
+        let (trigger, label, action) = GESTURE_TABLE[i];
+        out[i] = (trigger, if c == 1 { label } else { action });
+        i += 1;
+    }
+    out
+}
 
 /// `long_press` also accepts `dictionary` (select the word and look it up) and
 /// `select` (select the word only).

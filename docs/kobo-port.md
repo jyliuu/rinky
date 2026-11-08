@@ -1,80 +1,69 @@
-# Porting rinky to Kobo
+# Kobo port notes
 
-> **Status:** implemented on branch `spike/kobo` (2026-11-06): the Kobo backend, the
-> Kobo package and launcher, and the updater are in; see `docs/kobo.md` for users and
-> `docs/ARCHITECTURE.md` (Kobo) for the design. The notes below are the investigation
-> that led there; the "work to do" list is done except the sunxi models (Elipsa,
-> Sage), Kaleido colour, a warmth schedule and USB storage from inside rinky.
+Background for the Kobo backend: which Kobos exist, how their displays are driven, and
+what is still missing. How the backend works today is in `docs/ARCHITECTURE.md`
+("Running on the Kobo"); what users see is in `docs/kobo.md`.
 
-Investigation of 2026-11-06. Sources: KOReader and
-koreader-base (`frontend/device/kobo/`, `platform/kobo/`, `ffi/framebuffer_mxcfb.lua`,
-`ffi/mxcfb_kobo_h.lua`), FBInk (`fbink_device_id.c`, `fbink_rota_quirks.c`,
-`eink/*-kobo.h`), koxtoolchain, NickelMenu and KFMon, and Kobo's GPL tree
-(`kobolabs/Kobo-Reader/hw`). Tested in the eink-emulator's Tolino Shine 5 instance,
-which is Kobo Clara BW hardware (MT8113, E60T00 board) running Kobo firmware 5.12.
+The notes come from KOReader and koreader-base (`frontend/device/kobo/`,
+`platform/kobo/`, `ffi/framebuffer_mxcfb.lua`, `ffi/mxcfb_kobo_h.lua`), FBInk
+(`fbink_device_id.c`, `fbink_rota_quirks.c`, `eink/*-kobo.h`), koxtoolchain,
+NickelMenu and KFMon, and Kobo's GPL tree (`kobolabs/Kobo-Reader/hw`). The first tests
+ran in the eink-emulator's Tolino Shine 5 instance, which is Kobo Clara BW hardware
+(MT8113, E60T00 board) with Kobo firmware 5.12.
 
-## Verdict
+## How the port is shaped
 
-- **No new binary.** The Kindle build (static ARMv7 musl, hard float, Cortex-A9 +
+- **One binary.** The Kindle build (static ARMv7 musl, hard float, Cortex-A9 with
   NEON) runs unchanged on Kobo firmware. It needs no libc from the device, and every
-  Kobo since the Glo HD (2015) has a Cortex-A7, A9 or A53 CPU with NEON. The binary
-  can tell a Kindle from a Kobo when it starts, as it already tells Kindle models
-  apart.
-- **A separate package.** The binary is shared, but the package around it differs:
-  Kobo apps live in `/mnt/onboard/.adds/rinky/`, are started from NickelMenu or KFMon
-  instead of KUAL, and the launcher has to stop and restart Nickel instead of the
-  Kindle framework. So a release would ship `rinky-<v>-kobo.zip` next to the Kindle
-  tar, and the in-app updater would pick the asset by platform.
-- **The work is in the device layer.** On Kindle, rinky leans on Amazon's `lipc`
-  services for light, Wi-Fi, sleep and USB. Kobo has nothing like that, so a Kobo
-  backend has to drive the hardware directly, as KOReader does.
+  Kobo since the Glo HD (2015) has a Cortex-A7, A9 or A53 CPU with NEON.
+  `ink_platform::Platform::detect` tells a Kobo from a Kindle at start.
+- **A separate package.** Kobo apps live in `/mnt/onboard/.adds/rinky/`, start from
+  NickelMenu (or KFMon) instead of KUAL, and the launcher stops and restarts Nickel
+  instead of the Kindle framework. Releases ship `rinky-<version>-kobo.zip` and
+  `.tar.gz` next to the Kindle packages, and the in-app update picks the asset by
+  platform (`Platform::package_suffix`).
+- **The work is in the device layer.** On a Kindle, light, Wi-Fi, sleep and USB go
+  through Amazon's `lipc` services. A Kobo has nothing like them, so the Kobo backend
+  drives the hardware directly, as KOReader does (`crates/ink-device/src/ereader/kobo/`).
 
-## What the emulator showed
+## Status
 
-The spike's changes, about 150 lines:
+Done: platform detection and the Kobo model table (`KOBO_MODELS` in
+`ereader/model.rs`); the `mxcfb` v2 and hwtcon refresh interfaces; switching the
+framebuffer to 8 bpp gray and to its upright rotation, and back on exit; per-model
+touch transforms and the snow protocol; page keys and the sleep cover; frontlight and
+warmth; battery; suspend; Wi-Fi with Nickel's networks; the launcher, the NickelMenu
+entry and the package; the update by platform.
 
-- **Refresh:** a `KoboMtk` controller, Kobo's 36-byte `hwtcon_update_data` struct
-  with `HWTCON_SEND_UPDATE` (0x4024462E). REAGL and GLR16 are sent FULL, as KOReader
-  does.
-- **Pixel format:** the framebuffer boots at 32 bpp. Switching it to 8 bpp gray takes
-  `Y8` written to `/sys/devices/platform/*.hwtcon/mdp_src_format` first, as FBInk
-  does; otherwise the driver silently keeps 32 bpp. Both settings are restored on
-  exit.
-- **Touch:** the "snow" protocol. The panel never sends `TRACKING_ID -1`, so a
-  `BTN_TOUCH 0` now ends the contact (`evdev.rs`, with a test).
+Not done:
 
-Results:
-
-| Check | Result |
-|---|---|
-| Binary starts | yes, unchanged |
-| Book page drawn | yes, cover and text pages, 8 bpp |
-| Page turns, both directions | yes, with `RINKY_TOUCH=swap,mirror_x` |
-| Reader menu, quick settings panel | yes |
-| Exit restores 32 bpp / ABGR32 | yes |
-| Frontlight, warmth, Wi-Fi | "not available" (they go through `lipc`) |
-| Sleep, USB, starting Nickel again | not tried |
+- the i.MX6SL models (Glo HD, Aura ONE, the first Aura H2O² revision): `mxcfb` v1 and
+  touch protocol A;
+- the sunxi models (Elipsa, Sage): a separate display backend;
+- colour on the Kaleido models, which show grayscale at 8 bpp;
+- a warmth schedule;
+- USB storage from inside rinky (users exit to Nickel first, as with KOReader).
 
 ## Kobo models
 
 Kernel versions are from Kobo's GPL tree. ppi is from FBInk.
 
-| Model | Year | SoC | Display interface | ppi | Fit for rinky |
+| Model | Year | SoC | Display interface | ppi | rinky |
 |---|---|---|---|---|---|
 | Aura HD, Aura H2O | 2013-14 | i.MX50 (Cortex-A8), kernel 2.6.35 | mxcfb v1 | 265 | no (see below) |
 | Aura, Aura SE, Nia, Touch 2 | 2013-21 | i.MX50 / 6SL / 6ULL | mxcfb | 212 or less | no: too few pixels |
-| Glo HD | 2015 | i.MX6SL (A9), kernel 3.0.35 | mxcfb v1 | 300 | yes |
-| Aura ONE | 2016 | i.MX6SL | mxcfb v1 | 300 | yes |
-| Aura H2O² | 2017 | 6SL / 6SLL | mxcfb v1 / v2 | 265 | probably (265 ppi, like the Oasis 1) |
-| Clara HD | 2018 | i.MX6SLL (A9) | mxcfb v2 | 300 | yes |
-| Forma | 2018 | i.MX6SLL | mxcfb v2 | 300 | yes, page keys |
-| Libra H2O | 2019 | i.MX6SLL | mxcfb v2 | 300 | yes, page keys |
-| Libra 2, Clara 2E | 2021-22 | i.MX6SLL | mxcfb v2 | 300 | yes |
-| Elipsa, Sage | 2021 | Allwinner B300 (A7) | sunxi disp2 | 227 / 300 | Sage yes, Elipsa low ppi; needs the hardest display backend |
-| Elipsa 2E | 2023 | MT8113 (A53) | hwtcon | 227 | low ppi |
-| Clara BW, Clara Colour | 2024 | MT8113 | hwtcon | 300 | yes: what the spike ran on |
-| Libra Colour | 2024 | MT8113 | hwtcon | 300 | yes, page keys |
-| Tolino Shine 5, Shine Color, Vision Color | 2024 | MT8113 | hwtcon | 300 | yes: same hardware, Kobo-made firmware |
+| Glo HD | 2015 | i.MX6SL (A9), kernel 3.0.35 | mxcfb v1 | 300 | not yet: mxcfb v1 |
+| Aura ONE | 2016 | i.MX6SL | mxcfb v1 | 300 | not yet: mxcfb v1 |
+| Aura H2O² | 2017 | 6SL / 6SLL | mxcfb v1 / v2 | 265 | not yet (mxcfb v1 on the first revision) |
+| Clara HD | 2018 | i.MX6SLL (A9) | mxcfb v2 | 300 | supported |
+| Forma | 2018 | i.MX6SLL | mxcfb v2 | 300 | supported, page keys |
+| Libra H2O | 2019 | i.MX6SLL | mxcfb v2 | 300 | supported, page keys |
+| Libra 2, Clara 2E | 2021-22 | i.MX6SLL | mxcfb v2 | 300 | supported |
+| Elipsa, Sage | 2021 | Allwinner B300 (A7) | sunxi disp2 | 227 / 300 | not yet: sunxi backend (and the Elipsa is 227 ppi) |
+| Elipsa 2E | 2023 | MT8113 (A53) | hwtcon | 227 | no: too few pixels |
+| Clara BW, Clara Colour | 2024 | MT8113 | hwtcon | 300 | supported (grayscale on the Colour) |
+| Libra Colour | 2024 | MT8113 | hwtcon | 300 | supported, page keys, grayscale |
+| Tolino Shine 5, Shine Color, Vision Color | 2024 | MT8113 | hwtcon | 300 | supported: same hardware, Kobo-made firmware |
 
 **Why the i.MX50 models are out.** Two risks, neither tested:
 - **CPU:** a Cortex-A9 build may contain instructions the Cortex-A8 lacks (half-precision
@@ -89,63 +78,41 @@ single binary.
 
 | Interface | Models | Refresh call | Needs |
 |---|---|---|---|
-| mxcfb v1 | Glo HD, Aura ONE, H2O² r1 | `MXCFB_SEND_UPDATE_V1_NTX` 0x4044462E (68 bytes) | new struct, close to Kindle's legacy one |
-| mxcfb v2 | Clara HD, Forma, Libra H2O, Libra 2, Clara 2E | `MXCFB_SEND_UPDATE_V2` 0x4048462E (72 bytes), wait 0xC008462F | same request number as Kindle's legacy struct but a different layout, so detection has to come from the model, not probing; some models' wait call hangs (KOReader sleeps 2.5 ms instead) |
-| hwtcon | Clara BW, Colour, Libra Colour, Elipsa 2E, Tolinos | 0x4024462E (36 bytes) | done in the spike; night mode is global (`echo "night_mode 4" > /proc/hwtcon/cmd`); Colour models need 32 bpp to show colour |
-| sunxi disp2 | Elipsa, Sage | `DISP_EINK_UPDATE2` on `/dev/disp` | its own buffer from `/dev/ion`, submitted as a display layer; rotation by the G2D engine; no hardware inversion |
+| mxcfb v1 | Glo HD, Aura ONE, H2O² r1 | `MXCFB_SEND_UPDATE_V1_NTX` 0x4044462E (68 bytes) | not implemented; a struct close to the Kindle's legacy one |
+| mxcfb v2 | Clara HD, Forma, Libra H2O, Libra 2, Clara 2E | `MXCFB_SEND_UPDATE_V2` 0x4048462E (72 bytes), wait 0xC008462F | `Epdc::KoboMxcfb`. Same request number as the Kindle's legacy struct but another layout, so it comes from the model table, never from probing; some models' wait call hangs, so they do not wait (`reliable_wait`) |
+| hwtcon | Clara BW, Colour, Libra Colour, Elipsa 2E, Tolinos | 0x4024462E (36 bytes) | `Epdc::KoboMtk`; the framebuffer is switched to 8 bpp through the hwtcon `mdp_src_format` first; Colour models need 32 bpp to show colour |
+| sunxi disp2 | Elipsa, Sage | `DISP_EINK_UPDATE2` on `/dev/disp` | not implemented; see below |
 
 Every Kobo panel is mounted rotated, and each family maps rotation differently
-(FBInk's `rotationMap`). KOReader sets portrait at start and restores the rotation
-on exit; rinky's `make_upright` already does that for Kindles.
+(FBInk's `rotationMap`). As KOReader does, rinky sets the upright `rotate` value from
+the model table at start (`Model::upright`) and restores the old one on exit.
 
-## Work to do
+## Notes for the missing pieces
 
-Rough sizes, for a backend at the level the Kindle one is now:
-
-1. **Platform detection** (small). Kindle or Kobo, from `/proc/usid` against
-   `/mnt/onboard/.kobo/version`. Kobo model from the version file's last three
-   digits, or the NTX hardware config block (FBInk `identify_kobo`). A Kobo model
-   table like `kindle/model.rs`: display interface, touch transforms (`swap`,
-   `mirror_x` or `mirror_y`, snow protocol), frontlight type, page keys.
-2. **Display** (medium). hwtcon is done. mxcfb v1 and v2 are struct variants of
-   what exists. sunxi is a separate backend (ION buffer, layers, G2D rotation), the
-   largest single piece. Leaving the Elipsa and Sage for later is reasonable.
-3. **Touch and keys** (small). Transforms per model instead of `RINKY_TOUCH`. Snow
-   protocol is done; protocol A ("phoenix", lift by `TOUCH_MAJOR 0`) for the Glo HD
-   and Aura ONE. Page keys 193/194, sleep cover key 59 (35 on the Elipsa).
-4. **Frontlight and warmth** (small). `/sys/class/backlight/mxc_msp430.0/brightness`
-   or `ioctl(/dev/ntx_io, 241, level)`; warmth 0-10 written inverted to the mixer's
-   `color` node. The Aura ONE and H2O² mix three LED channels.
-5. **Sleep** (medium). No powerd: rinky does `echo 1 > /sys/power/state-extended`,
-   waits 2 s, `echo mem > /sys/power/state`, and undoes it on wake. The screensaver,
-   Wi-Fi and light off before. On MTK, never while charging (the kernel hangs).
-6. **Wi-Fi** (medium). Load the driver modules for the platform, `wpa_supplicant`
-   with Nickel's `/mnt/onboard/.kobo/wpa_supplicant.conf`, `udhcpc` or `dhcpcd`.
-   Three driver variants (sdio, NXP `moal`, MTK `wmt`). KOReader's
-   `enable-wifi.sh` is the reference.
-7. **Battery and USB** (small). Battery from `/sys/class/power_supply/*`. USB mass
-   storage means exiting to Nickel, as KOReader does (it has no USB export of its
-   own).
-8. **Launcher and package** (medium). A `rinky.sh` that copies itself to `/tmp`,
-   stops Nickel and its helpers (`nickel hindenburg sickel fickel …`), turns
-   Bluetooth off, runs rinky, restores bit depth and rotation, and starts Nickel
-   again. A NickelMenu entry (`menu_item:main:rinky:cmd_spawn:quiet:exec …`) and a
-   KFMon entry as the alternative. A zip that unpacks onto the Kobo drive.
-9. **Updater and docs** (small). Asset name by platform; a Kobo section in the user
-   guide (KoboRoot.tgz for NickelMenu, no jailbreak needed).
-
-Paths in the app that assume `/mnt/us` (library folders, fonts, logs) need a
-platform root as well. `rinky run` on the Tolino defaulted to `/mnt/us/Books` and
-missed the bundled UI font.
+- **mxcfb v1** (Glo HD, Aura ONE): `MXCFB_SEND_UPDATE_V1_NTX` 0x4044462E, a 68-byte
+  struct close to the Kindle's legacy one. Their touch panels use protocol A
+  ("phoenix"): a contact ends with `TOUCH_MAJOR 0`.
+- **sunxi** (Elipsa, Sage): `DISP_EINK_UPDATE2` on `/dev/disp`, with a buffer from
+  `/dev/ion` submitted as a display layer and rotation by the G2D engine. There is no
+  hardware inversion. It is the largest single piece; KOReader's sunxi framebuffer
+  code is the reference.
+- **Colour**: the panel needs 32 bpp and BGRA writes, a second pixel path next to
+  `copy_to_panel`. On hwtcon, night mode is global
+  (`echo "night_mode 4" > /proc/hwtcon/cmd`).
+- **Three-channel frontlights**: the Aura ONE and H2O² mix three LED channels instead
+  of a white level and a warmth mixer.
+- **Wi-Fi drivers**: there are three driver families (sdio, NXP `moal`, MTK `wmt`);
+  KOReader's `enable-wifi.sh` is the reference when a model's module does not load.
+- **Suspend on MediaTek**: never while charging, the kernel hangs
+  (`Model::suspend_on_charger`).
 
 ## Risks
 
-- **Nickel coexistence.** Every exit has to bring Nickel back cleanly. KOReader
-  reboots when it was started from KFMon. Kobo firmware 5.x changed the start-up
-  scripts, and NickelMenu does not support 5.x yet.
+- **Nickel coexistence.** Every exit has to bring Nickel back cleanly; the launcher
+  reboots instead when Nickel was not running before or KFMon asks for it, as KOReader
+  does. Kobo firmware 5.x changed the start-up scripts, and NickelMenu needs 4.x, so
+  the Tolinos on 5.x start rinky over SSH (`docs/install.md`, "Tolino").
 - **Real hardware differs from the emulator.** The emulator checks the kernel's
   answers, not ghosting, refresh speed or touch noise. The snow protocol and the
   swap and mirror values came from the emulator's touch model; KOReader's model
   table agrees for the Clara BW.
-- **Colour models** at 8 bpp show grayscale. Colour needs 32 bpp and BGRA writes:
-  a second pixel path in the screen code.

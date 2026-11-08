@@ -21,9 +21,9 @@
 use ink_net::kosync::{self, decide, KoSyncAccount, KoSyncClient, Progress, SyncDecision, SyncQueue};
 use ink_net::{HttpClient, NetError, Request, Response};
 use ink_plugin::serde_json::{self, json, Value};
+use ink_plugin::kit::{Answer, Pending, Requests};
 use ink_plugin::{HostCtx, HttpEvent, Permission, Plugin, PluginError, PluginManifest, Registrar, Result, StreamMode};
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 /// Plugin name.
 pub const NAME: &str = "kosync";
@@ -72,10 +72,11 @@ impl HttpClient for Capture {
     }
 }
 
-fn build(account: &KoSyncAccount, f: impl FnOnce(&KoSyncClient<'_>)) -> Option<Request> {
+/// The request `call` makes on a [`KoSyncClient`] for `account` (its answer is ignored).
+fn build<R>(account: &KoSyncAccount, call: impl FnOnce(&KoSyncClient<'_>) -> R) -> Result<Request> {
     let cap = Capture::default();
-    f(&KoSyncClient::new(&cap, account.clone()));
-    cap.0.into_inner()
+    call(&KoSyncClient::new(&cap, account.clone()));
+    cap.0.into_inner().ok_or_else(|| failed("no request"))
 }
 
 /// Checks an answer like [`KoSyncClient`] does: expected status, no HTML page (captive
@@ -102,12 +103,6 @@ enum Call {
     Drain { progress: Progress },
 }
 
-struct Inflight {
-    call: Call,
-    status: u16,
-    mime: String,
-}
-
 /// The open book as the plugin sees it.
 #[derive(Clone, Debug, Default)]
 struct Book {
@@ -128,7 +123,7 @@ struct Book {
 pub struct KoSyncPlugin {
     manifest: PluginManifest,
     clock: Box<dyn Fn() -> u64>,
-    inflight: HashMap<u32, Inflight>,
+    inflight: Requests<Call>,
     book: Option<Book>,
     last_push_at: u64,
     /// Remote position offered in the jump dialog.
@@ -137,8 +132,17 @@ pub struct KoSyncPlugin {
 }
 
 impl Default for KoSyncPlugin {
+    /// The plugin with the system clock.
     fn default() -> Self {
-        Self::new()
+        KoSyncPlugin {
+            manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]),
+            clock: Box::new(now_secs),
+            inflight: Requests::default(),
+            book: None,
+            last_push_at: 0,
+            offer: None,
+            draining: false,
+        }
     }
 }
 
@@ -151,19 +155,6 @@ fn failed(e: impl std::fmt::Display) -> PluginError {
 }
 
 impl KoSyncPlugin {
-    /// The plugin with the system clock.
-    pub fn new() -> Self {
-        KoSyncPlugin {
-            manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]),
-            clock: Box::new(now_secs),
-            inflight: HashMap::new(),
-            book: None,
-            last_push_at: 0,
-            offer: None,
-            draining: false,
-        }
-    }
-
     /// Uses `clock` (seconds) instead of the system clock (tests).
     pub fn with_clock(mut self, clock: impl Fn() -> u64 + 'static) -> Self {
         self.clock = Box::new(clock);
@@ -174,12 +165,13 @@ impl KoSyncPlugin {
         (self.clock)()
     }
 
+    /// A text setting; `None` when unset or empty.
     fn setting(cx: &mut HostCtx, key: &str) -> Option<String> {
-        cx.storage().ok()?.get(key).and_then(|v| v.as_str().map(str::to_string)).filter(|s| !s.is_empty())
+        cx.setting_str(key).filter(|s| !s.is_empty())
     }
 
     fn auto_sync(cx: &mut HostCtx) -> bool {
-        cx.storage().ok().and_then(|s| s.get("auto_sync")).and_then(|v| v.as_bool()).unwrap_or(true)
+        cx.setting_bool("auto_sync", true)
     }
 
     /// The account, when user and password are set.
@@ -203,11 +195,10 @@ impl KoSyncPlugin {
         Ok((name, id))
     }
 
-    fn start(&mut self, cx: &mut HostCtx, req: Request, call: Call) -> Result<u32> {
+    fn start(&mut self, cx: &mut HostCtx, req: Request, call: Call) -> Result<()> {
         log::info!("kosync: {} {} ({call:?})", req.method.as_str(), req.url);
-        let id = cx.start_request(req, StreamMode::Whole { limit: 1 << 20 })?;
-        self.inflight.insert(id, Inflight { call, status: 0, mime: String::new() });
-        Ok(id)
+        self.inflight.start(cx, req, StreamMode::Whole { limit: 1 << 20 }, call)?;
+        Ok(())
     }
 
     fn queue_path(cx: &mut HostCtx) -> Result<std::path::PathBuf> {
@@ -224,6 +215,19 @@ impl KoSyncPlugin {
         f(&mut q);
         q.save(&p).map_err(failed)?;
         Ok(q.items.len())
+    }
+
+    /// Reads the reader's position into the open book (the change time moves when it
+    /// changed). False when the position cannot be read.
+    fn note_position(&mut self, cx: &mut HostCtx) -> bool {
+        let Some((progress, pct)) = Self::read_position(cx) else { return false };
+        let now = self.now();
+        if let Some(b) = self.book.as_mut().filter(|b| b.progress != progress) {
+            b.progress = progress;
+            b.percentage = pct;
+            b.changed_at = now;
+        }
+        true
     }
 
     /// Reads the open book's position from the document.
@@ -259,28 +263,20 @@ impl KoSyncPlugin {
         if queue_first {
             Self::with_queue(cx, |q| q.push(p.clone(), now))?;
         }
-        let req = build(&account, |c| {
-            let _ = c.push(&p);
-        })
-        .ok_or_else(|| failed("no request"))?;
-        self.start(cx, req, Call::Push { progress: p, manual })?;
-        Ok(())
+        let req = build(&account, |c| c.push(&p))?;
+        self.start(cx, req, Call::Push { progress: p, manual })
     }
 
     fn pull_now(&mut self, cx: &mut HostCtx, manual: bool) -> Result<()> {
         let Some(account) = Self::account(cx) else {
             if manual {
-                cx.ui()?.toast("Progress sync: log in first (Settings, Plugins, Progress sync)");
+                cx.toast("Progress sync: log in first (Settings, Plugins, Progress sync)")?;
             }
             return Ok(());
         };
         let Some(doc) = self.book.as_ref().map(|b| b.id.clone()).filter(|d| !d.is_empty()) else { return Ok(()) };
-        let req = build(&account, |c| {
-            let _ = c.pull(&doc);
-        })
-        .ok_or_else(|| failed("no request"))?;
-        self.start(cx, req, Call::Pull { doc, manual })?;
-        Ok(())
+        let req = build(&account, |c| c.pull(&doc))?;
+        self.start(cx, req, Call::Pull { doc, manual })
     }
 
     /// Sends the first queued push (the rest follow one by one as each succeeds).
@@ -293,12 +289,10 @@ impl KoSyncPlugin {
         // Positions of the open book still waiting go out with the next push instead.
         let open = self.book.as_ref().map(|b| b.id.clone()).unwrap_or_default();
         let Some(first) = q.items.iter().find(|i| i.progress.document != open).map(|i| i.progress.clone()) else { return Ok(()) };
-        let req = build(&account, |c| {
-            let _ = c.push(&first);
-        })
-        .ok_or_else(|| failed("no request"))?;
-        self.draining = true;
+        let req = build(&account, |c| c.push(&first))?;
+        // Marked only once the request runs: a send that could not start is tried again.
         self.start(cx, req, Call::Drain { progress: first })?;
+        self.draining = true;
         Ok(())
     }
 
@@ -331,38 +325,32 @@ impl KoSyncPlugin {
             (format!("Automatic sync\t{}", if auto { "on" } else { "off" }), "auto"),
             ("Log out".to_string(), "logout"),
         ];
-        let items: Vec<(&str, &str)> = items.iter().map(|(l, a)| (l.as_str(), *a)).collect();
-        cx.ui()?.menu(MENU, "Progress sync (KOSync)", &items);
-        Ok(())
+        cx.menu(MENU, "Progress sync (KOSync)", items)
     }
 
     fn menu_pick(&mut self, cx: &mut HostCtx, pick: &str) -> Result<()> {
         match pick {
             "server" => {
                 let cur = Self::setting(cx, "server").unwrap_or_else(|| kosync::DEFAULT_SERVER.to_string());
-                cx.ui()?.input(IN_SERVER, "Sync server URL", &cur);
+                cx.input(IN_SERVER, "Sync server URL", &cur)?;
             }
             "user" => {
                 let cur = Self::setting(cx, "user").unwrap_or_default();
-                cx.ui()?.input(IN_USER, "User name", &cur);
+                cx.input(IN_USER, "User name", &cur)?;
             }
-            "password" => cx.ui()?.input(IN_PASS, "Password (only its MD5 is stored)", ""),
+            "password" => cx.input(IN_PASS, "Password (only its MD5 is stored)", "")?,
             "login" | "register" => {
                 let Some(account) = Self::account(cx) else {
-                    cx.ui()?.toast("Set the user name and the password first");
+                    cx.toast("Set the user name and the password first")?;
                     return self.show_menu(cx);
                 };
-                let (req, call) = if pick == "login" {
-                    (build(&account, |c| {
-                        let _ = c.authorize();
-                    }), Call::Auth)
+                let (req, call, toast) = if pick == "login" {
+                    (build(&account, |c| c.authorize())?, Call::Auth, "Logging in...")
                 } else {
-                    (build(&account, |c| {
-                        let _ = c.register();
-                    }), Call::Register)
+                    (build(&account, |c| c.register())?, Call::Register, "Registering...")
                 };
-                self.start(cx, req.ok_or_else(|| failed("no request"))?, call)?;
-                cx.ui()?.toast(if pick == "login" { "Logging in..." } else { "Registering..." });
+                self.start(cx, req, call)?;
+                cx.toast(toast)?;
             }
             "auto" => {
                 let on = !Self::auto_sync(cx);
@@ -371,7 +359,7 @@ impl KoSyncPlugin {
             }
             "logout" => {
                 cx.storage()?.set("userkey", Value::Null)?;
-                cx.ui()?.toast("Logged out");
+                cx.toast("Logged out")?;
                 self.show_menu(cx)?;
             }
             _ => {}
@@ -380,27 +368,28 @@ impl KoSyncPlugin {
     }
 
     /// `answer` is the body, or the transport error message.
-    fn finish(&mut self, cx: &mut HostCtx, f: Inflight, answer: std::result::Result<Vec<u8>, String>) -> Result<()> {
+    fn finish(&mut self, cx: &mut HostCtx, f: Pending<Call>, answer: Answer) -> Result<()> {
+        let mime = f.mime();
         let check = |ok: &[u16]| match &answer {
-            Ok(b) => check_answer(f.status, &f.mime, b, ok),
+            Ok(b) => check_answer(f.status, &mime, b, ok),
             Err(m) if m.contains("timed out") => Err(NetError::Timeout),
             Err(m) => Err(NetError::Http(m.clone())),
         };
-        match f.call {
+        match f.job {
             Call::Auth => match check(&[200]) {
                 Ok(v) if matches!(v.get("authorized").and_then(|a| a.as_str()), Some("OK") | None) => {
                     let user = Self::setting(cx, "user").unwrap_or_default();
-                    cx.ui()?.toast(&format!("Logged in as {user}"));
+                    cx.toast(&format!("Logged in as {user}"))?;
                     self.drain_next(cx)?;
                 }
-                Ok(v) => cx.ui()?.toast(&format!("Login refused: {v}")),
-                Err(NetError::Unauthorized(_)) => cx.ui()?.toast("Login failed: wrong user name or password"),
-                Err(e) => cx.ui()?.toast(&format!("Login failed: {e}")),
+                Ok(v) => cx.toast(&format!("Login refused: {v}"))?,
+                Err(NetError::Unauthorized(_)) => cx.toast("Login failed: wrong user name or password")?,
+                Err(e) => cx.toast(&format!("Login failed: {e}"))?,
             },
             Call::Register => match check(&[201]) {
-                Ok(_) => cx.ui()?.toast("Account registered; you are logged in"),
-                Err(NetError::Server { status: 402, .. }) => cx.ui()?.toast("That user name is taken"),
-                Err(e) => cx.ui()?.toast(&format!("Registration failed: {e}")),
+                Ok(_) => cx.toast("Account registered; you are logged in")?,
+                Err(NetError::Server { status: 402, .. }) => cx.toast("That user name is taken")?,
+                Err(e) => cx.toast(&format!("Registration failed: {e}"))?,
             },
             Call::Push { progress, manual } => match check(&[200, 202]) {
                 Ok(_) => {
@@ -410,7 +399,7 @@ impl KoSyncPlugin {
                         b.synced = Some(progress.progress.clone());
                     }
                     if manual {
-                        cx.ui()?.toast("Progress sent to the sync server");
+                        cx.toast("Progress sent to the sync server")?;
                     }
                     self.drain_next(cx)?;
                 }
@@ -423,7 +412,7 @@ impl KoSyncPlugin {
                         Self::drop_queued(cx, &progress.document)?;
                     }
                     if manual || matches!(e, NetError::Unauthorized(_)) {
-                        cx.ui()?.toast(&format!("Progress sync: {e}"));
+                        cx.toast(&format!("Progress sync: {e}"))?;
                     }
                 }
             },
@@ -453,7 +442,7 @@ impl KoSyncPlugin {
                     Err(e) => {
                         log::warn!("kosync: pull failed: {e}");
                         if manual || matches!(e, NetError::Unauthorized(_)) {
-                            cx.ui()?.toast(&format!("Progress sync: {e}"));
+                            cx.toast(&format!("Progress sync: {e}"))?;
                         }
                         return Ok(());
                     }
@@ -474,7 +463,7 @@ impl KoSyncPlugin {
                                     r.percentage * 100.0,
                                     pct * 100.0
                                 );
-                                cx.ui()?.dialog(JUMP, "Progress sync", &body, &[("No", "no"), ("Jump", "jump")]);
+                                cx.dialog(JUMP, "Progress sync", &body, &[("No", "no"), ("Jump", "jump")])?;
                             }
                             None => log::warn!("kosync: cannot read remote progress {:?}", r.progress),
                         }
@@ -491,7 +480,7 @@ impl KoSyncPlugin {
                             }
                         }
                         if manual {
-                            cx.ui()?.toast("Progress is in sync");
+                            cx.toast("Progress is in sync")?;
                         }
                     }
                 }
@@ -532,16 +521,13 @@ impl Plugin for KoSyncPlugin {
     }
 
     fn on_page_change(&mut self, cx: &mut HostCtx, _page: usize) -> Result<()> {
-        let now = self.now();
-        let Some((progress, pct)) = Self::read_position(cx) else { return Ok(()) };
-        let Some(b) = self.book.as_mut() else { return Ok(()) };
-        if b.progress != progress {
-            b.progress = progress;
-            b.percentage = pct;
-            b.changed_at = now;
+        if !self.note_position(cx) {
+            return Ok(());
         }
+        let now = self.now();
+        let Some(b) = self.book.as_ref() else { return Ok(()) };
         let due = b.pulled && self.offer.is_none() && b.synced.as_deref() != Some(b.progress.as_str()) && now.saturating_sub(self.last_push_at) >= PUSH_EVERY;
-        if due && Self::auto_sync(cx) && self.inflight.values().all(|f| !matches!(f.call, Call::Push { .. })) {
+        if due && Self::auto_sync(cx) && self.inflight.jobs().all(|c| !matches!(c, Call::Push { .. })) {
             self.push_now(cx, false, false)?;
         }
         Ok(())
@@ -563,16 +549,7 @@ impl Plugin for KoSyncPlugin {
     }
 
     fn on_close(&mut self, cx: &mut HostCtx) -> Result<()> {
-        if let Some((progress, pct)) = Self::read_position(cx) {
-            let now = self.now();
-            if let Some(b) = self.book.as_mut() {
-                if b.progress != progress {
-                    b.progress = progress;
-                    b.percentage = pct;
-                    b.changed_at = now;
-                }
-            }
-        }
+        self.note_position(cx);
         // Closed while the jump question was open: the user did not choose, so the
         // newer remote position stays on the server.
         let due = self.offer.is_none() && self.book.as_ref().is_some_and(|b| b.synced.as_deref() != Some(b.progress.as_str()));
@@ -594,16 +571,7 @@ impl Plugin for KoSyncPlugin {
                 if self.book.is_none() {
                     return Ok(());
                 }
-                if let Some((progress, pct)) = Self::read_position(cx) {
-                    let now = self.now();
-                    if let Some(b) = self.book.as_mut() {
-                        if b.progress != progress {
-                            b.progress = progress;
-                            b.percentage = pct;
-                            b.changed_at = now;
-                        }
-                    }
-                }
+                self.note_position(cx);
                 self.pull_now(cx, true)
             }
             _ => Ok(()),
@@ -613,16 +581,15 @@ impl Plugin for KoSyncPlugin {
     fn on_ui_result(&mut self, cx: &mut HostCtx, id: u32, result: &str) -> Result<()> {
         match id {
             MENU => self.menu_pick(cx, result),
-            IN_SERVER | IN_USER if !result.trim().is_empty() => {
-                let key = if id == IN_SERVER { "server" } else { "user" };
-                cx.storage()?.set(key, Value::String(result.trim().to_string()))?;
+            IN_SERVER | IN_USER => {
+                cx.set_from_input(if id == IN_SERVER { "server" } else { "user" }, result, |t| Ok(json!(t)))?;
                 self.show_menu(cx)
             }
             IN_PASS if !result.is_empty() => {
                 cx.storage()?.set("userkey", Value::String(kosync::userkey(result)))?;
                 self.show_menu(cx)
             }
-            IN_SERVER | IN_USER | IN_PASS => self.show_menu(cx),
+            IN_PASS => self.show_menu(cx),
             JUMP => {
                 if let Some(pos) = self.offer.take() {
                     if result == "jump" {
@@ -635,8 +602,9 @@ impl Plugin for KoSyncPlugin {
                         }
                     } else if Self::auto_sync(cx) {
                         // Keep this device's position: it becomes the newest.
+                        let now = self.now();
                         if let Some(b) = self.book.as_mut() {
-                            b.changed_at = (self.clock)();
+                            b.changed_at = now;
                         }
                         self.push_now(cx, false, false)?;
                     }
@@ -648,27 +616,9 @@ impl Plugin for KoSyncPlugin {
     }
 
     fn on_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
-        match ev {
-            HttpEvent::Response { status, headers } => {
-                if let Some(f) = self.inflight.get_mut(&id) {
-                    f.status = *status;
-                    f.mime = headers
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-                        .map(|(_, v)| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
-                        .unwrap_or_default();
-                }
-                Ok(())
-            }
-            HttpEvent::Done { body } => match self.inflight.remove(&id) {
-                Some(f) => self.finish(cx, f, Ok(body.clone().unwrap_or_default())),
-                None => Ok(()),
-            },
-            HttpEvent::Error(m) => match self.inflight.remove(&id) {
-                Some(f) => self.finish(cx, f, Err(m.clone())),
-                None => Ok(()),
-            },
-            _ => Ok(()),
+        match self.inflight.event(id, ev) {
+            Some((f, answer)) => self.finish(cx, f, answer),
+            None => Ok(()),
         }
     }
 }

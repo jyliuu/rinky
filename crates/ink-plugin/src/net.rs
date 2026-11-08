@@ -15,11 +15,10 @@
 use crate::{PluginError, Result};
 use ink_net::connectivity::NetActivity;
 use ink_net::{CancelToken, HttpClient, Request, SseEvent, SseParser};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// How the body of a request is delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +87,6 @@ pub struct NetWorker {
     next_id: u32,
     /// id -> (plugin, cancel token)
     running: HashMap<u32, (String, CancelToken)>,
-    cancelled: Arc<Mutex<HashSet<u32>>>,
     activity: NetActivity,
 }
 
@@ -96,7 +94,7 @@ impl NetWorker {
     /// A worker that sends requests with `client`.
     pub fn new(client: Arc<dyn HttpClient + Send + Sync>) -> Self {
         let (tx, rx) = channel();
-        NetWorker { client, tx, rx, next_id: 1, running: HashMap::new(), cancelled: Arc::new(Mutex::new(HashSet::new())), activity: NetActivity::new() }
+        NetWorker { client, tx, rx, next_id: 1, running: HashMap::new(), activity: NetActivity::new() }
     }
 
     /// The tracker every request registers with while its thread runs (shared: clones
@@ -161,9 +159,6 @@ impl NetWorker {
             if let Some((_, token)) = self.running.remove(&id) {
                 token.cancel();
             }
-            if let Ok(mut c) = self.cancelled.lock() {
-                c.insert(id);
-            }
         }
     }
 
@@ -179,15 +174,8 @@ impl NetWorker {
     pub fn poll(&mut self) -> Vec<(String, u32, HttpEvent)> {
         let mut out = Vec::new();
         while let Ok((id, ev)) = self.rx.try_recv() {
-            let Some((plugin, _)) = self.running.get(&id) else {
-                // Cancelled: drop the rest; forget the id once the thread is done.
-                if ev.is_last() {
-                    if let Ok(mut c) = self.cancelled.lock() {
-                        c.remove(&id);
-                    }
-                }
-                continue;
-            };
+            // A cancelled request: its late events are dropped.
+            let Some((plugin, _)) = self.running.get(&id) else { continue };
             let plugin = plugin.clone();
             if ev.is_last() {
                 self.running.remove(&id);
@@ -226,12 +214,8 @@ impl NetHost for PluginJobs<'_> {
 }
 
 /// Sends `req` and reports its events through `emit` (which returns false when nobody
-/// listens any more). Runs in a worker thread; public for tests and tools.
-pub fn run_request(client: &dyn HttpClient, req: Request, mode: StreamMode, cancel: &AtomicBool, emit: &dyn Fn(HttpEvent) -> bool) {
-    run_request_until(client, req, mode, &|| cancel.load(Ordering::Relaxed), emit)
-}
-
-/// [`run_request`] with a cancel check function.
+/// listens any more) until `cancelled` returns true. Runs in a worker thread; public for
+/// tests and tools.
 pub fn run_request_until(client: &dyn HttpClient, req: Request, mode: StreamMode, cancelled: &dyn Fn() -> bool, emit: &dyn Fn(HttpEvent) -> bool) {
     let mut resp = match client.send(req) {
         Ok(r) => r,
@@ -245,12 +229,12 @@ pub fn run_request_until(client: &dyn HttpClient, req: Request, mode: StreamMode
     }
     let mut buf = vec![0u8; 8192];
     let mut total = 0usize;
-    let mut body = Vec::new();
     let mut sse = SseParser::new();
     let limit = match mode {
         StreamMode::Whole { limit } => limit,
         _ => STREAM_LIMIT,
     };
+    let mut body = Vec::with_capacity(if matches!(mode, StreamMode::Whole { .. }) { resp.capacity_for(limit) } else { 0 });
     loop {
         if cancelled() {
             return;

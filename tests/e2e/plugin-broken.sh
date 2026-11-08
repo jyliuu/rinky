@@ -25,7 +25,8 @@ guest "rm -rf $PLUG; mkdir -p $PLUG/sample-lua $PLUG/syntax $PLUG/misnamed $PLUG
 for p in syntax misnamed crasher looper escaper; do
   "$SLOT" push "$NAME" "$SRC/$p/plugin.toml" "$SRC/$p/main.lua" "$PLUG/$p/" >/dev/null || fail "push $p"
 done
-start_reader
+# Fast on_page_change calls are logged at debug.
+READER_LOG=debug start_reader
 wait_until 30 "first page" at_least 1 || fail "no on_page_change for sample-lua"
 not_home page1
 tap 1000 900; wait_until 20 "page 2" at_least 2 || fail "page 2 not shown"; sleep 2; not_home page2

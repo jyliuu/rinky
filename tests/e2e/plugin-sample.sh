@@ -18,7 +18,8 @@ trap 'guest "rm -rf $PLUG" >/dev/null 2>&1' EXIT
 wait_home 240 home-before
 guest "rm -rf $PLUG; mkdir -p $PLUG/sample-lua" || fail "mkdir $PLUG"
 "$SLOT" push "$NAME" "$E2E_ROOT/plugins/sample-lua/plugin.toml" "$E2E_ROOT/plugins/sample-lua/main.lua" "$PLUG/sample-lua/" >/dev/null || fail "push plugin"
-start_reader
+# Fast on_page_change calls are logged at debug.
+READER_LOG=debug start_reader
 wait_until 30 "first page shown to the plugin" at_least 1 || fail "no on_page_change in the log"
 not_home page1
 tap 1000 900; wait_until 20 "page 2" at_least 2 || fail "page 2 not reported to the plugin"; sleep 2; not_home page2

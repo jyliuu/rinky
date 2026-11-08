@@ -109,17 +109,13 @@ pub struct UsbNetPlugin {
 }
 
 impl Default for UsbNetPlugin {
+    /// The plugin on the real device.
     fn default() -> Self {
-        Self::new()
+        Self::with_gadget(UsbNet::system())
     }
 }
 
 impl UsbNetPlugin {
-    /// The plugin on the real device.
-    pub fn new() -> Self {
-        Self::with_gadget(UsbNet::system())
-    }
-
     /// The plugin with this gadget (tests use a fake configfs).
     pub fn with_gadget(net: UsbNet) -> Self {
         UsbNetPlugin { manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Ui, Permission::Storage]), net, on: None, error: None, started: false }
@@ -139,10 +135,6 @@ impl UsbNetPlugin {
     fn refresh(&mut self) {
         let st = self.net.state();
         self.on = st.udc.map(|_| st.ifname.unwrap_or_else(|| "usb0".into()));
-    }
-
-    fn autostart(cx: &mut HostCtx) -> bool {
-        cx.storage().ok().and_then(|s| s.get("autostart")).and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
     /// The last failure, unless the cable made it stale: "no cable" once a cable is in,
@@ -176,11 +168,11 @@ impl UsbNetPlugin {
                     cx.storage()?.set("mtp_udc", json!(udc))?;
                 }
                 self.refresh();
-                cx.ui()?.toast(&format!("USB network on: {KINDLE_IP}"));
+                cx.toast(&format!("USB network on: {KINDLE_IP}"))?;
             }
             Err(e) => {
                 self.refresh();
-                cx.ui()?.toast(&format!("USB network: {e}"));
+                cx.toast(&format!("USB network: {e}"))?;
                 self.error = Some(e);
             }
         }
@@ -189,7 +181,7 @@ impl UsbNetPlugin {
 
     /// Turns USB network off (and gives the port back to MTP if it was taken from it).
     pub fn turn_off(&mut self, cx: &mut HostCtx) -> Result<()> {
-        let mtp = cx.storage().ok().and_then(|s| s.get("mtp_udc")).and_then(|v| v.as_str().map(str::to_string));
+        let mtp = cx.setting_str("mtp_udc");
         let r = self.net.off(mtp.as_deref());
         self.refresh();
         match r {
@@ -198,10 +190,10 @@ impl UsbNetPlugin {
                 if mtp.is_some() {
                     cx.storage()?.set("mtp_udc", Value::Null)?;
                 }
-                cx.ui()?.toast("USB network off");
+                cx.toast("USB network off")?;
             }
             Err(e) => {
-                cx.ui()?.toast(&format!("USB network: {e}"));
+                cx.toast(&format!("USB network: {e}"))?;
                 self.error = Some(e);
             }
         }
@@ -209,13 +201,11 @@ impl UsbNetPlugin {
     }
 
     fn show_menu(&mut self, cx: &mut HostCtx) -> Result<()> {
-        let auto = Self::autostart(cx);
+        let auto = cx.setting_bool("autostart", false);
         let switch = if self.is_on() { ("Turn off", "off") } else { ("Turn on", "on") };
         let auto_label = format!("Turn on when rinky starts\t{}", if auto { "on" } else { "off" });
         let status = self.status_text();
-        let items = [(status.as_str(), "status"), switch, (auto_label.as_str(), "autostart"), ("How to connect a computer", "help")];
-        cx.ui()?.menu(MENU, "USB network", &items);
-        Ok(())
+        cx.menu(MENU, "USB network", [(status.as_str(), "status"), switch, (auto_label.as_str(), "autostart"), ("How to connect a computer", "help")])
     }
 }
 
@@ -272,11 +262,11 @@ impl Plugin for UsbNetPlugin {
                 self.show_menu(cx)?;
             }
             (MENU, "autostart") => {
-                let auto = !Self::autostart(cx);
+                let auto = !cx.setting_bool("autostart", false);
                 cx.storage()?.set("autostart", json!(auto))?;
                 self.show_menu(cx)?;
             }
-            (MENU, "help") => cx.ui()?.view_markdown(HELP, "How to connect a computer", HELP_TEXT),
+            (MENU, "help") => cx.view_markdown(HELP, "How to connect a computer", HELP_TEXT)?,
             // Back from the help page: the settings page again.
             (HELP, "closed") => self.show_menu(cx)?,
             _ => {}
@@ -311,7 +301,7 @@ impl Plugin for UsbNetPlugin {
         self.started = true;
         self.refresh();
         log::info!("usbnet: start: USB network is {}", if self.is_on() { "on" } else { "off" });
-        if !self.is_on() && Self::autostart(cx) {
+        if !self.is_on() && cx.setting_bool("autostart", false) {
             log::info!("usbnet: autostart");
             self.turn_on(cx)?;
         }

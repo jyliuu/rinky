@@ -10,14 +10,15 @@ use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Gesture, TouchKind};
 use crate::icon::Icon;
 use crate::theme::space;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{press_class, take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Point, Rect, RefreshClass};
 use ink_text::hyphen::{hyphenator_for, Hyphenator};
 use ink_text::linebreak::wrap;
 use ink_text::Style;
 
-/// An on/off switch with a label on its left.
+/// An on/off switch with a label on its left. It keeps the default GL16 refresh: the off
+/// state has a gray track, which DU would show white.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toggle {
     /// Caption.
@@ -77,11 +78,6 @@ impl Widget for Toggle {
             }
             _ => EventResult::Ignored,
         }
-    }
-
-    fn refresh_class(&self) -> RefreshClass {
-        // The off state has a gray track, which DU would show white; the switch is small.
-        RefreshClass::Gl16
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
@@ -156,30 +152,54 @@ impl Slider {
     }
 }
 
+/// Draws a round outlined icon button (a slider's step buttons).
+pub fn paint_round_button(cx: &mut PaintCx, r: Rect, icon: Icon) {
+    let fg = cx.theme.fg;
+    stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, cx.theme.border_px as f32, fg);
+    cx.icon(icon, r, r.w / 2, fg);
+}
+
+/// Height of a slider's track bar.
+const TRACK_H: f32 = 12.0;
+
+/// Draws a slider's bar across the middle of `track`, black up to the fraction `f`, the
+/// rest in the theme's track gray, or white with a black outline when `du` (a drag shown
+/// with DU has no gray). Returns the centre of the knob.
+pub fn paint_slider_track(cx: &mut PaintCx, track: Rect, f: f32, du: bool) -> (f32, f32) {
+    let (fg, r) = (cx.theme.fg, TRACK_H / 2.0);
+    let ty = track.y as f32 + track.h as f32 / 2.0;
+    let kx = track.x as f32 + f * track.w as f32;
+    let bar = Rect::new(track.x, (ty - r) as i32, track.w, TRACK_H as u32);
+    fill_round_rect(cx.canvas, bar, r, if du { cx.theme.bg } else { cx.theme.track() });
+    if du {
+        stroke_round_rect(cx.canvas, bar, r, 2.0, fg);
+    }
+    fill_round_rect(cx.canvas, Rect::new(bar.x, bar.y, (kx - track.x as f32).max(0.0) as u32, bar.h), r, fg);
+    (kx, ty)
+}
+
+/// Draws a slider's knob centred at `at` on `track`: a ring, solid while `dragging`.
+pub fn paint_slider_knob(cx: &mut PaintCx, track: Rect, (kx, ty): (f32, f32), dragging: bool) {
+    let (fg, bg) = (cx.theme.fg, cx.theme.bg);
+    let kr = (track.h as f32 * 0.28).min(26.0);
+    Path::new().circle(kx, ty, kr).fill(cx.canvas, fg);
+    Path::new().circle(kx, ty, kr - 5.0).fill(cx.canvas, if dragging { fg } else { bg });
+}
+
 impl Widget for Slider {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let (fg, bg) = (cx.theme.fg, cx.theme.bg);
+        let fg = cx.theme.fg;
         let (px, small) = (cx.theme.font_px, cx.theme.small_px);
         let top = Rect::new(b.x + 8, b.y, b.w.saturating_sub(16), b.h / 2);
         cx.text_left(top, &self.label, small * 1.15, Style::Regular, fg);
-        let v = self.value_text();
-        let vw = cx.text_width(Style::Bold, px, &v);
         let baseline = cx.baseline_in(top, px, Style::Bold);
-        cx.draw_text_clipped(Style::Bold, px, top.right() as f32 - vw, baseline, &v, fg, b);
+        cx.draw_text_right(Style::Bold, px, top.right() as f32, baseline, &self.value_text(), fg, b);
         let (minus, track, plus) = Slider::parts(b);
-        for (r, icon) in [(minus, Icon::Minus), (plus, Icon::Plus)] {
-            stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, 3.0, fg);
-            cx.icon(icon, r, r.w / 2, fg);
-        }
-        let ty = track.y as f32 + track.h as f32 / 2.0;
+        paint_round_button(cx, minus, Icon::Minus);
+        paint_round_button(cx, plus, Icon::Plus);
         let f = if self.max > self.min { (self.value - self.min) / (self.max - self.min) } else { 0.0 };
-        let kx = track.x as f32 + f * track.w as f32;
-        let th = 12.0;
-        fill_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, track.w, th as u32), th / 2.0, cx.theme.track());
-        fill_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, (kx - track.x as f32) as u32, th as u32), th / 2.0, fg);
-        let kr = (track.h as f32 * 0.28).min(26.0);
-        Path::new().circle(kx, ty, kr).fill(cx.canvas, fg);
-        Path::new().circle(kx, ty, kr - 5.0).fill(cx.canvas, if self.dragging { fg } else { bg });
+        let knob = paint_slider_track(cx, track, f, false);
+        paint_slider_knob(cx, track, knob, self.dragging);
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
@@ -222,17 +242,12 @@ impl Widget for Slider {
                 self.value = self.snap(self.value + d * step);
                 self.report()
             }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        if self.dragging {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
-        }
+        press_class(self.dragging)
     }
 }
 
@@ -282,34 +297,17 @@ impl ProgressBar {
         ProgressBar { kind: ProgressKind::Thin, ..ProgressBar::new(value) }
     }
 
-    /// Black and white only (see [`ProgressBar::two_level`]).
-    pub fn two_level(mut self) -> Self {
-        self.two_level = true;
-        self
-    }
-
-    /// With chapter marks (fractions).
-    pub fn with_marks(mut self, marks: Vec<f32>) -> Self {
-        self.marks = marks;
-        self
-    }
-
-    /// With a label on the right.
-    pub fn with_label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-
-    /// Reserves the label column for `widest` (see [`ProgressBar::label_slot`]).
-    pub fn with_label_slot(mut self, widest: impl Into<String>) -> Self {
-        self.label_slot = Some(widest.into());
-        self
-    }
-
-    /// With a caption above the bar.
-    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
-        self.caption = Some(caption.into());
-        self
+    setters! {
+        /// Black and white only (see [`ProgressBar::two_level`]).
+        two_level() => two_level = true;
+        /// With chapter marks (fractions).
+        with_marks(marks: Vec<f32>) => marks = marks;
+        /// With a label on the right.
+        with_label(label: impl Into<String>) => label = Some(label.into());
+        /// Reserves the label column for `widest` (see [`ProgressBar::label_slot`]).
+        with_label_slot(widest: impl Into<String>) => label_slot = Some(widest.into());
+        /// With a caption above the bar.
+        with_caption(caption: impl Into<String>) => caption = Some(caption.into());
     }
 
     /// Track thickness for `kind` in a box `h` tall.
@@ -332,12 +330,11 @@ fn unit(v: f32) -> f32 {
 
 impl Widget for ProgressBar {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let small = t.caption.px;
-        let text_w = match &self.label {
-            Some(l) => cx.text_width(Style::Bold, small, l).ceil() as u32,
-            None => 0,
-        };
+        // The label is shaped once: for its width and to draw it.
+        let label = self.label.as_ref().map(|l| (l, cx.fonts.shape(Style::Bold, small, l)));
+        let text_w = label.as_ref().map_or(0, |(_, run)| run.width.ceil() as u32);
         let slot_w = match (&self.label, &self.label_slot) {
             (Some(_), Some(w)) => cx.text_width(Style::Bold, small, w).ceil() as u32,
             _ => 0,
@@ -362,12 +359,12 @@ impl Widget for ProgressBar {
         } else {
             self.paint_gray(cx, area, bar, h, done);
         }
-        if let Some(l) = &self.label {
+        if let Some((l, run)) = label {
             // Right-aligned in the column when a slot is reserved.
             let col_w = label_w.saturating_sub(space(2) as u32);
             let off = if self.label_slot.is_some() { col_w.saturating_sub(text_w + 4) } else { 0 };
             let r = Rect::new(bar.right() + space(2) + off as i32, area.y, col_w - off.min(col_w), area.h);
-            cx.text_left(r, l, small, Style::Bold, t.fg);
+            cx.put_left(r, run, l, Style::Bold, t.fg);
         }
     }
 }
@@ -375,14 +372,14 @@ impl Widget for ProgressBar {
 impl ProgressBar {
     /// The gray track with a black read part (round ends).
     fn paint_gray(&self, cx: &mut PaintCx, area: Rect, bar: Rect, h: u32, done: u32) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let rad = h as f32 / 2.0;
+        fill_round_rect(cx.canvas, bar, rad, t.track());
+        if done > 0 {
+            fill_round_rect(cx.canvas, Rect::new(bar.x, bar.y, done.max(h).min(bar.w), h), rad, t.fg);
+        }
         match self.kind {
             ProgressKind::Thick => {
-                fill_round_rect(cx.canvas, bar, rad, t.track());
-                if done > 0 {
-                    fill_round_rect(cx.canvas, Rect::new(bar.x, bar.y, done.max(h).min(bar.w), h), rad, t.fg);
-                }
                 // Chapter starts: notches through the bar, white in the done part and
                 // black in the rest (white on the light track would not show).
                 let done_x = bar.x + done as i32;
@@ -395,10 +392,6 @@ impl ProgressBar {
                 stroke_round_rect(cx.canvas, bar, rad, t.border_px as f32, t.fg);
             }
             ProgressKind::Thin => {
-                fill_round_rect(cx.canvas, bar, rad, t.track());
-                if done > 0 {
-                    fill_round_rect(cx.canvas, Rect::new(bar.x, bar.y, done.max(h).min(bar.w), h), rad, t.fg);
-                }
                 // Chapter starts: black ticks reaching above and below the track.
                 let reach = (area.h as i32 - h as i32) / 2;
                 let tick = reach.clamp(0, 8);
@@ -407,23 +400,17 @@ impl ProgressBar {
                     cx.canvas.fill_rect(x - 2, bar.y - tick, 4, h as i32 + 2 * tick, t.fg);
                 }
             }
-                }
+        }
     }
 
     /// Black and white only ([`ProgressBar::two_level`]): read part the full track height,
     /// unread part a 2 px line on the track's centre (thick bars: a 2 px outline), square
     /// ends; chapter ticks black, white where they cross the read part.
     fn paint_two_level(&self, cx: &mut PaintCx, area: Rect, bar: Rect, h: u32, done: u32) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let line = 2.min(h as i32);
         match self.kind {
-            ProgressKind::Thick => {
-                let bw = t.border_px.max(2);
-                cx.canvas.fill_rect(bar.x, bar.y, bar.w as i32, bw, t.fg);
-                cx.canvas.fill_rect(bar.x, bar.bottom() - bw, bar.w as i32, bw, t.fg);
-                cx.canvas.fill_rect(bar.x, bar.y, bw, h as i32, t.fg);
-                cx.canvas.fill_rect(bar.right() - bw, bar.y, bw, h as i32, t.fg);
-            }
+            ProgressKind::Thick => cx.canvas.stroke_rect(bar, t.border_px.max(2), t.fg),
             ProgressKind::Thin => cx.canvas.fill_rect(bar.x, bar.y + (h as i32 - line) / 2, bar.w as i32, line, t.fg),
         }
         cx.canvas.fill_rect(bar.x, bar.y, done.min(bar.w) as i32, h as i32, t.fg);
@@ -453,10 +440,9 @@ impl RingProgress {
         RingProgress { value, label: Some(format!("{}%", (unit(value) * 100.0).round() as u32)) }
     }
 
-    /// Without the label.
-    pub fn bare(mut self) -> Self {
-        self.label = None;
-        self
+    setters! {
+        /// Without the label.
+        bare() => label = None;
     }
 
     /// Square badge rectangle `side` big in the bottom-right corner of `cover`, inset by
@@ -475,7 +461,7 @@ impl Widget for RingProgress {
     }
 
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let side = b.w.min(b.h) as f32;
         if side < 4.0 {
             return;
@@ -520,10 +506,9 @@ impl Segmented {
         Segmented { options: options.iter().map(|s| s.to_string()).collect(), selected: 0, action: action.into() }
     }
 
-    /// With `i` selected.
-    pub fn with_selected(mut self, i: usize) -> Self {
-        self.selected = i;
-        self
+    setters! {
+        /// With `i` selected.
+        with_selected(i: usize) => selected = i;
     }
 
     /// Segment rectangles inside `b`.
@@ -534,7 +519,7 @@ impl Segmented {
 
 impl Widget for Segmented {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let rad = b.h as f32 / 2.0;
         let cells = self.cells(b);
         let n = cells.len();
@@ -562,19 +547,20 @@ impl Widget for Segmented {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else {
-            return match ev {
-                UiEvent::Gesture(_) => EventResult::Handled,
-                _ => EventResult::Ignored,
-            };
-        };
-        match self.cells(b).iter().position(|r| r.contains(*pos)) {
-            Some(i) if i != self.selected => {
-                self.selected = i;
-                EventResult::Action(format!("{}:{i}", self.action))
-            }
-            _ => EventResult::Handled,
+        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else { return take_gestures(ev) };
+        select_tapped(&self.cells(b), *pos, &mut self.selected, &self.action)
+    }
+}
+
+/// Selects the cell of `cells` under a tap at `pos`: reports `"<action>:<index>"` when
+/// that is another cell than `selected`, else just takes the tap.
+fn select_tapped(cells: &[Rect], pos: Point, selected: &mut usize, action: &str) -> EventResult {
+    match cells.iter().position(|r| r.contains(pos)) {
+        Some(i) if i != *selected => {
+            *selected = i;
+            EventResult::Action(format!("{action}:{i}"))
         }
+        _ => EventResult::Handled,
     }
 }
 
@@ -613,10 +599,9 @@ impl Chips {
         }
     }
 
-    /// Only one chip on at a time.
-    pub fn single(mut self) -> Self {
-        self.single = true;
-        self
+    setters! {
+        /// Only one chip on at a time.
+        single() => single = true;
     }
 
     /// With chip `i` selected.
@@ -638,7 +623,7 @@ impl Chips {
 
 impl Widget for Chips {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let t = cx.theme.clone();
+        let t = cx.theme;
         let h = Chips::CHIP_H.min(b.h);
         let px = t.label.px * 0.95;
         let check = (px * 0.9) as u32;
@@ -674,12 +659,7 @@ impl Widget for Chips {
     }
 
     fn event(&mut self, ev: &UiEvent, _b: Rect) -> EventResult {
-        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else {
-            return match ev {
-                UiEvent::Gesture(_) => EventResult::Handled,
-                _ => EventResult::Ignored,
-            };
-        };
+        let UiEvent::Gesture(Gesture::Tap { pos }) = ev else { return take_gestures(ev) };
         let Some(i) = self.rects.iter().position(|r| r.contains(*pos)) else { return EventResult::Handled };
         if self.single {
             if self.chips[i].selected {
@@ -736,13 +716,7 @@ impl Widget for Tabs {
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         let UiEvent::Gesture(Gesture::Tap { pos }) = ev else { return EventResult::Ignored };
-        match self.cells(b).iter().position(|r| r.contains(*pos)) {
-            Some(i) if i != self.selected => {
-                self.selected = i;
-                EventResult::Action(format!("{}:{i}", self.action))
-            }
-            _ => EventResult::Handled,
-        }
+        select_tapped(&self.cells(b), *pos, &mut self.selected, &self.action)
     }
 }
 
@@ -804,10 +778,9 @@ impl TextBlock {
         self
     }
 
-    /// With an alignment.
-    pub fn aligned(mut self, align: Align) -> Self {
-        self.align = align;
-        self
+    setters! {
+        /// With an alignment.
+        aligned(align: Align) => align = align;
     }
 
     /// Lines as (text, ends with a hyphen) for a width (for tests and measuring).
@@ -860,28 +833,25 @@ impl Widget for TextBlock {
                 break;
             }
             let shown = if *hyphen { format!("{}-", text.trim_end_matches('\u{ad}')) } else { text.replace('\u{ad}', "") };
-            let w = cx.text_width(self.style, self.px, &shown);
-            match self.align {
-                Align::Left => {
-                    cx.draw_text_clipped(self.style, self.px, b.x as f32, baseline, &shown, fg, clip);
+            let words: Vec<&str> = match self.align {
+                Align::Justify if !*last_of_para => shown.split(' ').filter(|w| !w.is_empty()).collect(),
+                _ => Vec::new(),
+            };
+            if words.len() >= 2 {
+                let ws: Vec<f32> = words.iter().map(|w| cx.text_width(self.style, self.px, w)).collect();
+                let gap = (b.w as f32 - ws.iter().sum::<f32>()) / (words.len() - 1) as f32;
+                let mut x = b.x as f32;
+                for (w, ww) in words.iter().zip(&ws) {
+                    cx.draw_text_clipped(self.style, self.px, x, baseline, w, fg, clip);
+                    x += ww + gap;
                 }
-                Align::Center => {
-                    cx.draw_text_clipped(self.style, self.px, b.x as f32 + (b.w as f32 - w) / 2.0, baseline, &shown, fg, clip);
-                }
-                Align::Justify => {
-                    let words: Vec<&str> = shown.split(' ').filter(|w| !w.is_empty()).collect();
-                    if *last_of_para || words.len() < 2 {
-                        cx.draw_text_clipped(self.style, self.px, b.x as f32, baseline, &shown, fg, clip);
-                    } else {
-                        let ws: Vec<f32> = words.iter().map(|w| cx.text_width(self.style, self.px, w)).collect();
-                        let gap = (b.w as f32 - ws.iter().sum::<f32>()) / (words.len() - 1) as f32;
-                        let mut x = b.x as f32;
-                        for (w, ww) in words.iter().zip(&ws) {
-                            cx.draw_text_clipped(self.style, self.px, x, baseline, w, fg, clip);
-                            x += ww + gap;
-                        }
-                    }
-                }
+            } else {
+                // Left, centred, or the last line of a justified paragraph (left).
+                let x = match self.align {
+                    Align::Center => b.x as f32 + (b.w as f32 - cx.text_width(self.style, self.px, &shown)) / 2.0,
+                    _ => b.x as f32,
+                };
+                cx.draw_text_clipped(self.style, self.px, x, baseline, &shown, fg, clip);
             }
             baseline += self.px * self.line_height;
         }

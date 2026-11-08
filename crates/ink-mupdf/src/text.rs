@@ -57,14 +57,12 @@ impl PageText {
 
     fn normalized(&self) -> Vec<Norm> {
         let mut out: Vec<Norm> = Vec::with_capacity(self.chars.len() + 16);
-        let n = self.chars.len();
         for (i, ch) in self.chars.iter().enumerate() {
-            let next_line_starts = i + 1 < n && self.chars[i + 1].line != ch.line;
-            // Line-end hyphenation: drop the hyphen, join the word.
-            if next_line_starts && (ch.c == '-' || ch.c == '\u{ad}') && self.chars[i + 1].c.is_lowercase() {
-                continue;
-            }
-            if ch.c == '\u{ad}' {
+            // The first character of the next line, when this one ends a line.
+            let next_line = self.chars.get(i + 1).filter(|n| n.line != ch.line);
+            // A soft hyphen never shows; a hyphen at a line end before a lower-case letter
+            // is dropped and the word joined.
+            if ch.c == '\u{ad}' || ch.c == '-' && next_line.is_some_and(|n| n.c.is_lowercase()) {
                 continue;
             }
             if ch.c.is_whitespace() {
@@ -76,11 +74,8 @@ impl PageText {
                     out.push(Norm { lower: lc, orig: (k == 0).then_some(ch.c), src: Some(i) });
                 }
             }
-            if next_line_starts {
-                let hyphen_join = (ch.c == '-' || ch.c == '\u{ad}') && self.chars[i + 1].c.is_lowercase();
-                if !hyphen_join && out.last().is_some_and(|l| l.lower != ' ') {
-                    out.push(Norm { lower: ' ', orig: Some(' '), src: None });
-                }
+            if next_line.is_some() && out.last().is_some_and(|l| l.lower != ' ') {
+                out.push(Norm { lower: ' ', orig: Some(' '), src: None });
             }
         }
         while out.last().is_some_and(|l| l.lower == ' ') {
@@ -96,25 +91,14 @@ impl PageText {
 
     /// The text of a character range, normalized like [`PageText::plain`].
     pub fn text_of(&self, range: Range<usize>) -> String {
+        text_of(&self.normalized(), range)
+    }
+
+    /// The text under each of `rects` ([`PageText::range_in`] of each, then
+    /// [`PageText::text_of`]; empty where no character is), normalizing the page once.
+    pub fn texts_under(&self, rects: &[FRect]) -> Vec<String> {
         let norm = self.normalized();
-        let mut out = String::new();
-        for (k, n) in norm.iter().enumerate() {
-            let inside = match n.src {
-                Some(i) => range.contains(&i),
-                None => {
-                    // A space between lines belongs to the range when both neighbours do.
-                    let prev = norm[..k].iter().rev().find_map(|m| m.src);
-                    let next = norm[k + 1..].iter().find_map(|m| m.src);
-                    matches!((prev, next), (Some(a), Some(b)) if range.contains(&a) && range.contains(&b))
-                }
-            };
-            if inside {
-                if let Some(c) = n.orig {
-                    out.push(c);
-                }
-            }
-        }
-        out.trim().to_string()
+        rects.iter().map(|r| self.range_in(std::slice::from_ref(r)).map(|range| text_of(&norm, range)).unwrap_or_default()).collect()
     }
 
     /// Every case-insensitive match of `query` (white space in the query matches any run
@@ -130,25 +114,14 @@ impl PageText {
         let mut i = 0;
         while i + q.len() <= norm.len() {
             if norm[i..i + q.len()].iter().zip(&q).all(|(n, c)| n.lower == *c) {
-                let srcs: Vec<usize> = norm[i..i + q.len()].iter().filter_map(|n| n.src).collect();
-                if let (Some(&a), Some(&b)) = (srcs.iter().min(), srcs.iter().max()) {
+                let srcs = || norm[i..i + q.len()].iter().filter_map(|n| n.src);
+                if let (Some(a), Some(b)) = (srcs().min(), srcs().max()) {
+                    let shown = |r: Range<usize>| norm[r].iter().filter_map(|n| n.orig).collect::<String>();
                     let lo = i.saturating_sub(context);
-                    let hi = (i + q.len() + context).min(norm.len());
-                    let mut excerpt = String::new();
-                    let mut start = 0;
-                    let mut end = 0;
-                    for (k, n) in norm.iter().enumerate().take(hi).skip(lo) {
-                        if k == i {
-                            start = excerpt.len();
-                        }
-                        if let Some(c) = n.orig {
-                            excerpt.push(c);
-                        }
-                        if k + 1 == i + q.len() {
-                            end = excerpt.len();
-                        }
-                    }
-                    out.push(TextMatch { chars: a..b + 1, excerpt, matched: start..end });
+                    let start = shown(lo..i).len();
+                    let matched = start..start + shown(i..i + q.len()).len();
+                    let excerpt = shown(lo..(i + q.len() + context).min(norm.len()));
+                    out.push(TextMatch { chars: a..b + 1, excerpt, matched });
                 }
                 i += q.len();
             } else {
@@ -178,7 +151,9 @@ impl PageText {
     pub fn nearest(&self, x: f32, y: f32) -> Option<usize> {
         let mut lines: Vec<(u32, FRect)> = Vec::new();
         for ch in self.chars.iter().filter(|c| !c.rect.is_empty()) {
-            match lines.iter_mut().find(|(l, _)| *l == ch.line) {
+            // Each line id appears once in `lines`; in reading order it is nearly always the
+            // last one, so look from the end (linear instead of chars x lines).
+            match lines.iter_mut().rev().find(|(l, _)| *l == ch.line) {
                 Some((_, r)) => *r = r.union(&ch.rect),
                 None => lines.push((ch.line, ch.rect)),
             }
@@ -197,31 +172,15 @@ impl PageText {
     /// Characters whose centre lies inside any of `rects` (page space), as one range from
     /// the first to the last.
     pub fn range_in(&self, rects: &[FRect]) -> Option<Range<usize>> {
-        let hits: Vec<usize> = self
-            .chars
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                let (cx, cy) = c.rect.center();
-                rects.iter().any(|r| r.inflate(0.5).contains(cx, cy))
-            })
-            .map(|(i, _)| i)
-            .collect();
-        Some(*hits.first()?..*hits.last()? + 1)
+        let first = self.chars.iter().position(|c| centre_in(c, rects))?;
+        let last = self.chars.iter().rposition(|c| centre_in(c, rects)).unwrap_or(first);
+        Some(first..last + 1)
     }
 
     /// The text of the characters whose centre lies inside any of `rects` (reading order,
     /// normalized like [`PageText::plain`]).
     pub fn text_in(&self, rects: &[FRect]) -> String {
-        let chars = self
-            .chars
-            .iter()
-            .filter(|c| {
-                let (cx, cy) = c.rect.center();
-                rects.iter().any(|r| r.inflate(0.5).contains(cx, cy))
-            })
-            .copied()
-            .collect();
+        let chars = self.chars.iter().filter(|c| centre_in(c, rects)).copied().collect();
         PageText::new(self.page, chars).plain()
     }
 
@@ -235,6 +194,34 @@ impl PageText {
     }
 }
 
+/// True when the centre of `c` lies inside one of `rects` (grown by half a point).
+fn centre_in(c: &TextChar, rects: &[FRect]) -> bool {
+    let (cx, cy) = c.rect.center();
+    rects.iter().any(|r| r.inflate(0.5).contains(cx, cy))
+}
+
+/// The text of the character range `range` from the normalized stream `norm`.
+fn text_of(norm: &[Norm], range: Range<usize>) -> String {
+    let mut out = String::new();
+    for (k, n) in norm.iter().enumerate() {
+        let inside = match n.src {
+            Some(i) => range.contains(&i),
+            None => {
+                // A space between lines belongs to the range when both neighbours do.
+                let prev = norm[..k].iter().rev().find_map(|m| m.src);
+                let next = norm[k + 1..].iter().find_map(|m| m.src);
+                matches!((prev, next), (Some(a), Some(b)) if range.contains(&a) && range.contains(&b))
+            }
+        };
+        if inside {
+            if let Some(c) = n.orig {
+                out.push(c);
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,7 +233,7 @@ mod tests {
             for (k, c) in text.chars().enumerate() {
                 let x = 10.0 * k as f32;
                 let y = 20.0 * l as f32;
-                chars.push(RawChar { c, rect: FRect::new(x, y, x + 10.0, y + 12.0), line: l as u32, block: 0 });
+                chars.push(RawChar { c, rect: FRect::new(x, y, x + 10.0, y + 12.0), line: l as u32 });
             }
         }
         PageText::new(0, chars)
@@ -284,6 +271,10 @@ mod tests {
         assert_eq!(p.text_of(4..10), "def ghi");
         assert_eq!(p.range_in(&[FRect::new(0.0, 18.0, 100.0, 40.0)]), Some(7..10));
         assert_eq!(p.text_in(&[FRect::new(35.0, 0.0, 100.0, 40.0)]), "def");
+        assert_eq!(
+            p.texts_under(&[FRect::new(35.0, 0.0, 100.0, 12.0), FRect::new(0.0, 100.0, 9.0, 120.0), FRect::new(0.0, 18.0, 100.0, 40.0)]),
+            vec!["def", "", "ghi"]
+        );
         assert_eq!(p.window(5, 4), 3..7);
         assert_eq!(p.window(0, 100), 0..10);
     }

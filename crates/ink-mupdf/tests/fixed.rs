@@ -260,6 +260,29 @@ fn contrast_and_gamma_change_gray_levels() {
     assert!((118..=138).contains(&m3) && l3 == 255, "contrast 2: {m3} {l3}");
 }
 
+/// Colour management is off (`fz_disable_icc` in the shim): gray content keeps its exact
+/// levels whether it is drawn in DeviceGray or as neutral RGB, and colours become gray
+/// by the plain luma weights (0.30 R + 0.59 G + 0.11 B).
+#[test]
+fn gray_levels_are_exact_and_colours_use_luma_weights() {
+    let mut page = testgen::PdfPage::letter();
+    page.rect(100.0, 100.0, 100.0, 100.0, 0.5);
+    page.rect_rgb(300.0, 100.0, 100.0, 100.0, [0.5, 0.5, 0.5]);
+    page.rect_rgb(100.0, 300.0, 100.0, 100.0, [1.0, 0.0, 0.0]);
+    page.rect_rgb(300.0, 300.0, 100.0, 100.0, [0.0, 1.0, 0.0]);
+    let path = write("colours.pdf", &testgen::write_pdf(&[page], &[], &[]));
+    let mut d = open(&path, "", W, H);
+    let c = screen(&mut d, 0);
+    let s = W as f32 / 612.0;
+    let top = (H as f32 - 792.0 * s) / 2.0;
+    let at = |x: f32, y: f32| px(&c, x * s, top + y * s);
+    let (gray, neutral, red, green) = (at(150.0, 150.0), at(350.0, 150.0), at(150.0, 350.0), at(350.0, 350.0));
+    assert!((127..=128).contains(&gray), "DeviceGray 0.5: {gray}");
+    assert_eq!(neutral, gray, "neutral RGB draws as the same gray");
+    assert!((76..=77).contains(&red), "red: {red}");
+    assert!((149..=151).contains(&green), "green: {green}");
+}
+
 // --- 3. Text, search, selection, highlights ------------------------------------------
 
 #[test]
@@ -511,6 +534,21 @@ fn cbz_two_page_spreads_in_landscape() {
 
 // --- 6. Page cache -----------------------------------------------------------------------
 
+/// `Document::prefetch_page` draws a screen into the cache once; the turn to it then
+/// shows the same pixels as a screen drawn on demand.
+#[test]
+fn prefetch_page_fills_the_cache_once() {
+    let path = cbz_path();
+    let mut d = open(&path, "", W, H);
+    let doc: &mut dyn Document = &mut d;
+    assert!(doc.prefetch_page(3), "drawn now");
+    assert!(!doc.prefetch_page(3), "already cached");
+    assert!(!doc.prefetch_page(12), "past the last screen");
+    assert!(d.is_cached(3) && !d.is_cached(2));
+    let fresh = screen(&mut open(&path, "", W, H), 3);
+    assert_eq!(screen(&mut d, 3).pixels, fresh.pixels);
+}
+
 #[test]
 fn page_cache_respects_its_memory_cap() {
     let path = pdf_path();
@@ -591,4 +629,85 @@ fn zoom_step_cuts_pages_into_more_screens_and_back() {
     }
     assert_eq!(d.zoom_step(1), None, "at the top of the ladder");
     assert_eq!(d.options().zoom, 4.0);
+}
+
+/// Share of pixels of `a` that differ by more than 64 levels from every pixel of `b`
+/// within one pixel (so a coarse but well placed preview passes, a shifted one not).
+fn misplaced(a: &Canvas, b: &Canvas) -> f64 {
+    let (w, h) = (a.width as i32, a.height as i32);
+    let mut n = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let v = a.pixels[(y * w + x) as usize];
+            let near = (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (x + dx, y + dy)));
+            if near.filter_map(|(x, y)| b.get(x, y)).all(|u| u.abs_diff(v) > 64) {
+                n += 1;
+            }
+        }
+    }
+    n as f64 / a.pixels.len() as f64
+}
+
+/// A zoom step scales the page shown before it as a preview of the new screen: close
+/// to the sharp render (in and out, two steps at once too, on a PDF and a CBZ), and gone
+/// once the sharp page was drawn or the options changed.
+#[test]
+fn zoom_preview_scales_the_screen_shown_before() {
+    for path in [pdf_path(), cbz_path()] {
+        let mut d = open(&path, "", W, H);
+        let mut c = Canvas::new(W as usize, H as usize);
+        assert!(!d.render_zoom_preview(0, &mut c), "no zoom yet");
+        d.set_current_page(2);
+        assert!(d.zoom_step(1).is_some());
+        let page = d.current_page();
+        assert!(!d.render_zoom_preview(page, &mut c), "the page shown was never drawn");
+
+        d.set_options(FixedOptions::default());
+        screen(&mut d, 2);
+        d.set_current_page(2);
+        for (steps, name) in [(1, "x1.25"), (2, "x1.5 then x2")] {
+            for _ in 0..steps {
+                assert!(d.zoom_step(1).is_some());
+            }
+            let page = d.current_page();
+            assert!(d.render_zoom_preview(page, &mut c), "{name}");
+            let sharp = screen(&mut d, page);
+            let diff = misplaced(&c, &sharp);
+            assert!(diff < 0.01, "{}: {name}: {:.2} % of the preview is off", path.display(), diff * 100.0);
+            assert!(c.pixels.iter().any(|&v| v < 100), "{name}: the preview shows ink");
+            assert!(!d.render_zoom_preview(page, &mut c), "{name}: the sharp page replaced the preview");
+            d.set_current_page(page);
+        }
+        // Out again: the zoomed tile covers part of the page, the rest stays white.
+        assert!(d.zoom_step(-3).is_some());
+        let page = d.current_page();
+        assert!(d.render_zoom_preview(page, &mut c));
+        assert!(c.pixels.iter().any(|&v| v < 100) && c.pixels.contains(&255));
+        d.set_options(FixedOptions::default());
+        assert!(!d.render_zoom_preview(page, &mut c), "an option change drops the preview");
+    }
+}
+
+/// The trait's view options reach the engine: two columns cut each page into two
+/// screens, the current page stays on screen, and the engine's own gamma stays.
+#[test]
+fn fixed_view_through_the_document_trait() {
+    let path = pdf_path();
+    let mut d = open(&path, "gamma=1.5", W, H);
+    let base = d.fixed_view().expect("a fixed-layout document has view options");
+    assert_eq!(base, ink_doc::FixedView::default());
+    let before = d.page_count().pages;
+    d.set_current_page(d.page_of(&"page:2".parse().unwrap()).unwrap());
+    let view = ink_doc::FixedView { columns: 2, ..base };
+    d.set_fixed_view(&view).unwrap();
+    assert_eq!(d.fixed_view(), Some(view));
+    assert_eq!(d.options().gamma, 1.5, "gamma is the engine's, not the view's");
+    assert!(d.page_count().pages > before, "two columns: more screens ({} vs {before})", d.page_count().pages);
+    let Position::Page(at) = d.position_of_page(d.current_page()).unwrap() else { panic!("a page position") };
+    assert_eq!(at.page, 2, "the page shown before stays on screen");
+    // Setting the same view again changes nothing (the screen cache stays).
+    let cur = d.current_page();
+    d.render_page(cur, &mut Canvas::new(W as usize, H as usize)).unwrap();
+    d.set_fixed_view(&view).unwrap();
+    assert!(d.is_cached(cur));
 }

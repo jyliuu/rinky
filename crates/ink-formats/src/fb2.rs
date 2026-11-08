@@ -17,8 +17,8 @@
 //!   date, cover page), `document-info/id`, `publish-info` (publisher, ISBN, year).
 
 use crate::book::{Book, BookInfo, Cover, Identifier, Target, TocNode};
-use crate::util::{base64_decode, read_limited, sniff_media_type, MAX_ENTRY};
-use crate::xml::{self, escape_attr, escape_text, Element, Node};
+use crate::util::{base64_decode, find_bytes, read_limited, sniff_media_type, MAX_ENTRY};
+use crate::xml::{self, escape_text, Element, Node};
 use crate::Format;
 use ink_doc::{DocError, MemoryLoader, Result};
 use ink_html::HtmlChapter;
@@ -63,8 +63,11 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
 
 /// Parses FB2 bytes into the `FictionBook` element.
 pub fn parse(bytes: &[u8]) -> Result<Element> {
-    let text = xml::decode_xml_bytes(bytes);
-    let root = xml::parse(&text).map_err(|e| DocError::Format(format!("FB2: {e}")))?;
+    parse_text(&xml::decode_xml_bytes(bytes))
+}
+
+fn parse_text(text: &str) -> Result<Element> {
+    let root = xml::parse(text).map_err(|e| DocError::Format(format!("FB2: {e}")))?;
     if root.name != "FictionBook" {
         return Err(DocError::Format(format!("FB2: root element is <{}>, not <FictionBook>", root.name)));
     }
@@ -133,20 +136,75 @@ pub fn info_of(root: &Element) -> BookInfo {
     info
 }
 
-/// The `binary` elements: path -> (media type, bytes). With `only`, decodes just that path.
-pub fn binaries(root: &Element, only: Option<&str>) -> HashMap<String, (String, Vec<u8>)> {
-    let mut out = HashMap::new();
-    for b in root.children_named("binary") {
-        let Some(id) = b.attr("id") else { continue };
-        let path = image_path(id);
-        if only.is_some_and(|o| o != path) {
+/// The `binary` elements: path -> (media type, bytes).
+pub fn binaries(root: &Element) -> HashMap<String, (String, Vec<u8>)> {
+    root.children_named("binary").filter_map(|b| Some((image_path(b.attr("id")?), binary(b)))).collect()
+}
+
+/// Media type and bytes of a `binary` element.
+fn binary(b: &Element) -> (String, Vec<u8>) {
+    let bytes = base64_decode(b.text().as_bytes());
+    let mt = sniff_media_type(&bytes).map(str::to_string).or_else(|| b.attr("content-type").map(str::to_string)).unwrap_or_default();
+    (mt, bytes)
+}
+
+/// Start tags of elements with local name `local` in `text`, with or without a namespace
+/// prefix (`<binary`, `<fb:binary`), as (offset of the `<`, qualified name). Comments,
+/// CDATA sections and processing instructions are skipped, as the parser would.
+fn start_tags<'a>(text: &'a str, local: &'a str) -> impl Iterator<Item = (usize, &'a str)> + 'a {
+    let b = text.as_bytes();
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        while let Some(k) = b.get(at..)?.iter().position(|&c| c == b'<') {
+            let lt = at + k;
+            let rest = &b[lt..];
+            let skip_to = |close: &[u8]| find_bytes(b, close, lt + 1).map_or(b.len(), |e| e + close.len());
+            if rest.starts_with(b"<!--") {
+                at = skip_to(b"-->");
+                continue;
+            }
+            if rest.starts_with(b"<![CDATA[") {
+                at = skip_to(b"]]>");
+                continue;
+            }
+            if rest.starts_with(b"<?") {
+                at = skip_to(b"?>");
+                continue;
+            }
+            at = lt + 1;
+            let len = rest[1..].iter().position(|&c| c.is_ascii_whitespace() || c == b'>' || c == b'/').unwrap_or(rest.len() - 1);
+            let qname = &text[lt + 1..lt + 1 + len];
+            if qname.rsplit(':').next() == Some(local) {
+                return Some((lt, qname));
+            }
+        }
+        None
+    })
+}
+
+/// The last `binary` element of `text` whose id gives `path`, parsed alone (the rest
+/// of the book is not built into a tree).
+fn find_binary(text: &str, path: &str) -> Option<(String, Vec<u8>)> {
+    let b = text.as_bytes();
+    let mut found = None;
+    for (start, qname) in start_tags(text, "binary") {
+        let Some(gt) = xml::tag_end(b, start) else { break };
+        let open = text[start..gt].trim_end_matches('/');
+        let Ok(tag) = xml::parse(&format!("{open}/>")) else { continue };
+        if tag.attr("id").map(image_path).as_deref() != Some(path) {
             continue;
         }
-        let bytes = base64_decode(b.text().as_bytes());
-        let mt = sniff_media_type(&bytes).map(str::to_string).or_else(|| b.attr("content-type").map(str::to_string)).unwrap_or_default();
-        out.insert(path, (mt, bytes));
+        let end = if b[gt - 1] == b'/' {
+            gt + 1
+        } else {
+            let close = format!("</{qname}>");
+            find_bytes(b, close.as_bytes(), gt).map_or(text.len(), |e| e + close.len())
+        };
+        if let Ok(el) = xml::parse(&text[start..end]) {
+            found = Some(binary(&el));
+        }
     }
-    out
+    found
 }
 
 /// One chapter of the conversion: what it is made of.
@@ -200,7 +258,7 @@ fn units_of<'a>(body: &'a Element) -> Vec<Unit<'a>> {
 
 struct Conv<'a> {
     /// Element id -> chapter file.
-    ids: &'a HashMap<String, String>,
+    chapters: &'a Chapters,
     images: &'a HashMap<String, (String, Vec<u8>)>,
     out: String,
     /// Note bodies render their sections as footnotes.
@@ -209,70 +267,106 @@ struct Conv<'a> {
     inline: bool,
 }
 
-fn heading(depth: u8) -> String {
-    format!("h{}", depth.clamp(1, 6))
-}
+/// FB2 elements written as one XHTML element: (FB2 name, tag, class, inline content).
+/// Block content keeps child elements only (white space between blocks is dropped).
+const ELEMENTS: &[(&str, &str, Option<&str>, bool)] = &[
+    ("p", "p", None, true),
+    ("v", "p", Some("v"), true),
+    ("subtitle", "p", Some("subtitle"), true),
+    ("text-author", "p", Some("text-author"), true),
+    ("date", "p", Some("date"), true),
+    ("epigraph", "blockquote", Some("epigraph"), false),
+    ("cite", "blockquote", Some("cite"), false),
+    ("poem", "div", Some("poem"), false),
+    ("stanza", "div", Some("stanza"), false),
+    ("annotation", "div", Some("annotation"), false),
+    ("table", "table", None, false),
+    ("tr", "tr", None, false),
+    ("strong", "strong", None, true),
+    ("emphasis", "em", None, true),
+    ("strikethrough", "s", None, true),
+    ("sub", "sub", None, true),
+    ("sup", "sup", None, true),
+    ("code", "code", None, true),
+];
+
+/// Table cell attributes kept (FB2 and FB3).
+pub(crate) const CELL_ATTRS: [&str; 4] = ["colspan", "rowspan", "align", "valign"];
 
 impl Conv<'_> {
+    /// Writes `<tag`, the class, the attributes `copy` of `el` and its id; the caller
+    /// adds more attributes or the closing `>`.
+    fn open(&mut self, tag: &str, class: Option<&str>, copy: &[&str], el: &Element) {
+        self.out.push('<');
+        self.out.push_str(tag);
+        if let Some(c) = class {
+            xml::push_attr(&mut self.out, "class", c);
+        }
+        for a in copy {
+            if let Some(v) = el.attr(a) {
+                xml::push_attr(&mut self.out, a, v);
+            }
+        }
+        self.id_attr(el);
+    }
+
     fn id_attr(&mut self, el: &Element) {
         if let Some(id) = el.attr("id") {
-            self.out.push_str(&format!(" id=\"{}\"", escape_attr(id)));
+            xml::push_attr(&mut self.out, "id", id);
         }
+    }
+
+    fn close(&mut self, tag: &str) {
+        self.out.push_str("</");
+        self.out.push_str(tag);
+        self.out.push('>');
     }
 
     fn children(&mut self, el: &Element, depth: u8) {
         for c in &el.children {
             match c {
-                Node::Text(t) => self.out.push_str(&escape_text(t)),
+                Node::Text(t) => xml::push_text(&mut self.out, t),
                 Node::Element(e) => self.element(e, depth),
             }
         }
     }
 
-    /// Block children only (whitespace between blocks dropped).
-    fn blocks(&mut self, el: &Element, depth: u8) {
-        for e in el.elements() {
-            self.element(e, depth);
-        }
+    /// Text and inline elements, with images inline.
+    fn inline_children(&mut self, el: &Element, depth: u8) {
+        let was = std::mem::replace(&mut self.inline, true);
+        self.children(el, depth);
+        self.inline = was;
     }
 
-    fn wrap(&mut self, tag: &str, class: Option<&str>, el: &Element, depth: u8, inline: bool) {
-        self.out.push('<');
-        self.out.push_str(tag);
-        if let Some(c) = class {
-            self.out.push_str(&format!(" class=\"{c}\""));
-        }
-        self.id_attr(el);
+    fn wrap(&mut self, tag: &str, class: Option<&str>, copy: &[&str], el: &Element, depth: u8, inline: bool) {
+        self.open(tag, class, copy, el);
         self.out.push('>');
         if inline {
-            let was = std::mem::replace(&mut self.inline, true);
-            self.children(el, depth);
-            self.inline = was;
+            self.inline_children(el, depth);
         } else {
-            self.blocks(el, depth);
+            for e in el.elements() {
+                self.element(e, depth);
+            }
         }
-        self.out.push_str(&format!("</{tag}>"));
+        self.close(tag);
     }
 
     fn title(&mut self, el: &Element, depth: u8, section_title: bool) {
-        let lines: Vec<&Element> = el.elements().filter(|e| e.name == "p").collect();
-        if section_title {
-            let tag = heading(depth);
-            self.out.push_str(&format!("<{tag} class=\"title\""));
-            self.id_attr(el);
-            self.out.push('>');
-            let was = std::mem::replace(&mut self.inline, true);
-            for (i, p) in lines.iter().enumerate() {
-                if i > 0 {
-                    self.out.push_str("<br/>");
-                }
-                self.children(p, depth);
-            }
-            self.inline = was;
-            self.out.push_str(&format!("</{tag}>"));
-        } else {
-            self.wrap("div", Some("title"), el, depth, false);
+        if !section_title {
+            return self.wrap("div", Some("title"), &[], el, depth, false);
         }
+        let tag = format!("h{}", depth.clamp(1, 6));
+        self.open(&tag, Some("title"), &[], el);
+        self.out.push('>');
+        let was = std::mem::replace(&mut self.inline, true);
+        for (i, p) in el.children_named("p").enumerate() {
+            if i > 0 {
+                self.out.push_str("<br/>");
+            }
+            self.children(p, depth);
+        }
+        self.inline = was;
+        self.close(&tag);
     }
 
     fn image(&mut self, el: &Element, block: bool) {
@@ -284,129 +378,135 @@ impl Conv<'_> {
         if !self.images.contains_key(&path) {
             return;
         }
-        let alt = el.attr("alt").or_else(|| el.attr("title")).unwrap_or("");
-        let img = format!("<img src=\"{}\" alt=\"{}\"/>", escape_attr(&path), escape_attr(alt));
         if block {
-            self.out.push_str("<div class=\"image\"");
-            self.id_attr(el);
+            self.open("div", Some("image"), &[], el);
             self.out.push('>');
-            self.out.push_str(&img);
-            self.out.push_str("</div>");
-        } else {
-            self.out.push_str(&img);
+        }
+        self.out.push_str("<img");
+        xml::push_attr(&mut self.out, "src", &path);
+        xml::push_attr(&mut self.out, "alt", el.attr("alt").or_else(|| el.attr("title")).unwrap_or(""));
+        self.out.push_str("/>");
+        if block {
+            self.close("div");
         }
     }
 
     fn link(&mut self, el: &Element, depth: u8) {
-        let href = el.attr("href").unwrap_or("");
-        let target = match href.strip_prefix('#') {
-            Some(id) => match self.ids.get(id) {
-                Some(file) => format!("{file}#{id}"),
-                None => href.to_string(),
-            },
-            None => href.to_string(),
-        };
-        let note = el.attr("type") == Some("note");
-        self.out.push_str(&format!("<a href=\"{}\"", escape_attr(&target)));
-        if note {
+        self.out.push_str("<a");
+        xml::push_attr(&mut self.out, "href", &self.chapters.href(el.attr("href").unwrap_or("")));
+        if el.attr("type") == Some("note") {
             self.out.push_str(" class=\"note\" epub:type=\"noteref\"");
         }
         self.id_attr(el);
         self.out.push('>');
-        let was = std::mem::replace(&mut self.inline, true);
-        self.children(el, depth);
-        self.inline = was;
-        self.out.push_str("</a>");
+        self.inline_children(el, depth);
+        self.close("a");
     }
 
     fn element(&mut self, el: &Element, depth: u8) {
         match el.name.as_str() {
             "section" => {
-                let footnote = self.in_notes && el.attr("id").is_some();
-                self.out.push_str("<div class=\"section\"");
-                self.id_attr(el);
-                if footnote {
+                self.open("div", Some("section"), &[], el);
+                if self.in_notes && el.attr("id").is_some() {
                     self.out.push_str(" epub:type=\"footnote\"");
                 }
                 self.out.push('>');
                 for c in el.elements() {
-                    if c.name == "title" {
-                        self.title(c, depth, true);
-                    } else if c.name == "section" {
-                        self.element(c, depth.saturating_add(1));
-                    } else {
-                        self.element(c, depth);
+                    match c.name.as_str() {
+                        "title" => self.title(c, depth, true),
+                        "section" => self.element(c, depth.saturating_add(1)),
+                        _ => self.element(c, depth),
                     }
                 }
-                self.out.push_str("</div>");
+                self.close("div");
             }
             "title" => self.title(el, depth, false),
-            "p" => self.wrap("p", None, el, depth, true),
-            "v" => self.wrap("p", Some("v"), el, depth, true),
-            "subtitle" => self.wrap("p", Some("subtitle"), el, depth, true),
-            "text-author" => self.wrap("p", Some("text-author"), el, depth, true),
             "empty-line" => self.out.push_str("<p class=\"empty-line\">\u{a0}</p>"),
-            "epigraph" => self.wrap("blockquote", Some("epigraph"), el, depth, false),
-            "cite" => self.wrap("blockquote", Some("cite"), el, depth, false),
-            "poem" => self.wrap("div", Some("poem"), el, depth, false),
-            "stanza" => self.wrap("div", Some("stanza"), el, depth, false),
-            "annotation" => self.wrap("div", Some("annotation"), el, depth, false),
-            "date" => self.wrap("p", Some("date"), el, depth, true),
             "image" => self.image(el, !self.inline),
-            "table" => self.wrap("table", None, el, depth, false),
-            "tr" => self.wrap("tr", None, el, depth, false),
-            "th" | "td" => {
-                let tag = el.name.clone();
-                self.out.push('<');
-                self.out.push_str(&tag);
-                for a in ["colspan", "rowspan", "align", "valign"] {
-                    if let Some(v) = el.attr(a) {
-                        self.out.push_str(&format!(" {a}=\"{}\"", escape_attr(v)));
-                    }
-                }
-                self.id_attr(el);
-                self.out.push('>');
-                let was = std::mem::replace(&mut self.inline, true);
-                self.children(el, depth);
-                self.inline = was;
-                self.out.push_str(&format!("</{tag}>"));
-            }
-            "strong" => self.wrap("strong", None, el, depth, true),
-            "emphasis" => self.wrap("em", None, el, depth, true),
-            "strikethrough" => self.wrap("s", None, el, depth, true),
-            "sub" => self.wrap("sub", None, el, depth, true),
-            "sup" => self.wrap("sup", None, el, depth, true),
-            "code" => self.wrap("code", None, el, depth, true),
+            "th" | "td" => self.wrap(&el.name, None, &CELL_ATTRS, el, depth, true),
             "style" => {
                 let class = el.attr("name").map(|n| n.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_"));
-                self.wrap("span", class.as_deref(), el, depth, true)
+                self.wrap("span", class.as_deref(), &[], el, depth, true)
             }
             "a" => self.link(el, depth),
-            // Unknown elements: keep their content.
-            _ => self.children(el, depth),
+            name => match ELEMENTS.iter().find(|e| e.0 == name) {
+                Some(&(_, tag, class, inline)) => self.wrap(tag, class, &[], el, depth, inline),
+                // Unknown elements: keep their content.
+                None => self.children(el, depth),
+            },
         }
     }
 }
 
-/// Gives every section an id (`fb2-s<N>`) so TOC entries can point at it.
-fn assign_ids(el: &mut Element, n: &mut usize) {
+/// Gives every `section` without an id the id `<prefix>-s<N>`, so TOC entries can
+/// point at it (FB2 and FB3).
+pub(crate) fn assign_section_ids(el: &mut Element, prefix: &str, n: &mut usize) {
     if el.name == "section" && el.attr("id").is_none() {
         *n += 1;
-        el.attrs.push(xml::Attr { local: "id".into(), qname: "id".into(), value: format!("fb2-s{n}") });
+        el.attrs.push(xml::Attr { local: "id".into(), qname: "id".into(), value: format!("{prefix}-s{n}") });
     }
     for c in &mut el.children {
         if let Node::Element(e) = c {
-            assign_ids(e, n);
+            assign_section_ids(e, prefix, n);
         }
     }
 }
 
-fn collect_ids(el: &Element, file: &str, out: &mut HashMap<String, String>) {
-    if let Some(id) = el.attr("id") {
-        out.entry(id.to_string()).or_insert_with(|| file.to_string());
+/// The chapter files of a converted FictionBook (`<prefix>-001.xhtml`, ...) and the
+/// chapter that holds each element id (FB2 and FB3).
+pub(crate) struct Chapters {
+    prefix: &'static str,
+    ids: HashMap<String, usize>,
+}
+
+impl Chapters {
+    pub(crate) fn new(prefix: &'static str) -> Self {
+        Chapters { prefix, ids: HashMap::new() }
     }
-    for e in el.elements() {
-        collect_ids(e, file, out);
+
+    /// File name of chapter `i` (0-based).
+    pub(crate) fn path(&self, i: usize) -> String {
+        format!("{}-{:03}.xhtml", self.prefix, i + 1)
+    }
+
+    /// Records `id` as being in chapter `i` (the first chapter that has it wins).
+    pub(crate) fn add_id(&mut self, id: &str, i: usize) {
+        if !self.ids.contains_key(id) {
+            self.ids.insert(id.to_string(), i);
+        }
+    }
+
+    /// Records the ids of `el` and of everything below it as being in chapter `i`.
+    pub(crate) fn add(&mut self, el: &Element, i: usize) {
+        if let Some(id) = el.attr("id") {
+            self.add_id(id, i);
+        }
+        for e in el.elements() {
+            self.add(e, i);
+        }
+    }
+
+    /// `href` with a `#id` reference pointed at the chapter file that holds the id.
+    pub(crate) fn href(&self, href: &str) -> String {
+        match href.strip_prefix('#').and_then(|id| Some((*self.ids.get(id)?, id))) {
+            Some((i, id)) => format!("{}#{id}", self.path(i)),
+            None => href.to_string(),
+        }
+    }
+
+    /// TOC nodes for the sections below `el` whose id is in a chapter; sections without a
+    /// title (`title_of`) pass their children up.
+    pub(crate) fn section_toc(&self, el: &Element, title_of: &dyn Fn(&Element) -> Option<String>) -> Vec<TocNode> {
+        let mut out = Vec::new();
+        for s in el.children_named("section") {
+            let children = self.section_toc(s, title_of);
+            let id = s.attr("id").unwrap_or("");
+            match (title_of(s), self.ids.get(id)) {
+                (Some(title), Some(&ch)) => out.push(TocNode { title, target: Some(Target::id(ch, id)), children }),
+                _ => out.extend(children),
+            }
+        }
+        out
     }
 }
 
@@ -417,21 +517,8 @@ fn section_title(el: &Element) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// TOC nodes for the sections below `el` (sections without titles pass their children up).
-fn section_toc(el: &Element, chapter_of: &dyn Fn(&str) -> Option<usize>) -> Vec<TocNode> {
-    let mut out = Vec::new();
-    for s in el.children_named("section") {
-        let children = section_toc(s, chapter_of);
-        let id = s.attr("id").unwrap_or("");
-        match (section_title(s), chapter_of(id)) {
-            (Some(title), Some(ch)) => out.push(TocNode { title, target: Some(Target::id(ch, id)), children }),
-            _ => out.extend(children),
-        }
-    }
-    out
-}
-
-fn chapter_html(title: &str, body: &str) -> String {
+/// A converted chapter page: XHTML with the FB2 stylesheet (FB2 and FB3).
+pub(crate) fn chapter_html(title: &str, body: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>{}</title><link rel=\"stylesheet\" type=\"text/css\" href=\"fb2.css\"/></head><body>{}</body></html>",
         escape_text(title),
@@ -443,8 +530,8 @@ fn chapter_html(title: &str, body: &str) -> String {
 pub fn convert(mut root: Element) -> Result<Book> {
     let mut info = info_of(&root);
     let mut n = 0;
-    assign_ids(&mut root, &mut n);
-    let images = binaries(&root, None);
+    assign_section_ids(&mut root, "fb2", &mut n);
+    let images = binaries(&root);
     let bodies: Vec<&Element> = root.children_named("body").collect();
     let main = bodies.iter().copied().find(|b| is_main_body(b)).or(bodies.first().copied()).ok_or_else(|| DocError::Format("FB2 has no <body>".into()))?;
     let mut units = units_of(main);
@@ -453,24 +540,26 @@ pub fn convert(mut root: Element) -> Result<Book> {
             units.push(Unit::Body(b));
         }
     }
-    let file = |i: usize| format!("fb2-{:03}.xhtml", i + 1);
-    let mut ids = HashMap::new();
+    let mut files = Chapters::new("fb2");
     for (i, u) in units.iter().enumerate() {
         match u {
             Unit::Header(parent, els, _) => {
                 if parent.name == "section" {
                     if let Some(id) = parent.attr("id") {
-                        ids.entry(id.to_string()).or_insert_with(|| file(i));
+                        files.add_id(id, i);
                     }
                 }
-                els.iter().for_each(|e| collect_ids(e, &file(i), &mut ids))
+                els.iter().for_each(|e| files.add(e, i))
             }
-            Unit::Section(e, _) | Unit::Body(e) => collect_ids(e, &file(i), &mut ids),
+            Unit::Section(e, _) | Unit::Body(e) => files.add(e, i),
         }
     }
+    // Section titles by element, for the chapters and then the TOC (a calibre title can
+    // hold the whole chapter, so it is collapsed once).
+    let mut titles: HashMap<*const Element, Option<String>> = HashMap::new();
     let mut chapters = Vec::with_capacity(units.len());
     for u in &units {
-        let mut c = Conv { ids: &ids, images: &images, out: String::new(), in_notes: false, inline: false };
+        let mut c = Conv { chapters: &files, images: &images, out: String::new(), in_notes: false, inline: false };
         let title = match u {
             Unit::Header(parent, els, level) => {
                 let section = parent.name == "section";
@@ -488,14 +577,14 @@ pub fn convert(mut root: Element) -> Result<Book> {
                 }
                 if section {
                     c.out.push_str("</div>");
-                    section_title(parent).unwrap_or_default()
+                    titles.entry(std::ptr::from_ref(*parent)).or_insert_with(|| section_title(parent)).clone().unwrap_or_default()
                 } else {
                     info.metadata.title.clone()
                 }
             }
             Unit::Section(e, depth) => {
                 c.element(e, *depth);
-                section_title(e).unwrap_or_default()
+                titles.entry(std::ptr::from_ref(*e)).or_insert_with(|| section_title(e)).clone().unwrap_or_default()
             }
             Unit::Body(b) => {
                 c.in_notes = true;
@@ -509,11 +598,10 @@ pub fn convert(mut root: Element) -> Result<Book> {
                 b.child("title").map(|t| t.text_collapsed()).unwrap_or_else(|| b.attr("name").unwrap_or("").to_string())
             }
         };
-        chapters.push(HtmlChapter { path: file(chapters.len()), html: chapter_html(&title, &c.out) });
+        chapters.push(HtmlChapter { path: files.path(chapters.len()), html: chapter_html(&title, &c.out) });
     }
     // TOC: section titles of the main body (nested), then the titles of extra bodies.
-    let chapter_of = |id: &str| ids.get(id).and_then(|f| f.trim_start_matches("fb2-").trim_end_matches(".xhtml").parse::<usize>().ok()).map(|n| n - 1);
-    let mut toc = section_toc(main, &chapter_of);
+    let mut toc = files.section_toc(main, &|s| titles.get(&std::ptr::from_ref(s)).cloned().unwrap_or_else(|| section_title(s)));
     for (i, u) in units.iter().enumerate() {
         if let Unit::Body(b) = u {
             let title = b.child("title").map(|t| t.text_collapsed()).filter(|t| !t.is_empty());
@@ -553,14 +641,25 @@ pub fn load(path: &Path) -> Result<Book> {
 }
 
 /// Metadata and cover of an FB2 file.
+///
+/// Only the part before the first `body` or `binary` (the description) is built into a
+/// tree, and the cover's `binary` element alone: a book of many MB of text and images
+/// is not parsed whole for the library.
 pub fn read_info(path: &Path) -> Result<BookInfo> {
-    let root = parse(&read_bytes(path)?)?;
+    let text = xml::decode_xml_bytes(&read_bytes(path)?);
+    let head_end = [start_tags(&text, "body").next(), start_tags(&text, "binary").next()].into_iter().flatten().map(|(at, _)| at).min();
+    // A head that does not parse (the cut fell inside a comment, say) falls back to the
+    // whole book, as before.
+    let root = match head_end.map(|e| parse_text(&text[..e])) {
+        Some(Ok(head)) => head,
+        _ => parse_text(&text)?,
+    };
     let mut info = info_of(&root);
     if info.metadata.title.is_empty() {
         info.metadata.title = crate::title_from(path);
     }
     if let Some(cover) = info.metadata.cover.clone() {
-        match binaries(&root, Some(&cover)).remove(&cover) {
+        match find_binary(&text, &cover) {
             Some((media_type, bytes)) => info.cover = Some(Cover { path: cover, media_type, bytes }),
             None => info.metadata.cover = None,
         }
@@ -636,6 +735,47 @@ Ggo=</binary>
         assert_eq!(book.toc[1].title, "Notes");
         assert_eq!(book.resources.read("images/pic.png").unwrap(), b"\x89PNG\r\n\x1a\n");
         assert!(book.resources.read("fb2.css").is_ok());
+    }
+
+    #[test]
+    fn read_info_parses_the_description_and_the_cover_alone() {
+        // What the whole tree gives (the old read_info), for the sample and variants: the
+        // cover binary before the body, given twice (the last one counts), self-closing,
+        // missing.
+        let whole = |src: &str| {
+            let root = parse(src.as_bytes()).unwrap();
+            let info = info_of(&root);
+            let cover = info.metadata.cover.as_ref().and_then(|c| binaries(&root).remove(c));
+            (info.metadata, cover)
+        };
+        let dir = std::env::temp_dir().join(format!("ink-fb2-info-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = "<binary id=\"cover.png\" content-type=\"image/png\">iVBORw0KGgo=</binary>";
+        let jpg = "<binary content-type=\"image/jpeg\" id=\"cover.png\">/9j/4AAQ</binary>";
+        let variants = [
+            SAMPLE.to_string(),
+            SAMPLE.replacen("<body>", &format!("{png}<body>"), 1),
+            SAMPLE.replace("</FictionBook>", &format!("{jpg}</FictionBook>")),
+            SAMPLE.replace(png, "<binary id=\"cover.png\" content-type=\"image/png\"/>"),
+            SAMPLE.replace(png, ""),
+            // Namespace prefixes, and markup-like text in a description comment.
+            SAMPLE.replace("<FictionBook xmlns=", "<fb:FictionBook xmlns:fb=").replace("</FictionBook>", "</fb:FictionBook>").replace("<body", "<fb:body").replace("</body>", "</fb:body>").replace(png, &png.replace("<binary", "<fb:binary").replace("</binary>", "</fb:binary>")),
+            SAMPLE.replace("<book-title>", "<!-- <body> <binary id=\"cover.png\"> --><book-title>"),
+        ];
+        for (i, src) in variants.iter().enumerate() {
+            let f = dir.join(format!("v{i}.fb2"));
+            std::fs::write(&f, src).unwrap();
+            let info = read_info(&f).unwrap();
+            let (meta, cover) = whole(src);
+            assert_eq!(info.metadata.title, meta.title, "{i}");
+            assert_eq!(info.metadata.authors, meta.authors, "{i}");
+            assert_eq!(info.metadata.cover, cover.as_ref().map(|_| "images/cover.png".to_string()), "{i}");
+            assert_eq!(info.cover.map(|c| (c.media_type, c.bytes)), cover, "{i}");
+        }
+        assert_eq!(whole(&variants[2]).1.map(|c| c.0).as_deref(), Some("image/jpeg"));
+        assert_eq!(whole(&variants[4]).1, None);
+        assert!(whole(&variants[5]).1.is_some() && whole(&variants[6]).1.is_some());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

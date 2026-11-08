@@ -16,6 +16,7 @@
 //! warmth state.
 
 use crate::screens::settings::quick_light;
+use ink_device::clock::DateTime;
 use ink_device::Light;
 use ink_device::{Point, Size};
 use ink_store::prefs::GestureMap;
@@ -71,6 +72,25 @@ pub fn toggle_level(cur: u32, (lo, hi): (u32, u32), saved: &mut Option<u32>) -> 
     }
 }
 
+/// The range and the current level of the warmth (`warmth`) or brightness control;
+/// `None`, logged for `what`, when the level cannot be read.
+pub fn level(light: &dyn Light, warmth: bool, what: &str) -> Option<((u32, u32), u32)> {
+    let (range, cur) = if warmth { (light.warmth_range(), light.warmth()) } else { (light.brightness_range(), light.brightness()) };
+    cur.map(|v| (range, v)).map_err(|e| log::warn!("reader: {what}: {e}")).ok()
+}
+
+/// Sets the warmth (`warmth`) or brightness to `v` through the control center's light
+/// code, and lets auto warmth keep a warmth set by hand. Returns the applied value's
+/// text (`None`: not applied).
+pub fn set_level(light: &mut dyn Light, warmth: bool, v: u32, now: &DateTime) -> Option<String> {
+    let name = if warmth { quick_light::WARMTH } else { quick_light::BRIGHTNESS };
+    let text = quick_light::apply(&format!("{name}:{v}"), light);
+    if warmth {
+        quick_light::with_auto_warmth(light, |w, light| w.manual(v, light, now));
+    }
+    text
+}
+
 thread_local! {
     /// Levels the toggles go back to: (brightness, warmth).
     static SAVED: RefCell<(Option<u32>, Option<u32>)> = const { RefCell::new((None, None)) };
@@ -96,8 +116,7 @@ impl Slide {
     /// Starts a slide at `from` from the light's current level; `None` when the light
     /// has no such control.
     pub fn new(warmth: bool, from: Point, light: &dyn Light) -> Option<Slide> {
-        let (range, cur) = if warmth { (light.warmth_range(), light.warmth()) } else { (light.brightness_range(), light.brightness()) };
-        let base = cur.map_err(|e| log::warn!("reader: edge slide: {e}")).ok()?;
+        let (range, base) = level(light, warmth, "edge slide")?;
         log::info!("reader: edge slide ({}) from {base}", if warmth { "warmth" } else { "brightness" });
         Some(Slide { warmth, base, range, from, last: None, value: base })
     }
@@ -117,40 +136,25 @@ impl Slide {
     }
 
     /// The finger lifted: writes the final level (auto warmth keeps it as the user's).
-    pub fn finish(self, light: &mut dyn Light, now: &ink_device::clock::DateTime) {
+    pub fn finish(self, light: &mut dyn Light, now: &DateTime) {
         if self.value == self.base && self.last.is_none() {
             return;
         }
-        let name = if self.warmth { quick_light::WARMTH } else { quick_light::BRIGHTNESS };
-        if let Some(text) = quick_light::apply(&format!("{name}:{}", self.value), light) {
+        if let Some(text) = set_level(light, self.warmth, self.value, now) {
             log::info!("reader: edge slide: {} -> {text}", self.base);
-        }
-        if self.warmth {
-            quick_light::with_auto_warmth(light, |w, light| w.manual(self.value, light, now));
         }
     }
 }
 
 /// `light_toggle` / `warmth_toggle`: the light (warmth) off, or back to its level before.
-pub fn toggle(warmth: bool, light: &mut dyn Light, now: &ink_device::clock::DateTime) {
-    let (range, cur) = if warmth { (light.warmth_range(), light.warmth()) } else { (light.brightness_range(), light.brightness()) };
-    let cur = match cur {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("reader: light toggle: {e}");
-            return;
-        }
-    };
+pub fn toggle(warmth: bool, light: &mut dyn Light, now: &DateTime) {
+    let Some((range, cur)) = level(light, warmth, "light toggle") else { return };
     let v = SAVED.with(|s| {
         let mut s = s.borrow_mut();
         toggle_level(cur, range, if warmth { &mut s.1 } else { &mut s.0 })
     });
-    let name = if warmth { quick_light::WARMTH } else { quick_light::BRIGHTNESS };
-    if let Some(text) = quick_light::apply(&format!("{name}:{v}"), light) {
+    if let Some(text) = set_level(light, warmth, v, now) {
         log::info!("reader: {} toggle: {cur} -> {text}", if warmth { "warmth" } else { "light" });
-    }
-    if warmth {
-        quick_light::with_auto_warmth(light, |w, light| w.manual(v, light, now));
     }
 }
 

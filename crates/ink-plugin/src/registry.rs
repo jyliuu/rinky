@@ -263,66 +263,53 @@ pub struct Registrar<'a> {
 }
 
 impl Registrar<'_> {
-    fn s(v: &str) -> String {
-        v.to_string()
-    }
-
     /// Adds a reader menu item.
     pub fn menu_item(&mut self, id: &str, label: &str, order: i32) {
-        let plugin = Self::s(self.plugin);
-        self.registry.menu_items.push(MenuItem { plugin, id: Self::s(id), label: Self::s(label), order });
+        self.registry.menu_items.push(MenuItem { plugin: self.plugin.into(), id: id.into(), label: label.into(), order });
         self.registry.menu_items.sort_by_key(|m| m.order);
     }
 
     /// Adds a selection action.
     pub fn selection_action(&mut self, id: &str, label: &str) {
-        let plugin = Self::s(self.plugin);
-        self.registry.selection_actions.push(SelectionAction { plugin, id: Self::s(id), label: Self::s(label) });
+        self.registry.selection_actions.push(SelectionAction { plugin: self.plugin.into(), id: id.into(), label: label.into() });
     }
 
     /// Binds a gesture.
     pub fn gesture(&mut self, id: &str, gesture: &str, label: &str) {
-        let plugin = Self::s(self.plugin);
-        self.registry.gestures.push(GestureBinding { plugin, id: Self::s(id), gesture: Self::s(gesture), label: Self::s(label) });
+        self.registry.gestures.push(GestureBinding { plugin: self.plugin.into(), id: id.into(), gesture: gesture.into(), label: label.into() });
     }
 
     /// Offers a function for the reader's gesture map.
     pub fn action(&mut self, id: &str, label: &str) {
-        let plugin = Self::s(self.plugin);
-        self.registry.actions.push(ReaderAction { plugin, id: Self::s(id), label: Self::s(label) });
+        self.registry.actions.push(ReaderAction { plugin: self.plugin.into(), id: id.into(), label: label.into() });
     }
 
     /// Adds a settings page.
     pub fn settings_page(&mut self, id: &str, title: &str) {
-        let plugin = Self::s(self.plugin);
-        self.registry.settings_pages.push(SettingsPage { plugin, id: Self::s(id), title: Self::s(title) });
+        self.registry.settings_pages.push(SettingsPage { plugin: self.plugin.into(), id: id.into(), title: title.into() });
     }
 
     /// Adds a library action.
     pub fn library_action(&mut self, id: &str, label: &str) {
-        let plugin = Self::s(self.plugin);
-        self.registry.library_actions.push(LibraryAction { plugin, id: Self::s(id), label: Self::s(label) });
+        self.registry.library_actions.push(LibraryAction { plugin: self.plugin.into(), id: id.into(), label: label.into() });
     }
 
     /// Adds a control-center tile; the returned tile takes optional settings
     /// ([`ControlTile::needs_wifi`], [`ControlTile::working`], [`ControlTile::state`]).
     pub fn control_tile(&mut self, id: &str, label: &str, icon: &str) -> &mut ControlTile {
-        let plugin = Self::s(self.plugin);
-        let tile = ControlTile { plugin, id: Self::s(id), label: Self::s(label), icon: Self::s(icon), state: String::new(), needs_wifi: None, working: String::new(), hold: None };
+        let tile = ControlTile { plugin: self.plugin.into(), id: id.into(), label: label.into(), icon: icon.into(), state: String::new(), needs_wifi: None, working: String::new(), hold: None };
         self.registry.control_tiles.push(tile);
         self.registry.control_tiles.last_mut().expect("just pushed")
     }
 
     /// Adds a library-level action (no book) for the overflow menu and the navigation bar.
     pub fn library_entry(&mut self, id: &str, label: &str, icon: &str) {
-        let plugin = Self::s(self.plugin);
-        self.registry.library_entries.push(LibraryEntry { plugin, id: Self::s(id), label: Self::s(label), icon: Self::s(icon) });
+        self.registry.library_entries.push(LibraryEntry { plugin: self.plugin.into(), id: id.into(), label: label.into(), icon: icon.into() });
     }
 
     /// Adds a status-bar widget.
     pub fn status_widget(&mut self, id: &str, slot: StatusSlot, text: &str) {
-        let plugin = Self::s(self.plugin);
-        self.registry.status_widgets.push(StatusWidget { plugin, id: Self::s(id), slot, text: Self::s(text) });
+        self.registry.status_widgets.push(StatusWidget { plugin: self.plugin.into(), id: id.into(), slot, text: text.into() });
     }
 }
 

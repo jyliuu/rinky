@@ -18,13 +18,14 @@ pub mod vocab;
 mod tests;
 
 use crate::router::{AppCtx, AppScreen, Route, ScreenRegistry, Transition};
-use ink_device::{Key, Point, Rect, RefreshClass, Size};
+use crate::screens::common::{input, paint_cx, pill, Input};
+use ink_device::{Key, Rect, RefreshClass, Size};
 use ink_stats::report::{self, format_duration, Day, Overview};
 use ink_text::Style;
 use ink_ui::bars::APP_BAR_H;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::theme::space;
-use ink_ui::{paint_button, AppBar, BarAction, ButtonKind, Damage, Gesture, Icon, PaintCx, ProgressBar, Segmented, UiEvent, Widget};
+use ink_ui::{AppBar, BarAction, Damage, Icon, PaintCx, ProgressBar, Segmented, UiEvent, Widget};
 
 /// Registers both screens.
 pub fn register(reg: &mut ScreenRegistry) {
@@ -54,14 +55,9 @@ pub(crate) fn now_and_offset(cx: &AppCtx) -> (u64, i64) {
     (now, offset)
 }
 
-/// A pill button (design system); `primary` is filled.
-pub(crate) fn button(p: &mut PaintCx, r: Rect, label: &str, primary: bool) {
-    paint_button(p, r, label, None, if primary { ButtonKind::Filled } else { ButtonKind::Outlined }, true, false);
-}
-
 /// A round outlined icon button.
-pub(crate) fn icon_button(p: &mut PaintCx, r: Rect, icon: Icon) {
-    paint_button(p, r, "", Some(icon), ButtonKind::Outlined, true, false);
+fn icon_button(p: &mut PaintCx, r: Rect, icon: Icon) {
+    pill(p, r, "", Some(icon), false);
 }
 
 /// The ink-ui app bar with a back button, a title and an optional text action; records
@@ -98,26 +94,6 @@ pub(crate) fn pager<H: Clone>(p: &mut PaintCx, page: usize, pages: usize, extra:
     let label = format!("Page {} of {pages}{extra}", page + 1);
     let (cap, muted) = (p.theme.caption, p.theme.muted);
     p.text_centered(Rect::new(pr.right() + space(2), y, (nr.x - pr.right() - space(4)) as u32, PAGER_H as u32), &label, cap.px, cap.style, muted);
-}
-
-/// The position of a tap or long press.
-pub(crate) fn tap_pos(ev: &UiEvent) -> Option<Point> {
-    match ev {
-        UiEvent::Gesture(Gesture::Tap { pos } | Gesture::LongPress { pos, .. }) => Some(*pos),
-        _ => None,
-    }
-}
-
-/// +1 for a swipe left or up (next), -1 for right or down.
-pub(crate) fn swipe_step(ev: &UiEvent) -> Option<i32> {
-    match ev {
-        UiEvent::Gesture(g @ Gesture::Swipe { .. }) => {
-            let (dx, dy) = g.delta();
-            let d = if dx.abs() > dy.abs() { dx } else { dy };
-            Some(if d < 0 { 1 } else { -1 })
-        }
-        _ => None,
-    }
 }
 
 /// Calendar fill for a day's reading: `(fill, text)` palette values, `None` under a
@@ -189,6 +165,9 @@ pub struct StatsScreen {
     dirty: Option<RefreshClass>,
 }
 
+/// Weekday names, Monday first (the calendar's columns, the 7-day chart's labels).
+const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
 const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 impl StatsScreen {
@@ -225,6 +204,18 @@ impl StatsScreen {
         let (y, m) = self.month;
         let i = y * 12 + m as i32 - 1 + d;
         self.month = (i.div_euclid(12), i.rem_euclid(12) as u32 + 1);
+    }
+
+    /// The next (`forward`) or previous page of the tab: books or months; the overview
+    /// has none.
+    fn step(&self, forward: bool) -> Option<Hit> {
+        match (self.tab, forward) {
+            (Tab::Books, true) => Some(Hit::NextPage),
+            (Tab::Books, false) => Some(Hit::PrevPage),
+            (Tab::Calendar, true) => Some(Hit::NextMonth),
+            (Tab::Calendar, false) => Some(Hit::PrevMonth),
+            (Tab::Overview, _) => None,
+        }
     }
 
     fn act(&mut self, hit: Hit, size: Size) -> Transition {
@@ -340,7 +331,7 @@ impl StatsScreen {
             // Labels: weekday initials for 7 days, every fifth day of the month for 30.
             let (_, mm, dd) = report::civil_from_days(*day);
             let label = if n == 7 {
-                ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][report::weekday(*day) as usize % 7].to_string()
+                WEEKDAYS[report::weekday(*day) as usize % 7].to_string()
             } else if (n - 1 - i) % 5 == 0 {
                 format!("{dd}/{mm}")
             } else {
@@ -370,7 +361,7 @@ impl StatsScreen {
         let cw = (w - 2 * MARGIN) / 7;
         let ch = 150;
         let wy = top + 104 + space(3);
-        for (i, name) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].iter().enumerate() {
+        for (i, name) in WEEKDAYS.iter().enumerate() {
             p.text_centered(Rect::new(MARGIN + i as i32 * cw, wy, cw as u32, 44), name, t.caption.px, t.caption.style, t.muted);
         }
         let grid = report::month_grid(y, m, &self.data.days);
@@ -480,44 +471,21 @@ impl AppScreen for StatsScreen {
     }
 
     fn handle(&mut self, ev: &UiEvent, cx: &mut AppCtx) -> anyhow::Result<Transition> {
-        let size = cx.screen.size();
-        if matches!(ev, UiEvent::Quit) {
-            return Ok(Transition::Exit);
-        }
-        if let UiEvent::Key(k) = ev {
-            if !k.pressed {
-                return Ok(Transition::None);
-            }
-            return Ok(match k.key {
-                Key::Back => Transition::Pop,
-                Key::PageNext if self.tab == Tab::Books => self.act(Hit::NextPage, size),
-                Key::PagePrev if self.tab == Tab::Books => self.act(Hit::PrevPage, size),
-                Key::PageNext if self.tab == Tab::Calendar => self.act(Hit::NextMonth, size),
-                Key::PagePrev if self.tab == Tab::Calendar => self.act(Hit::PrevMonth, size),
-                _ => Transition::None,
-            });
-        }
-        if let Some(step) = swipe_step(ev) {
-            let hit = match (self.tab, step > 0) {
-                (Tab::Books, true) => Hit::NextPage,
-                (Tab::Books, false) => Hit::PrevPage,
-                (Tab::Calendar, true) => Hit::NextMonth,
-                (Tab::Calendar, false) => Hit::PrevMonth,
-                (Tab::Overview, more) => Hit::Range(if more { 30 } else { 7 }),
-            };
-            return Ok(self.act(hit, size));
-        }
-        if let Some(pos) = tap_pos(ev) {
-            if let Some(hit) = self.hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, h)| h.clone()) {
-                return Ok(self.act(hit, size));
-            }
-        }
-        Ok(Transition::None)
+        let hit = match input(ev, &self.hits) {
+            Some(Input::Quit) => return Ok(Transition::Exit),
+            Some(Input::Key(Key::Back)) => return Ok(Transition::Pop),
+            Some(Input::Key(k @ (Key::PageNext | Key::PagePrev))) => self.step(k == Key::PageNext),
+            // On the overview a swipe switches the chart between 7 and 30 days.
+            Some(Input::Swipe(step)) => Some(self.step(step > 0).unwrap_or(Hit::Range(if step > 0 { 30 } else { 7 }))),
+            Some(Input::Hit(hit)) => Some(hit),
+            _ => None,
+        };
+        Ok(hit.map_or(Transition::None, |h| self.act(h, cx.screen.size())))
     }
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {
         let Some(class) = self.dirty.take() else { return Ok(Vec::new()) };
-        let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+        let mut p = paint_cx(cx);
         self.draw(&mut p);
         Ok(vec![Damage { rect: cx.canvas.bounds(), class }])
     }

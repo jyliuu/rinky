@@ -5,6 +5,7 @@
 
 use super::*;
 use gadget::{Error, Paths, Sys};
+use ink_plugin::testing::TempDir;
 use ink_plugin::{MemoryStorage, Registrar, UiQueue, UiRequest};
 use std::cell::RefCell;
 use std::io;
@@ -13,11 +14,8 @@ use std::rc::Rc;
 
 const UDC: &str = "ci_hdrc.0";
 
-fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("usbnet-test-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmp(tag: &str) -> TempDir {
+    TempDir::new(&format!("usbnet-{tag}"))
 }
 
 /// The fake device's switches and the commands run.
@@ -164,7 +162,7 @@ fn default_groups(path: &Path) -> &'static [&'static str] {
 
 /// A fake device: configfs with or without the MTP gadget, one controller.
 struct Device {
-    root: PathBuf,
+    root: TempDir,
     paths: Paths,
     log: Rc<RefCell<Log>>,
 }
@@ -222,11 +220,6 @@ impl Device {
     }
 }
 
-impl Drop for Device {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
 
 const UP: &str = "ifconfig usb0 192.168.15.244 netmask 255.255.255.0 up";
 

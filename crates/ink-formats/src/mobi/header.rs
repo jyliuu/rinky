@@ -20,8 +20,6 @@ pub mod exth {
     pub const SUBJECT: u32 = 105;
     /// Publishing date.
     pub const DATE: u32 = 106;
-    /// Contributor.
-    pub const CONTRIBUTOR: u32 = 108;
     /// Source.
     pub const SOURCE: u32 = 112;
     /// ASIN.
@@ -32,8 +30,6 @@ pub mod exth {
     pub const KF8_COVER_URI: u32 = 129;
     /// Cover image: offset from the first resource record.
     pub const COVER_OFFSET: u32 = 201;
-    /// Thumbnail: offset from the first resource record.
-    pub const THUMB_OFFSET: u32 = 202;
     /// Document type (`EBOK`, `PDOC`, `EBSP` for samples).
     pub const CDE_TYPE: u32 = 501;
     /// Updated title.
@@ -129,22 +125,14 @@ pub struct MobiHeader {
     pub text_length: u32,
     /// Number of text records.
     pub text_records: u16,
-    /// Text record size (4096).
-    pub record_size: u16,
     /// 0 = none, 1 = old Mobipocket, 2 = Mobipocket/Kindle DRM.
     pub encryption: u16,
     /// True when the `MOBI` header is present (false for plain PalmDOC).
     pub has_mobi: bool,
-    /// MOBI header length.
-    pub header_length: u32,
-    /// MOBI type (2 = book, 3 = PalmDOC, 257 = news, ...).
-    pub mobi_type: u32,
     /// Text encoding (1252 or 65001).
     pub codepage: u32,
     /// File version (6 for MOBI 6, 8 for KF8).
     pub version: u32,
-    /// First record after the text (relative).
-    pub first_non_book: u32,
     /// Full name (title).
     pub full_name: String,
     /// Locale code.
@@ -155,8 +143,6 @@ pub struct MobiHeader {
     pub huff_offset: u32,
     /// HUFF + CDIC record count.
     pub huff_count: u32,
-    /// EXTH flags (0x40 = EXTH present).
-    pub exth_flags: u32,
     /// Trailing entry flags of text records.
     pub extra_flags: u16,
     /// NCX index record (relative).
@@ -185,10 +171,8 @@ impl MobiHeader {
             compression: be16(rec, 0).unwrap_or(1),
             text_length: be32(rec, 4).unwrap_or(0),
             text_records: be16(rec, 8).unwrap_or(0),
-            record_size: be16(rec, 10).unwrap_or(4096),
             encryption: be16(rec, 12).unwrap_or(0),
             codepage: 1252,
-            first_non_book: NULL,
             first_resource: NULL,
             huff_offset: NULL,
             ncx_index: NULL,
@@ -202,19 +186,15 @@ impl MobiHeader {
             return Ok(h);
         }
         h.has_mobi = true;
-        h.header_length = u32_at(0x14);
-        h.mobi_type = u32_at(0x18);
+        let hl = u32_at(0x14) as usize; // MOBI header length
         h.codepage = u32_at(0x1C);
         h.version = u32_at(0x24);
-        h.first_non_book = u32_at(0x50);
         let name_off = u32_at(0x54) as usize;
         let name_len = u32_at(0x58) as usize;
         h.locale = u32_at(0x5C);
         h.first_resource = u32_at(0x6C);
         h.huff_offset = u32_at(0x70);
         h.huff_count = u32_at(0x74);
-        h.exth_flags = u32_at(0x80);
-        let hl = h.header_length as usize;
         // Fields exist only when the header is long enough.
         let field = |o: usize| if o + 4 <= hl.saturating_add(0x10) { u32_at(o) } else { NULL };
         if hl >= 0xE4 {
@@ -227,7 +207,8 @@ impl MobiHeader {
             h.skel_index = field(0xFC);
             h.guide_index = field(0x104);
         }
-        if h.exth_flags & 0x40 != 0 {
+        // EXTH flags: 0x40 = EXTH present.
+        if u32_at(0x80) & 0x40 != 0 {
             if let Some(b) = rec.get(hl.saturating_add(0x10)..) {
                 h.exth = Exth::parse(b);
             }

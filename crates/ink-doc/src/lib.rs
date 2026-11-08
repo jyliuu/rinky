@@ -8,8 +8,6 @@
 //! - Notes: [`Link::footnote`] marks note references, [`Document::note`] returns the note.
 //! - [`LayoutSettings`]: what a reflowable layout depends on (also the page-map cache key).
 //! - [`ResourceLoader`]: images, stylesheets and fonts referenced by a book.
-//!
-//! Owner from wave A: the `html` agent (with `ink-html` and `tests/golden`).
 
 #![warn(missing_docs)]
 
@@ -76,6 +74,54 @@ pub enum DocKind {
     Reflowable,
     /// Pages with fixed geometry (PDF, CBZ).
     Fixed,
+}
+
+/// How a fixed-layout page is scaled to the screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fit {
+    /// Whole page on screen.
+    #[default]
+    Page,
+    /// Page width fills the screen; the page continues on the next screens.
+    Width,
+}
+
+/// Two fixed-layout pages side by side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Spreads {
+    /// For comic books (CBZ) when the screen is landscape.
+    #[default]
+    Auto,
+    /// Always (fit page, zoom 1, one column only).
+    Always,
+    /// Never.
+    Never,
+}
+
+/// The view options of a fixed-layout document that a reader offers in its settings
+/// (see [`Document::fixed_view`]). The engine may keep more options of its own (zoom,
+/// gamma, rotation), which a change of the view leaves as they are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FixedView {
+    /// Whole page or page width.
+    pub fit: Fit,
+    /// White margins cropped automatically.
+    pub crop_margins: bool,
+    /// Text columns read one after the other (1 = off).
+    pub columns: u8,
+    /// Contrast (1.0 = none, larger is steeper).
+    pub contrast: f32,
+    /// Two pages side by side.
+    pub spreads: Spreads,
+    /// Pages run right to left (manga): the right page of a spread comes first, and the
+    /// reader turns pages the other way.
+    pub rtl: bool,
+}
+
+impl Default for FixedView {
+    fn default() -> Self {
+        FixedView { fit: Fit::Page, crop_margins: false, columns: 1, contrast: 1.0, spreads: Spreads::Auto, rtl: false }
+    }
 }
 
 /// Settings a reflowable layout depends on. Fixed-layout documents use `width` and
@@ -353,6 +399,28 @@ pub trait Document {
         None
     }
 
+    /// After [`Document::zoom_step`]: draws `page` at once by scaling the screen shown
+    /// before the zoom (coarse, without the detail of the new zoom), for the reader to
+    /// show until `render_page` has drawn the sharp page. False, with `canvas` left as
+    /// it was, when there is nothing to scale: no zoom since the last `render_page`, or
+    /// the page shown before is not at hand. Default: false.
+    fn render_zoom_preview(&mut self, _page: usize, _canvas: &mut Canvas) -> bool {
+        false
+    }
+
+    /// The view options of a fixed-layout document; `None` for reflowable documents.
+    fn fixed_view(&self) -> Option<FixedView> {
+        None
+    }
+
+    /// Changes the view options of a fixed-layout document. Screens are cut again;
+    /// positions stay valid and the current position stays on screen (read the page
+    /// with `current_page()` after it), page numbers do not. Default (reflowable):
+    /// [`DocError::Unsupported`].
+    fn set_fixed_view(&mut self, _view: &FixedView) -> Result<()> {
+        Err(DocError::Unsupported("fixed-layout view options".into()))
+    }
+
     /// Current layout settings.
     fn layout(&self) -> &LayoutSettings;
 
@@ -362,6 +430,14 @@ pub trait Document {
     /// Draws page `page` into `canvas` (which has the layout's size). Draws the page
     /// content only; the reader adds headers, footers and overlays.
     fn render_page(&mut self, page: usize, canvas: &mut Canvas) -> Result<()>;
+
+    /// Does the slow part of a later `render_page(page)` now, within the document's own
+    /// page cache (the reader calls it while idle, for the page it expects next).
+    /// Returns true when work was done; false when `page` was ready already, is out of
+    /// range, or the document has nothing to prepare. Default: nothing.
+    fn prefetch_page(&mut self, _page: usize) -> bool {
+        false
+    }
 
     /// Position of the first character on `page`.
     fn position_of_page(&self, page: usize) -> Result<Position>;
@@ -463,6 +539,14 @@ pub trait Document {
         true
     }
 
+    /// Turns on (the default) or off the pages an engine that paginates in the
+    /// background lays out past the current page whenever the count is asked
+    /// (`page_count`), so that a reader clamping page turns to the count never waits.
+    /// Off, `page_count` returns the pages known so far and never waits for the
+    /// background: a reader shows its first page with that count (and the estimate)
+    /// and turns this on once the page is on the panel. Default: nothing.
+    fn set_read_ahead(&mut self, _on: bool) {}
+
     /// A plausible total page count while pagination runs (`page_count().complete` is
     /// false), estimated from the sizes of the parts not paginated yet; show it marked
     /// as an estimate ("~1234"). `None` when the count is complete or no estimate exists.
@@ -501,7 +585,7 @@ pub trait Provider {
     /// True when this provider handles `path` (by extension by default).
     fn can_open(&self, path: &Path) -> bool {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
-        self.extensions().iter().any(|ext| name.ends_with(&format!(".{ext}")))
+        self.extensions().iter().any(|ext| name.strip_suffix(ext).is_some_and(|stem| stem.ends_with('.')))
     }
 
     /// Opens `path`.
@@ -642,12 +726,23 @@ mod tests {
         assert_eq!(m.read("a.css").unwrap(), b"p{}");
         assert!(!m.exists("b.css"));
         assert!(m.shared().unwrap().exists("a.css"));
-        // INK_MANIFEST_DIR: the test binary runs on the emulator with the files copied there.
-        let root = std::env::var_os("INK_MANIFEST_DIR").map(PathBuf::from).unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into());
-        let d = DirLoader { root };
-        assert!(d.exists("Cargo.toml"));
-        assert!(d.shared().unwrap().exists("Cargo.toml"));
-        assert!(matches!(d.read("../ink-doc/Cargo.toml"), Err(DocError::NotFound(_))));
+        // The test writes its own files: reading the crate's Cargo.toml from the source
+        // checkout failed when the checkout changed under a long workspace run (a branch
+        // switch rewrites the file) or when INK_MANIFEST_DIR pointed elsewhere.
+        let base = std::env::temp_dir().join(format!("ink-doc-loaders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("book/img")).unwrap();
+        std::fs::write(base.join("book/img/a.png"), b"png").unwrap();
+        std::fs::write(base.join("outside.css"), b"p{}").unwrap();
+        let d = DirLoader { root: base.join("book") };
+        assert_eq!(d.read("img/a.png").unwrap(), b"png");
+        assert!(d.exists("img/x/../a.png"));
+        assert!(!d.exists("img/b.png"));
+        assert!(d.shared().unwrap().exists("img/a.png"));
+        // A path that leaves the root is refused even though the file exists.
+        assert!(matches!(d.read("../outside.css"), Err(DocError::NotFound(_))));
+        assert!(matches!(d.read("img/../../outside.css"), Err(DocError::NotFound(_))));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     struct Fake;

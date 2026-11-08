@@ -150,9 +150,11 @@ exit_device() {
 }
 
 # start_reader [BOOK]: launches rinky.sh and waits until rinky runs without the framework.
+# READER_LOG=debug starts it with RINKY_LOG=debug (lines logged at debug only).
 start_reader() {
   local book=${1:-$DEST/juliet.epub}
-  guest "rm -f $DEST/rinky.log $DEST/watchdog.log; rm -rf $DEST/juliet.sdr; sh $DEST/rinky.sh $book" || fail "launch"
+  local env=${READER_LOG:+RINKY_LOG=$READER_LOG }
+  guest "rm -f $DEST/rinky.log $DEST/watchdog.log; rm -rf $DEST/juliet.sdr; ${env}sh $DEST/rinky.sh $book" || fail "launch"
   wait_until 90 "rinky running, KPPMainApp gone" reader_running || fail "rinky did not take over"
   nap 4
   log "framework: $(framework_state)"

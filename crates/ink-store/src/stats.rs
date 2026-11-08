@@ -82,22 +82,9 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// Gap that ends a session when sessions are rebuilt from page records (KOReader data).
 pub const SESSION_GAP_SECS: u64 = 600;
 
-const SCHEMA: &str = r#"
-    CREATE TABLE IF NOT EXISTS book
-        (
-            id integer PRIMARY KEY autoincrement,
-            title text,
-            authors text,
-            notes      integer,
-            last_open  integer,
-            highlights integer,
-            pages      integer,
-            series text,
-            language text,
-            md5 text,
-            total_read_time  integer,
-            total_read_pages integer
-        );
+const SCHEMA: &str = concat!(
+    crate::koreader::sqlite::schema::book_table!(),
+    r#"
     CREATE UNIQUE INDEX IF NOT EXISTS book_title_authors_md5 ON book(title, authors, md5);
     CREATE INDEX IF NOT EXISTS book_md5 ON book(md5);
     CREATE TABLE IF NOT EXISTS page_stat_data
@@ -122,7 +109,8 @@ const SCHEMA: &str = r#"
             source     text NOT NULL DEFAULT 'rinky'
         );
     CREATE INDEX IF NOT EXISTS session_book_start ON session(id_book, start_time);
-"#;
+"#
+);
 
 /// A book as the statistics know it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -231,12 +219,14 @@ fn u(v: i64) -> u64 {
     v.max(0) as u64
 }
 
+fn u32_of(v: i64) -> u32 {
+    v.clamp(0, u32::MAX as i64) as u32
+}
+
 impl StatsDb {
     /// Opens (creating if needed) the database at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
-        }
+        crate::create_parent_dir(path)?;
         let conn = Connection::open(path)?;
         Self::init(conn, WriteQueue::for_path(path))
     }
@@ -246,15 +236,7 @@ impl StatsDb {
     /// `-journal`) and a new database is started; the new name is returned. Other errors
     /// (locked, read-only, a newer schema) are returned and nothing is moved.
     pub fn open_or_recover(path: &Path) -> Result<(Self, Option<PathBuf>)> {
-        let damaged = |e: &StoreError| matches!(e, StoreError::Sqlite(e) if crate::is_damaged_sqlite(e));
-        match Self::open(path) {
-            Ok(db) => Ok((db, None)),
-            Err(e) if damaged(&e) => {
-                let Some(moved) = crate::set_aside_database(path) else { return Err(e) };
-                Ok((Self::open(path)?, Some(moved)))
-            }
-            Err(e) => Err(e),
-        }
+        crate::open_db_or_recover(path, Self::open)
     }
 
     /// An in-memory database (tests).
@@ -347,11 +329,10 @@ impl StatsDb {
     /// page count are updated, so a crash loses at most the unwritten records.
     pub fn record_pages(&mut self, session: i64, recs: &[PageRecord]) -> Result<()> {
         let (_turn, tx) = self.write_tx()?;
-        let (book, start): (i64, i64) = tx
-            .query_row("SELECT id_book, start_time FROM session WHERE id = ?1", [session], |r| Ok((r.get(0)?, r.get(1)?)))
+        let (book, start, mut end): (i64, i64, i64) = tx
+            .query_row("SELECT id_book, start_time, end_time FROM session WHERE id = ?1", [session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?
             .ok_or_else(|| StoreError::NotFound(format!("session {session}")))?;
-        let mut end: i64 = tx.query_row("SELECT end_time FROM session WHERE id = ?1", [session], |r| r.get(0))?;
         {
             let mut ins = tx.prepare_cached(
                 "INSERT INTO page_stat_data (id_book, page, start_time, duration, total_pages) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -402,70 +383,53 @@ impl StatsDb {
     }
 
     fn totals(&self, md5: Option<&str>) -> Result<Vec<BookTotals>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT b.md5, b.title, b.authors, b.pages,
+        let sql = "SELECT b.md5, b.title, b.authors, b.pages,
                     (SELECT coalesce(sum(duration), 0) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT count(DISTINCT page) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT count(*) FROM session s WHERE s.id_book = b.id),
                     (SELECT min(start_time) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT max(start_time + duration) FROM page_stat_data p WHERE p.id_book = b.id)
              FROM book b WHERE (?1 IS NULL OR b.md5 = ?1)
-             ORDER BY 9 DESC NULLS LAST, b.id",
-        )?;
-        let rows = st.query_map([md5], |r| {
+             ORDER BY 9 DESC NULLS LAST, b.id";
+        crate::query_all(&self.conn, sql, [md5], |r| {
             Ok(BookTotals {
                 md5: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 title: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 authors: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                pages: r.get::<_, Option<i64>>(3)?.map(|p| p.clamp(0, u32::MAX as i64) as u32),
+                pages: r.get::<_, Option<i64>>(3)?.map(u32_of),
                 read_time: u(r.get(4)?),
                 pages_read: u(r.get(5)?),
                 sessions: u(r.get(6)?),
                 first_read: r.get::<_, Option<i64>>(7)?.map(u),
                 last_read: r.get::<_, Option<i64>>(8)?.map(u),
             })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })
     }
 
     /// Sessions, newest first; of one book when `md5` is given.
     pub fn sessions(&self, md5: Option<&str>, limit: usize) -> Result<Vec<Session>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT s.id, b.md5, s.start_time, s.end_time, s.duration, s.pages, s.source FROM session s JOIN book b ON b.id = s.id_book
-             WHERE (?1 IS NULL OR b.md5 = ?1) ORDER BY s.start_time DESC, s.id DESC LIMIT ?2",
-        )?;
-        let rows = st.query_map(params![md5, limit as i64], row_session)?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let sql = "SELECT s.id, b.md5, s.start_time, s.end_time, s.duration, s.pages, s.source FROM session s JOIN book b ON b.id = s.id_book
+             WHERE (?1 IS NULL OR b.md5 = ?1) ORDER BY s.start_time DESC, s.id DESC LIMIT ?2";
+        crate::query_all(&self.conn, sql, params![md5, limit as i64], row_session)
     }
 
     /// Page records of the book with `md5`, oldest first.
     pub fn page_stats(&self, md5: &str) -> Result<Vec<PageRecord>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT p.page, p.total_pages, p.start_time, p.duration FROM page_stat_data p JOIN book b ON b.id = p.id_book
-             WHERE b.md5 = ?1 ORDER BY p.start_time, p.page",
-        )?;
-        let rows = st.query_map([md5], |r| {
-            Ok(PageRecord {
-                page: r.get::<_, i64>(0)?.clamp(0, u32::MAX as i64) as u32,
-                total_pages: r.get::<_, i64>(1)?.clamp(0, u32::MAX as i64) as u32,
-                start_time: u(r.get(2)?),
-                duration: r.get::<_, i64>(3)?.clamp(0, u32::MAX as i64) as u32,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let sql = "SELECT p.page, p.total_pages, p.start_time, p.duration FROM page_stat_data p JOIN book b ON b.id = p.id_book
+             WHERE b.md5 = ?1 ORDER BY p.start_time, p.page";
+        crate::query_all(&self.conn, sql, [md5], |r| {
+            Ok(PageRecord { page: u32_of(r.get(0)?), total_pages: u32_of(r.get(1)?), start_time: u(r.get(2)?), duration: u32_of(r.get(3)?) })
+        })
     }
 
     /// Reading per day for page records starting in `from..to`, with days counted in a
     /// time zone `utc_offset` seconds east of UTC.
     pub fn daily(&self, from: u64, to: u64, utc_offset: i64) -> Result<Vec<DayTotal>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT date(start_time + ?3, 'unixepoch') AS day, sum(duration), count(*), count(DISTINCT id_book)
-             FROM page_stat_data WHERE start_time >= ?1 AND start_time < ?2 GROUP BY day ORDER BY day",
-        )?;
-        let rows = st.query_map(params![from as i64, to as i64, utc_offset], |r| {
+        let sql = "SELECT date(start_time + ?3, 'unixepoch') AS day, sum(duration), count(*), count(DISTINCT id_book)
+             FROM page_stat_data WHERE start_time >= ?1 AND start_time < ?2 GROUP BY day ORDER BY day";
+        crate::query_all(&self.conn, sql, params![from as i64, to as i64, utc_offset], |r| {
             Ok(DayTotal { day: r.get(0)?, seconds: u(r.get(1)?), pages: u(r.get(2)?), books: u(r.get(3)?) })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })
     }
 
     /// Copies KOReader's statistics in: books are matched by md5 (created if missing),
@@ -554,21 +518,39 @@ fn update_book_totals(conn: &Connection, book: i64) -> Result<()> {
     Ok(())
 }
 
+/// `spans` (inclusive `(start, end)`, any order, may overlap) sorted by start with the
+/// overlapping ones joined, so [`covers`] can binary search them.
+fn merge_spans(mut spans: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    spans.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(spans.len());
+    for (a, b) in spans {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// True when `t` lies in one of `merged` (from [`merge_spans`]); O(log n).
+fn covers(merged: &[(i64, i64)], t: i64) -> bool {
+    let i = merged.partition_point(|&(a, _)| a <= t);
+    i > 0 && t <= merged[i - 1].1
+}
+
 /// Replaces the `koreader` sessions of `book` with sessions built from its page records
 /// that no rinky session covers. Returns the number of sessions.
 fn rebuild_koreader_sessions(conn: &Connection, book: i64) -> Result<usize> {
     conn.execute("DELETE FROM session WHERE id_book = ?1 AND source = 'koreader'", [book])?;
-    let ours: Vec<(i64, i64)> = conn
-        .prepare("SELECT start_time, end_time FROM session WHERE id_book = ?1")?
-        .query_map([book], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<std::result::Result<_, _>>()?;
-    let rows: Vec<(i64, i64, i64)> = conn
-        .prepare("SELECT start_time, duration, page FROM page_stat_data WHERE id_book = ?1 ORDER BY start_time, page")?
-        .query_map([book], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<std::result::Result<_, _>>()?;
+    // Sorted and joined once, so each page record is checked in O(log sessions) rather
+    // than against every session (an imported history has thousands of each).
+    let ours: Vec<(i64, i64)> = crate::query_all(conn, "SELECT start_time, end_time FROM session WHERE id_book = ?1", [book], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let ours = merge_spans(ours);
+    let sql = "SELECT start_time, duration, page FROM page_stat_data WHERE id_book = ?1 ORDER BY start_time, page";
+    let rows: Vec<(i64, i64, i64)> = crate::query_all(conn, sql, [book], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     let mut sessions: Vec<(i64, i64, i64, std::collections::HashSet<i64>)> = Vec::new();
     for (start, dur, page) in rows {
-        if ours.iter().any(|&(a, b)| start >= a && start <= b) {
+        if covers(&ours, start) {
             continue;
         }
         match sessions.last_mut() {
@@ -595,6 +577,19 @@ mod tests {
 
     fn juliet() -> StatsBook {
         StatsBook { md5: "cf7ce9b8d4e135c8ac340f18d1e58c85".into(), title: "Romeo and Juliet".into(), authors: "William Shakespeare".into(), pages: Some(180), ..Default::default() }
+    }
+
+    #[test]
+    fn covered_times_match_a_linear_scan() {
+        // Unsorted, overlapping, touching, nested and single-instant spans.
+        let spans = vec![(50, 60), (10, 20), (15, 30), (31, 31), (100, 200), (120, 130), (30, 30), (70, 70), (-5, 0)];
+        let merged = merge_spans(spans.clone());
+        assert!(merged.windows(2).all(|w| w[0].1 < w[1].0), "{merged:?}");
+        for t in -10..=210 {
+            let linear = spans.iter().any(|&(a, b)| t >= a && t <= b);
+            assert_eq!(covers(&merged, t), linear, "t = {t}");
+        }
+        assert!(!covers(&merge_spans(Vec::new()), 0));
     }
 
     #[test]

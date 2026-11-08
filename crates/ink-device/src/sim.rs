@@ -12,10 +12,10 @@
 //! The window must live on the main thread (a macOS requirement).
 
 use crate::canvas::Canvas;
-use crate::eink::EinkPanel;
+use crate::eink::{panel_screen_state, EinkPanel};
 use crate::geom::{Rect, Rotation, Size};
 use crate::input::{Input, InputEvent, Key, KeyEvent, Timestamp, TouchContact, TouchFrame, TouchPhase};
-use crate::screen::{copy_to_panel, RefreshClass, Screen};
+use crate::screen::{RefreshClass, Screen};
 use crate::script::{Played, ScriptPlayer, Step};
 use crate::services::{SystemClock, Unsupported};
 use crate::{Device, DeviceError, DeviceInfo, Result};
@@ -45,10 +45,7 @@ pub struct SimOptions {
 
 struct Shared {
     window: Window,
-    fb: Canvas,
     panel: EinkPanel,
-    rotation: Rotation,
-    night: bool,
     scale: f32,
     win_size: (usize, usize),
     buffer: Vec<u32>,
@@ -106,58 +103,30 @@ impl Shared {
 struct SimScreen(Rc<RefCell<Shared>>);
 
 impl Screen for SimScreen {
-    fn panel_size(&self) -> Size {
-        self.0.borrow().fb.size()
-    }
-
-    fn rotation(&self) -> Rotation {
-        self.0.borrow().rotation
-    }
-
-    fn set_rotation(&mut self, rotation: Rotation) -> Result<()> {
-        self.0.borrow_mut().rotation = rotation;
-        Ok(())
-    }
-
-    fn night_mode(&self) -> bool {
-        self.0.borrow().night
-    }
-
-    fn set_night_mode(&mut self, on: bool) -> Result<()> {
-        self.0.borrow_mut().night = on;
-        Ok(())
-    }
+    panel_screen_state!();
 
     fn update(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass) -> Result<()> {
         let mut s = self.0.borrow_mut();
-        let s = &mut *s;
-        let panel = s.fb.size();
-        let stride = s.fb.width;
-        let changed = copy_to_panel(canvas, rect, s.rotation, s.night, panel, &mut s.fb.pixels, stride);
-        if class == RefreshClass::Gc16 && changed == s.fb.bounds() {
+        let changed = s.panel.write(canvas, rect);
+        if class == RefreshClass::Gc16 && changed == s.panel.fb.bounds() {
             // Show the black flash of a full GC16 update.
-            let mut black = Canvas::new(s.fb.width, s.fb.height);
+            let mut black = Canvas::new(s.panel.pixels.width, s.panel.pixels.height);
             black.clear(0);
             std::mem::swap(&mut s.panel.pixels, &mut black);
             s.present()?;
             std::thread::sleep(Duration::from_millis(60));
             std::mem::swap(&mut s.panel.pixels, &mut black);
         }
-        s.panel.apply(&s.fb, changed, class);
+        s.panel.refresh(changed, class);
         log::info!("sim update {}: {changed:?} {class:?}", s.panel.updates);
         s.present()
     }
 
     fn refresh_all(&mut self) -> Result<()> {
         let mut s = self.0.borrow_mut();
-        let s = &mut *s;
-        let r = s.fb.bounds();
-        s.panel.apply(&s.fb, r, RefreshClass::Gc16);
+        let r = s.panel.fb.bounds();
+        s.panel.refresh(r, RefreshClass::Gc16);
         s.present()
-    }
-
-    fn screenshot(&self) -> Result<Canvas> {
-        Ok(self.0.borrow().panel.pixels.clone())
     }
 }
 
@@ -309,10 +278,7 @@ pub fn open(opts: SimOptions) -> Result<Device> {
     window.set_target_fps(60);
     let shared = Rc::new(RefCell::new(Shared {
         window,
-        fb: Canvas::new(panel.w as usize, panel.h as usize),
         panel: EinkPanel::new(panel, opts.ghosting),
-        rotation: Rotation::Portrait,
-        night: false,
         scale,
         win_size,
         buffer: vec![0; win_size.0 * win_size.1],

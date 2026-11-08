@@ -12,12 +12,14 @@
 //! - Gutenberg headers (`Title:`, `Author:`, `Language:`) fill the metadata.
 
 use crate::book::{Book, BookInfo, Target, TocNode};
-use crate::encoding::decode_text;
-use crate::xml::escape_text;
+use crate::encoding::{decode_text, decode_text_owned};
+use crate::util::LANGUAGES;
+use crate::xml::{escape_text, push_text};
 use crate::Format;
 use ink_doc::{DirLoader, DocError, Result};
 use ink_html::HtmlChapter;
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::path::Path;
 
 /// Characters of text per chapter when the book has no headings (keeps chapters small
@@ -37,47 +39,49 @@ enum Mode {
     Line,
 }
 
-/// `\r\n`/`\r` to `\n`, form feeds to blank lines (a copy only when needed: a book
-/// can be tens of MB).
+/// `\r\n`/`\r` to `\n`, form feeds to blank lines (a copy only when needed, made in one
+/// pass: a book can be tens of MB).
 fn normalise(text: &str) -> Cow<'_, str> {
-    if text.contains(['\r', '\u{c}']) {
-        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n").replace('\u{c}', "\n\n"))
-    } else {
-        Cow::Borrowed(text)
+    if !text.bytes().any(|b| b == b'\r' || b == 0x0C) {
+        return Cow::Borrowed(text);
     }
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut rest = text;
+    while let Some(i) = rest.bytes().position(|b| b == b'\r' || b == 0x0C) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        rest = if rest.as_bytes()[i] == b'\r' {
+            out.push('\n');
+            after.strip_prefix('\n').unwrap_or(after)
+        } else {
+            out.push_str("\n\n");
+            after
+        };
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
-/// Lines of normalised text without trailing whitespace (tabs and indents kept).
+/// Lines of normalised text without trailing whitespace (tabs and indents kept), so a
+/// blank line is an empty one.
 fn lines_of(t: &str) -> Vec<&str> {
     let t = t.strip_prefix('\u{feff}').unwrap_or(t);
     t.split('\n').map(|l| l.trim_end()).collect()
 }
 
 fn mode_of(lines: &[&str]) -> Mode {
-    let nonblank: Vec<&str> = lines.iter().copied().filter(|l| !l.trim().is_empty()).collect();
-    if nonblank.is_empty() {
+    let nonblank = lines.iter().filter(|l| !l.is_empty()).count();
+    if nonblank == 0 {
         return Mode::Line;
     }
-    // Runs of blank lines between text lines.
-    let mut separators = 0;
-    let mut seen_text = false;
-    let mut in_blank = false;
-    for l in lines {
-        if l.trim().is_empty() {
-            in_blank = true;
-        } else {
-            if seen_text && in_blank {
-                separators += 1;
-            }
-            seen_text = true;
-            in_blank = false;
-        }
-    }
-    if separators * 10 >= nonblank.len() {
+    // Runs of blank lines between text lines: the steps from a blank line to text, less
+    // the one after blank lines at the start.
+    let steps = lines.windows(2).filter(|w| w[0].is_empty() && !w[1].is_empty()).count();
+    if (steps - usize::from(lines[0].is_empty())) * 10 >= nonblank {
         return Mode::Blank;
     }
-    let indented = nonblank.iter().filter(|l| l.starts_with("  ") || l.starts_with('\t') || l.starts_with('\u{3000}')).count();
-    if indented * 5 >= nonblank.len() && indented < nonblank.len() {
+    let indented = lines.iter().filter(|l| l.starts_with("  ") || l.starts_with('\t') || l.starts_with('\u{3000}')).count();
+    if indented * 5 >= nonblank && indented < nonblank {
         Mode::Indent
     } else {
         Mode::Line
@@ -94,7 +98,7 @@ fn groups<'t>(lines: &[&'t str], mode: Mode) -> Vec<Vec<&'t str>> {
         }
     };
     for &l in lines {
-        let blank = l.trim().is_empty();
+        let blank = l.is_empty();
         match mode {
             Mode::Blank => {
                 if blank {
@@ -167,11 +171,13 @@ fn heading_level(line: &str) -> Option<u8> {
     if chars == 0 || chars > 80 {
         return None;
     }
-    let lower = t.to_lowercase();
-    let first: String = lower.split_whitespace().next().unwrap_or("").to_string();
+    // Only the first two words are compared, so only they are lower-cased.
+    let first_raw = t.split_whitespace().next().unwrap_or("");
+    let rest = t[first_raw.len()..].trim();
+    let first = first_raw.to_lowercase();
     let first_bare = first.trim_end_matches(|c: char| ".:,;".contains(c));
-    let rest = lower[first.len()..].trim();
-    let rest_first = rest.split_whitespace().next().unwrap_or("").trim_end_matches(|c: char| ".:,;—-".contains(c));
+    let rest_lower = rest.split_whitespace().next().unwrap_or("").to_lowercase();
+    let rest_first = rest_lower.trim_end_matches(|c: char| ".:,;—-".contains(c));
     let numberish = |w: &str| {
         !w.is_empty()
             && (w.chars().all(|c| c.is_ascii_digit()) || is_roman(w) || NUMBER_WORDS.contains(&w) || w.chars().count() == 1)
@@ -200,7 +206,14 @@ fn is_all_caps_title(line: &str) -> bool {
 }
 
 fn join_lines(lines: &[&str]) -> String {
-    lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(l.trim_start());
+    }
+    out
 }
 
 fn blocks_of(groups: &[Vec<&str>], mode: Mode, allow_caps: bool) -> Vec<Block> {
@@ -209,9 +222,10 @@ fn blocks_of(groups: &[Vec<&str>], mode: Mode, allow_caps: bool) -> Vec<Block> {
         // A heading line, optionally followed by up to two subtitle lines that are not
         // headings themselves.
         let short = g.len() <= 3 && g.iter().all(|l| l.trim().chars().count() <= 80);
-        let heading = if short && g[1..].iter().all(|l| heading_level(l).is_none()) {
+        let heading = if short {
             match heading_level(g[0]) {
-                Some(level) => Some(level),
+                // The subtitle lines are looked at only for a heading line (rare).
+                Some(level) => g[1..].iter().all(|l| heading_level(l).is_none()).then_some(level),
                 None if allow_caps && mode == Mode::Blank && g.len() == 1 && is_all_caps_title(g[0]) => Some(1),
                 None => None,
             }
@@ -220,7 +234,7 @@ fn blocks_of(groups: &[Vec<&str>], mode: Mode, allow_caps: bool) -> Vec<Block> {
         };
         match heading {
             Some(level) => out.push(Block::Heading { level, title: join_lines(g) }),
-            None if mode == Mode::Line => out.push(Block::Para(g[0].trim().to_string())),
+            None if mode == Mode::Line => out.push(Block::Para(g[0].trim_start().to_string())),
             None => out.push(Block::Para(join_lines(g))),
         }
     }
@@ -256,17 +270,6 @@ fn demote_contents_lists(blocks: &mut [Block]) {
             }
         }
     }
-}
-
-/// Text converted to chapters and a TOC.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TxtConversion {
-    /// XHTML chapters (`text-NNN.xhtml`).
-    pub chapters: Vec<HtmlChapter>,
-    /// Nested TOC: parts with their chapters.
-    pub toc: Vec<TocNode>,
-    /// Encoding used.
-    pub encoding: &'static str,
 }
 
 fn xhtml(title: &str, body: &str) -> String {
@@ -317,7 +320,9 @@ pub fn convert_text(text: &str, title: &str) -> (Vec<HtmlChapter>, Vec<TocNode>)
                 chapter_title = t.clone();
                 let id = format!("h{headings}");
                 let tag = if level == 0 { "h1" } else { "h2" };
-                body.push_str(&format!("<{tag} id=\"{id}\">{}</{tag}>", escape_text(&t)));
+                let _ = write!(body, "<{tag} id=\"{id}\">");
+                push_text(&mut body, &t);
+                let _ = write!(body, "</{tag}>");
                 let node = TocNode::new(t, Target::id(chapters.len(), id));
                 match (level, toc.last_mut()) {
                     (1, Some(part)) if in_part => part.children.push(node),
@@ -334,7 +339,7 @@ pub fn convert_text(text: &str, title: &str) -> (Vec<HtmlChapter>, Vec<TocNode>)
                 }
                 chars += p.len();
                 body.push_str("<p>");
-                body.push_str(&escape_text(&p));
+                push_text(&mut body, &p);
                 body.push_str("</p>");
             }
         }
@@ -351,13 +356,6 @@ pub fn convert_text(text: &str, title: &str) -> (Vec<HtmlChapter>, Vec<TocNode>)
     (out, toc)
 }
 
-/// Converts text bytes: detects the encoding, then [`convert_text`].
-pub fn convert(bytes: &[u8], title: &str) -> TxtConversion {
-    let d = decode_text(bytes);
-    let (chapters, toc) = convert_text(&d.text, title);
-    TxtConversion { chapters, toc, encoding: d.encoding }
-}
-
 /// Metadata from a Project Gutenberg style header in the first lines.
 fn header_metadata(text: &str, info: &mut BookInfo) {
     for line in text.lines().take(120) {
@@ -372,33 +370,12 @@ fn header_metadata(text: &str, info: &mut BookInfo) {
                 info.metadata.authors = v.split(" and ").map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
             }
         } else if let Some(v) = field("Language:") {
-            info.metadata.language.get_or_insert(language_code(&v));
+            let name = v.to_lowercase();
+            info.metadata.language.get_or_insert(LANGUAGES.iter().find(|l| l.0 == name).map_or(name.clone(), |l| l.2.to_string()));
         } else if l.starts_with("*** START OF") {
             break;
         }
     }
-}
-
-fn language_code(name: &str) -> String {
-    match name.to_lowercase().as_str() {
-        "english" => "en",
-        "german" => "de",
-        "french" => "fr",
-        "spanish" => "es",
-        "italian" => "it",
-        "danish" => "da",
-        "dutch" => "nl",
-        "russian" => "ru",
-        "portuguese" => "pt",
-        "swedish" => "sv",
-        "norwegian" => "no",
-        "finnish" => "fi",
-        "polish" => "pl",
-        "chinese" => "zh",
-        "japanese" => "ja",
-        other => return other.to_string(),
-    }
-    .to_string()
 }
 
 fn info_of(path: &Path, text: &str, encoding: &str) -> BookInfo {
@@ -439,7 +416,7 @@ pub fn looks_binary(text: &str) -> bool {
 /// Opens a text file. Binary data (an image or program renamed to `.txt`) is refused.
 pub fn open(path: &Path) -> Result<Book> {
     // The raw bytes are freed once decoded.
-    let d = decode_text(&std::fs::read(path)?);
+    let d = decode_text_owned(std::fs::read(path)?);
     if looks_binary(&d.text) {
         return Err(DocError::Format(format!(
             "{} is not a text file (binary data; detected encoding {})",
@@ -491,6 +468,14 @@ mod tests {
             assert!(!looks_binary(&text), "{} taken as binary", p.display());
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn line_ends_and_form_feeds() {
+        for s in ["a\r\nb\rc\u{c}d", "\r\r\n\r", "x\r\u{c}\r\n", "\u{c}\u{c}", "plain\n", "", "é\r\nü\r"] {
+            let want = s.replace("\r\n", "\n").replace('\r', "\n").replace('\u{c}', "\n\n");
+            assert_eq!(normalise(s), want, "{s:?}");
+        }
     }
 
     #[test]
@@ -561,9 +546,9 @@ mod tests {
     fn encodings_and_header() {
         let src = "Глава 1\n\nМой дядя самых честных правил, когда не в шутку занемог.\n\nГлава 2\n\nОн уважать себя заставил и лучше выдумать не мог.\n".repeat(20);
         let (cp, _, _) = encoding_rs::WINDOWS_1251.encode(&src);
-        let c = convert(&cp, "t");
-        assert_eq!(c.encoding, "windows-1251");
-        assert!(c.chapters.iter().any(|ch| ch.html.contains("Мой дядя")));
+        let d = decode_text(&cp);
+        assert_eq!(d.encoding, "windows-1251");
+        assert!(convert_text(&d.text, "t").0.iter().any(|ch| ch.html.contains("Мой дядя")));
         let mut info = BookInfo::new(Format::Txt);
         header_metadata("Title: Alice\nAuthor: Lewis Carroll\nLanguage: English\n*** START OF", &mut info);
         assert_eq!(info.metadata.title, "Alice");

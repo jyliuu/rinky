@@ -2,8 +2,8 @@
 //! with `resvg`), scaling and Floyd-Steinberg dithering to the 16 gray levels of the
 //! e-ink panel. Transparent pixels are composited on white.
 
-use image::{GrayImage, ImageReader};
-use std::collections::HashMap;
+use image::{DynamicImage, GrayImage, ImageReader};
+use ink_device::Canvas;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -52,11 +52,35 @@ pub fn intrinsic_size(bytes: &[u8]) -> Option<(u32, u32)> {
 /// A decoded gray image scaled to `w` x `h` (not dithered). `resolve` loads resources an
 /// SVG refers to.
 pub fn decode_scaled(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<'_>>) -> Option<GrayImage> {
+    decode_with(bytes, w, h, resolve, GrayMath::ImageCrate)
+}
+
+/// [`decode_scaled`] for a thumbnail that is stored, not drawn as is (library covers):
+/// 8-bit colour becomes gray with integer Rec. 709 weights, where the image crate's
+/// conversion (f32 colour management per pixel) takes about 70 ms for a 600 x 900
+/// cover on a Kindle. The two differ by at most one level of 255 (rounding).
+pub fn decode_thumbnail(bytes: &[u8], w: u32, h: u32) -> Option<GrayImage> {
+    decode_with(bytes, w, h, None, GrayMath::Integer)
+}
+
+/// How [`whole_decode`] turns 8-bit colour into gray.
+#[derive(Clone, Copy, PartialEq)]
+enum GrayMath {
+    /// The image crate's `to_luma8` (what page goldens were made with).
+    ImageCrate,
+    /// [`gray_of`]: integer Rec. 709 luma, rounded.
+    Integer,
+}
+
+fn decode_with(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<'_>>, math: GrayMath) -> Option<GrayImage> {
     if w == 0 || h == 0 || w > 8000 || h > 8000 {
         return None;
     }
     if is_svg(bytes) {
         let tree = usvg::Tree::from_data(bytes, &svg_options(resolve)).ok()?;
+        if let Some(img) = svg_raster_only(&tree, w, h) {
+            return Some(img);
+        }
         return Some(render_svg_tree(&tree, w, h));
     }
     let (sw, sh) = intrinsic_size(bytes)?;
@@ -68,7 +92,7 @@ pub fn decode_scaled(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<
         let out = match fmt {
             Some(image::ImageFormat::Png) => png_shrunk(bytes, w, h),
             Some(image::ImageFormat::Jpeg) => jpeg_shrunk(bytes, w, h),
-            _ if source_px <= MAX_OTHER_PX => whole_decode(bytes, w, h),
+            _ if source_px <= MAX_OTHER_PX => whole_decode(bytes, w, h, math),
             _ => None,
         };
         if out.is_none() {
@@ -76,7 +100,7 @@ pub fn decode_scaled(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<
         }
         return out;
     }
-    whole_decode(bytes, w, h)
+    whole_decode(bytes, w, h, math)
 }
 
 /// Sources above this many pixels go through the bounded-memory decoders.
@@ -91,13 +115,30 @@ pub const MAX_OTHER_PX: u64 = 16 << 20;
 const MAX_SOURCE_W: u32 = 100_000;
 
 /// Decodes the whole image with the `image` crate, then scales it.
-fn whole_decode(bytes: &[u8], w: u32, h: u32) -> Option<GrayImage> {
+fn whole_decode(bytes: &[u8], w: u32, h: u32, math: GrayMath) -> Option<GrayImage> {
     let mut r = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(256 << 20);
     r.limits(limits);
     let img = r.decode().ok()?;
-    let gray = if img.color().has_alpha() {
+    if math == GrayMath::ImageCrate {
+        return Some(finish_size(image_crate_gray(img)?, w, h));
+    }
+    let (iw, ih) = (img.width(), img.height());
+    let raw = match img {
+        DynamicImage::ImageLuma8(i) => return Some(finish_size(i, w, h)),
+        DynamicImage::ImageLumaA8(i) => gray_pixels::<2>(i.as_raw()),
+        DynamicImage::ImageRgb8(i) => gray_pixels::<3>(i.as_raw()),
+        DynamicImage::ImageRgba8(i) => gray_pixels::<4>(i.as_raw()),
+        other => return Some(finish_size(image_crate_gray(other)?, w, h)),
+    };
+    Some(finish_size(GrayImage::from_raw(iw, ih, raw)?, w, h))
+}
+
+/// An image as 8-bit gray with the image crate's conversion, transparency composited
+/// on white.
+fn image_crate_gray(img: DynamicImage) -> Option<GrayImage> {
+    if img.color().has_alpha() {
         let la = img.to_luma_alpha8();
         let (iw, ih) = la.dimensions();
         let raw: Vec<u8> = la
@@ -105,27 +146,32 @@ fn whole_decode(bytes: &[u8], w: u32, h: u32) -> Option<GrayImage> {
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|p| ((p[0] as u32 * p[1] as u32 + 255 * (255 - p[1] as u32)) / 255) as u8)
+            .map(|p| over_white(p[0] as u32, p[1] as u32))
             .collect();
-        GrayImage::from_raw(iw, ih, raw)?
+        GrayImage::from_raw(iw, ih, raw)
     } else {
-        img.to_luma8()
-    };
-    if gray.dimensions() == (w, h) {
-        return Some(gray);
+        Some(img.to_luma8())
     }
-    Some(resize_gray(&gray, w, h))
+}
+
+/// [`gray_of`] for every pixel of `C`-channel 8-bit data.
+fn gray_pixels<const C: usize>(raw: &[u8]) -> Vec<u8> {
+    raw.as_chunks::<C>().0.iter().map(|p| gray_of(p, C)).collect()
 }
 
 /// 8-bit gray of one pixel with `channels` (1 gray, 2 gray+alpha, 3 RGB, 4 RGBA)
 /// samples; transparency is composited on white.
 fn gray_of(px: &[u8], channels: usize) -> u8 {
-    let (l, a) = match channels {
-        1 => return px[0],
-        2 => (px[0] as u32, px[1] as u32),
-        3 => return luma(px[0], px[1], px[2]) as u8,
-        _ => (luma(px[0], px[1], px[2]), px[3] as u32),
-    };
+    match channels {
+        1 => px[0],
+        2 => over_white(px[0] as u32, px[1] as u32),
+        3 => luma(px[0], px[1], px[2]) as u8,
+        _ => over_white(luma(px[0], px[1], px[2]), px[3] as u32),
+    }
+}
+
+/// Gray `l` with alpha `a` composited on white paper.
+fn over_white(l: u32, a: u32) -> u8 {
     ((l * a + 255 * (255 - a)) / 255) as u8
 }
 
@@ -194,8 +240,8 @@ impl RowShrink {
     }
 }
 
-/// Fits a shrunk image (at most `w` x `h`) to exactly `w` x `h` (upscaling the axes
-/// that the source was too small for).
+/// Scales an image to exactly `w` x `h` unless it has that size (the shrinking
+/// decoders give at most `w` x `h`: axes the source was too small for grow).
 fn finish_size(img: GrayImage, w: u32, h: u32) -> GrayImage {
     if img.dimensions() == (w, h) {
         img
@@ -327,24 +373,73 @@ fn axis_weights(src: u32, dst: u32) -> Vec<(u32, Vec<i32>)> {
         .collect()
 }
 
+/// The weights of [`axis_weights`] (for a source `src` wide) as one flat array with the
+/// same number of taps per output pixel: the window start of each output, the tap
+/// count, and the weights, zero where the original window does not reach.
+fn padded_weights(ws: &[(u32, Vec<i32>)], src: u32) -> (Vec<u32>, usize, Vec<i32>) {
+    let taps = ws.iter().map(|(_, w)| w.len()).max().unwrap_or(1).min(src as usize);
+    let mut starts = Vec::with_capacity(ws.len());
+    let mut flat = vec![0; ws.len() * taps];
+    for ((lo, w), out) in ws.iter().zip(flat.chunks_exact_mut(taps)) {
+        // Move the window left when it would run past the end of the row.
+        let start = (*lo).min(src - taps as u32);
+        let at = (lo - start) as usize;
+        out[at..at + w.len()].copy_from_slice(w);
+        starts.push(start);
+    }
+    (starts, taps, flat)
+}
+
+/// One row of the horizontal pass of [`resize_gray`] with `N` taps per output pixel
+/// (a fixed count the compiler unrolls).
+fn horizontal<const N: usize>(row: &[u8], out: &mut [u16], starts: &[u32], flat: &[i32]) {
+    for ((o, &lo), ws) in out.iter_mut().zip(starts).zip(flat.as_chunks::<N>().0) {
+        let px: &[u8; N] = row[lo as usize..][..N].try_into().expect("N taps");
+        let mut acc = 0i32;
+        for k in 0..N {
+            acc += px[k] as i32 * ws[k];
+        }
+        *o = to_8_8(acc);
+    }
+}
+
+/// A horizontal sum (weights in 1/16384) rounded to 8.8 fixed point.
+fn to_8_8(acc: i32) -> u16 {
+    ((acc + (1 << 5)) >> 6).clamp(0, 255 << 8) as u16
+}
+
 /// Separable bilinear / area resize of a gray image in fixed point.
 pub fn resize_gray(src: &GrayImage, w: u32, h: u32) -> GrayImage {
     let (sw, sh) = src.dimensions();
+    if sw == 0 || sh == 0 {
+        return GrayImage::from_pixel(w, h, image::Luma([255]));
+    }
     let xs = axis_weights(sw, w);
     let ys = axis_weights(sh, h);
     let s = src.as_raw();
     // Horizontal pass: sh rows of w values (x 16384 scale kept as u16 after rounding).
+    // Every output pixel reads the same number of source pixels (its weights padded
+    // with zeros), a constant up to 8 taps, so the compiler unrolls the inner loop; the
+    // sums, and so the result, are the same.
+    let (starts, taps, flat) = padded_weights(&xs, sw);
     let mut tmp = vec![0u16; (w * sh) as usize];
     for y in 0..sh as usize {
         let row = &s[y * sw as usize..(y + 1) * sw as usize];
         let out = &mut tmp[y * w as usize..(y + 1) * w as usize];
-        for (o, (lo, ws)) in out.iter_mut().zip(&xs) {
-            let mut acc = 0i32;
-            for (k, wt) in ws.iter().enumerate() {
-                acc += row[*lo as usize + k] as i32 * wt;
+        match taps {
+            2 => horizontal::<2>(row, out, &starts, &flat),
+            3 => horizontal::<3>(row, out, &starts, &flat),
+            4 => horizontal::<4>(row, out, &starts, &flat),
+            5 => horizontal::<5>(row, out, &starts, &flat),
+            6 => horizontal::<6>(row, out, &starts, &flat),
+            7 => horizontal::<7>(row, out, &starts, &flat),
+            8 => horizontal::<8>(row, out, &starts, &flat),
+            _ => {
+                for ((o, &lo), ws) in out.iter_mut().zip(&starts).zip(flat.chunks_exact(taps)) {
+                    let px = &row[lo as usize..lo as usize + taps];
+                    *o = to_8_8(px.iter().zip(ws).map(|(&p, &wt)| p as i32 * wt).sum());
+                }
             }
-            // 8.8 fixed point.
-            *o = ((acc + (1 << 5)) >> 6).clamp(0, 255 << 8) as u16;
         }
     }
     // Vertical pass, row by row: each source row is added into one accumulator row
@@ -370,6 +465,93 @@ pub fn resize_gray(src: &GrayImage, w: u32, h: u32) -> GrayImage {
     GrayImage::from_raw(w, h, out).expect("size")
 }
 
+/// An SVG that only shows one raster image (a cover page: `<svg><image .../></svg>`,
+/// with or without a viewBox, sizes or `preserveAspectRatio`) drawn by decoding the
+/// image straight into its place in the `w` x `h` box. resvg would decode it at full
+/// size and resample it with a bicubic filter, seconds on a Kindle. `None` when the
+/// SVG draws anything else, or the image is transformed, clipped, masked, filtered or
+/// translucent: resvg renders those.
+fn svg_raster_only(tree: &usvg::Tree, w: u32, h: u32) -> Option<GrayImage> {
+    let s = tree.size();
+    let (fx, fy) = (w as f32 / s.width().max(1.0), h as f32 / s.height().max(1.0));
+    let canvas = tiny_skia::Rect::from_xywh(0.0, 0.0, s.width(), s.height())?;
+    let mut found = None;
+    if !only_one_image(tree.root(), canvas, &mut found) {
+        return None;
+    }
+    let image = found?;
+    let bytes = match image.kind() {
+        usvg::ImageKind::JPEG(b) | usvg::ImageKind::PNG(b) | usvg::ImageKind::GIF(b) | usvg::ImageKind::WEBP(b) => b,
+        usvg::ImageKind::SVG(_) => return None,
+    };
+    let t = image.abs_transform();
+    if !image.is_visible() || t.kx != 0.0 || t.ky != 0.0 || t.sx <= 0.0 || t.sy <= 0.0 {
+        return None;
+    }
+    let r = image.abs_bounding_box();
+    let (x0, y0) = ((r.left() * fx).round(), (r.top() * fy).round());
+    let (x1, y1) = ((r.right() * fx).round(), (r.bottom() * fy).round());
+    let (dw, dh) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+    if dw > 8000.0 || dh > 8000.0 {
+        return None;
+    }
+    let img = decode_scaled(bytes, dw as u32, dh as u32, None)?;
+    let mut out = GrayImage::from_pixel(w, h, image::Luma([255]));
+    image::imageops::replace(&mut out, &img, x0 as i64, y0 as i64);
+    Some(out)
+}
+
+/// True when `g` and its descendants draw nothing but at most one image (stored in
+/// `found`) with plain groups: full opacity, normal blending, no mask or filter, and
+/// no clip other than a rectangle covering the whole `canvas` (an image with
+/// `preserveAspectRatio="... slice"` gets one).
+fn only_one_image<'a>(g: &'a usvg::Group, canvas: tiny_skia::Rect, found: &mut Option<&'a usvg::Image>) -> bool {
+    let plain = g.opacity() == usvg::Opacity::ONE
+        && g.blend_mode() == usvg::BlendMode::Normal
+        && g.mask().is_none()
+        && g.filters().is_empty();
+    if !plain || g.clip_path().is_some_and(|c| !clip_covers(c, g.abs_transform(), canvas)) {
+        return false;
+    }
+    g.children().iter().all(|n| match n {
+        usvg::Node::Group(c) => only_one_image(c, canvas, found),
+        usvg::Node::Image(i) => found.replace(i).is_none(),
+        usvg::Node::Path(_) | usvg::Node::Text(_) => false,
+    })
+}
+
+/// True when the clip path is one axis-aligned rectangle that contains `canvas`, so
+/// clipping to it changes nothing on the canvas.
+fn clip_covers(clip: &usvg::ClipPath, abs: tiny_skia::Transform, canvas: tiny_skia::Rect) -> bool {
+    let [usvg::Node::Path(p)] = clip.root().children() else { return false };
+    if clip.clip_path().is_some() || clip.root().transform() != tiny_skia::Transform::identity() {
+        return false;
+    }
+    let data = p.data();
+    let b = data.bounds();
+    // One closed outline of four corners of the bounds, each edge along one axis (a
+    // bow tie or two separate lines through the corners do not enclose the box).
+    use usvg::tiny_skia_path::PathVerb::{Close, Line, Move};
+    let pts = data.points();
+    if !matches!(data.verbs(), [Move, Line, Line, Line] | [Move, Line, Line, Line, Close]) || pts.len() != 4 || !p.is_visible() {
+        return false;
+    }
+    let corner = |q: &tiny_skia::Point| (q.x == b.left() || q.x == b.right()) && (q.y == b.top() || q.y == b.bottom());
+    let edge = |i: usize| {
+        let (q, r) = (pts[i], pts[(i + 1) % 4]);
+        (q.x == r.x) != (q.y == r.y)
+    };
+    if !pts.iter().all(corner) || !(0..4).all(edge) {
+        return false;
+    }
+    let ts = abs.pre_concat(clip.transform());
+    if ts.kx != 0.0 || ts.ky != 0.0 {
+        return false;
+    }
+    let Some(r) = b.transform(ts) else { return false };
+    r.left() <= canvas.left() && r.top() <= canvas.top() && r.right() >= canvas.right() && r.bottom() >= canvas.bottom()
+}
+
 fn render_svg_tree(tree: &usvg::Tree, w: u32, h: u32) -> GrayImage {
     let mut pix = tiny_skia::Pixmap::new(w, h).expect("pixmap");
     pix.fill(tiny_skia::Color::WHITE);
@@ -381,9 +563,7 @@ fn render_svg_tree(tree: &usvg::Tree, w: u32, h: u32) -> GrayImage {
     for (i, px) in pix.pixels().iter().enumerate() {
         let c = px.demultiply();
         let (r, g, b, a) = (c.red() as u32, c.green() as u32, c.blue() as u32, c.alpha() as u32);
-        let l = (r * 299 + g * 587 + b * 114) / 1000;
-        let v = (l * a + 255 * (255 - a)) / 255;
-        out.as_mut()[i] = v as u8;
+        out.as_mut()[i] = over_white((r * 299 + g * 587 + b * 114) / 1000, a);
     }
     out
 }
@@ -497,29 +677,28 @@ fn write_svg(dom: &crate::dom::Dom, id: crate::dom::NodeId, out: &mut String, ro
     }
 }
 
-/// A small cache of decoded, scaled and dithered images for rendering.
+/// A small cache of decoded, scaled and dithered images for rendering, ready to blit:
+/// the 8 made last.
 #[derive(Default)]
 pub struct ImageCache {
-    entries: HashMap<(String, u32, u32), Arc<GrayImage>>,
-    order: Vec<(String, u32, u32)>,
+    entries: Vec<((String, u32, u32), Arc<Canvas>)>,
 }
 
 impl ImageCache {
-    /// The dithered image for `key`, decoding with `make` on a miss. Keeps 8 entries.
-    pub fn get(&mut self, key: (String, u32, u32), make: impl FnOnce() -> Option<GrayImage>) -> Option<Arc<GrayImage>> {
-        if let Some(i) = self.entries.get(&key) {
-            return Some(i.clone());
+    /// The dithered image `name` at `w` x `h`, decoding with `make` on a miss.
+    pub fn get(&mut self, name: &str, w: u32, h: u32, make: impl FnOnce() -> Option<GrayImage>) -> Option<Arc<Canvas>> {
+        if let Some((_, img)) = self.entries.iter().find(|((n, ew, eh), _)| n == name && (*ew, *eh) == (w, h)) {
+            return Some(img.clone());
         }
-        let mut img = make()?;
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        dither16(img.as_mut(), w, h);
-        let img = Arc::new(img);
-        if self.order.len() >= 8 {
-            let old = self.order.remove(0);
-            self.entries.remove(&old);
+        let img = make()?;
+        let (iw, ih) = (img.width() as usize, img.height() as usize);
+        let mut px = img.into_raw();
+        dither16(&mut px, iw, ih);
+        let img = Arc::new(Canvas::from_pixels(iw, ih, px));
+        if self.entries.len() >= 8 {
+            self.entries.remove(0);
         }
-        self.order.push(key.clone());
-        self.entries.insert(key, img.clone());
+        self.entries.push(((name.to_string(), w, h), img.clone()));
         Some(img)
     }
 }
@@ -564,7 +743,18 @@ mod tests {
     #[test]
     fn resize_gray_matches_the_reference_byte_for_byte() {
         let mut seed = 12345u32;
-        for &(sw, sh, w, h) in &[(600, 900, 267, 400), (1200, 1800, 300, 400), (37, 53, 80, 110), (1000, 10, 7, 3), (5, 700, 5, 9), (3000, 2000, 1272, 848)] {
+        let sizes = [
+            (600, 900, 267, 400),
+            (1200, 1800, 300, 400),
+            (37, 53, 80, 110),
+            (1000, 10, 7, 3),
+            (5, 700, 5, 9),
+            (3000, 2000, 1272, 848),
+            (800, 1104, 290, 400),
+            (3, 4, 1, 1),
+            (9, 9, 4, 4),
+        ];
+        for (sw, sh, w, h) in sizes {
             let px: Vec<u8> = (0..sw * sh)
                 .map(|i| {
                     seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
@@ -652,7 +842,7 @@ mod tests {
                 });
                 resize_gray(&y, tw, th)
             } else {
-                whole_decode(bytes, tw, th).unwrap()
+                whole_decode(bytes, tw, th, GrayMath::ImageCrate).unwrap()
             };
             let d = mean_diff(&fast, &whole);
             assert!(d < 2.0, "{name} {tw}x{th}: mean difference {d}");
@@ -723,6 +913,9 @@ mod tests {
         }
         let one = GrayImage::from_pixel(1, 1, image::Luma([9]));
         assert!(resize_gray(&one, 5, 3).pixels().all(|p| p.0[0] == 9));
+        // An empty source gives white paper, not a panic.
+        let empty = resize_gray(&GrayImage::new(0, 0), 5, 3);
+        assert!(empty.dimensions() == (5, 3) && empty.pixels().all(|p| p.0[0] == 255));
         // Halving averages alternating 0/255 columns to mid gray (inside the image; at the
         // borders the filter is cut and renormalized).
         let stripes = GrayImage::from_fn(64, 4, |x, _| image::Luma([if x % 2 == 0 { 0 } else { 255 }]));
@@ -734,5 +927,74 @@ mod tests {
         let row: Vec<u8> = (0..50).map(|x| r.get_pixel(x, 0).0[0]).collect();
         assert!(row.windows(2).all(|w| w[0] <= w[1]), "{row:?}");
         assert!(row[0] < 8 && row[49] > 247, "{row:?}");
+    }
+
+    #[test]
+    fn thumbnails_match_the_image_crate_gray_within_rounding() {
+        let px = |x: u32, y: u32| Rgba([(x * 4) as u8, (y * 5) as u8, ((x * y) % 256) as u8, (255 - y * 3) as u8]);
+        let rgba = RgbaImage::from_fn(64, 48, px);
+        let img = DynamicImage::ImageRgba8(rgba);
+        let sources = [
+            ("png rgba", encode(&img, ImageFormat::Png), 1),
+            ("png rgb", encode(&DynamicImage::ImageRgb8(img.to_rgb8()), ImageFormat::Png), 1),
+            ("jpeg rgb", encode(&DynamicImage::ImageRgb8(img.to_rgb8()), ImageFormat::Jpeg), 1),
+            ("png gray", encode(&DynamicImage::ImageLuma8(img.to_luma8()), ImageFormat::Png), 0),
+            ("png gray+alpha", encode(&DynamicImage::ImageLumaA8(img.to_luma_alpha8()), ImageFormat::Png), 0),
+        ];
+        for (name, bytes, most) in sources {
+            // At the source size (no resize to blur the difference) and scaled down.
+            for (w, h) in [(64, 48), (20, 15)] {
+                let exact = decode_scaled(&bytes, w, h, None).unwrap();
+                let fast = decode_thumbnail(&bytes, w, h).unwrap();
+                let worst = exact.as_raw().iter().zip(fast.as_raw()).map(|(&a, &b)| a.abs_diff(b)).max();
+                assert!(worst <= Some(most), "{name} {w}x{h}: {worst:?}");
+            }
+        }
+    }
+
+    /// A 40 x 60 gray PNG (a diagonal ramp with a dark frame), served as `a.png`.
+    fn svg_tree(markup: &str) -> usvg::Tree {
+        let px = GrayImage::from_fn(40, 60, |x, y| image::Luma([if x < 2 || y < 2 { 0 } else { (x * 3 + y * 2) as u8 }]));
+        let png = encode(&DynamicImage::ImageLuma8(px), ImageFormat::Png);
+        let res: HrefResolver<'static> = Arc::new(move |href: &str| (href == "a.png").then(|| png.clone()));
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" {markup}</svg>"#);
+        usvg::Tree::from_data(svg.as_bytes(), &svg_options(Some(res))).unwrap()
+    }
+
+    #[test]
+    fn single_image_svgs_decode_the_image_where_resvg_draws_it() {
+        let cases = [
+            // The KF8 cover flow (Calibre): percent sizes, a viewBox, the image filling it.
+            (r#"width="100%" height="100%" viewBox="0 0 40 60" preserveAspectRatio="xMidYMid meet"><image width="40" height="60" xlink:href="a.png"/>"#, 80, 120),
+            (r#"width="40" height="60"><image href="a.png"/>"#, 40, 60),
+            (r#"viewBox="0 0 100 60"><image width="100" height="60" href="a.png"/>"#, 200, 120),
+            (r#"viewBox="0 0 100 60"><image width="100" height="60" preserveAspectRatio="xMinYMid meet" href="a.png"/>"#, 100, 60),
+            (r#"viewBox="0 0 100 60"><image width="100" height="60" preserveAspectRatio="xMidYMid slice" href="a.png"/>"#, 100, 60),
+            (r#"viewBox="0 0 40 60"><title>Cover</title><g transform="translate(5 10)"><image width="30" height="40" href="a.png"/></g>"#, 80, 120),
+            (r#"viewBox="0 0 40 60"><image width="40" height="60" preserveAspectRatio="none" href="a.png"/>"#, 120, 90),
+        ];
+        for (markup, w, h) in cases {
+            let tree = svg_tree(markup);
+            let fast = svg_raster_only(&tree, w, h).unwrap_or_else(|| panic!("not a single image: {markup}"));
+            let d = mean_diff(&fast, &render_svg_tree(&tree, w, h));
+            assert!(d < 1.5, "{markup}: mean difference {d}");
+        }
+    }
+
+    #[test]
+    fn svgs_with_more_than_one_plain_image_go_to_resvg() {
+        for markup in [
+            r#"viewBox="0 0 40 60"><image width="40" height="60" href="a.png"/><rect width="5" height="5"/>"#,
+            r#"viewBox="0 0 40 60"><image width="40" height="60" href="a.png"/><image width="10" height="10" href="a.png"/>"#,
+            r#"viewBox="0 0 40 60"><image width="40" height="60" opacity="0.5" href="a.png"/>"#,
+            r#"viewBox="0 0 40 60"><g transform="rotate(10)"><image width="40" height="60" href="a.png"/></g>"#,
+            r#"viewBox="0 0 40 60"><clipPath id="c"><circle r="20"/></clipPath><image clip-path="url(#c)" width="40" height="60" href="a.png"/>"#,
+            r#"viewBox="0 0 40 60"><image width="40" height="60" href="missing.png"/>"#,
+            // Four points on the corners of a canvas-sized box that do not enclose it.
+            r#"viewBox="0 0 40 60"><clipPath id="c"><path d="M0 0L40 60L40 0L0 60Z"/></clipPath><image clip-path="url(#c)" width="40" height="60" href="a.png"/>"#,
+            r#"viewBox="0 0 40 60"><clipPath id="c"><path d="M0 0L40 60M0 0L40 60"/></clipPath><image clip-path="url(#c)" width="40" height="60" href="a.png"/>"#,
+        ] {
+            assert!(svg_raster_only(&svg_tree(markup), 80, 120).is_none(), "{markup}");
+        }
     }
 }

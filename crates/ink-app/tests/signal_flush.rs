@@ -27,6 +27,8 @@ fn sigterm_right_after_a_page_turn_writes_the_position() {
         .arg(&script)
         .arg(&book)
         .env("RINKY_LOG", "debug")
+        // The sim keeps its state in $TMPDIR/rinky-sim; this run keeps its own.
+        .env("TMPDIR", &dir)
         .env_remove("RINKY_LOG_FILE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -81,6 +83,8 @@ fn sigterm_right_after_a_page_turn_writes_the_position() {
     let after = sidecar_position(&book);
     assert!(after.is_some() && after != first, "sidecar position {after:?} (was {first:?} before SIGTERM)\n{log}");
     assert!(log.contains("exit: reason=signal SIGTERM status=143"), "{log}");
-    assert!(took < Duration::from_millis(1900), "the loop stopped by itself, not the {took:?} fallback\n{log}");
+    // The signal thread logs this line when it gives up on the loop after STOP_GRACE
+    // (2 s) and exits by itself; a wall-clock bound would also fail on a loaded machine.
+    assert!(!log.contains("did not stop within"), "the loop stopped by itself, not the fallback (after {took:?})\n{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }

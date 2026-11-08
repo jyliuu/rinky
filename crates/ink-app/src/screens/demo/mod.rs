@@ -149,6 +149,16 @@ impl Default for DemoScreen {
     }
 }
 
+/// The Input tab's line about the keyboard language.
+fn keyboard_line(language: &str) -> String {
+    format!("Keyboard: {} · hold a key for accents", language_name(language))
+}
+
+/// The Controls tab's sample label at `px`.
+fn sample_line(px: f32) -> String {
+    format!("Label · AV To · fi fl · {} px", px as u32)
+}
+
 /// Stacks rectangles down a column.
 struct Col {
     r: Rect,
@@ -282,16 +292,30 @@ impl DemoScreen {
         self.tree.invalidate(Rect::from_size(size), RefreshClass::Gc16);
     }
 
-    fn build_controls(&mut self) {
+    /// The content area as two columns in landscape, one (and `None`) in portrait.
+    fn columns(&self) -> (Rect, Option<Rect>) {
         let c = self.content_rect();
-        let (left, right) = if self.landscape() {
+        if self.landscape() {
             let cols = split_cols(c, 2, 40);
             (cols[0], Some(cols[1]))
         } else {
             (c, None)
-        };
+        }
+    }
+
+    /// Sets the text of the label `id` (`f` may change more of it) and repaints it.
+    fn set_label(&mut self, id: Option<WidgetId>, f: impl FnOnce(&mut Label)) {
+        let Some(id) = id else { return };
+        if let Some(l) = self.tree.get_mut::<Label>(id) {
+            f(l);
+        }
+        self.tree.mark_dirty(id, RefreshClass::Gl16);
+    }
+
+    fn build_controls(&mut self) {
+        let (left, right) = self.columns();
         let mut col = Col::new(left);
-        let sample = Label::left(format!("Label · AV To · fi fl · {} px", self.sample_px as u32), self.sample_px);
+        let sample = Label::left(sample_line(self.sample_px), self.sample_px);
         self.ids.sample = Some(self.tree.add(None, Box::new(sample), col.take(60)));
         // Dialog at (200, 320) and Settings at (600, 320) in portrait, where the phase 0
         // gallery had them (tests/sim/demo.txt, tests/screens.rs).
@@ -393,19 +417,13 @@ impl DemoScreen {
         let r = col.take(110);
         self.buttons.push(("focus:password".into(), r));
         self.ids.password = Some(self.tree.add(None, Box::new(pw), r));
-        let typed = format!("Keyboard: {} · hold a key for accents", language_name(&self.keyboard_language));
+        let typed = keyboard_line(&self.keyboard_language);
         self.ids.typed = Some(self.tree.add(None, Box::new(Label::left(typed, 30.0)), col.take(60)));
     }
 
     /// The Design tab: one of each design-system widget (`docs/DESIGN.md`).
     fn build_design(&mut self) {
-        let c = self.content_rect();
-        let (left, right) = if self.landscape() {
-            let cols = split_cols(c, 2, 40);
-            (cols[0], Some(cols[1]))
-        } else {
-            (c, None)
-        };
+        let (left, right) = self.columns();
         let mut col = Col::new(left);
         let bar = AppBar::new("Book details")
             .with_subtitle("App bar: back, title, actions")
@@ -484,13 +502,8 @@ impl DemoScreen {
     }
 
     fn set_status(&mut self, text: String) {
-        self.last = text;
-        if let Some(id) = self.ids.status {
-            if let Some(l) = self.tree.get_mut::<Label>(id) {
-                l.text = self.last.clone();
-            }
-            self.tree.mark_dirty(id, RefreshClass::Gl16);
-        }
+        self.last = text.clone();
+        self.set_label(self.ids.status, |l| l.text = text);
     }
 
     fn close_overlays(&mut self) {
@@ -600,13 +613,8 @@ impl DemoScreen {
                 if let Some(k) = self.tree.get_mut::<Keyboard>(kid) {
                     self.keyboard_language = k.current_language().to_string();
                 }
-                let text = format!("Keyboard: {} · hold a key for accents", language_name(&self.keyboard_language));
-                if let Some(id) = self.ids.typed {
-                    if let Some(l) = self.tree.get_mut::<Label>(id) {
-                        l.text = text;
-                    }
-                    self.tree.mark_dirty(id, RefreshClass::Gl16);
-                }
+                let text = keyboard_line(&self.keyboard_language);
+                self.set_label(self.ids.typed, |l| l.text = text);
                 log::info!("demo keyboard language {}", self.keyboard_language);
                 self.set_status(format!("keyboard language {}", self.keyboard_language));
                 continue;
@@ -682,13 +690,10 @@ impl DemoScreen {
             _ if a.starts_with("size:") => {
                 if let Ok(v) = a[5..].parse::<f32>() {
                     self.sample_px = v;
-                    if let Some(id) = self.ids.sample {
-                        if let Some(l) = self.tree.get_mut::<Label>(id) {
-                            l.px = v;
-                            l.text = format!("Label · AV To · fi fl · {} px", v as u32);
-                        }
-                        self.tree.mark_dirty(id, RefreshClass::Gl16);
-                    }
+                    self.set_label(self.ids.sample, |l| {
+                        l.px = v;
+                        l.text = sample_line(v);
+                    });
                 }
             }
             _ if a.starts_with("progress:") => {

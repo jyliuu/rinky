@@ -14,8 +14,8 @@ use crate::book::Book;
 use crate::dom::{Dom, ElemRef, NodeId, NodeKind, NONE};
 use crate::fonts::{FaceKey, FontBook};
 use crate::style::{
-    ua_rules, Cascade, ComputedStyle, Display, Hyphens, Len, LineHeight, ListStyle, PageBreak, StyleContext, TextAlign, TextTransform,
-    VAlign, WhiteSpace,
+    ua_rules, Cascade, ComputedStyle, Display, Edges, Hyphens, Len, LineHeight, ListStyle, PageBreak, StyleContext, TextAlign, TextTransform,
+    VAlign,
 };
 use ink_doc::{resolve_href, LayoutSettings};
 use ink_text::linebreak::{break_opportunities, Break};
@@ -26,7 +26,7 @@ use std::sync::Arc;
 pub const NO_LINK: u32 = u32::MAX;
 
 /// A run of text drawn at one position.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextRun {
     /// Left edge (page pixels).
     pub x: f32,
@@ -160,8 +160,6 @@ pub struct ChapterLayout {
 /// What a chapter layout depends on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
-    /// Page width.
-    pub page_w: f32,
     /// Page content height.
     pub content_h: f32,
     /// Left margin.
@@ -177,7 +175,7 @@ impl Params {
     pub fn new(s: &LayoutSettings) -> Self {
         let content_w = (s.width as f32 - s.margin_left - s.margin_right).max(50.0);
         let content_h = (s.height as f32 - s.margin_top - s.margin_bottom).max(50.0);
-        Params { page_w: s.width as f32, content_h, left: s.margin_left, content_w, settings: s.clone() }
+        Params { content_h, left: s.margin_left, content_w, settings: s.clone() }
     }
 }
 
@@ -206,15 +204,13 @@ pub fn compute_styles(book: &Book, ch: &crate::book::ChapterDom, p: &Params) -> 
     if dom.body == NONE {
         return out;
     }
-    let mut stack = vec![(dom.body, root)];
+    // (element, parent): a parent's style is computed before its children's.
+    let mut stack = vec![(dom.body, NONE)];
     while let Some((id, parent)) = stack.pop() {
-        let mut st = cascade.compute(ElemRef { dom, id }, &parent);
+        let parent_style = if parent == NONE { &root } else { out[parent as usize].as_deref().expect("parent styled first") };
+        let mut st = cascade.compute(ElemRef { dom, id }, parent_style);
         apply_user(&mut st, s, dom.name(id));
-        for &c in dom.node(id).children.iter().rev() {
-            if dom.element(c).is_some() {
-                stack.push((c, st.clone()));
-            }
-        }
+        stack.extend(dom.node(id).children.iter().rev().filter(|&&c| dom.element(c).is_some()).map(|&c| (c, id)));
         out[id as usize] = Some(Box::new(st));
     }
     out
@@ -305,6 +301,33 @@ impl SrcRuns {
     }
 }
 
+/// The display text of an inline run being collected, with the source of each char and
+/// the segments the sources point into.
+#[derive(Default)]
+struct InlineText {
+    text: String,
+    src: SrcRuns,
+    segs: Vec<Seg>,
+}
+
+impl InlineText {
+    /// Adds a segment; returns its index.
+    fn add_seg(&mut self, seg: Seg) -> u32 {
+        self.segs.push(seg);
+        (self.segs.len() - 1) as u32
+    }
+
+    fn push(&mut self, c: char, seg: u32, dom: u32) {
+        self.text.push(c);
+        self.src.push(CharSrc { seg, dom });
+    }
+
+    fn pop(&mut self) {
+        self.text.pop();
+        self.src.pop();
+    }
+}
+
 /// A style segment of a paragraph (one text node, image or line break).
 #[derive(Clone, Debug)]
 struct Seg {
@@ -314,13 +337,13 @@ struct Seg {
     kind: SegKind,
     /// Baseline shift from `vertical-align` of the inline ancestors (up = positive).
     shift: f32,
-    /// Font size factor (small capitals of `font-variant: small-caps`).
-    scale: f32,
 }
 
 #[derive(Clone, Debug)]
 enum SegKind {
-    Text,
+    /// Text in face `face` at `px` (the style's size, smaller for the small capitals of
+    /// `font-variant: small-caps`), resolved once per segment.
+    Text { face: FaceKey, px: f32 },
     Image { src: String, w: f32, h: f32 },
     Break,
 }
@@ -336,13 +359,11 @@ struct Piece {
 }
 
 /// An unbreakable box: text between two break opportunities.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct WordBox {
     /// Byte range of the content (without trailing spaces).
     start: usize,
     end: usize,
-    /// Byte end including trailing spaces.
-    end_ws: usize,
     width: f32,
     space: f32,
     forced: bool,
@@ -350,10 +371,90 @@ struct WordBox {
     hyphen: bool,
 }
 
+impl WordBox {
+    /// The box cut at byte `cut` into a head `head` wide and the rest `rest` wide.
+    fn split(&self, cut: usize, head: f32, hyphen: bool, rest: f32) -> (WordBox, WordBox) {
+        (WordBox { start: self.start, end: cut, width: head, space: 0.0, forced: false, hyphen }, WordBox { start: cut, width: rest, ..*self })
+    }
+}
+
+/// A line of a paragraph: its boxes are `start..end` of the paragraph's line boxes.
 struct Line {
-    boxes: Vec<WordBox>,
+    start: usize,
+    end: usize,
     forced: bool,
     first: bool,
+}
+
+/// A paragraph (or one chunk of a giant paragraph) being broken into lines: its display
+/// text, the source of each char, where its multi-byte chars are and its segments.
+struct Para<'p> {
+    text: &'p str,
+    src: &'p [CharSrc],
+    /// (char index, byte offset) just after each multi-byte char. Between two of them
+    /// (and before the first) the text is ASCII, so char and byte indices advance
+    /// together: plain ASCII text needs no table and no search.
+    wide: Vec<(u32, u32)>,
+    segs: &'p [Seg],
+}
+
+impl<'p> Para<'p> {
+    fn new(text: &'p str, src: &'p [CharSrc], segs: &'p [Seg]) -> Self {
+        let mut wide = Vec::new();
+        if !text.is_ascii() {
+            for (ci, (b, c)) in text.char_indices().enumerate() {
+                if !c.is_ascii() {
+                    wide.push((ci as u32 + 1, (b + c.len_utf8()) as u32));
+                }
+            }
+        }
+        Para { text, src, wide, segs }
+    }
+
+    /// Index of the char at byte `b` (or of the first char after it).
+    fn char_index(&self, b: usize) -> usize {
+        let b = b.min(self.text.len());
+        // The last multi-byte char ending at or before `b`; ASCII from there on, up to
+        // the next multi-byte char (a byte inside it counts that char as before `b`).
+        let k = self.wide.partition_point(|&(_, wb)| wb as usize <= b);
+        let (ci, wb) = if k == 0 { (0, 0) } else { (self.wide[k - 1].0 as usize, self.wide[k - 1].1 as usize) };
+        let i = ci + (b - wb);
+        match self.wide.get(k) {
+            Some(&(next, _)) => i.min(next as usize),
+            None => i,
+        }
+    }
+
+    /// Byte offset of char `i` (the text length past the end).
+    fn byte(&self, i: usize) -> usize {
+        let k = self.wide.partition_point(|&(wi, _)| wi as usize <= i);
+        let b = if k == 0 { i } else { self.wide[k - 1].1 as usize + (i - self.wide[k - 1].0 as usize) };
+        b.min(self.text.len())
+    }
+
+    /// The segment of the char at byte `b`.
+    fn seg_at(&self, b: usize) -> &'p Seg {
+        &self.segs[self.src[self.char_index(b)].seg as usize]
+    }
+
+    /// The bytes `start..end` cut into runs of one segment: (segment, start, end).
+    fn runs(&self, start: usize, end: usize) -> impl Iterator<Item = (u32, usize, usize)> + '_ {
+        let stop = self.char_index(end);
+        let mut i = self.char_index(start);
+        std::iter::from_fn(move || {
+            if i >= stop {
+                return None;
+            }
+            let seg = self.src[i].seg;
+            let mut j = i + 1;
+            while j < stop && self.src[j].seg == seg {
+                j += 1;
+            }
+            let run = (seg, self.byte(i), self.byte(j).min(end));
+            i = j;
+            Some(run)
+        })
+    }
 }
 
 /// Layout state of a chapter flow.
@@ -373,7 +474,8 @@ pub struct Flow<'a, 'e> {
     force_break: bool,
     keep_next: bool,
     first_line_pending: bool,
-    marker: Option<(String, NodeId, f32)>,
+    /// The list marker the next line starts with, and whether it hangs outside.
+    marker: Option<(String, bool)>,
     /// True while laying out a table cell (no page-break handling inside).
     in_cell: bool,
     /// Elements whose subtree contains block-level descendants (for inline elements).
@@ -390,6 +492,9 @@ pub struct Flow<'a, 'e> {
     stop: Option<StopAt>,
     /// The stop was reached: the open blocks unwind without laying out more children.
     stopped: bool,
+    /// Lines make text draw items. False for a page-map layout ([`Flow::layout_slices`]),
+    /// which needs only the slices: their geometry and keys do not depend on the items.
+    text_items: bool,
 }
 
 /// Where [`Flow::layout_until`] stops: once the flow is `extra` px below the first slice
@@ -444,10 +549,21 @@ fn is_block_level(st: &ComputedStyle) -> bool {
     !matches!(st.display, Display::Inline | Display::InlineBlock | Display::None) || st.float != 0
 }
 
+/// Elements laid out as images.
+fn is_image(name: &str) -> bool {
+    matches!(name, "img" | "image" | "svg")
+}
+
 impl<'a, 'e> Flow<'a, 'e> {
     /// Lays out a chapter.
     pub fn layout(env: &'a mut Env<'e>, p: &'a Params, dom: &'a Dom, styles: &'a [Option<Box<ComputedStyle>>], chapter_path: &'a str, book_lang: Option<String>) -> ChapterLayout {
         Self::layout_until(env, p, dom, styles, chapter_path, book_lang, None).0
+    }
+
+    /// [`Flow::layout`] for the page map: the same slices and height, without the draw
+    /// items of the lines (no text runs to measure again, build and drop).
+    pub fn layout_slices(env: &'a mut Env<'e>, p: &'a Params, dom: &'a Dom, styles: &'a [Option<Box<ComputedStyle>>], chapter_path: &'a str, book_lang: Option<String>) -> ChapterLayout {
+        Self::run(env, p, dom, styles, chapter_path, book_lang, None, false).0
     }
 
     /// [`Flow::layout`] that stops early at `stop`. Returns the layout and whether it is
@@ -465,7 +581,20 @@ impl<'a, 'e> Flow<'a, 'e> {
         book_lang: Option<String>,
         stop: Option<StopAt>,
     ) -> (ChapterLayout, bool) {
-        let dir_end = chapter_path.rfind('/').map(|i| i + 1).unwrap_or(0);
+        Self::run(env, p, dom, styles, chapter_path, book_lang, stop, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        env: &'a mut Env<'e>,
+        p: &'a Params,
+        dom: &'a Dom,
+        styles: &'a [Option<Box<ComputedStyle>>],
+        chapter_path: &'a str,
+        book_lang: Option<String>,
+        stop: Option<StopAt>,
+        text_items: bool,
+    ) -> (ChapterLayout, bool) {
         let mut has_block_desc = vec![false; dom.nodes.len()];
         // Post-order: an element has block descendants if a child is block-level or has some.
         for &n in dom.preorder.iter().rev() {
@@ -482,7 +611,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             p,
             dom,
             styles,
-            chapter_dir: &chapter_path[..dir_end],
+            chapter_dir: crate::book::dir_of(chapter_path),
             chapter_path,
             book_lang,
             out: ChapterLayout::default(),
@@ -500,6 +629,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             list_numbers: std::collections::HashMap::new(),
             stop,
             stopped: false,
+            text_items,
         };
         if dom.body != NONE {
             f.block(dom.body, p.left, p.content_w);
@@ -565,39 +695,30 @@ impl<'a, 'e> Flow<'a, 'e> {
         if st.break_before == PageBreak::Always && !self.in_cell {
             self.force_break = true;
         }
-        let ml = st.margin.left.resolve(w, 0.0);
-        let mr = st.margin.right.resolve(w, 0.0);
-        let mt = st.margin.top.resolve(w, 0.0);
-        let mb = st.margin.bottom.resolve(w, 0.0);
-        let pl = st.padding.left.resolve(w, 0.0);
-        let pr = st.padding.right.resolve(w, 0.0);
-        let pt = st.padding.top.resolve(w, 0.0);
-        let pb = st.padding.bottom.resolve(w, 0.0);
+        let Edges { top: mt, right: mr, bottom: mb, left: ml } = st.margin.resolve(w);
+        let Edges { top: pt, right: pr, bottom: pb, left: pl } = st.padding.resolve(w);
         let b = st.border;
         let mut box_x = x + ml;
         let mut box_w = (w - ml - mr).max(10.0);
-        let name = self.dom.name(id);
+        let image = is_image(self.dom.name(id));
         let is_table = st.display == Display::Table;
-        if let Len::Px(_) | Len::Pct(_) = st.width {
-            if !matches!(name, "img" | "image" | "svg") {
-                let want = st.width.resolve(w, box_w) + if is_table { 0.0 } else { pl + pr + b.left + b.right };
-                let want = want.min(box_w);
-                if st.margin.left.is_auto() && st.margin.right.is_auto() {
-                    box_x += (box_w - want) / 2.0;
-                } else if st.margin.left.is_auto() {
-                    box_x += box_w - want;
-                }
-                box_w = want;
+        if !st.width.is_auto() && !image {
+            let want = st.width.resolve(w, box_w) + if is_table { 0.0 } else { pl + pr + b.left + b.right };
+            let want = want.min(box_w);
+            if st.margin.left.is_auto() && st.margin.right.is_auto() {
+                box_x += (box_w - want) / 2.0;
+            } else if st.margin.left.is_auto() {
+                box_x += box_w - want;
             }
+            box_w = want;
         }
-        if let Len::Px(_) | Len::Pct(_) = st.max_width {
-            let mw = st.max_width.resolve(w, box_w);
-            if mw < box_w && !matches!(name, "img" | "image" | "svg") {
-                if st.margin.left.is_auto() && st.margin.right.is_auto() {
-                    box_x += (box_w - mw) / 2.0;
-                }
-                box_w = mw;
+        // An `auto` maximum resolves to the box width: no change.
+        let mw = st.max_width.resolve(w, box_w);
+        if mw < box_w && !image {
+            if st.margin.left.is_auto() && st.margin.right.is_auto() {
+                box_x += (box_w - mw) / 2.0;
             }
+            box_w = mw;
         }
         self.add_margin(mt);
         let framed_top = b.top > 0.0 || pt > 0.0;
@@ -611,9 +732,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         let content_top = self.y;
         self.first_line_pending = true;
         if st.display == Display::ListItem {
-            self.list_marker(id, st, cx);
+            self.list_marker(id, st);
         }
-        if matches!(name, "img" | "image" | "svg") {
+        if image {
             self.block_image(id, cx, cw);
         } else if is_table {
             self.table(id, cx, cw);
@@ -622,7 +743,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         self.first_line_pending = false;
         if let Len::Px(h) = st.height {
-            if !matches!(name, "img" | "image" | "svg") && self.y + self.margin - content_top < h {
+            if !image && self.y + self.margin - content_top < h {
                 self.flush_margin();
                 self.y = self.y.max(content_top + h);
             }
@@ -633,20 +754,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         self.y += pb + b.bottom;
         let box_bottom = self.y;
-        // Borders.
-        let gray = 0u8;
-        if b.top > 0.0 {
-            self.out.decor.push(RectRun { x: box_x, y: box_top, w: box_w, h: b.top, gray });
-        }
-        if b.bottom > 0.0 {
-            self.out.decor.push(RectRun { x: box_x, y: box_bottom - b.bottom, w: box_w, h: b.bottom, gray });
-        }
-        if b.left > 0.0 {
-            self.out.decor.push(RectRun { x: box_x, y: box_top, w: b.left, h: box_bottom - box_top, gray });
-        }
-        if b.right > 0.0 {
-            self.out.decor.push(RectRun { x: box_x + box_w - b.right, y: box_top, w: b.right, h: box_bottom - box_top, gray });
-        }
+        self.out.decor.extend(border_rects(b, box_x, box_w, box_top, box_bottom, box_bottom - box_top));
         self.add_margin(mb);
         if !self.in_cell {
             match st.break_after {
@@ -666,7 +774,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    fn list_marker(&mut self, id: NodeId, st: &ComputedStyle, _cx: f32) {
+    fn list_marker(&mut self, id: NodeId, st: &ComputedStyle) {
         if st.list_style == ListStyle::None {
             return;
         }
@@ -699,15 +807,15 @@ impl<'a, 'e> Flow<'a, 'e> {
             n = self.list_numbers[&parent].get(&id).copied().unwrap_or(1);
         }
         let text = marker_text(st.list_style, n);
-        self.marker = Some((text, id, if st.list_inside { 0.0 } else { 1.0 }));
+        self.marker = Some((text, !st.list_inside));
     }
 
     /// Children of a block container: inline runs become paragraphs.
     fn block_children(&mut self, id: NodeId, x: f32, w: f32) {
-        let kids = self.dom.node(id).children.clone();
+        let kids = &self.dom.node(id).children;
         if self.depth > 150 {
             // Deeper nesting is laid out as one paragraph.
-            self.paragraph(id, &kids, x, w);
+            self.paragraph(id, kids, x, w);
             return;
         }
         self.depth += 1;
@@ -734,9 +842,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.stopped
     }
 
-    fn block_children_inner(&mut self, id: NodeId, kids: Vec<NodeId>, x: f32, w: f32) {
+    fn block_children_inner(&mut self, id: NodeId, kids: &[NodeId], x: f32, w: f32) {
         let mut run: Vec<NodeId> = Vec::new();
-        for c in kids {
+        for &c in kids {
             if self.at_stop() {
                 // The text gathered so far stays out too: a paragraph is never cut.
                 return;
@@ -771,10 +879,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    fn resolve_src(&self, raw: &str) -> String {
-        resolve_href(self.chapter_dir, raw)
-    }
-
     /// Size of an image element in device px for a containing width `w`.
     fn image_box(&mut self, id: NodeId, w: f32, max_h: f32) -> Option<(String, f32, f32)> {
         let e = self.dom.element(id)?;
@@ -788,7 +892,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             if raw.starts_with("data:") {
                 return None;
             }
-            let src = self.resolve_src(raw);
+            let src = resolve_href(self.chapter_dir, raw);
             let (iw, ih) = (self.env.image_size)(&src)?;
             (src, iw as f32, ih as f32)
         };
@@ -799,33 +903,21 @@ impl<'a, 'e> Flow<'a, 'e> {
         let aspect = ih / iw;
         let mut dw = iw * scale;
         let mut dh = ih * scale;
-        match (st.width, st.height) {
-            (Len::Px(_) | Len::Pct(_), Len::Px(_) | Len::Pct(_)) => {
-                dw = st.width.resolve(w, dw);
-                dh = st.height.resolve(max_h, dh);
-            }
-            (Len::Px(_) | Len::Pct(_), _) => {
-                dw = st.width.resolve(w, dw);
-                dh = dw * aspect;
-            }
-            (_, Len::Px(_) | Len::Pct(_)) => {
-                dh = st.height.resolve(max_h, dh);
-                dw = dh / aspect;
-            }
-            _ => {}
+        let (dw0, dh0) = (st.width.resolve(w, dw), st.height.resolve(max_h, dh));
+        // A size given on one axis only keeps the aspect ratio.
+        match (st.width.is_auto(), st.height.is_auto()) {
+            (false, false) => (dw, dh) = (dw0, dh0),
+            (false, true) => (dw, dh) = (dw0, dw0 * aspect),
+            (true, false) => (dw, dh) = (dh0 / aspect, dh0),
+            (true, true) => {}
         }
-        let max_w = match st.max_width {
-            Len::Auto => w,
-            m => m.resolve(w, w).min(w),
-        };
+        // `auto` maxima resolve to the available size.
+        let max_w = st.max_width.resolve(w, w).min(w);
         if dw > max_w {
             dh *= max_w / dw;
             dw = max_w;
         }
-        let max_hh = match st.max_height {
-            Len::Auto => max_h,
-            m => m.resolve(max_h, max_h).min(max_h),
-        };
+        let max_hh = st.max_height.resolve(max_h, max_h).min(max_h);
         if dh > max_hh {
             dw *= max_hh / dh;
             dh = max_hh;
@@ -884,7 +976,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         let target = if external {
             h.to_string()
         } else if let Some(frag) = h.strip_prefix('#') {
-            format!("{}#{}", self.chapter_path_full(), frag)
+            format!("{}#{}", self.chapter_path, frag)
         } else {
             let frag = h.split_once('#').map(|(_, f)| f);
             let path = resolve_href(self.chapter_dir, h);
@@ -897,14 +989,8 @@ impl<'a, 'e> Flow<'a, 'e> {
         (self.out.links.len() - 1) as u32
     }
 
-    fn chapter_path_full(&self) -> String {
-        self.chapter_path.to_string()
-    }
-
-    /// Collects the display text of an inline run.
     /// Appends the display text of text node `n`.
-    #[allow(clippy::too_many_arguments)]
-    fn push_text(&mut self, n: NodeId, text: &mut String, src: &mut SrcRuns, segs: &mut Vec<Seg>, link: u32, shift: f32) {
+    fn push_text(&mut self, n: NodeId, out: &mut InlineText, link: u32, shift: f32) {
         let dom = self.dom;
         let Some(t) = dom.text(n) else { return };
         let parent = dom.node(n).parent;
@@ -912,59 +998,64 @@ impl<'a, 'e> Flow<'a, 'e> {
         if st.hidden {
             return;
         }
-        let mut seg = segs.len() as u32;
-        segs.push(Seg { node: n, style: parent, link, kind: SegKind::Text, shift, scale: 1.0 });
+        let face = self.face(st);
+        let text_seg = |scale: f32| Seg { node: n, style: parent, link, kind: SegKind::Text { face, px: st.font_size * scale }, shift };
+        let mut seg = out.add_seg(text_seg(1.0));
         let small_caps = st.small_caps;
         let mut small = false;
         let ws = st.white_space;
         let keep_spaces = ws.keeps_spaces();
         let keep_nl = ws.keeps_newlines();
         let tt = st.text_transform;
-        let mut prev_alpha = text.chars().last().is_some_and(|c| c.is_alphanumeric());
+        let capitalize = tt == TextTransform::Capitalize;
+        // The last char of the collected text, kept here instead of decoded again for
+        // every char.
+        let mut last = out.text.chars().last();
+        let mut prev_alpha = last.is_some_and(|c| c.is_alphanumeric());
+        out.text.reserve(t.len());
         for (i, c) in t.chars().enumerate() {
             let i = i as u32;
             if c == '\n' && keep_nl {
-                text.push('\n');
-                src.push(CharSrc { seg, dom: i });
+                out.push('\n', seg, i);
+                last = Some('\n');
                 prev_alpha = false;
                 continue;
             }
             let c = if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c };
-            if c == ' ' && !keep_spaces {
-                let last = text.chars().last();
-                if matches!(last, None | Some(' ') | Some('\n')) {
-                    continue;
-                }
+            if c == ' ' && !keep_spaces && matches!(last, None | Some(' ') | Some('\n')) {
+                continue;
             }
-            let mut out = match tt {
+            let mut shown = match tt {
                 TextTransform::Upper => c.to_uppercase().next().unwrap_or(c),
                 TextTransform::Lower => c.to_lowercase().next().unwrap_or(c),
                 TextTransform::Capitalize if !prev_alpha => c.to_uppercase().next().unwrap_or(c),
                 _ => c,
             };
-            if small_caps && out != ' ' {
+            if small_caps && shown != ' ' {
                 // Lower-case letters become smaller capitals (a segment per case run).
-                let want_small = out.is_lowercase();
+                let want_small = shown.is_lowercase();
                 if want_small != small {
                     small = want_small;
-                    seg = segs.len() as u32;
-                    segs.push(Seg { node: n, style: parent, link, kind: SegKind::Text, shift, scale: if small { 0.78 } else { 1.0 } });
+                    seg = out.add_seg(text_seg(if small { 0.78 } else { 1.0 }));
                 }
                 if small {
-                    out = out.to_uppercase().next().unwrap_or(out);
+                    shown = shown.to_uppercase().next().unwrap_or(shown);
                 }
             }
-            prev_alpha = c.is_alphanumeric();
-            text.push(out);
-            src.push(CharSrc { seg, dom: i });
+            if capitalize {
+                prev_alpha = c.is_alphanumeric();
+            }
+            out.push(shown, seg, i);
+            last = Some(shown);
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn collect(&mut self, nodes: &[NodeId], owner: NodeId, text: &mut String, src: &mut SrcRuns, segs: &mut Vec<Seg>, link: u32, w: f32, shift: f32) {
+    /// Collects the display text of inline nodes of block `owner` (containing width `w`).
+    fn collect(&mut self, nodes: &[NodeId], owner: NodeId, out: &mut InlineText, link: u32, w: f32, shift: f32) {
+        let dom = self.dom;
         for &n in nodes {
-            match &self.dom.node(n).kind {
-                NodeKind::Text(_) => self.push_text(n, text, src, segs, link, shift),
+            match &dom.node(n).kind {
+                NodeKind::Text(_) => self.push_text(n, out, link, shift),
                 NodeKind::Element(e) => {
                     let st = self.st(n);
                     if st.display == Display::None {
@@ -975,25 +1066,20 @@ impl<'a, 'e> Flow<'a, 'e> {
                         continue;
                     }
                     if name == "br" {
-                        let seg = segs.len() as u32;
-                        segs.push(Seg { node: n, style: n, link, kind: SegKind::Break, shift, scale: 1.0 });
+                        let seg = out.add_seg(Seg { node: n, style: n, link, kind: SegKind::Break, shift });
                         // A trailing space before a forced break is dropped.
-                        if text.ends_with(' ') && !self.st(owner).white_space.keeps_spaces() {
-                            text.pop();
-                            src.pop();
+                        if out.text.ends_with(' ') && !self.st(owner).white_space.keeps_spaces() {
+                            out.pop();
                         }
-                        text.push('\n');
-                        src.push(CharSrc { seg, dom: 0 });
+                        out.push('\n', seg, 0);
                         continue;
                     }
-                    if matches!(name, "img" | "image" | "svg") {
+                    if is_image(name) {
                         if let Some((s, dw, dh)) = self.image_box(n, w, self.p.content_h) {
                             let l = if link == NO_LINK { self.link_of(n) } else { link };
-                            let seg = segs.len() as u32;
                             let own = self.valign_shift(n);
-                            segs.push(Seg { node: n, style: n, link: l, kind: SegKind::Image { src: s, w: dw, h: dh }, shift: shift + own, scale: 1.0 });
-                            text.push(OBJ);
-                            src.push(CharSrc { seg, dom: 0 });
+                            let seg = out.add_seg(Seg { node: n, style: n, link: l, kind: SegKind::Image { src: s, w: dw, h: dh }, shift: shift + own });
+                            out.push(OBJ, seg, 0);
                         }
                         continue;
                     }
@@ -1003,21 +1089,21 @@ impl<'a, 'e> Flow<'a, 'e> {
                             l = self.add_link(n, h);
                         }
                     }
-                    let kids = self.dom.node(n).children.clone();
+                    let kids = &dom.node(n).children;
                     let sh = shift + self.valign_shift(n);
                     if self.depth > 400 {
                         // Too deep: the rest of the subtree is plain text.
                         let mut stack: Vec<NodeId> = kids.iter().rev().copied().collect();
                         while let Some(k) = stack.pop() {
-                            match &self.dom.node(k).kind {
-                                NodeKind::Text(_) => self.push_text(k, text, src, segs, l, sh),
-                                NodeKind::Element(_) => stack.extend(self.dom.node(k).children.iter().rev()),
+                            match &dom.node(k).kind {
+                                NodeKind::Text(_) => self.push_text(k, out, l, sh),
+                                NodeKind::Element(_) => stack.extend(dom.node(k).children.iter().rev()),
                             }
                         }
                         continue;
                     }
                     self.depth += 1;
-                    self.collect(&kids, owner, text, src, segs, l, w, sh);
+                    self.collect(kids, owner, out, l, w, sh);
                     self.depth -= 1;
                 }
             }
@@ -1041,14 +1127,21 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.st(style_node).lang.as_deref().map(str::to_string).or_else(|| self.book_lang.clone())
     }
 
-    fn seg_face(&mut self, seg: &Seg) -> (FaceKey, f32, &'a ComputedStyle) {
-        let st = self.st(seg.style);
-        (self.face(st), st.font_size * seg.scale, st)
+    /// Face and size of a segment's text.
+    fn seg_face(&mut self, seg: &Seg) -> (FaceKey, f32) {
+        match seg.kind {
+            SegKind::Text { face, px } => (face, px),
+            _ => {
+                let st = self.st(seg.style);
+                (self.face(st), st.font_size)
+            }
+        }
     }
 
     /// Width of a text range of one segment.
     fn range_width(&mut self, text: &str, seg: &Seg) -> f32 {
-        let (face, px, st) = self.seg_face(seg);
+        let (face, px) = self.seg_face(seg);
+        let st = self.st(seg.style);
         // Most words have no soft hyphen (UTF-8 C2 AD) or newline: measure them in place.
         let dirty = text.as_bytes().iter().any(|&b| b == b'\n' || b == 0xAD);
         let owned: String;
@@ -1068,97 +1161,49 @@ impl<'a, 'e> Flow<'a, 'e> {
         wdt
     }
 
-    /// Splits a byte range into same-segment pieces with widths.
-    fn pieces(&mut self, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], start: usize, end: usize) -> Vec<Piece> {
-        let mut out: Vec<Piece> = Vec::new();
-        if start >= end {
-            return out;
+    /// Width of one run of [`Para::runs`].
+    fn run_width(&mut self, p: &Para, (seg, start, end): (u32, usize, usize)) -> f32 {
+        let seg = &p.segs[seg as usize];
+        match &seg.kind {
+            SegKind::Image { w, .. } => *w,
+            SegKind::Break => 0.0,
+            SegKind::Text { .. } => self.range_width(&p.text[start..end], seg),
         }
-        let ci0 = char_at.partition_point(|&b| b < start);
-        let ci1 = char_at.partition_point(|&b| b < end);
-        let mut i = ci0;
-        while i < ci1 {
-            let seg = src[i].seg;
-            let mut j = i + 1;
-            while j < ci1 && src[j].seg == seg {
-                j += 1;
-            }
-            let bs = char_at[i];
-            let be = if j < char_at.len() { char_at[j] } else { text.len() };
-            let be = be.min(end);
-            let width = match &segs[seg as usize].kind {
-                SegKind::Image { w, .. } => *w,
-                SegKind::Break => 0.0,
-                SegKind::Text => {
-                    let s = &text[bs..be];
-                    self.range_width(s, &segs[seg as usize])
-                }
-            };
-            out.push(Piece { seg, start: bs, end: be, width });
-            i = j;
-        }
-        out
     }
 
-    /// The summed width of [`Self::pieces`] of a byte range, without building the list.
-    fn pieces_width(&mut self, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], start: usize, end: usize) -> f32 {
-        if start >= end {
-            return 0.0;
-        }
-        let ci0 = char_at.partition_point(|&b| b < start);
-        let ci1 = char_at.partition_point(|&b| b < end);
-        let mut total = 0.0;
-        let mut i = ci0;
-        while i < ci1 {
-            let seg = src[i].seg;
-            let mut j = i + 1;
-            while j < ci1 && src[j].seg == seg {
-                j += 1;
-            }
-            let bs = char_at[i];
-            let be = if j < char_at.len() { char_at[j] } else { text.len() };
-            let be = be.min(end);
-            total += match &segs[seg as usize].kind {
-                SegKind::Image { w, .. } => *w,
-                SegKind::Break => 0.0,
-                SegKind::Text => self.range_width(&text[bs..be], &segs[seg as usize]),
-            };
-            i = j;
-        }
-        total
+    /// Width of the bytes `start..end` of a paragraph.
+    fn width(&mut self, p: &Para, start: usize, end: usize) -> f32 {
+        p.runs(start, end).map(|r| self.run_width(p, r)).sum()
     }
 
     /// Lays out an inline run as one paragraph owned by block `owner`.
     fn paragraph(&mut self, owner: NodeId, nodes: &[NodeId], x: f32, w: f32) {
-        let mut text = String::new();
-        let mut src = SrcRuns::default();
-        let mut segs: Vec<Seg> = Vec::new();
-        self.collect(nodes, owner, &mut text, &mut src, &mut segs, NO_LINK, w, 0.0);
-        let ost = self.st(owner);
-        let keep_spaces = ost.white_space.keeps_spaces();
-        // Trim leading and trailing collapsible spaces.
-        if !keep_spaces {
-            while text.ends_with(' ') {
-                text.pop();
-                src.pop();
+        let mut out = InlineText::default();
+        self.collect(nodes, owner, &mut out, NO_LINK, w, 0.0);
+        // Trailing collapsible spaces go (leading ones were never collected).
+        if !self.st(owner).white_space.keeps_spaces() {
+            while out.text.ends_with(' ') {
+                out.pop();
             }
         }
-        let only_breaks = !text.is_empty() && text.chars().all(|c| c == '\n');
+        let only_breaks = !out.text.is_empty() && out.text.chars().all(|c| c == '\n');
         if only_breaks {
             // `<p><br/></p>`: one empty line.
-            text.truncate(1);
-            src.truncate(1);
-        } else if text.ends_with('\n') {
+            out.text.truncate(1);
+            out.src.truncate(1);
+        } else if out.text.ends_with('\n') {
             // A final line break (or newline in pre text) makes no empty line.
-            text.pop();
-            src.pop();
+            out.pop();
         }
+        let InlineText { text, src, segs } = out;
         if text.is_empty() {
             return;
         }
         let para_first_slice = self.out.slices.len();
         if text.len() <= GIANT_PARAGRAPH {
-            let src: Vec<CharSrc> = src.iter().collect();
+            let mut chars = Vec::with_capacity(src.n);
+            chars.extend(src.iter());
+            let src = chars;
             self.lay_lines(owner, &text, &src, &segs, x, w);
         } else {
             let mut src_iter = src.iter();
@@ -1199,34 +1244,49 @@ impl<'a, 'e> Flow<'a, 'e> {
     fn lay_lines(&mut self, owner: NodeId, text: &str, src: &[CharSrc], segs: &[Seg], x: f32, w: f32) {
         let ost = self.st(owner);
         let keep_spaces = ost.white_space.keeps_spaces();
-        let char_at: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+        let para = Para::new(text, src, segs);
         // Break opportunities.
         let wraps = ost.white_space.wraps() || keep_spaces;
-        let mut ops: Vec<(usize, Break)> = break_opportunities(text).into_iter().filter(|(b, k)| wraps || *k == Break::Mandatory || *b == text.len()).collect();
+        let mut ops: Vec<(usize, Break)> = break_opportunities(text);
+        if !wraps {
+            ops.retain(|(b, k)| *k == Break::Mandatory || *b == text.len());
+        }
         // Allow breaks around images.
-        for (ci, c) in text.char_indices() {
-            if c == OBJ {
-                ops.push((ci, Break::Allowed));
-                ops.push((ci + c.len_utf8(), Break::Allowed));
+        if text.contains(OBJ) {
+            for (ci, c) in text.char_indices() {
+                if c == OBJ {
+                    ops.push((ci, Break::Allowed));
+                    ops.push((ci + c.len_utf8(), Break::Allowed));
+                }
             }
         }
         ops.retain(|(b, _)| *b > 0);
         ops.sort_by_key(|o| (o.0, o.1 == Break::Allowed));
         ops.dedup_by_key(|o| o.0);
         // Boxes.
-        let mut boxes: Vec<WordBox> = Vec::new();
+        let mut boxes: Vec<WordBox> = Vec::with_capacity(ops.len());
         let mut prev = 0usize;
+        // The width of a space in the last segment one was measured in (most boxes of a
+        // paragraph end with a space of the same segment).
+        let mut space_of: Option<(usize, f32)> = None;
         for (b, kind) in ops {
             let seg_text = &text[prev..b];
             let forced = kind == Break::Mandatory && b < text.len() || seg_text.ends_with('\n');
             let trimmed = if keep_spaces { seg_text.trim_end_matches('\n') } else { seg_text.trim_end_matches([' ', '\n']) };
             let end = prev + trimmed.len();
-            let width = self.pieces_width(text, src, &char_at, segs, prev, end);
+            let width = self.width(&para, prev, end);
             let space = if end < b && !keep_spaces {
-                let sp_seg = src[char_at.partition_point(|&x| x < end).min(src.len() - 1)].seg as usize;
+                let sp_seg = src[para.char_index(end).min(src.len() - 1)].seg as usize;
                 let n_sp = text[end..b].chars().filter(|&c| c == ' ').count();
                 if n_sp > 0 {
-                    self.range_width(" ", &segs[sp_seg])
+                    match space_of {
+                        Some((s, sw)) if s == sp_seg => sw,
+                        _ => {
+                            let sw = self.range_width(" ", &segs[sp_seg]);
+                            space_of = Some((sp_seg, sw));
+                            sw
+                        }
+                    }
                 } else {
                     0.0
                 }
@@ -1234,7 +1294,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 0.0
             };
             let hyphen = trimmed.ends_with(SOFT_HYPHEN);
-            boxes.push(WordBox { start: prev, end, end_ws: b, width, space, forced, hyphen });
+            boxes.push(WordBox { start: prev, end, width, space, forced, hyphen });
             prev = b;
         }
         // Lines.
@@ -1242,71 +1302,75 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.first_line_pending = false;
         let hyph_ok = self.p.settings.hyphenate;
         let mut lines: Vec<Line> = Vec::new();
-        let mut cur: Vec<WordBox> = Vec::new();
+        // The boxes of every line, in order; the current line is `kept[cur..]`.
+        let mut kept: Vec<WordBox> = Vec::with_capacity(boxes.len());
+        let mut cur = 0usize;
         let mut cur_w = 0.0f32;
-        let mut i = 0;
         let mut queue: std::collections::VecDeque<WordBox> = boxes.into();
         while let Some(bx) = queue.pop_front() {
             let first_line = lines.is_empty();
             let avail = if first_line { w - indent.max(0.0) } else { w };
-            let gap = cur.last().map(|b: &WordBox| b.space).unwrap_or(0.0);
+            let empty = kept.len() == cur;
+            let gap = if empty { 0.0 } else { kept[kept.len() - 1].space };
             let need = cur_w + gap + bx.width;
-            if wraps && cur.is_empty() && need > avail + 0.01 && bx.width > 0.0 {
+            if wraps && empty && need > avail + 0.01 && bx.width > 0.0 {
                 // Alone at the start of a line and still too wide (a long URL or word):
                 // hyphenate or cut it.
-                if let Some((a, b)) = self.split_box(text, src, &char_at, segs, &bx, avail, hyph_ok).or_else(|| self.cut_box(text, src, &char_at, segs, &bx, avail)) {
-                    lines.push(Line { boxes: vec![a], forced: false, first: first_line });
+                if let Some((a, b)) = self.split_box(&para, &bx, avail, hyph_ok).or_else(|| self.cut_box(&para, &bx, avail)) {
+                    kept.push(a);
+                    lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+                    cur = kept.len();
                     queue.push_front(b);
                     continue;
                 }
             }
-            if cur.is_empty() || need <= avail + 0.01 {
+            if empty || need <= avail + 0.01 {
                 cur_w = need;
                 let forced = bx.forced;
-                cur.push(bx);
+                kept.push(bx);
                 if forced {
-                    lines.push(Line { boxes: std::mem::take(&mut cur), forced: true, first: first_line });
+                    lines.push(Line { start: cur, end: kept.len(), forced: true, first: first_line });
+                    cur = kept.len();
                     cur_w = 0.0;
                 }
-                i += 1;
                 continue;
             }
             // Does not fit: try to hyphenate it into the remaining space.
             let remaining = avail - cur_w - gap;
-            if let Some((a, b)) = self.split_box(text, src, &char_at, segs, &bx, remaining, hyph_ok) {
-                cur.push(a);
-                lines.push(Line { boxes: std::mem::take(&mut cur), forced: false, first: first_line });
+            if let Some((a, b)) = self.split_box(&para, &bx, remaining, hyph_ok) {
+                kept.push(a);
+                lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+                cur = kept.len();
                 cur_w = 0.0;
                 queue.push_front(b);
                 continue;
             }
-            lines.push(Line { boxes: std::mem::take(&mut cur), forced: false, first: first_line });
+            lines.push(Line { start: cur, end: kept.len(), forced: false, first: first_line });
+            cur = kept.len();
             cur_w = 0.0;
             // On a line of its own next (cut there when still too wide).
             queue.push_front(bx);
         }
-        if !cur.is_empty() {
+        if kept.len() > cur {
             let first = lines.is_empty();
-            lines.push(Line { boxes: cur, forced: true, first });
+            lines.push(Line { start: cur, end: kept.len(), forced: true, first });
         }
-        let _ = i;
         let n_lines = lines.len();
-        for (li, line) in lines.into_iter().enumerate() {
+        for (li, line) in lines.iter().enumerate() {
             let last = li + 1 == n_lines;
-            self.place_line(owner, text, src, &char_at, segs, line, x, w, indent, last);
+            self.place_line(owner, &para, line, &kept[line.start..line.end], x, w, indent, last);
         }
     }
 
     /// Splits a box at a hyphenation point (soft hyphen or dictionary) so the first part
     /// plus a hyphen fits `avail`.
-    #[allow(clippy::too_many_arguments)]
-    fn split_box(&mut self, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], bx: &WordBox, avail: f32, dict: bool) -> Option<(WordBox, WordBox)> {
+    fn split_box(&mut self, p: &Para, bx: &WordBox, avail: f32, dict: bool) -> Option<(WordBox, WordBox)> {
         if avail <= 0.0 {
             return None;
         }
-        let word = &text[bx.start..bx.end];
-        let first_seg = &segs[src[char_at.partition_point(|&b| b < bx.start)].seg as usize];
-        if !matches!(first_seg.kind, SegKind::Text) {
+        let word = &p.text[bx.start..bx.end];
+        let first_seg = p.seg_at(bx.start);
+        if !matches!(first_seg.kind, SegKind::Text { .. }) {
             return None;
         }
         let st = self.st(first_seg.style);
@@ -1327,16 +1391,16 @@ impl<'a, 'e> Flow<'a, 'e> {
         if points.is_empty() {
             return None;
         }
-        let (face, px, _) = self.seg_face(first_seg);
+        let (face, px) = self.seg_face(first_seg);
         let hyph_w = self.env.fonts.width(face, px, "-");
         if word.len() > LONG_BOX_BYTES {
             // A very long box (soft hyphens in a giant word): widths added piece by piece
             // from the start, so the search is linear.
             let mut best = None;
             let (mut acc, mut prev) = (0.0f32, bx.start);
-            for &p in &points {
-                let cut = bx.start + p;
-                acc += self.pieces_width(text, src, char_at, segs, prev, cut);
+            for &pt in &points {
+                let cut = bx.start + pt;
+                acc += self.width(p, prev, cut);
                 prev = cut;
                 if acc + hyph_w > avail {
                     break;
@@ -1344,30 +1408,24 @@ impl<'a, 'e> Flow<'a, 'e> {
                 best = Some((cut, acc));
             }
             let (cut, wdt) = best?;
-            let a = WordBox { start: bx.start, end: cut, end_ws: cut, width: wdt + hyph_w, space: 0.0, forced: false, hyphen: true };
-            let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: (bx.width - wdt).max(0.0), space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
-            return Some((a, b));
+            return Some(bx.split(cut, wdt + hyph_w, true, (bx.width - wdt).max(0.0)));
         }
-        for &p in points.iter().rev() {
-            let cut = bx.start + p;
-            let pieces = self.pieces(text, src, char_at, segs, bx.start, cut);
-            let wdt: f32 = pieces.iter().map(|p| p.width).sum();
+        for &pt in points.iter().rev() {
+            let cut = bx.start + pt;
+            let wdt = self.width(p, bx.start, cut);
             if wdt + hyph_w <= avail {
-                let rest = self.pieces(text, src, char_at, segs, cut, bx.end);
-                let a = WordBox { start: bx.start, end: cut, end_ws: cut, width: wdt + hyph_w, space: 0.0, forced: false, hyphen: true };
-                let b = WordBox { start: cut, end: bx.end, end_ws: bx.end_ws, width: rest.iter().map(|p| p.width).sum(), space: bx.space, forced: bx.forced, hyphen: bx.hyphen };
-                return Some((a, b));
+                let rest = self.width(p, cut, bx.end);
+                return Some(bx.split(cut, wdt + hyph_w, true, rest));
             }
         }
         None
     }
 
     /// Cuts a box that cannot fit a line at all (long URLs) at the last char that fits.
-    #[allow(clippy::too_many_arguments)]
-    fn cut_box(&mut self, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], bx: &WordBox, avail: f32) -> Option<(WordBox, WordBox)> {
+    fn cut_box(&mut self, p: &Para, bx: &WordBox, avail: f32) -> Option<(WordBox, WordBox)> {
         let mut cut = None;
-        for (i, _) in text[bx.start..bx.end].char_indices().skip(1) {
-            let wdt: f32 = self.pieces_width(text, src, char_at, segs, bx.start, bx.start + i);
+        for (i, _) in p.text[bx.start..bx.end].char_indices().skip(1) {
+            let wdt = self.width(p, bx.start, bx.start + i);
             if wdt > avail {
                 break;
             }
@@ -1377,19 +1435,17 @@ impl<'a, 'e> Flow<'a, 'e> {
         // The rest's width: measured when short, else the box width minus the cut part
         // (measuring the rest of a giant word at every line was quadratic).
         let rest: f32 = if bx.end - c <= LONG_BOX_BYTES {
-            self.pieces_width(text, src, char_at, segs, c, bx.end)
+            self.width(p, c, bx.end)
         } else {
             (bx.width - wdt).max(0.0)
         };
-        Some((
-            WordBox { start: bx.start, end: c, end_ws: c, width: wdt, space: 0.0, forced: false, hyphen: false },
-            WordBox { start: c, end: bx.end, end_ws: bx.end_ws, width: rest, space: bx.space, forced: bx.forced, hyphen: bx.hyphen },
-        ))
+        Some(bx.split(c, wdt, false, rest))
     }
 
     /// Positions one line, emits its draw items and its slice.
     #[allow(clippy::too_many_arguments)]
-    fn place_line(&mut self, owner: NodeId, text: &str, src: &[CharSrc], char_at: &[usize], segs: &[Seg], line: Line, x: f32, w: f32, indent: f32, last: bool) {
+    fn place_line(&mut self, owner: NodeId, p: &Para, line: &Line, boxes: &[WordBox], x: f32, w: f32, indent: f32, last: bool) {
+        let (text, src, segs) = (p.text, p.src, p.segs);
         let ost = self.st(owner);
         // Vertical metrics: the block's strut plus every piece.
         let strut_face = self.face(ost);
@@ -1398,60 +1454,56 @@ impl<'a, 'e> Flow<'a, 'e> {
         let half = (lh - (sa - sd)) / 2.0;
         let mut asc = sa + half;
         let mut desc = lh - asc;
-        struct Placed {
-            piece: Piece,
-            shift: f32,
-            hyphen: bool,
-            img: Option<(String, f32, f32)>,
-        }
-        let mut placed: Vec<(Placed, f32)> = Vec::new(); // (piece, x offset)
-        let n_boxes = line.boxes.len();
+        // (piece, x offset, a hyphen is drawn after it)
+        let n_boxes = boxes.len();
+        let mut placed: Vec<(Piece, f32, bool)> = Vec::with_capacity(n_boxes);
         let mut pen = 0.0f32;
         let mut spaces = 0usize;
-        for (bi, b) in line.boxes.iter().enumerate() {
-            let pieces = self.pieces(text, src, char_at, segs, b.start, b.end);
-            for pc in pieces {
-                let seg = &segs[pc.seg as usize];
-                let st = self.st(seg.style);
-                let mut img = None;
-                let shift = seg.shift;
-                match &seg.kind {
-                    SegKind::Image { src, w, h } => {
-                        let a = match st.vertical_align {
-                            VAlign::Middle => h / 2.0 + sa * 0.3,
-                            VAlign::Top => sa,
-                            _ => *h,
-                        };
-                        let shift = if matches!(st.vertical_align, VAlign::Middle | VAlign::Top) { 0.0 } else { shift };
-                        asc = asc.max(a + shift);
-                        desc = desc.max(h - a - shift);
-                        img = Some((src.clone(), *w, *h));
-                    }
-                    SegKind::Text => {
-                        let face = self.face(st);
-                        let (a, d) = self.env.fonts.vmetrics(face, st.font_size * seg.scale);
-                        let l = self.line_height(st);
-                        let hl = (l - (a - d)) / 2.0;
-                        if shift == 0.0 {
-                            asc = asc.max(a + hl + shift);
-                            desc = desc.max(l - a - hl - shift);
-                        } else {
-                            // Sub/superscripts do not grow the line beyond their glyphs.
+        // The segment whose metrics are in `asc` and `desc` already (the same segment
+        // gives the same metrics, so the next pieces of a run of words skip them).
+        let mut measured_seg = None;
+        for (bi, b) in boxes.iter().enumerate() {
+            for run in p.runs(b.start, b.end) {
+                // Widths only place the pieces across the line.
+                let width = if self.text_items { self.run_width(p, run) } else { 0.0 };
+                let pc = Piece { seg: run.0, start: run.1, end: run.2, width };
+                if measured_seg != Some(pc.seg) {
+                    measured_seg = Some(pc.seg);
+                    let seg = &segs[pc.seg as usize];
+                    let st = self.st(seg.style);
+                    let shift = seg.shift;
+                    match seg.kind {
+                        SegKind::Image { h, .. } => {
+                            let a = image_ascent(st.vertical_align, h, sa);
+                            let shift = if matches!(st.vertical_align, VAlign::Middle | VAlign::Top) { 0.0 } else { shift };
                             asc = asc.max(a + shift);
-                            desc = desc.max(-d - shift);
+                            desc = desc.max(h - a - shift);
                         }
+                        SegKind::Text { face, px } => {
+                            let (a, d) = self.env.fonts.vmetrics(face, px);
+                            let l = self.line_height(st);
+                            let hl = (l - (a - d)) / 2.0;
+                            if shift == 0.0 {
+                                asc = asc.max(a + hl + shift);
+                                desc = desc.max(l - a - hl - shift);
+                            } else {
+                                // Sub/superscripts do not grow the line beyond their glyphs.
+                                asc = asc.max(a + shift);
+                                desc = desc.max(-d - shift);
+                            }
+                        }
+                        SegKind::Break => {}
                     }
-                    SegKind::Break => {}
                 }
                 let wdt = pc.width;
-                placed.push((Placed { piece: pc, shift, hyphen: false, img }, pen));
+                placed.push((pc, pen, false));
                 pen += wdt;
             }
-            if b.hyphen && bi + 1 == n_boxes && !line.forced {
+            if b.hyphen && bi + 1 == n_boxes && !line.forced && self.text_items {
                 if let Some(last_p) = placed.last_mut() {
-                    last_p.0.hyphen = true;
-                    let seg = &segs[last_p.0.piece.seg as usize];
-                    let (face, px, _) = self.seg_face(seg);
+                    last_p.2 = true;
+                    let seg = &segs[last_p.0.seg as usize];
+                    let (face, px) = self.seg_face(seg);
                     pen += self.env.fonts.width(face, px, "-");
                 }
             }
@@ -1469,9 +1521,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         let justify = align == TextAlign::Justify && !last && !line.forced && spaces > 0 && !self.merge_runs;
         let extra = (avail - line_w).max(0.0);
         let mut x0 = x + first_indent;
-        if first_indent < 0.0 {
-            x0 = x + first_indent;
-        }
         match align {
             TextAlign::Center => x0 += extra / 2.0,
             TextAlign::Right => x0 += extra,
@@ -1485,13 +1534,13 @@ impl<'a, 'e> Flow<'a, 'e> {
         let bottom = top + asc + desc;
         let first_item = self.out.items.len();
         // Marker.
-        if let Some((m, _li, outside)) = self.marker.take() {
+        if let Some((m, outside)) = self.marker.take() {
             let st = ost;
             let face = FaceKey { family: self.env.fonts.family(&st.font_family), bold: false, italic: false };
             let shape = m.chars().next().filter(|&c| m.chars().count() == 1 && !self.env.fonts.has_glyph(face, c));
             let mw = if shape.is_some() { st.font_size * 0.3 } else { self.env.fonts.width(face, st.font_size, &m) };
             let gap = st.font_size * 0.4;
-            let mx = if outside > 0.0 { x - mw - gap } else { x0 };
+            let mx = if outside { x - mw - gap } else { x0 };
             if let Some(c) = shape {
                 // No glyph for ◦ or ▪: draw a square, hollow for circles.
                 let sz = mw;
@@ -1500,96 +1549,83 @@ impl<'a, 'e> Flow<'a, 'e> {
                 if c == '▪' {
                     self.out.items.push(Draw::Rect(RectRun { x: mx, y, w: sz, h: sz, gray: 0 }));
                 } else {
-                    for r in [
-                        RectRun { x: mx, y, w: sz, h: t, gray: 0 },
-                        RectRun { x: mx, y: y + sz - t, w: sz, h: t, gray: 0 },
-                        RectRun { x: mx, y, w: t, h: sz, gray: 0 },
-                        RectRun { x: mx + sz - t, y, w: t, h: sz, gray: 0 },
-                    ] {
-                        self.out.items.push(Draw::Rect(r));
-                    }
-                }
-                if outside <= 0.0 {
-                    x0 += mw + gap;
+                    self.out.items.extend(border_rects(Edges::all(t), mx, sz, y, y + sz, sz).map(Draw::Rect));
                 }
             } else {
-            self.out.items.push(Draw::Text(TextRun {
-                x: mx,
-                baseline,
-                face,
-                px: st.font_size,
-                text: m,
-                width: mw,
-                node: NONE,
-                start: 0,
-                len: 0,
-                link: NO_LINK,
-                underline: false,
-                strike: false,
-                gray: 0,
-                letter_spacing: 0.0,
-                deco_w: mw,
-                line_top: top,
-                line_bottom: bottom,
-                hyphenated: false,
-            }));
-            if outside <= 0.0 {
+                // Black, undecorated, outside the DOM text and links.
+                let run = TextRun {
+                    x: mx,
+                    baseline,
+                    face,
+                    px: st.font_size,
+                    text: m,
+                    width: mw,
+                    node: NONE,
+                    link: NO_LINK,
+                    deco_w: mw,
+                    line_top: top,
+                    line_bottom: bottom,
+                    ..Default::default()
+                };
+                self.out.items.push(Draw::Text(run));
+            }
+            if !outside {
                 x0 += mw + gap;
             }
-            }
         }
-        // Box boundaries in `placed` for justification.
-        let mut box_end_bytes: Vec<usize> = line.boxes.iter().map(|b| b.end).collect();
-        box_end_bytes.pop();
+        // Box ends (all but the last box's) for justification: a box with a space after
+        // it widens that space. Each box counts its own space (an empty box, such as the
+        // space after an inline image, ends where the box before it ends).
+        let mut gaps = boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
         let mut add = 0.0f32;
         let mut key: Option<(u32, u32)> = None;
-        for (pl, off) in placed {
-            let pc = &pl.piece;
+        for (pc, off, hyphen) in placed {
+            if !self.text_items && key.is_some() {
+                // A page-map layout needs only the key of the first piece.
+                break;
+            }
             // Extra space accumulated before this piece.
-            while let Some(&e) = box_end_bytes.first() {
-                if pc.start >= e {
-                    let bx = line.boxes.iter().find(|b| b.end == e).unwrap();
-                    if bx.space > 0.0 {
-                        add += per_space;
-                    }
-                    box_end_bytes.remove(0);
-                } else {
-                    break;
+            while let Some((_, spaced)) = gaps.next_if(|&(e, _)| pc.start >= e) {
+                if spaced {
+                    add += per_space;
                 }
             }
             let px_x = x0 + off + add;
             let seg = &segs[pc.seg as usize];
             let st = self.st(seg.style);
-            let ci = char_at.partition_point(|&b| b < pc.start);
+            let ci = p.char_index(pc.start);
             match &seg.kind {
-                SegKind::Image { .. } => {
-                    let (s, iw, ih) = pl.img.clone().unwrap();
-                    let a = match st.vertical_align {
-                        VAlign::Middle => ih / 2.0 + sa * 0.3,
-                        VAlign::Top => sa,
-                        _ => ih,
-                    };
-                    let y = baseline - a - pl.shift;
-                    self.out.items.push(Draw::Image(ImageRun { x: px_x, y, w: iw, h: ih, src: s, node: seg.node, link: seg.link }));
+                SegKind::Image { src, w, h } => {
+                    let y = baseline - image_ascent(st.vertical_align, *h, sa) - seg.shift;
+                    if self.text_items {
+                        self.out.items.push(Draw::Image(ImageRun { x: px_x, y, w: *w, h: *h, src: src.clone(), node: seg.node, link: seg.link }));
+                    }
                     key.get_or_insert((self.dom.node(seg.node).order, 0));
                 }
                 SegKind::Break => {
                     key.get_or_insert((self.dom.node(seg.node).order, 0));
                 }
-                SegKind::Text => {
+                &SegKind::Text { face, px } => {
+                    if !self.text_items {
+                        key.get_or_insert((self.dom.node(seg.node).order, src[ci].dom));
+                        continue;
+                    }
                     let raw = &text[pc.start..pc.end];
-                    let mut shown: String = raw.chars().filter(|&c| c != SOFT_HYPHEN && c != '\n').collect();
-                    if pl.hyphen {
+                    let mut shown = String::with_capacity(raw.len() + usize::from(hyphen));
+                    if raw.contains([SOFT_HYPHEN, '\n']) {
+                        shown.extend(raw.chars().filter(|&c| c != SOFT_HYPHEN && c != '\n'));
+                    } else {
+                        shown.push_str(raw);
+                    }
+                    if hyphen {
                         shown.push('-');
                     }
                     let dom_start = src[ci].dom;
-                    let ce = char_at.partition_point(|&b| b < pc.end);
+                    let ce = p.char_index(pc.end);
                     let dom_end = if ce < src.len() && src[ce].seg == pc.seg { src[ce].dom } else { src[ce - 1].dom + 1 };
                     key.get_or_insert((self.dom.node(seg.node).order, dom_start));
-                    let face = self.face(st);
-                    let px = st.font_size * seg.scale;
                     let mut width = pc.width;
-                    if pl.hyphen {
+                    if hyphen {
                         width += self.env.fonts.width(face, px, "-");
                     }
                     if shown.trim().is_empty() && !st.white_space.keeps_spaces() {
@@ -1602,7 +1638,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                             if prev.node == seg.node
                                 && prev.face == face
                                 && prev.px == px
-                                && prev.baseline == baseline - pl.shift
+                                && prev.baseline == baseline - seg.shift
                                 && prev.link == seg.link
                                 && prev.gray == st.color
                                 && prev.underline == st.underline
@@ -1618,14 +1654,14 @@ impl<'a, 'e> Flow<'a, 'e> {
                                 prev.width = px_x + width - prev.x;
                                 prev.deco_w = prev.width;
                                 prev.len = dom_end.saturating_sub(prev.start);
-                                prev.hyphenated = pl.hyphen;
+                                prev.hyphenated = hyphen;
                                 continue;
                             }
                         }
                     }
                     self.out.items.push(Draw::Text(TextRun {
                         x: px_x,
-                        baseline: baseline - pl.shift,
+                        baseline: baseline - seg.shift,
                         face,
                         px,
                         text: shown,
@@ -1641,21 +1677,16 @@ impl<'a, 'e> Flow<'a, 'e> {
                         deco_w: width,
                         line_top: top,
                         line_bottom: bottom,
-                        hyphenated: pl.hyphen,
+                        hyphenated: hyphen,
                     }));
                 }
             }
         }
         // Underlines and strike-throughs continue over the spaces between runs.
-        let line_items: Vec<usize> = (first_item..self.out.items.len()).collect();
-        for w2 in line_items.windows(2) {
-            let (a, b) = (w2[0], w2[1]);
-            if let (Draw::Text(ta), Draw::Text(tb)) = (&self.out.items[a], &self.out.items[b]) {
+        for a in first_item..self.out.items.len().saturating_sub(1) {
+            if let [Draw::Text(ta), Draw::Text(tb)] = &mut self.out.items[a..a + 2] {
                 if (ta.underline && tb.underline || ta.strike && tb.strike) && ta.link == tb.link && tb.x > ta.x {
-                    let d = tb.x - ta.x;
-                    if let Draw::Text(ta) = &mut self.out.items[a] {
-                        ta.deco_w = d;
-                    }
+                    ta.deco_w = tb.x - ta.x;
                 }
             }
         }
@@ -1734,16 +1765,12 @@ impl<'a, 'e> Flow<'a, 'e> {
                     cmin[col] = cmin[col].max(mn);
                     cmax[col] = cmax[col].max(mx);
                 } else if col + span <= ncols {
-                    let have: f32 = cmin[col..col + span].iter().sum();
-                    if mn > have {
-                        for v in &mut cmin[col..col + span] {
-                            *v += (mn - have) / span as f32;
-                        }
-                    }
-                    let havex: f32 = cmax[col..col + span].iter().sum();
-                    if mx > havex {
-                        for v in &mut cmax[col..col + span] {
-                            *v += (mx - havex) / span as f32;
+                    // A spanning cell spreads what its columns lack evenly over them.
+                    for (widths, need) in [(&mut cmin, mn), (&mut cmax, mx)] {
+                        let cols = &mut widths[col..col + span];
+                        let have: f32 = cols.iter().sum();
+                        if need > have {
+                            cols.iter_mut().for_each(|v| *v += (need - have) / span as f32);
                         }
                     }
                 }
@@ -1799,44 +1826,18 @@ impl<'a, 'e> Flow<'a, 'e> {
                 continue;
             }
             for (lay, cx, cw, c) in sub {
-                let link_base = self.out.links.len() as u32;
-                for it in lay.items {
-                    let mut it = shift_item(it, row_top);
-                    match &mut it {
-                        Draw::Text(t) if t.link != NO_LINK => t.link += link_base,
-                        Draw::Image(i) if i.link != NO_LINK => i.link += link_base,
-                        _ => {}
-                    }
-                    self.out.items.push(it);
-                }
-                for d in lay.decor {
-                    self.out.decor.push(RectRun { y: d.y + row_top, ..d });
-                }
-                self.out.links.extend(lay.links);
+                self.append_drawn(lay, row_top);
                 // Cell borders span the full row height.
-                let st = self.st(c);
-                let b = st.border;
-                let gray = 0;
-                if b.top > 0.0 {
-                    self.out.decor.push(RectRun { x: cx, y: row_top, w: cw, h: b.top, gray });
-                }
-                if b.bottom > 0.0 {
-                    self.out.decor.push(RectRun { x: cx, y: row_top + row_h - b.bottom, w: cw, h: b.bottom, gray });
-                }
-                if b.left > 0.0 {
-                    self.out.decor.push(RectRun { x: cx, y: row_top, w: b.left, h: row_h, gray });
-                }
-                if b.right > 0.0 {
-                    self.out.decor.push(RectRun { x: cx + cw - b.right, y: row_top, w: b.right, h: row_h, gray });
-                }
+                self.out.decor.extend(border_rects(self.st(c).border, cx, cw, row_top, row_top + row_h, row_h));
             }
             self.y = row_top + row_h;
             self.push_slice(row_top, self.y, key, first_item);
         }
     }
 
-    fn append_sub(&mut self, lay: ChapterLayout, dy: f32) {
-        let item_base = self.out.items.len() as u32;
+    /// Appends the draw items, decorations and links of a cell's layout moved down by
+    /// `dy` (its link indexes rebased); returns its slices.
+    fn append_drawn(&mut self, lay: ChapterLayout, dy: f32) -> Vec<Slice> {
         let link_base = self.out.links.len() as u32;
         for it in lay.items {
             let mut it = shift_item(it, dy);
@@ -1848,10 +1849,15 @@ impl<'a, 'e> Flow<'a, 'e> {
             self.out.items.push(it);
         }
         self.out.links.extend(lay.links);
-        for d in lay.decor {
-            self.out.decor.push(RectRun { y: d.y + dy, ..d });
-        }
-        for s in lay.slices {
+        self.out.decor.extend(lay.decor.into_iter().map(|d| RectRun { y: d.y + dy, ..d }));
+        lay.slices
+    }
+
+    /// Appends a cell's layout as slices of this flow at `dy`.
+    fn append_sub(&mut self, lay: ChapterLayout, dy: f32) {
+        let item_base = self.out.items.len() as u32;
+        let height = lay.height;
+        for s in self.append_drawn(lay, dy) {
             self.out.slices.push(Slice {
                 top: s.top + dy,
                 bottom: s.bottom + dy,
@@ -1860,46 +1866,30 @@ impl<'a, 'e> Flow<'a, 'e> {
                 ..s
             });
         }
-        self.y = dy + lay.height;
+        self.y = dy + height;
     }
 
     /// Lays out a table cell in its own flow (y from 0).
     fn cell_layout(&mut self, cell: NodeId, x: f32, w: f32) -> ChapterLayout {
         let st = self.st(cell);
+        let (pad, b) = (st.padding.resolve(w), st.border);
+        let (pl, pr, pt, pb) = (pad.left + b.left, pad.right + b.right, pad.top + b.top, pad.bottom + b.bottom);
+        // The flow state the cell's flow replaces, put back after it.
         let saved = (
             std::mem::take(&mut self.out),
-            self.y,
-            self.margin,
-            self.neg_margin,
+            std::mem::replace(&mut self.y, pt),
+            std::mem::take(&mut self.margin),
+            std::mem::take(&mut self.neg_margin),
             self.force_break,
             self.keep_next,
-            self.first_line_pending,
+            std::mem::replace(&mut self.first_line_pending, true),
             self.marker.take(),
-            self.in_cell,
+            std::mem::replace(&mut self.in_cell, true),
         );
-        self.y = 0.0;
-        self.margin = 0.0;
-        self.neg_margin = 0.0;
-        self.first_line_pending = true;
-        self.in_cell = true;
-        let pl = st.padding.left.resolve(w, 0.0) + st.border.left;
-        let pr = st.padding.right.resolve(w, 0.0) + st.border.right;
-        let pt = st.padding.top.resolve(w, 0.0) + st.border.top;
-        let pb = st.padding.bottom.resolve(w, 0.0) + st.border.bottom;
-        self.y = pt;
         self.block_children(cell, x + pl, (w - pl - pr).max(10.0));
         self.y += pb;
-        let mut lay = std::mem::take(&mut self.out);
-        lay.height = self.y;
-        self.out = saved.0;
-        self.y = saved.1;
-        self.margin = saved.2;
-        self.neg_margin = saved.3;
-        self.force_break = saved.4;
-        self.keep_next = saved.5;
-        self.first_line_pending = saved.6;
-        self.marker = saved.7;
-        self.in_cell = saved.8;
+        let lay = ChapterLayout { height: self.y, ..std::mem::take(&mut self.out) };
+        (self.out, self.y, self.margin, self.neg_margin, self.force_break, self.keep_next, self.first_line_pending, self.marker, self.in_cell) = saved;
         lay
     }
 
@@ -1908,18 +1898,13 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut min = 0.0f32;
         let mut max = 0.0f32;
         let mut line = 0.0f32;
+        let dom = self.dom;
         let mut stack = vec![cell];
-        let mut order: Vec<NodeId> = Vec::new();
         while let Some(n) = stack.pop() {
-            order.push(n);
-            for &c in self.dom.node(n).children.iter().rev() {
-                stack.push(c);
-            }
-        }
-        for n in order {
-            match &self.dom.node(n).kind {
+            stack.extend(dom.node(n).children.iter().rev());
+            match &dom.node(n).kind {
                 NodeKind::Text(t) => {
-                    let st = self.st(self.dom.node(n).parent);
+                    let st = self.st(dom.node(n).parent);
                     if st.display == Display::None {
                         continue;
                     }
@@ -1932,7 +1917,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 }
                 NodeKind::Element(e) => {
                     let st = self.st(n);
-                    if matches!(e.name.as_str(), "img" | "image" | "svg") {
+                    if is_image(&e.name) {
                         if let Some((_, iw, _)) = self.image_box(n, w, self.p.content_h) {
                             min = min.max(iw.min(w / 2.0));
                             line += iw;
@@ -1946,6 +1931,28 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         max = max.max(line);
         (min.min(w), max)
+    }
+}
+
+/// The rectangles of a box border from `top` to `bottom` (`h`: the height of the side
+/// borders): top, bottom, left and right, leaving out sides of width 0.
+fn border_rects(b: Edges<f32>, x: f32, w: f32, top: f32, bottom: f32, h: f32) -> impl Iterator<Item = RectRun> {
+    let r = |x, y, w, h| RectRun { x, y, w, h, gray: 0 };
+    let sides = [
+        (b.top, r(x, top, w, b.top)),
+        (b.bottom, r(x, bottom - b.bottom, w, b.bottom)),
+        (b.left, r(x, top, b.left, h)),
+        (b.right, r(x + w - b.right, top, b.right, h)),
+    ];
+    sides.into_iter().filter(|(width, _)| *width > 0.0).map(|(_, r)| r)
+}
+
+/// Height of an inline image above the baseline (`sa`: the line's strut ascent).
+fn image_ascent(va: VAlign, h: f32, sa: f32) -> f32 {
+    match va {
+        VAlign::Middle => h / 2.0 + sa * 0.3,
+        VAlign::Top => sa,
+        _ => h,
     }
 }
 
@@ -2039,17 +2046,6 @@ fn roman(n: i64) -> String {
     s
 }
 
-/// The keys of whitespace-collapsed text: helper for tests and search (the visible text
-/// of a chapter in reading order with the DOM position of each char).
-pub fn hyphenator_for(lang: &str) -> Option<Arc<crate::hyph::PatternHyphenator>> {
-    crate::hyph::for_lang(lang)
-}
-
-/// True when `st` asks for hyphenation (used by tests).
-pub fn wants_hyphens(st: &ComputedStyle, settings: &LayoutSettings) -> bool {
-    settings.hyphenate && st.hyphens == Hyphens::Auto && st.white_space != WhiteSpace::Pre
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2060,5 +2056,20 @@ mod tests {
         assert_eq!(marker_text(ListStyle::UpperRoman, 14), "XIV.");
         assert_eq!(marker_text(ListStyle::LowerAlpha, 28), "ab.");
         assert_eq!(marker_text(ListStyle::Disc, 1), "•");
+    }
+
+    #[test]
+    fn para_char_and_byte_indices_match_a_full_table() {
+        let texts = ["", "plain words", "é", "café au lait", "“Quoted”—and ‘more’.", "Съешь же ещё", "a😀b\u{ad}c\u{fffc}", "😀😀x"];
+        for text in texts {
+            let para = Para::new(text, &[], &[]);
+            let at: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+            for b in 0..=text.len() + 2 {
+                assert_eq!(para.char_index(b), at.partition_point(|&x| x < b), "char_index({b}) of {text:?}");
+            }
+            for i in 0..=at.len() + 2 {
+                assert_eq!(para.byte(i), at.get(i).copied().unwrap_or(text.len()), "byte({i}) of {text:?}");
+            }
+        }
     }
 }

@@ -31,6 +31,7 @@ use ink_doc::{LinkTarget, Metadata, Position, Selection};
 use mlua::{Function, HookTriggers, Lua, LuaOptions, MultiValue, StdLib, Table, Value, VmState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -272,40 +273,35 @@ fn to_json(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
         // Error objects (from pcall) are kept as their message.
         Value::Error(e) => J::String(describe(e).lines().next().unwrap_or_default().to_string()),
         Value::Table(t) => {
+            // Look at the keys first and convert each value once: converting every value
+            // for the object form and again for the array form doubled the work at every
+            // level of nested arrays (2^depth).
             let len = t.raw_len();
-            let mut count = 0usize;
-            let mut obj = serde_json::Map::new();
-            let mut all_seq = true;
+            let mut pairs = Vec::new();
+            let mut seq = true;
             for pair in t.clone().pairs::<Value, Value>() {
                 let (k, val) = pair?;
-                count += 1;
                 let key = match &k {
                     Value::Integer(i) => {
-                        if *i < 1 || *i as usize > len {
-                            all_seq = false;
-                        }
+                        seq &= *i >= 1 && *i as usize <= len;
                         i.to_string()
                     }
                     Value::String(s) => {
-                        all_seq = false;
+                        seq = false;
                         s.to_string_lossy()
                     }
                     Value::Number(n) => {
-                        all_seq = false;
+                        seq = false;
                         n.to_string()
                     }
                     other => return Err(mlua::Error::RuntimeError(format!("table key of type {} has no JSON form", other.type_name()))),
                 };
-                obj.insert(key, to_json(&val, depth + 1)?);
+                pairs.push((key, val));
             }
-            if all_seq && count == len && len > 0 {
-                let mut arr = Vec::with_capacity(len);
-                for i in 1..=len {
-                    arr.push(to_json(&t.raw_get::<Value>(i)?, depth + 1)?);
-                }
-                J::Array(arr)
+            if seq && pairs.len() == len && len > 0 {
+                J::Array((1..=len).map(|i| to_json(&t.raw_get::<Value>(i)?, depth + 1)).collect::<mlua::Result<_>>()?)
             } else {
-                J::Object(obj)
+                J::Object(pairs.into_iter().map(|(k, v)| Ok((k, to_json(&v, depth + 1)?))).collect::<mlua::Result<_>>()?)
             }
         }
         other => return Err(mlua::Error::RuntimeError(format!("a {} has no JSON form", other.type_name()))),
@@ -503,7 +499,9 @@ struct HttpCall {
     callback: Option<Function>,
     whole: bool,
     status: Option<u16>,
-    headers: Vec<(String, String)>,
+    /// Shared, so every later event of the request (all of them carry the headers)
+    /// takes a reference instead of a copy.
+    headers: Rc<[(String, String)]>,
 }
 
 /// Plugin state the dispatcher changes.
@@ -659,6 +657,10 @@ fn mv(values: Vec<Value>) -> MultiValue {
     MultiValue::from_vec(values)
 }
 
+fn no_args(_: &Lua) -> mlua::Result<MultiValue> {
+    Ok(MultiValue::new())
+}
+
 fn selection_table(lua: &Lua, s: &Selection) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("text", s.text.as_str())?;
@@ -697,7 +699,7 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_book_open(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.call_hook(cx, "on_book_open", false, |_| Ok(mv(vec![])))
+        self.call_hook(cx, "on_book_open", false, no_args)
     }
 
     fn on_page_change(&mut self, cx: &mut HostCtx, page: usize) -> Result<()> {
@@ -705,38 +707,37 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_selection(&mut self, cx: &mut HostCtx, sel: &Selection) -> Result<()> {
-        let sel = sel.clone();
-        self.call_hook(cx, "on_selection", false, move |lua| Ok(mv(vec![Value::Table(selection_table(lua, &sel)?)])))
+        self.call_hook(cx, "on_selection", false, |lua| Ok(mv(vec![Value::Table(selection_table(lua, sel)?)])))
     }
 
     fn on_suspend(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.call_hook(cx, "on_suspend", false, |_| Ok(mv(vec![])))
+        self.call_hook(cx, "on_suspend", false, no_args)
     }
 
     fn on_resume(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.call_hook(cx, "on_resume", false, |_| Ok(mv(vec![])))
+        self.call_hook(cx, "on_resume", false, no_args)
     }
 
     fn on_close(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.call_hook(cx, "on_close", false, |_| Ok(mv(vec![])))
+        self.call_hook(cx, "on_close", false, no_args)
     }
 
     fn on_action(&mut self, cx: &mut HostCtx, id: &str) -> Result<()> {
-        let id_s = id.to_string();
-        if let Some(f) = self.state.handlers.get(id).cloned() {
-            return self.call_fn(cx, f, move |lua| Ok(mv(vec![Value::String(lua.create_string(&id_s)?)])));
+        let args = |lua: &Lua| Ok(mv(vec![Value::String(lua.create_string(id)?)]));
+        match self.state.handlers.get(id).cloned() {
+            Some(f) => self.call_fn(cx, f, args),
+            None => self.call_hook(cx, "on_action", false, args),
         }
-        self.call_hook(cx, "on_action", false, move |lua| Ok(mv(vec![Value::String(lua.create_string(&id_s)?)])))
     }
 
     fn on_library_action(&mut self, cx: &mut HostCtx, id: &str, book: &Path) -> Result<()> {
-        let (id_s, book_s) = (id.to_string(), book.display().to_string());
-        let args = move |lua: &Lua| Ok(mv(vec![Value::String(lua.create_string(&book_s)?), Value::String(lua.create_string(&id_s)?)]));
+        let book_s = book.display().to_string();
+        let args = |lua: &Lua| Ok(mv(vec![Value::String(lua.create_string(&book_s)?), Value::String(lua.create_string(id)?)]));
         if let Some(f) = self.state.handlers.get(id).cloned() {
             return self.call_fn(cx, f, args);
         }
         if self.hook("on_library_action").is_some() {
-            return self.call_hook(cx, "on_library_action", false, move |lua| {
+            return self.call_hook(cx, "on_library_action", false, |lua| {
                 let mut a = args(lua)?.into_vec();
                 a.swap(0, 1);
                 Ok(mv(a))
@@ -746,27 +747,25 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_ui_result(&mut self, cx: &mut HostCtx, id: u32, result: &str) -> Result<()> {
-        let r = result.to_string();
-        let kind = self.state.ui.get(&id).map(|(k, _)| *k);
-        let callback = match kind {
-            Some(UiKind::Viewer) if result != "closed" => self.state.ui.get(&id).map(|(_, f)| f.clone()),
+        // A viewer's callback stays for further link taps until it is closed.
+        let callback = match self.state.ui.get(&id) {
+            Some((UiKind::Viewer, f)) if result != "closed" => Some(f.clone()),
             Some(_) => self.state.ui.remove(&id).map(|(_, f)| f),
             None => None,
         };
         match callback {
-            Some(f) => self.call_fn(cx, f, move |lua| Ok(mv(vec![Value::String(lua.create_string(&r)?)]))),
-            None => self.call_hook(cx, "on_ui_result", false, move |lua| Ok(mv(vec![Value::Integer(id as i64), Value::String(lua.create_string(&r)?)]))),
+            Some(f) => self.call_fn(cx, f, |lua| Ok(mv(vec![Value::String(lua.create_string(result)?)]))),
+            None => self.call_hook(cx, "on_ui_result", false, |lua| Ok(mv(vec![Value::Integer(id as i64), Value::String(lua.create_string(result)?)]))),
         }
     }
 
     fn on_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
         let Some(call) = self.state.http.get_mut(&id) else {
-            let ev = ev.clone();
-            return self.call_hook(cx, "on_http", false, move |lua| Ok(mv(vec![Value::Integer(id as i64), Value::Table(http_event_table(lua, &ev, None, &[])?)])));
+            return self.call_hook(cx, "on_http", false, |lua| Ok(mv(vec![Value::Integer(id as i64), Value::Table(http_event_table(lua, ev, None, &[])?)])));
         };
         if let HttpEvent::Response { status, headers } = ev {
             call.status = Some(*status);
-            call.headers = headers.clone();
+            call.headers = headers.as_slice().into();
             if call.whole {
                 return Ok(());
             }
@@ -777,8 +776,7 @@ impl Plugin for LuaPlugin {
             self.state.http.remove(&id);
         }
         let Some(f) = callback else { return Ok(()) };
-        let ev = ev.clone();
-        self.call_fn(cx, f, move |lua| Ok(mv(vec![Value::Table(http_event_table(lua, &ev, status, &headers)?)])))
+        self.call_fn(cx, f, |lua| Ok(mv(vec![Value::Table(http_event_table(lua, ev, status, &headers)?)])))
     }
 }
 
@@ -892,13 +890,18 @@ impl Args<'_> {
 fn soft<T>(lua: &Lua, r: Result<T>, ok: impl FnOnce(&Lua, T) -> mlua::Result<MultiValue>) -> mlua::Result<MultiValue> {
     match r {
         Ok(v) => ok(lua, v),
-        Err(e @ (PluginError::Unsupported(_) | PluginError::Failed(_))) => Ok(mv(vec![Value::Nil, Value::String(lua.create_string(e.to_string())?)])),
+        Err(e @ (PluginError::Unsupported(_) | PluginError::Failed(_))) => nil_msg(lua, e.to_string()),
         Err(e) => Err(rt(e.to_string())),
     }
 }
 
 fn one(v: impl mlua::IntoLua, lua: &Lua) -> mlua::Result<MultiValue> {
     Ok(mv(vec![v.into_lua(lua)?]))
+}
+
+/// The Lua convention for a soft failure: `nil, message`.
+fn nil_msg(lua: &Lua, msg: impl AsRef<[u8]>) -> mlua::Result<MultiValue> {
+    Ok(mv(vec![Value::Nil, Value::String(lua.create_string(msg)?)]))
 }
 
 fn host<'c, 'a, 'b>(cx: &'c mut Cx<'a, 'b>, fname: &str) -> mlua::Result<&'c mut HostCtx<'b>> {
@@ -908,7 +911,12 @@ fn host<'c, 'a, 'b>(cx: &'c mut Cx<'a, 'b>, fname: &str) -> mlua::Result<&'c mut
     }
 }
 
-fn ui<'c>(cx: &'c mut Cx<'_, '_>, fname: &str) -> mlua::Result<&'c mut dyn UiHost> {
+/// The UI for one request, counted against [`CallCaps::ui`].
+fn ui<'c>(cx: &'c mut Cx<'_, '_>, spent: &mut Spent, fname: &str) -> mlua::Result<&'c mut dyn UiHost> {
+    spent.ui += 1;
+    if spent.ui > CALL_CAPS.ui {
+        return Err(rt(format!("ink.{fname}: too many UI requests in one call (at most {})", CALL_CAPS.ui)));
+    }
     host(cx, fname)?.ui().map_err(|e| rt(format!("ink.{fname}: {e}")))
 }
 
@@ -920,6 +928,17 @@ fn pos_arg(cx: &mut Cx, a: &Args, i: usize) -> mlua::Result<Result<Position>> {
             Err(e) => Err(e),
         },
     })
+}
+
+/// A Lua sequence with one table per item, filled by `row`.
+fn rows<T>(lua: &Lua, items: &[T], row: impl Fn(&Table, &T) -> mlua::Result<()>) -> mlua::Result<MultiValue> {
+    let t = lua.create_table_with_capacity(items.len(), 0)?;
+    for (i, item) in items.iter().enumerate() {
+        let r = lua.create_table()?;
+        row(&r, item)?;
+        t.raw_set(i + 1, r)?;
+    }
+    one(t, lua)
 }
 
 fn metadata_table(lua: &Lua, m: &Metadata) -> mlua::Result<Table> {
@@ -1007,66 +1026,57 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
                 return Err(rt(format!("ink.{n} works only while the plugin loads (main.lua or on_load)")));
             };
             let id = a.str(0)?;
-            let handler_at = |i: usize| a.opt_fn(i);
-            match n {
+            // Each call takes (id, label or slot, ...) and an optional handler function at
+            // the index it returns.
+            let handler_at = match n {
                 "register.menu_item" => {
                     let order = a.opt_int(2)?.unwrap_or(0) as i32;
                     reg.menu_item(&id, &a.str(1)?, order);
-                    if let Some(f) = handler_at(3)? {
-                        state.handlers.insert(id, f);
-                    }
+                    3
                 }
                 "register.selection_action" => {
                     reg.selection_action(&id, &a.str(1)?);
-                    if let Some(f) = handler_at(2)? {
-                        state.handlers.insert(id, f);
-                    }
+                    2
                 }
                 "register.gesture" => {
                     let label = a.opt_str(2)?.unwrap_or_else(|| id.clone());
                     reg.gesture(&id, &a.str(1)?, &label);
-                    if let Some(f) = handler_at(3)? {
-                        state.handlers.insert(id, f);
-                    }
+                    3
                 }
                 "register.action" => {
                     reg.action(&id, &a.str(1)?);
-                    if let Some(f) = handler_at(2)? {
-                        state.handlers.insert(id, f);
-                    }
+                    2
                 }
                 "register.settings_page" => {
                     reg.settings_page(&id, &a.str(1)?);
-                    if let Some(f) = handler_at(2)? {
-                        state.handlers.insert(format!("settings:{id}"), f);
-                    }
+                    2
                 }
                 "register.library_action" => {
                     reg.library_action(&id, &a.str(1)?);
-                    if let Some(f) = handler_at(2)? {
-                        state.handlers.insert(id, f);
-                    }
+                    2
                 }
                 "register.control_tile" => {
                     let icon = a.opt_str(2)?.unwrap_or_else(|| "info".into());
                     reg.control_tile(&id, &a.str(1)?, &icon);
-                    if let Some(f) = handler_at(3)? {
-                        state.handlers.insert(id, f);
-                    }
+                    3
                 }
                 "register.library_entry" => {
                     let icon = a.opt_str(2)?.unwrap_or_else(|| "more".into());
                     reg.library_entry(&id, &a.str(1)?, &icon);
-                    if let Some(f) = handler_at(3)? {
-                        state.handlers.insert(id, f);
-                    }
+                    3
                 }
                 "register.status_widget" => {
                     let slot_name = a.opt_str(1)?.unwrap_or_else(|| "right".into());
                     let slot = StatusSlot::parse(&slot_name).ok_or_else(|| rt(format!("ink.{n}: slot must be left, center or right, not {slot_name:?}")))?;
                     reg.status_widget(&id, slot, &a.opt_str(2)?.unwrap_or_default());
+                    return Ok(mv(vec![]));
                 }
                 _ => return Err(rt(format!("ink.{n} does not exist"))),
+            };
+            if let Some(f) = a.opt_fn(handler_at)? {
+                // A settings page is opened as the action `settings:<id>`.
+                let key = if n == "register.settings_page" { format!("settings:{id}") } else { id };
+                state.handlers.insert(key, f);
             }
             Ok(mv(vec![]))
         }
@@ -1079,7 +1089,7 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
             let s = a.str(0)?;
             match serde_json::from_str::<serde_json::Value>(&s) {
                 Ok(j) => Ok(mv(vec![json_to_lua(lua, &j)?])),
-                Err(e) => Ok(mv(vec![Value::Nil, Value::String(lua.create_string(format!("bad JSON: {e}"))?)])),
+                Err(e) => nil_msg(lua, format!("bad JSON: {e}")),
             }
         }
 
@@ -1095,16 +1105,12 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
         "doc.toc" => {
             let r = host(cx, name)?.document().map(|d| d.toc());
             soft(lua, r, |lua, toc| {
-                let t = lua.create_table()?;
-                for (i, e) in toc.iter().enumerate() {
-                    let row = lua.create_table()?;
+                rows(lua, &toc, |row, e| {
                     row.set("title", e.title.as_str())?;
                     row.set("level", e.level)?;
                     row.set("position", e.position.to_string())?;
-                    row.set("page", e.page.map(|p| p + 1))?;
-                    t.raw_set(i + 1, row)?;
-                }
-                one(t, lua)
+                    row.set("page", e.page.map(|p| p + 1))
+                })
             })
         }
         "doc.search" => {
@@ -1112,17 +1118,13 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
             let limit = a.opt_int(1)?.unwrap_or(20).clamp(1, 500) as usize;
             let r = host(cx, name)?.document().and_then(|d| d.search(&q, limit));
             soft(lua, r, |lua, hits| {
-                let t = lua.create_table()?;
-                for (i, h) in hits.iter().enumerate() {
-                    let row = lua.create_table()?;
+                rows(lua, &hits, |row, h| {
                     row.set("position", h.position.to_string())?;
                     row.set("page", h.page.map(|p| p + 1))?;
                     row.set("excerpt", h.excerpt.as_str())?;
                     row.set("match_start", h.matched.start + 1)?;
-                    row.set("match_end", h.matched.end)?;
-                    t.raw_set(i + 1, row)?;
-                }
-                one(t, lua)
+                    row.set("match_end", h.matched.end)
+                })
             })
         }
         "doc.read_around" => {
@@ -1139,24 +1141,20 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
                 Err(e) => Err(e),
             };
             soft(lua, r, |lua, links| {
-                let t = lua.create_table()?;
-                for (i, l) in links.iter().enumerate() {
-                    let row = lua.create_table()?;
+                rows(lua, &links, |row, l| {
                     row.set("text", l.text.as_str())?;
                     row.set("footnote", l.footnote)?;
                     match &l.target {
                         LinkTarget::Internal(p) => {
                             row.set("internal", true)?;
-                            row.set("position", p.to_string())?;
+                            row.set("position", p.to_string())
                         }
                         LinkTarget::External(u) => {
                             row.set("internal", false)?;
-                            row.set("url", u.as_str())?;
+                            row.set("url", u.as_str())
                         }
                     }
-                    t.raw_set(i + 1, row)?;
-                }
-                one(t, lua)
+                })
             })
         }
         "doc.current_position" => {
@@ -1192,28 +1190,24 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
         }
 
         // UI.
-        n if n.starts_with("ui.") && !matches!(n, "ui.toast" | "ui.notify" | "ui.status" | "ui.tile_state" | "ui.dialog" | "ui.menu" | "ui.view" | "ui.input") => Err(rt(format!("ink.{n} does not exist"))),
-        n if n.starts_with("ui.") && spend(&mut state.spent.ui, CALL_CAPS.ui, "UI requests").is_err() => {
-            Err(rt(format!("ink.{n}: too many UI requests in one call (at most {})", CALL_CAPS.ui)))
-        }
         "ui.toast" => {
             let text = clip(a.str(0)?, MAX_SHORT_TEXT);
-            ui(cx, name)?.toast(&text);
+            ui(cx, &mut state.spent, name)?.toast(&text);
             Ok(mv(vec![]))
         }
         "ui.notify" => {
             let text = clip(a.str(0)?, MAX_SHORT_TEXT);
-            ui(cx, name)?.notify(&text);
+            ui(cx, &mut state.spent, name)?.notify(&text);
             Ok(mv(vec![]))
         }
         "ui.status" => {
             let (id, text) = (a.str(0)?, clip(a.opt_str(1)?.unwrap_or_default(), MAX_SHORT_TEXT));
-            ui(cx, name)?.status(&id, &text);
+            ui(cx, &mut state.spent, name)?.status(&id, &text);
             Ok(mv(vec![]))
         }
         "ui.tile_state" => {
             let (id, text) = (a.str(0)?, clip(a.opt_str(1)?.unwrap_or_default(), MAX_SHORT_TEXT));
-            ui(cx, name)?.tile_state(&id, &text);
+            ui(cx, &mut state.spent, name)?.tile_state(&id, &text);
             Ok(mv(vec![]))
         }
         "ui.dialog" | "ui.menu" | "ui.view" | "ui.input" => {
@@ -1226,7 +1220,7 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
                 }
                 Ok(t)
             };
-            let u = ui(cx, name)?;
+            let u = ui(cx, &mut state.spent, name)?;
             let (kind, req): (UiKind, Box<dyn FnOnce(u32) -> UiRequest>) = match name {
                 "ui.dialog" => {
                     let body = long(opts.get::<Option<String>>("body")?.or(opts.get::<Option<String>>("text")?).unwrap_or_default())?;
@@ -1283,7 +1277,7 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
             match r {
                 Ok(()) => one(true, lua),
                 Err(e @ PluginError::Permission(_)) => Err(rt(format!("ink.{name}: {e}"))),
-                Err(e) => Ok(mv(vec![Value::Nil, Value::String(lua.create_string(e.to_string())?)])),
+                Err(e) => nil_msg(lua, e.to_string()),
             }
         }
         "files.read" | "files.write" | "files.append" | "files.remove" | "files.exists" | "files.list" => {
@@ -1298,7 +1292,7 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
                 None => dir.clone(),
             };
             let io = |r: std::io::Result<MultiValue>| -> mlua::Result<MultiValue> {
-                r.or_else(|e| Ok(mv(vec![Value::Nil, Value::String(lua.create_string(format!("{}: {e}", fname.as_deref().unwrap_or("data")))?)])))
+                r.or_else(|e| nil_msg(lua, format!("{}: {e}", fname.as_deref().unwrap_or("data"))))
             };
             match name {
                 "files.read" => match std::fs::read(&path) {
@@ -1321,7 +1315,7 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
                 _ => {
                     let data = a.bytes(1)?;
                     if data.len() > MAX_WRITE {
-                        return Ok(mv(vec![Value::Nil, Value::String(lua.create_string("write larger than 16 MiB")?)]));
+                        return nil_msg(lua, "write larger than 16 MiB");
                     }
                     state.spent.file_bytes += data.len() as u64;
                     if state.spent.file_bytes > CALL_CAPS.file_bytes {
@@ -1383,11 +1377,11 @@ fn dispatch(lua: &Lua, state: &mut State, cx: &mut Cx, name: &str, args: Vec<Val
             let r = host(cx, name)?.start_request(req, mode);
             match r {
                 Ok(id) => {
-                    state.http.insert(id, HttpCall { callback: f, whole: matches!(mode, StreamMode::Whole { .. }), status: None, headers: Vec::new() });
+                    state.http.insert(id, HttpCall { callback: f, whole: matches!(mode, StreamMode::Whole { .. }), status: None, headers: Rc::new([]) });
                     one(id, lua)
                 }
                 Err(e @ PluginError::Permission(_)) => Err(rt(format!("ink.http.request: {e}"))),
-                Err(e) => Ok(mv(vec![Value::Nil, Value::String(lua.create_string(e.to_string())?)])),
+                Err(e) => nil_msg(lua, e.to_string()),
             }
         }
         "http.cancel" => {

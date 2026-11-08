@@ -1,5 +1,6 @@
 use super::*;
 use crate::testutil::{CannedClient, FakeBook};
+use ink_plugin::testing::TempDir;
 use ink_plugin::{MemoryStorage, NetWorker, UiQueue, UiRequest};
 use std::sync::Arc;
 
@@ -39,19 +40,16 @@ struct Env {
     book: FakeBook,
     worker: NetWorker,
     client: Arc<CannedClient>,
-    dir: PathBuf,
+    dir: TempDir,
 }
 
 impl Env {
     fn new(test: &str, toml: &str, answers: &[(u16, &str)]) -> Env {
-        let dir = std::env::temp_dir().join(format!("insightful-plugin-{}-{test}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TempDir::new(&format!("insightful-plugin-{test}"));
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::write(dir.join("data/insightful.toml"), toml).unwrap();
         let client = Arc::new(CannedClient::seq(answers));
-        let mut plugin = InsightfulPlugin::new();
-        plugin.koreader_config = dir.join("no-configuration.lua");
-        plugin.batch_interval = Duration::from_secs(3600);
+        let mut plugin = InsightfulPlugin { koreader_config: dir.join("no-configuration.lua"), batch_interval: Duration::from_secs(3600), ..InsightfulPlugin::default() };
         let mut registry = ink_plugin::Registry::default();
         plugin.on_load(&mut Registrar { plugin: NAME, registry: &mut registry }).unwrap();
         assert_eq!(registry.selection_actions.len(), 1, "one popup button (the popup shows 3 for all plugins)");
@@ -540,7 +538,7 @@ fn model_search_errors_offline_and_close() {
     // Closing the book cancels a pending list; a stale id is ignored.
     env.answer(MENU_MODEL, "list");
     env.with(|p, cx| p.on_close(cx)).unwrap();
-    assert!(env.plugin.models_req.is_none());
+    assert!(env.plugin.models_req.jobs().next().is_none());
     let n = env.ui.0.len();
     env.with(|p, cx| p.on_http(cx, 999, &HttpEvent::Done { body: Some(b"{}".to_vec()) })).unwrap();
     env.pump();

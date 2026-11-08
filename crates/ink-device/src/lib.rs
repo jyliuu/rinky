@@ -47,6 +47,7 @@ pub mod input;
 pub mod journal;
 pub mod light;
 pub mod lipc;
+pub mod netman;
 pub use ink_platform as platform;
 pub mod screen;
 pub mod screensaver;
@@ -69,6 +70,7 @@ pub use geom::{Point, Rect, Rotation, Size};
 pub use input::{Input, InputEvent, Key, KeyEvent, PowerEvent, Timestamp, TouchContact, TouchFrame, TouchPhase};
 pub use screen::{RefreshClass, Screen, Wave};
 pub use services::{Battery, BatteryState, Clock, Light, Power, Usb, UsbState, Wifi, WifiNetwork, WifiState};
+pub use netman::{NetEvent, NetStatus};
 
 /// Errors from the device layer.
 #[derive(Debug, thiserror::Error)]

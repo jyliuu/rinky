@@ -137,6 +137,9 @@ pub enum PowerEvent {
     TimeChanged(i64),
     /// Wi-Fi connection manager state changed (`CONNECTED`, `PENDING`, `NA`, ...).
     WifiState(String),
+    /// The network worker's news ([`crate::netman`]): status changes, failed joins,
+    /// finished scans, "Wi-Fi was on" to keep.
+    Network(crate::netman::NetEvent),
     /// Any other event from a subscribed lipc publisher (`com.lab126.wifid`, `cmd`,
     /// `volumd`, `hal`), with the publisher's full name.
     Lipc {
@@ -234,23 +237,6 @@ pub fn wait_step(caller: Option<Instant>, deadline: Instant, now: Instant, polle
     }
     let end = caller.map_or(deadline, |c| c.min(deadline));
     WaitStep::Poll(end.saturating_duration_since(now))
-}
-
-/// An [`Input`] fed from a list, for unit tests.
-#[derive(Default)]
-pub struct QueueInput {
-    /// Events returned in order; `Quit` is returned once the queue is empty.
-    pub events: std::collections::VecDeque<InputEvent>,
-}
-
-impl Input for QueueInput {
-    fn next_event(&mut self, _timeout: Option<Duration>) -> Result<Option<InputEvent>> {
-        Ok(Some(self.events.pop_front().unwrap_or(InputEvent::Quit)))
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

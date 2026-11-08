@@ -1,11 +1,10 @@
-//! Battery and charger state from sysfs (no child process), powerd's `battStateInfo`
-//! JSON as a fallback, and the low-battery monitor.
+//! Battery and charger state from sysfs (no child process) and the low-battery
+//! monitor.
 //!
 //! PW12 / emulator (5.19.5): `/sys/class/power_supply/bd71827_bat/{capacity, status,
 //! charging, temp, voltage_now}` (KOReader reads the same files), chargers
-//! `bd71827_ac` (type `Mains`) and `Wireless`; powerd `battLevel`, `isCharging`,
-//! `battStateInfo` = `{"battInfo":[{"type":"PRIMARY","cap":59,"charging":false}],
-//! "state":"STANDALONE","aggr_batt":59,"usb":false}`.
+//! `bd71827_ac` (type `Mains`) and `Wireless`. Without a battery supply the Kindle
+//! services fall back to powerd's `battLevel` and `isCharging`.
 
 use crate::sysfs::SysRoot;
 
@@ -40,7 +39,11 @@ pub fn supplies(root: &SysRoot) -> Vec<(String, String)> {
 
 /// True when any charger supply (not a battery, not the moisture sensor) is online.
 pub fn external_power(root: &SysRoot) -> bool {
-    supplies(root)
+    any_charger_online(root, &supplies(root))
+}
+
+fn any_charger_online(root: &SysRoot, supplies: &[(String, String)]) -> bool {
+    supplies
         .iter()
         .filter(|(_, t)| matches!(t.as_str(), "Mains" | "USB" | "USB_DCP" | "USB_CDP" | "USB_ACA" | "Wireless"))
         .any(|(n, _)| root.read_int(&format!("{PSY}/{n}/online")).unwrap_or(0) == 1)
@@ -53,14 +56,12 @@ pub fn charging(root: &SysRoot) -> bool {
 
 /// Reads the first `Battery` supply.
 pub fn read_sysfs(root: &SysRoot) -> Option<BatteryInfo> {
-    let (name, _) = supplies(root).into_iter().find(|(_, t)| t == "Battery")?;
+    let all = supplies(root);
+    let (name, _) = all.iter().find(|(_, t)| t == "Battery")?;
     let base = format!("{PSY}/{name}");
     let percent = root.read_int(&format!("{base}/capacity")).ok()?.clamp(0, 100) as u8;
     let status = root.read(&format!("{base}/status")).unwrap_or_default();
-    let charging = match root.read_int(&format!("{base}/charging")) {
-        Ok(v) => v != 0,
-        Err(_) => status == "Charging",
-    } || status == "Charging";
+    let charging = status == "Charging" || root.read_int(&format!("{base}/charging")).is_ok_and(|v| v != 0);
     Some(BatteryInfo {
         percent,
         charging,
@@ -68,23 +69,9 @@ pub fn read_sysfs(root: &SysRoot) -> Option<BatteryInfo> {
         // Tenths of a degree, as power_supply reports.
         temperature_c: root.read_int(&format!("{base}/temp")).ok().map(|t| t as f32 / 10.0),
         voltage_mv: root.read_int(&format!("{base}/voltage_now")).ok().map(|uv| (uv / 1000).max(0) as u32),
-        external_power: external_power(root),
+        external_power: any_charger_online(root, &all),
         source: format!("sysfs:{name}"),
     })
-}
-
-/// Parses powerd's `battStateInfo`: `(percent, charging, usb)`.
-pub fn parse_batt_state_info(json: &str) -> Option<(u8, bool, bool)> {
-    fn field<'a>(s: &'a str, key: &str) -> Option<&'a str> {
-        let i = s.find(&format!("\"{key}\""))? + key.len() + 2;
-        let rest = s[i..].trim_start().strip_prefix(':')?.trim_start();
-        let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
-        Some(rest[..end].trim())
-    }
-    let cap = field(json, "aggr_batt").or_else(|| field(json, "cap"))?.parse::<i64>().ok()?.clamp(0, 100) as u8;
-    let charging = field(json, "charging").map(|v| v == "true").unwrap_or(false);
-    let usb = field(json, "usb").map(|v| v == "true").unwrap_or(false);
-    Some((cap, charging, usb))
 }
 
 /// Emits a low-battery warning once when the charge falls to `threshold` while not
@@ -175,15 +162,6 @@ mod tests {
         assert!(b.charging && b.external_power);
         std::fs::remove_dir_all(d).unwrap();
         assert!(read_sysfs(&SysRoot::at("/nonexistent-ink")).is_none());
-    }
-
-    #[test]
-    fn powerd_batt_state_info() {
-        let j = r#"{"battInfo":[{"type":"PRIMARY","cap":59,"charging":false}],"state":"STANDALONE","aggr_batt":59,"usb":false}"#;
-        assert_eq!(parse_batt_state_info(j), Some((59, false, false)));
-        let j = r#"{"battInfo":[{"type":"PRIMARY","cap":80,"charging":true}],"aggr_batt":81,"usb":true}"#;
-        assert_eq!(parse_batt_state_info(j), Some((81, true, true)));
-        assert_eq!(parse_batt_state_info("garbage"), None);
     }
 
     #[test]

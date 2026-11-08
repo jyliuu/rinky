@@ -79,9 +79,7 @@ pub struct VocabDb {
 impl VocabDb {
     /// Opens (creating if needed) the database at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
-        }
+        crate::create_parent_dir(path)?;
         Self::init(Connection::open(path)?)
     }
 
@@ -90,14 +88,7 @@ impl VocabDb {
     /// the new name is returned. Other errors (locked, a newer schema) are returned and
     /// nothing is moved.
     pub fn open_or_recover(path: &Path) -> Result<(Self, Option<PathBuf>)> {
-        match Self::open(path) {
-            Ok(db) => Ok((db, None)),
-            Err(StoreError::Sqlite(e)) if crate::is_damaged_sqlite(&e) => {
-                let Some(moved) = crate::set_aside_database(path) else { return Err(StoreError::Sqlite(e)) };
-                Ok((Self::open(path)?, Some(moved)))
-            }
-            Err(e) => Err(e),
-        }
+        crate::open_db_or_recover(path, Self::open)
     }
 
     /// An in-memory database (tests).
@@ -139,23 +130,19 @@ impl VocabDb {
 
     /// The newest `limit` lookups, newest first.
     pub fn lookups(&self, limit: usize) -> Result<Vec<Lookup>> {
-        let mut st = self.conn.prepare("SELECT word, form, book_md5, book_title, time, found, context FROM lookup ORDER BY time DESC, id DESC LIMIT ?1")?;
-        let rows = st.query_map([limit as i64], |r| {
+        let sql = "SELECT word, form, book_md5, book_title, time, found, context FROM lookup ORDER BY time DESC, id DESC LIMIT ?1";
+        crate::query_all(&self.conn, sql, [limit as i64], |r| {
             Ok(Lookup { word: r.get(0)?, form: r.get(1)?, book_md5: r.get(2)?, book_title: r.get(3)?, time: r.get::<_, i64>(4)?.max(0) as u64, found: r.get::<_, i64>(5)? != 0, context: r.get(6)? })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })
     }
 
     /// Words that were found, grouped by lowercase form, most recent first.
     pub fn words(&self) -> Result<Vec<VocabWord>> {
-        let mut st = self.conn.prepare(
-            "WITH k AS (SELECT lower(CASE WHEN form <> '' THEN form ELSE word END) AS w, time, id, book_title FROM lookup WHERE found = 1)
+        let sql = "WITH k AS (SELECT lower(CASE WHEN form <> '' THEN form ELSE word END) AS w, time, id, book_title FROM lookup WHERE found = 1)
              SELECT w, count(*), min(time), max(time),
                     (SELECT book_title FROM k k2 WHERE k2.w = k.w ORDER BY time DESC, id DESC LIMIT 1)
-             FROM k GROUP BY w ORDER BY max(time) DESC, w",
-        )?;
-        let rows = st.query_map([], |r| Ok(VocabWord { word: r.get(0)?, count: r.get::<_, i64>(1)? as u64, first_time: r.get::<_, i64>(2)?.max(0) as u64, last_time: r.get::<_, i64>(3)?.max(0) as u64, last_title: r.get(4)? }))?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+             FROM k GROUP BY w ORDER BY max(time) DESC, w";
+        crate::query_all(&self.conn, sql, [], |r| Ok(VocabWord { word: r.get(0)?, count: r.get::<_, i64>(1)? as u64, first_time: r.get::<_, i64>(2)?.max(0) as u64, last_time: r.get::<_, i64>(3)?.max(0) as u64, last_title: r.get(4)? }))
     }
 }
 

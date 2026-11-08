@@ -14,19 +14,10 @@ impl LibraryScreen {
     /// The rows of the menu for book `p`: (label, action).
     pub(super) fn book_menu_items(&self, p: &std::path::Path) -> Vec<(String, String)> {
         let status = self.lib.as_ref().and_then(|l| l.index.get(p)).map(|b| b.status);
-        let mut items = vec![("Open".to_string(), "open".to_string()), ("Book details".to_string(), "details".to_string())];
-        if status == Some(ReadingStatus::Complete) {
-            items.push(("Mark as unread".into(), "unread".into()));
-        } else {
-            items.push(("Mark as finished".into(), "finished".into()));
-        }
-        items.push(("Add to collection…".into(), "collections".into()));
-        items.push(("Export highlights".into(), "export".into()));
-        if !self.plugin_actions.is_empty() {
-            items.push(("More actions…".into(), "plugins".into()));
-        }
-        items.push(("Delete…".into(), "delete".into()));
-        items
+        let status = if status == Some(ReadingStatus::Complete) { ("Mark as unread", "unread") } else { ("Mark as finished", "finished") };
+        let plugins = (!self.plugin_actions.is_empty()).then_some(("More actions…", "plugins"));
+        let rows = [Some(("Open", "open")), Some(("Book details", "details")), Some(status), Some(("Add to collection…", "collections")), Some(("Export highlights", "export")), plugins, Some(("Delete…", "delete"))];
+        super::menu_items(&rows.into_iter().flatten().collect::<Vec<_>>())
     }
 
     /// Opens the menu of book `p` next to its cover or row.
@@ -54,7 +45,7 @@ impl LibraryScreen {
                 let entry = self.lib.as_ref().and_then(|l| l.index.get(&p)).cloned();
                 let paths = self.paths.clone();
                 self.toast = Some(match (entry, paths) {
-                    (Some(e), Some(paths)) => crate::export::export_one(&paths, &e, &ink_store::export::Locator::none()),
+                    (Some(e), Some(paths)) => crate::export::export_one(&paths, &e, &ink_store::export::Locator::none(), self.export_format),
                     _ => "Export failed: the library is not loaded".to_string(),
                 });
                 self.redraw();

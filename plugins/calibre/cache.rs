@@ -19,6 +19,17 @@ pub fn slim(book: &Value) -> Value {
     Value::Object(m)
 }
 
+/// Writes `data` to `path` through `<name>.json.tmp` and a rename, making the folder
+/// when it is missing.
+pub fn write_json(path: &Path, data: Vec<u8>) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// The book list.
 #[derive(Debug, Default)]
 pub struct Cache {
@@ -54,13 +65,7 @@ impl Cache {
 
     /// Writes the list (temp file, then rename).
     pub fn save(&self) -> std::io::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        let text = serde_json::to_vec_pretty(&Value::Array(self.books.clone())).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, &self.path)
+        write_json(&self.path, serde_json::to_vec_pretty(&self.books).map_err(std::io::Error::other)?)
     }
 
     /// Index of the book with `lpath`.

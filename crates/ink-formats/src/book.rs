@@ -189,7 +189,8 @@ impl std::fmt::Debug for Book {
 /// tolerance for mismatched end tags, same depth limit), but only element names, the
 /// child order and the wanted `id`/`name` values are kept: no text, no other
 /// attributes. Names are interned, so a 100 000-element chapter allocates a few
-/// hundred small strings instead of one per element, text node and attribute.
+/// hundred small strings instead of one per element, text node and attribute. The walk
+/// then descends only into elements with a wanted id below them.
 fn id_paths(xhtml: &str, wanted: &HashSet<&str>) -> HashMap<String, Vec<Step>> {
     let mut out = HashMap::new();
     if wanted.is_empty() {
@@ -200,7 +201,7 @@ fn id_paths(xhtml: &str, wanted: &HashSet<&str>) -> HashMap<String, Vec<Step>> {
     let body = t.find(root, t.body_name);
     if let Some(body) = body {
         let mut path = Vec::new();
-        t.walk(body, &mut path, wanted, &mut out);
+        t.walk(body, &mut path, &mut out);
     }
     out
 }
@@ -213,6 +214,8 @@ struct SkelNode {
     children: Vec<u32>,
     /// The first `id` / `name` attribute (local name), when its value is wanted.
     ids: [Option<String>; 2],
+    /// An element below this one has a wanted id.
+    wanted_below: bool,
 }
 
 /// The element structure of an XHTML source, as [`xml::parse`] would nest it.
@@ -229,25 +232,17 @@ impl Skeleton {
         use quick_xml::events::Event;
         let mut r = quick_xml::Reader::from_str(src);
         r.config_mut().check_end_names = false;
-        let mut nodes = vec![SkelNode { name: u32::MAX, children: Vec::new(), ids: [None, None] }];
+        let mut nodes = vec![SkelNode { name: u32::MAX, children: Vec::new(), ids: [None, None], wanted_below: false }];
         let mut stack: Vec<u32> = vec![0];
         let mut skipped = 0usize;
-        // Local name as `xml::qname_parts` takes it: after the first `:`.
-        fn local(q: &[u8]) -> std::borrow::Cow<'_, str> {
-            let s = String::from_utf8_lossy(q);
-            match s {
-                std::borrow::Cow::Borrowed(b) => std::borrow::Cow::Borrowed(b.split_once(':').map_or(b, |(_, l)| l)),
-                std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o.split_once(':').map_or(o.as_str(), |(_, l)| l).to_string()),
-            }
-        }
         struct Names {
             list: Vec<String>,
             ids: HashMap<String, u32>,
         }
         let mut nm = Names { list: Vec::new(), ids: HashMap::new() };
-        fn add(e: &quick_xml::events::BytesStart, nodes: &mut Vec<SkelNode>, parent: u32, nm: &mut Names, wanted: &HashSet<&str>) -> u32 {
+        fn add(e: &quick_xml::events::BytesStart, nodes: &mut Vec<SkelNode>, stack: &[u32], nm: &mut Names, wanted: &HashSet<&str>) -> u32 {
             let q = e.name();
-            let l = local(q.as_ref());
+            let l = xml::local_name(q.as_ref());
             let name = match nm.ids.get(l.as_ref()) {
                 Some(&n) => n,
                 None => {
@@ -268,17 +263,26 @@ impl Skeleton {
                 if std::mem::replace(&mut seen[k], true) {
                     continue; // `Element::attr` takes the first one
                 }
+                // Copied only when wanted (some books give every paragraph an id).
                 let v = match a.unescape_value_with(xml::html_entity) {
-                    Ok(v) => v.into_owned(),
-                    Err(_) => String::from_utf8_lossy(&a.value).into_owned(),
+                    Ok(v) => v,
+                    Err(_) => String::from_utf8_lossy(&a.value),
                 };
-                if wanted.contains(v.as_str()) {
-                    ids[k] = Some(v);
+                if wanted.contains(v.as_ref()) {
+                    ids[k] = Some(v.into_owned());
                 }
             }
             let id = nodes.len() as u32;
-            nodes.push(SkelNode { name, children: Vec::new(), ids });
-            nodes[parent as usize].children.push(id);
+            if ids.iter().any(Option::is_some) {
+                // The open elements are this one's ancestors.
+                for &a in stack.iter().rev() {
+                    if std::mem::replace(&mut nodes[a as usize].wanted_below, true) {
+                        break;
+                    }
+                }
+            }
+            nodes.push(SkelNode { name, children: Vec::new(), ids, wanted_below: false });
+            nodes[*stack.last().expect("document") as usize].children.push(id);
             id
         }
         loop {
@@ -297,12 +301,12 @@ impl Skeleton {
                     if stack.len() > xml::MAX_DEPTH {
                         skipped += 1;
                     } else {
-                        let id = add(&e, &mut nodes, *stack.last().expect("document"), &mut nm, wanted);
+                        let id = add(&e, &mut nodes, &stack, &mut nm, wanted);
                         stack.push(id);
                     }
                 }
                 Event::Empty(e) => {
-                    add(&e, &mut nodes, *stack.last().expect("document"), &mut nm, wanted);
+                    add(&e, &mut nodes, &stack, &mut nm, wanted);
                 }
                 Event::End(e) => {
                     if skipped > 0 {
@@ -310,7 +314,7 @@ impl Skeleton {
                         continue;
                     }
                     let q = e.name();
-                    let l = local(q.as_ref());
+                    let l = xml::local_name(q.as_ref());
                     let Some(&name) = nm.ids.get(l.as_ref()) else { continue };
                     if let Some(pos) = stack.iter().rposition(|&n| nodes[n as usize].name == name) {
                         if pos > 0 {
@@ -334,7 +338,9 @@ impl Skeleton {
         self.nodes[n as usize].children.iter().find_map(|&c| self.find(c, name))
     }
 
-    fn walk(&self, el: u32, path: &mut Vec<Step>, wanted: &HashSet<&str>, out: &mut HashMap<String, Vec<Step>>) {
+    /// Records the element path of every wanted id below `el`; `path` holds the steps
+    /// down to `el` as (interned name, index).
+    fn walk(&self, el: u32, path: &mut Vec<(u32, Option<u32>)>, out: &mut HashMap<String, Vec<Step>>) {
         let kids = &self.nodes[el as usize].children;
         // Siblings per name, counted once (a chapter body can have 50 000 paragraphs).
         let mut totals: HashMap<u32, u32> = HashMap::new();
@@ -346,15 +352,20 @@ impl Skeleton {
             let node = &self.nodes[k as usize];
             let n = seen.entry(node.name).or_insert(0);
             *n += 1;
-            let index = *n;
-            let total = totals[&node.name];
-            path.push(Step { name: self.names[node.name as usize].clone(), index: (total > 1).then_some(index) });
+            let has_id = node.ids.iter().any(Option::is_some);
+            if !has_id && !node.wanted_below {
+                continue;
+            }
+            path.push((node.name, (totals[&node.name] > 1).then_some(*n)));
             for id in node.ids.iter().flatten() {
-                if wanted.contains(id.as_str()) && !out.contains_key(id) {
-                    out.insert(id.clone(), path.clone());
+                if !out.contains_key(id) {
+                    let steps = path.iter().map(|&(name, index)| Step { name: self.names[name as usize].clone(), index }).collect();
+                    out.insert(id.clone(), steps);
                 }
             }
-            self.walk(k, path, wanted, out);
+            if node.wanted_below {
+                self.walk(k, path, out);
+            }
             path.pop();
         }
     }
@@ -403,19 +414,32 @@ fn walk_ids(el: &Element, path: &mut Vec<Step>, wanted: &HashSet<&str>, out: &mu
 }
 
 /// Resolves targets to positions, parsing each chapter at most once.
-pub struct Resolver<'a> {
-    chapters: Vec<&'a str>,
+pub struct Resolver {
+    /// Number of chapters.
+    chapters: usize,
     cache: HashMap<usize, HashMap<String, Vec<Step>>>,
 }
 
-impl<'a> Resolver<'a> {
+impl Resolver {
     /// Prepares resolution of `targets` in `chapters`.
-    pub fn new<'t>(chapters: &'a [HtmlChapter], targets: impl IntoIterator<Item = &'t Target>) -> Self {
+    pub fn new<'t>(chapters: &[HtmlChapter], targets: impl IntoIterator<Item = &'t Target>) -> Self {
         Self::from_sources(chapters.iter().map(|c| c.html.as_str()).collect(), targets)
     }
 
     /// [`Resolver::new`] over the XHTML sources of the chapters.
-    pub fn from_sources<'t>(chapters: Vec<&'a str>, targets: impl IntoIterator<Item = &'t Target>) -> Self {
+    pub fn from_sources<'t>(chapters: Vec<&str>, targets: impl IntoIterator<Item = &'t Target>) -> Self {
+        Self::from_fn(chapters.len(), |i| chapters[i].len(), |i| chapters[i], targets)
+    }
+
+    /// [`Resolver::from_sources`] over `chapters` chapters whose XHTML `source` gives,
+    /// asked for on the resolving threads and only for chapters with targets. `len` is
+    /// the length of a chapter's source or an estimate of it (it decides on threads).
+    pub fn from_fn<'s, 't>(
+        chapters: usize,
+        len: impl Fn(usize) -> usize,
+        source: impl Fn(usize) -> &'s str + Sync,
+        targets: impl IntoIterator<Item = &'t Target>,
+    ) -> Self {
         let mut wanted: HashMap<usize, HashSet<&str>> = HashMap::new();
         for t in targets {
             if let Some(id) = &t.id {
@@ -423,19 +447,19 @@ impl<'a> Resolver<'a> {
             }
         }
         // Each chapter with targets is parsed once; big books spread that over threads.
-        let jobs: Vec<(usize, HashSet<&str>)> = wanted.into_iter().filter(|(ch, _)| *ch < chapters.len()).collect();
-        let bytes: usize = jobs.iter().map(|(ch, _)| chapters[*ch].len()).sum();
+        let jobs: Vec<(usize, HashSet<&str>)> = wanted.into_iter().filter(|(ch, _)| *ch < chapters).collect();
+        let bytes: usize = jobs.iter().map(|(ch, _)| len(*ch)).sum();
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4);
         let threads = if bytes > 512 * 1024 { cores.min(jobs.len()).max(1) } else { 1 };
         let cache = if threads <= 1 {
-            jobs.into_iter().map(|(ch, ids)| (ch, id_paths(chapters[ch], &ids))).collect()
+            jobs.into_iter().map(|(ch, ids)| (ch, id_paths(source(ch), &ids))).collect()
         } else {
             let per = jobs.len().div_ceil(threads);
-            let chapters = &chapters;
+            let source = &source;
             std::thread::scope(|scope| {
                 let handles: Vec<_> = jobs
                     .chunks(per)
-                    .map(|part| scope.spawn(move || part.iter().map(|(ch, ids)| (*ch, id_paths(chapters[*ch], ids))).collect::<Vec<_>>()))
+                    .map(|part| scope.spawn(move || part.iter().map(|(ch, ids)| (*ch, id_paths(source(*ch), ids))).collect::<Vec<_>>()))
                     .collect();
                 // A panicking part loses its targets (they open at the chapter start).
                 handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
@@ -446,7 +470,7 @@ impl<'a> Resolver<'a> {
 
     /// The xpointer of `t`: the element path when the id is found, else the chapter start.
     pub fn position(&self, t: &Target) -> Position {
-        let n = t.chapter.min(self.chapters.len().saturating_sub(1)) as u32 + 1;
+        let n = t.chapter.min(self.chapters.saturating_sub(1)) as u32 + 1;
         let mut x = XPointer::fragment_start(n);
         if let Some(steps) = t.id.as_ref().and_then(|id| self.cache.get(&t.chapter)?.get(id)) {
             x.steps.extend(steps.iter().cloned());
@@ -455,21 +479,40 @@ impl<'a> Resolver<'a> {
     }
 }
 
-fn flatten(nodes: &[TocNode], level: u8, r: &Resolver, out: &mut Vec<TocEntry>) {
-    flatten_with(nodes, level, &mut |t| r.position(t), out);
+/// Every TOC target (depth first), then every page-list target: the order of
+/// [`assemble`] and of a resolved-TOC cache file.
+fn all_targets<'a>(toc: &'a [TocNode], page_list: &'a [PageTarget]) -> Vec<&'a Target> {
+    fn walk<'a>(nodes: &'a [TocNode], out: &mut Vec<&'a Target>) {
+        for n in nodes {
+            out.extend(&n.target);
+            walk(&n.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(toc, &mut out);
+    out.extend(page_list.iter().map(|p| &p.target));
+    out
 }
 
-/// The flattened TOC with the position of each target from `pos` (called in the order
-/// of [`collect_targets`]).
-fn flatten_with(nodes: &[TocNode], level: u8, pos: &mut dyn FnMut(&Target) -> Position, out: &mut Vec<TocEntry>) {
-    for n in nodes {
-        let mut child_level = level;
-        if let Some(t) = &n.target {
-            out.push(TocEntry { title: n.title.clone(), level, position: pos(t), page: None });
-            child_level = level.saturating_add(1);
+/// The flattened TOC (levels from 0) and the page labels, given the position of each
+/// target of [`all_targets`] in order.
+fn assemble(toc: &[TocNode], page_list: &[PageTarget], positions: Vec<Position>) -> ResolvedToc {
+    fn flatten(nodes: &[TocNode], level: u8, next: &mut dyn FnMut() -> Position, out: &mut Vec<TocEntry>) {
+        for n in nodes {
+            let mut child_level = level;
+            if n.target.is_some() {
+                out.push(TocEntry { title: n.title.clone(), level, position: next(), page: None });
+                child_level = level.saturating_add(1);
+            }
+            flatten(&n.children, child_level, next, out);
         }
-        flatten_with(&n.children, child_level, pos, out);
     }
+    let mut it = positions.into_iter();
+    let mut next = || it.next().unwrap_or_else(|| Position::XPointer(XPointer::fragment_start(1)));
+    let mut entries = Vec::new();
+    flatten(toc, 0, &mut next, &mut entries);
+    let labels = page_list.iter().map(|p| (p.label.clone(), next())).collect();
+    (entries, labels)
 }
 
 /// First line of a resolved-TOC cache file.
@@ -519,26 +562,12 @@ fn write_toc_file(path: &std::path::Path, hash: u64, positions: &[Position]) -> 
     std::fs::rename(&tmp, path)
 }
 
-fn collect_targets<'a>(nodes: &'a [TocNode], out: &mut Vec<&'a Target>) {
-    for n in nodes {
-        if let Some(t) = &n.target {
-            out.push(t);
-        }
-        collect_targets(&n.children, out);
-    }
-}
-
 impl Book {
     /// The flattened TOC (levels from 0) and page labels as xpointer positions.
     pub fn positions(&self) -> (Vec<TocEntry>, Vec<(String, Position)>) {
-        let mut targets = Vec::new();
-        collect_targets(&self.toc, &mut targets);
-        targets.extend(self.page_list.iter().map(|p| &p.target));
-        let r = Resolver::new(&self.chapters, targets);
-        let mut toc = Vec::new();
-        flatten(&self.toc, 0, &r, &mut toc);
-        let labels = self.page_list.iter().map(|p| (p.label.clone(), r.position(&p.target))).collect();
-        (toc, labels)
+        let targets = all_targets(&self.toc, &self.page_list);
+        let r = Resolver::new(&self.chapters, targets.iter().copied());
+        assemble(&self.toc, &self.page_list, targets.iter().map(|t| r.position(t)).collect())
     }
 
     /// Builds the engine document (without the book's TOC; see [`Book::into_document`]).
@@ -554,19 +583,11 @@ impl Book {
         let info = self.info.clone();
         let doc = HtmlDocument::new(self.info.metadata, self.chapters, self.resources)?;
         ink_doc::timing::step("styles+fonts", t);
-        Ok(BookDocument {
-            doc,
-            info,
-            nodes: self.toc,
-            page_list: self.page_list,
-            resolved: std::cell::OnceCell::new(),
-            toc_file: None,
-            interest_set: false,
-        })
+        Ok(BookDocument::new(doc, info, self.toc, self.page_list))
     }
 }
 
-/// The resolved table of contents and the link targets it was resolved from.
+/// The flattened table of contents and the page labels, with xpointer positions.
 type ResolvedToc = (Vec<TocEntry>, Vec<(String, Position)>);
 
 /// [`HtmlDocument`] plus the book's own TOC (NCX/nav, FB2 sections, MOBI NCX), page list
@@ -593,16 +614,19 @@ pub struct BookDocument {
 }
 
 impl BookDocument {
+    /// The engine document `doc` with the book's `info`, TOC and page list.
+    pub(crate) fn new(doc: HtmlDocument, info: BookInfo, nodes: Vec<TocNode>, page_list: Vec<PageTarget>) -> Self {
+        BookDocument { doc, info, nodes, page_list, resolved: std::cell::OnceCell::new(), toc_file: None, interest_set: false }
+    }
+
     /// The resolved TOC and page labels (resolved now when needed).
-    fn resolved(&self) -> &(Vec<TocEntry>, Vec<(String, Position)>) {
+    fn resolved(&self) -> &ResolvedToc {
         self.resolved.get_or_init(|| self.resolve())
     }
 
-    fn resolve(&self) -> (Vec<TocEntry>, Vec<(String, Position)>) {
+    fn resolve(&self) -> ResolvedToc {
         let t = std::time::Instant::now();
-        let mut targets = Vec::new();
-        collect_targets(&self.nodes, &mut targets);
-        targets.extend(self.page_list.iter().map(|p| &p.target));
+        let targets = all_targets(&self.nodes, &self.page_list);
         if targets.is_empty() {
             return (Vec::new(), Vec::new());
         }
@@ -613,7 +637,10 @@ impl BookDocument {
         let positions = match cached {
             Some(p) => p,
             None => {
-                let r = Resolver::from_sources(chapters.iter().map(|c| c.html.as_str()).collect(), targets.iter().copied());
+                // Spine items not read yet are read on the resolving threads, and only
+                // those with targets.
+                let (len, source) = (|i: usize| chapters[i].src_len(), |i: usize| chapters[i].html());
+                let r = Resolver::from_fn(chapters.len(), len, source, targets.iter().copied());
                 let p: Vec<Position> = targets.iter().map(|t| r.position(t)).collect();
                 if let Some(f) = &self.toc_file {
                     if let Err(e) = write_toc_file(f, hash, &p) {
@@ -623,12 +650,9 @@ impl BookDocument {
                 p
             }
         };
-        let mut it = positions.into_iter();
-        let mut toc = Vec::new();
-        flatten_with(&self.nodes, 0, &mut |_| it.next().unwrap_or_else(|| Position::XPointer(XPointer::fragment_start(1))), &mut toc);
-        let labels = self.page_list.iter().map(|p| (p.label.clone(), it.next().unwrap_or_else(|| Position::XPointer(XPointer::fragment_start(1))))).collect();
+        let resolved = assemble(&self.nodes, &self.page_list, positions);
         ink_doc::timing::step(if from_file { "toc cache read" } else { "toc resolve" }, t);
-        (toc, labels)
+        resolved
     }
 }
 
@@ -647,16 +671,6 @@ impl BookDocument {
     /// The engine document.
     pub fn html(&self) -> &HtmlDocument {
         &self.doc
-    }
-
-    /// The engine document, mutable.
-    pub fn html_mut(&mut self) -> &mut HtmlDocument {
-        &mut self.doc
-    }
-
-    /// Unwraps the engine document.
-    pub fn into_html(self) -> HtmlDocument {
-        self.doc
     }
 }
 
@@ -785,6 +799,9 @@ impl Document for BookDocument {
     fn wait_paginated(&mut self, timeout: std::time::Duration) -> bool {
         self.doc.wait_paginated(timeout)
     }
+    fn set_read_ahead(&mut self, on: bool) {
+        self.doc.set_read_ahead(on)
+    }
     fn page_estimate(&self) -> Option<usize> {
         self.doc.page_estimate()
     }
@@ -896,7 +913,7 @@ mod tests {
         }
         let mut chapters = 0;
         for b in books {
-            let book = crate::epub::load(&b).unwrap_or_else(|e| panic!("{}: {e}", b.display()));
+            let book = crate::epub::load(&b, None).unwrap_or_else(|e| panic!("{}: {e}", b.display()));
             for ch in &book.chapters {
                 same_paths(&ch.html, &[]);
                 chapters += 1;
@@ -946,6 +963,27 @@ mod tests {
             assert_eq!(flat(&d.resolved().0), flat(&want_toc), "{} (stale file)", b.display());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolving_reads_only_spine_items_with_targets() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        for name in ["juliet.epub", "formats/epub2-ncx.epub", "formats/epub3-nav.epub"] {
+            let b = root.join(name);
+            let d = crate::epub::open_book(&b, None).unwrap();
+            let (want_toc, want_labels) = crate::load(&b).unwrap().positions();
+            let (toc, labels) = d.resolved();
+            assert_eq!(toc, &want_toc, "{name}");
+            assert_eq!(labels, &want_labels, "{name}");
+            let with_ids: HashSet<usize> = all_targets(&d.nodes, &d.page_list).iter().filter(|t| t.id.is_some()).map(|t| t.chapter).collect();
+            let chapters = &d.doc.book().chapters;
+            let first = chapters.iter().position(|c| !c.html().trim().is_empty()).unwrap();
+            for (i, c) in chapters.iter().enumerate() {
+                // (A spine item missing from the archive is "read" as empty.)
+                let needed = i <= first || with_ids.contains(&i);
+                assert!(needed || !c.is_read() || c.html().is_empty(), "{name}: spine item {i} read without a target in it");
+            }
+        }
     }
 
     #[test]

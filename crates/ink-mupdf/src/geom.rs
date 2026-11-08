@@ -7,7 +7,8 @@
 use ink_device::Rect;
 use ink_doc::Quad;
 
-/// A rectangle with float coordinates (`x1`/`y1` exclusive).
+/// A rectangle with float coordinates (`x1`/`y1` exclusive); also the shim's `ink_rect`.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FRect {
     /// Left.

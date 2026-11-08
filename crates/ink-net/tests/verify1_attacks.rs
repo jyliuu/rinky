@@ -15,7 +15,7 @@ use ink_net::http::{ClientConfig, HttpClient, Request, Response, TlsRoots, UreqC
 use ink_net::kosync::{decide, KoSyncAccount, KoSyncClient, Progress, SyncDecision};
 use ink_net::opds::{fill_template, parse_any, parse_feed, OpdsClient};
 use ink_net::sse::{SseParser, SseReader};
-use ink_net::testserver::{file_bytes, State, TestServer, TEST_CA_PEM};
+use ink_net::testserver::{file_bytes, server_tls_config, State, TestServer, TEST_CA_PEM};
 use ink_net::{CancelToken, NetError};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -24,102 +24,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod common;
+use common::{header_of, serve};
+
 // ---------------------------------------------------------------------------------------
 // Helpers: raw servers.
-
-type Handler = dyn Fn(&mut dyn ReadWrite, String, usize) + Send + Sync;
 
 trait ReadWrite: Read + Write {}
 impl<T: Read + Write> ReadWrite for T {}
 
-/// Reads one request head (up to the blank line).
-fn read_head(s: &mut dyn Read) -> String {
-    let mut buf = Vec::new();
-    let mut b = [0u8; 1];
-    while !buf.ends_with(b"\r\n\r\n") && buf.len() < 65536 {
-        match s.read(&mut b) {
-            Ok(1) => buf.push(b[0]),
-            _ => break,
-        }
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-fn header_of<'a>(head: &'a str, name: &str) -> Option<&'a str> {
-    head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim()))
-}
-
 /// Plain HTTP server; `h(stream, request head, connection number)` runs per connection.
 fn raw_server(h: impl Fn(&mut dyn ReadWrite, String, usize) + Send + Sync + 'static) -> String {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", l.local_addr().unwrap());
-    let h: Arc<Handler> = Arc::new(h);
-    let n = Arc::new(AtomicUsize::new(0));
-    std::thread::spawn(move || {
-        for c in l.incoming() {
-            let Ok(mut s) = c else { continue };
-            let (h, i) = (h.clone(), n.fetch_add(1, Ordering::SeqCst));
-            std::thread::spawn(move || {
-                let _ = s.set_nodelay(true);
-                let head = read_head(&mut s);
-                h(&mut s, head, i);
-            });
-        }
-    });
-    base
-}
-
-fn server_tls_config() -> Arc<rustls::ServerConfig> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-    let mut certs = Vec::new();
-    for item in ureq::tls::parse_pem(include_bytes!("../testdata/tls/test-server.pem")) {
-        if let ureq::tls::PemItem::Certificate(c) = item.unwrap() {
-            certs.push(CertificateDer::from(c.der().to_vec()));
-        }
-    }
-    let mut key = None;
-    for item in ureq::tls::parse_pem(include_bytes!("../testdata/tls/test-server.key.pem")) {
-        if let ureq::tls::PemItem::PrivateKey(k) = item.unwrap() {
-            key = Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(k.der().to_vec())));
-        }
-    }
-    let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(certs, key.unwrap())
-        .unwrap();
-    Arc::new(cfg)
+    serve("http", |tcp| tcp, move |s, head, i| h(s, head, i)).0
 }
 
 /// HTTPS server with the TEST-ONLY certificate. Dropping the stream at the end of the
 /// handler closes TCP without a TLS close_notify (a broken connection).
 fn raw_tls_server(h: impl Fn(&mut dyn ReadWrite, String, usize) + Send + Sync + 'static) -> String {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("https://{}", l.local_addr().unwrap());
-    let cfg = server_tls_config();
-    let h: Arc<Handler> = Arc::new(h);
-    let n = Arc::new(AtomicUsize::new(0));
-    std::thread::spawn(move || {
-        for c in l.incoming() {
-            let Ok(tcp) = c else { continue };
-            let (h, i, cfg) = (h.clone(), n.fetch_add(1, Ordering::SeqCst), cfg.clone());
-            std::thread::spawn(move || {
-                let _ = tcp.set_nodelay(true);
-                let mut s = rustls::StreamOwned::new(rustls::ServerConnection::new(cfg).unwrap(), tcp);
-                let head = read_head(&mut s);
-                h(&mut s, head, i);
-            });
-        }
-    });
-    base
+    let cfg = server_tls_config().unwrap();
+    serve("https", move |tcp| rustls::StreamOwned::new(rustls::ServerConnection::new(cfg.clone()).unwrap(), tcp), move |s, head, i| h(s, head, i)).0
 }
 
 fn tmpdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ink-net-verify1-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    common::tmpdir("verify1", name)
 }
 
 fn trusted() -> UreqClient {

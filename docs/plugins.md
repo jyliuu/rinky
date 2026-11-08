@@ -1,7 +1,7 @@
 # Plugins
 
 rinky has one plugin API. First-party plugins are Rust crates compiled into the
-binary; user plugins are Lua 5.4 scripts in a folder on the Kindle. Both implement the same
+binary; user plugins are Lua 5.4 scripts in a folder on the e-reader. Both implement the same
 `ink_plugin::Plugin` trait (a Lua plugin is a `ink_plugin::lua::LuaPlugin`), go through the
 same `PluginManager`, registry and host services, and get the same permissions checks.
 
@@ -10,7 +10,7 @@ same `PluginManager`, registry and host services, and get the same permissions c
 | API: trait, registry, host services, manifest, Lua host, Markdown parser, network worker | `crates/ink-plugin` |
 | App side: loading, storage on disk, network, UI presenter (ink-ui widgets) | `crates/ink-app/src/plugin_host.rs` |
 | Sample Lua plugin (word count and reading timer) | `plugins/sample-lua/plugin.toml`, `main.lua` |
-| Lua plugins on the Kindle | `/mnt/us/rinky/plugins/<name>/` |
+| Lua plugins on the device | `/mnt/us/rinky/plugins/<name>/` (Kobo: `/mnt/onboard/.adds/rinky/plugins/<name>/`) |
 | Compiled-in Rust plugins | `plugins/<name>/` crates, one line each in `crates/ink-app/src/plugins.rs` (kosync, opds, calibre, dictionary, stats, insightful, wikipedia, usbnet, ssh) |
 
 Contents: [Lua quick start](#lua-quick-start) - [plugin.toml](#plugintoml) -
@@ -55,9 +55,10 @@ end
 return p
 ```
 
-rinky loads every folder under `/mnt/us/rinky/plugins/` that has a `plugin.toml`
-when it starts (`PluginHost::load`, called from `App::new`). `RINKY_HOME` moves the
-root (`$RINKY_HOME/plugins`). A plugin with a bad manifest or a Lua syntax error is
+rinky loads every folder under `/mnt/us/rinky/plugins/` (on a Kobo
+`/mnt/onboard/.adds/rinky/plugins/`) that has a `plugin.toml` when it starts
+(`PluginHost::load`, called from `App::new`). `RINKY_HOME` moves the root
+(`$RINKY_HOME/plugins`). A plugin with a bad manifest or a Lua syntax error is
 skipped and reported (toast, notification list, `rinky.log`); the others still load.
 A Lua plugin cannot take the name of a compiled-in plugin.
 
@@ -96,13 +97,13 @@ The same hooks exist in Rust (`Plugin` trait methods, `cx: &mut HostCtx`) and Lu
 | Hook | Lua arguments | Called |
 | --- | --- | --- |
 | `on_load` | `reg` (= `ink.register`) | once at start, after `main.lua` ran; register entries here (or at the top level of `main.lua`) |
-| `on_book_open` | - | after a book is opened and laid out |
-| `on_page_change` | `page` | after every page shown (also the first); keep it fast (500 ms limit) |
+| `on_book_open` | - | once the book's first page is on the screen (the reader defers it so the book opens fast); `on_page_change` for that page follows |
+| `on_page_change` | `page` | for every new page (also the first), just before it is drawn, so a status text set here appears with the page; keep it fast (500 ms limit) |
 | `on_selection` | `sel` = `{text, start, ["end"], page}` | the user selected text |
 | `on_suspend` | - | before the device sleeps (screensaver); running `ink.http` requests are cancelled first and end with an `error` event (`interrupted: the device went to sleep`) |
 | `on_resume` | - | after it woke up and the page is back |
 | `on_close` | - | the book is closed (reader exits or opens another book) |
-| `on_exit` | - (Rust only) | once, when rinky exits normally (exit tap, power key, `SIGTERM`): stop own processes and give back devices so the Kindle UI finds them as before; not called after a crash |
+| `on_exit` | - (Rust only) | once, when rinky exits normally ("Exit to Kindle", `SIGTERM`): stop own processes and give back devices so the stock UI finds them as before; not called after a crash |
 | `on_action` | `id` | a registered entry without its own handler was triggered |
 | `on_library_action` | `id, book_path` | a library action without its own handler (falls back to `on_action(id)`) |
 | `on_ui_result` | `id, result` | answer to a UI request made without a callback |
@@ -160,10 +161,10 @@ and wrong arguments raise errors.
 | `ink.doc.search(query[, limit=20])` | `{ {position, page, excerpt, match_start, match_end}, ... }`; `excerpt:sub(match_start, match_end)` is the match |
 | `ink.doc.read_around([position][, chars=1000])` | about `chars` characters centred on `position` (default: current) |
 | `ink.doc.links([position])` | `{ {text, internal, position or url, footnote}, ... }` on that page |
-| `ink.doc.current_position()` | position string (crengine xpointer, `page:N;...` or the phase 0 `flow:` form) |
+| `ink.doc.current_position()` | position string (crengine xpointer for reflowable books, `page:N;...` for PDF and CBZ) |
 | `ink.doc.selection()` | `{text, start, ["end"], page}` or nil |
 | `ink.doc.page()`, `ink.doc.page_count()` | current page (1-based) and page count |
-| `ink.doc.page_text([page])` | text of a page, or `nil, "not supported: ..."` when the engine has no page text (the phase 0 engine has none) |
+| `ink.doc.page_text([page])` | text of a page, or `nil, "not supported: ..."` when the engine has no page text |
 
 Positions are strings; pass them back unchanged. These are the five Insightful book tools
 (`search_book`, `read_around`, `list_links`, `toc`, `current_position`).
@@ -413,7 +414,8 @@ A network plugin with a selection action. Worth reading for these patterns:
 
 ## For screen authors
 
-The hook API is `crate::plugin_host::hooks` (functions taking the screen's `AppCtx`).
+The hook API is `cx.plugins` (the `PluginHost`) and `crate::plugin_host::hooks`
+(functions taking the screen's `AppCtx`).
 The app loop (`app.rs`) already does events, overlay painting, timers, network delivery
 and suspend/resume for every screen:
 
@@ -444,18 +446,18 @@ without and once with the overlay.
 
 | When | Call |
 | --- | --- |
-| `on_enter`, after the book is opened and laid out | `hooks::on_book_open(cx, doc, &path)` |
-| `paint`, after `render_page` and `doc.set_current_page(page)` | `hooks::on_page_change(cx, doc, page)` |
-| a selection was made | `hooks::on_selection(cx, doc, &sel)`; the popup adds `hooks::selection_actions(cx)` |
-| reader menu | add `hooks::reader_menu(cx)` (show `entry.label`) |
+| after the first page is on the panel | `cx.plugins.book_open(doc, &path)`, then `cx.plugins.page_change` for that page |
+| `paint` of a new page, after `doc.set_current_page(page)` and before `render_page` (status texts then land in the same update) | `cx.plugins.page_change(doc, page)` |
+| a selection was made | `cx.plugins.selection(doc, &sel)`; the popup adds `cx.plugins.selection_actions()` |
+| reader menu | add `hooks::entries(cx.plugins, EntryKind::ReaderMenu)` (show `entry.label`) |
 | an entry was picked | `hooks::run_entry(cx, &entry, Some(doc), None)` |
 | a gesture the reader does not use | `if hooks::gesture(cx, &g, Some(doc)) { /* used */ }` |
 | status bar | `hooks::status_text(cx, StatusSlot::Left/Center/Right)` |
-| `on_exit` | `hooks::on_close(cx, doc)` |
+| `on_exit` | `cx.plugins.book_close(doc)` |
 | `AppScreen::document` | return the open book |
 
 Suspend/resume need no reader call (the app loop does them with `document()`);
-`hooks::on_suspend`/`on_resume` exist for screens that sleep on their own and are no-ops
+`cx.plugins.suspend`/`resume` exist for screens that sleep on their own and are no-ops
 when repeated.
 
 ### Library and home (`screens/library`)
@@ -463,7 +465,7 @@ when repeated.
 - The navigation bar items and the overflow menu rows of plugin library entries come
   from `cx.plugins.library_entries()`; saved ids are read with
   `plugin_entries::nav_chosen`. A pick runs `cx.plugins.trigger(plugin, id, None)`.
-- A book's long-press menu adds `hooks::library_actions(cx)`; a pick calls
+- A book's long-press menu adds `hooks::entries(cx.plugins, EntryKind::Library)`; a pick calls
   `hooks::run_entry(cx, &entry, None, Some(&book_path))`.
 
 ### Settings (`screens/settings`)
@@ -479,7 +481,7 @@ when repeated.
   `enabled`, `errors`). Enable/disable (stored in `plugins/disabled.txt`, applied at the
   next start): `plugin_host::set_user_enabled(&paths, name, on)`; on the command line
   `rinky plugins [list|enable NAME|disable NAME]`.
-- Notifications: `cx.plugins.notifications()`, `hooks::unread_notifications(cx)`,
+- Notifications: `cx.plugins.notifications()`, `cx.plugins.unread_notifications()`,
   `cx.plugins.mark_notifications_read()`.
 
 ### Overlay behaviour
@@ -488,7 +490,8 @@ when repeated.
   the pixels under it and puts them back when it closes; with `below_redrawn = true` it
   takes them again from the new page.
 - Refresh classes of the returned damage: toasts and keyboard typing DU, dialogs and menus
-  GL16, the viewer GC16 when it opens and closes.
+  GL16, the full-screen viewer REAGL when it opens and closes (no flash; see
+  `docs/DESIGN.md`, "Flash policy").
 - `handle_event` passes the power key and timers through; a touch dismisses a toast and
   is not used by it (the page still turns); a tap outside a menu cancels it; the back key
   cancels any modal layer.

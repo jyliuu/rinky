@@ -37,8 +37,6 @@ pub const ABS_X: u16 = 0x00;
 pub const ABS_Y: u16 = 0x01;
 /// `ABS_MT_SLOT`.
 pub const ABS_MT_SLOT: u16 = 0x2f;
-/// `ABS_MT_TOUCH_MAJOR`.
-pub const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
 /// `ABS_MT_POSITION_X`.
 pub const ABS_MT_POSITION_X: u16 = 0x35;
 /// `ABS_MT_POSITION_Y`.
@@ -175,12 +173,8 @@ pub struct TouchProfile {
     pub device_names: &'static [&'static str],
     /// Raw units are panel pixels (no scaling), if the reported range fits the panel.
     pub pixels: bool,
-    /// Swap raw X and Y.
-    pub swap_xy: bool,
-    /// Mirror horizontally.
-    pub mirror_x: bool,
-    /// Mirror vertically.
-    pub mirror_y: bool,
+    /// Axis swap and mirroring.
+    pub transform: TouchTransform,
 }
 
 /// Known controllers, most specific first.
@@ -193,41 +187,18 @@ pub struct TouchProfile {
 ///   1-pixel offset (tap 400,1200 logged as 399,1199).
 /// - `cyttsp`: older Parade/Cypress drivers on earlier Kindles; pixels.
 pub const TOUCH_PROFILES: [TouchProfile; 4] = [
-    TouchProfile {
-        name: "pt_mt",
-        device_names: &["pt_mt"],
-        pixels: true,
-        swap_xy: false,
-        mirror_x: false,
-        mirror_y: false,
-    },
-    TouchProfile {
-        name: "fts_ts",
-        device_names: &["fts_ts"],
-        pixels: true,
-        swap_xy: false,
-        mirror_x: false,
-        mirror_y: false,
-    },
-    TouchProfile {
-        name: "cyttsp",
-        device_names: &["cyttsp"],
-        pixels: true,
-        swap_xy: false,
-        mirror_x: false,
-        mirror_y: false,
-    },
-    TouchProfile {
-        name: "generic",
-        device_names: &[],
-        pixels: false,
-        swap_xy: false,
-        mirror_x: false,
-        mirror_y: false,
-    },
+    TouchProfile::upright("pt_mt", &["pt_mt"], true),
+    TouchProfile::upright("fts_ts", &["fts_ts"], true),
+    TouchProfile::upright("cyttsp", &["cyttsp"], true),
+    TouchProfile::upright("generic", &[], false),
 ];
 
 impl TouchProfile {
+    /// A controller mounted upright (no swap or mirror).
+    const fn upright(name: &'static str, device_names: &'static [&'static str], pixels: bool) -> Self {
+        TouchProfile { name, device_names, pixels, transform: TouchTransform::NONE }
+    }
+
     /// The profile for a device name; `generic` (scale by the reported range) otherwise.
     pub fn for_device(name: &str) -> TouchProfile {
         TOUCH_PROFILES
@@ -253,6 +224,11 @@ pub struct TouchTransform {
     pub mirror_x: bool,
     /// Flip y (after the swap).
     pub mirror_y: bool,
+}
+
+impl TouchTransform {
+    /// No swap, no mirror.
+    pub const NONE: TouchTransform = TouchTransform { swap: false, mirror_x: false, mirror_y: false };
 }
 
 /// Parsed `RINKY_TOUCH` value: comma-separated tokens.
@@ -331,12 +307,8 @@ pub struct TouchMapping {
     pub range_y: (i32, i32),
     /// Panel size in pixels (width, height).
     pub screen: (i32, i32),
-    /// Swap raw X and Y before scaling.
-    pub swap_xy: bool,
-    /// Mirror the result horizontally.
-    pub mirror_x: bool,
-    /// Mirror the result vertically.
-    pub mirror_y: bool,
+    /// Swap raw X and Y before scaling, then mirror the result.
+    pub transform: TouchTransform,
     /// Raw units are pixels: subtract the range minimum, no scaling, clamp to the panel.
     pub pixels: bool,
 }
@@ -344,44 +316,28 @@ pub struct TouchMapping {
 impl TouchMapping {
     /// Identity mapping for a panel of `w` x `h` whose controller reports pixels.
     pub fn identity(w: i32, h: i32) -> Self {
-        TouchMapping {
-            range_x: (0, w - 1),
-            range_y: (0, h - 1),
-            screen: (w, h),
-            swap_xy: false,
-            mirror_x: false,
-            mirror_y: false,
-            pixels: true,
-        }
+        TouchMapping { range_x: (0, w - 1), range_y: (0, h - 1), screen: (w, h), transform: TouchTransform::NONE, pixels: true }
     }
 
     /// The mapping for a controller with `profile` and the reported ranges on a
     /// `w` x `h` panel. A pixel profile falls back to scaling when the reported range
     /// does not fit the panel (more than 2 units off in either direction).
     pub fn for_profile(profile: &TouchProfile, range_x: (i32, i32), range_y: (i32, i32), w: i32, h: i32) -> Self {
-        let (rx, ry) = if profile.swap_xy { (range_y, range_x) } else { (range_x, range_y) };
+        let (rx, ry) = if profile.transform.swap { (range_y, range_x) } else { (range_x, range_y) };
         let fits = |(lo, hi): (i32, i32), size: i32| (hi - lo - (size - 1)).abs() <= 2;
         TouchMapping {
             range_x,
             range_y,
             screen: (w, h),
-            swap_xy: profile.swap_xy,
-            mirror_x: profile.mirror_x,
-            mirror_y: profile.mirror_y,
+            transform: profile.transform,
             pixels: profile.pixels && fits(rx, w) && fits(ry, h),
         }
     }
 
     /// Applies an `RINKY_TOUCH` override.
     pub fn with_override(mut self, ov: &TouchOverride) -> Self {
-        if let Some(t) = ov.transforms {
-            self.swap_xy = t.swap;
-            self.mirror_x = t.mirror_x;
-            self.mirror_y = t.mirror_y;
-        }
-        if let Some(p) = ov.pixels {
-            self.pixels = p;
-        }
+        self.transform = ov.transforms.unwrap_or(self.transform);
+        self.pixels = ov.pixels.unwrap_or(self.pixels);
         self
     }
 
@@ -393,8 +349,8 @@ impl TouchMapping {
 
     /// Raw controller position to panel pixel.
     pub fn to_screen(&self, (rx, ry): (i32, i32)) -> (i32, i32) {
-        let (rx, ry, rangex, rangey) =
-            if self.swap_xy { (ry, rx, self.range_y, self.range_x) } else { (rx, ry, self.range_x, self.range_y) };
+        let t = self.transform;
+        let (rx, ry, rangex, rangey) = if t.swap { (ry, rx, self.range_y, self.range_x) } else { (rx, ry, self.range_x, self.range_y) };
         let (w, h) = self.screen;
         let map = |v: i32, (lo, hi): (i32, i32), size: i32| -> i32 {
             // i64: the controller's reported range or a raw value near i32::MAX must not
@@ -406,19 +362,13 @@ impl TouchMapping {
             };
             p.clamp(0, i64::from(size - 1).max(0)) as i32
         };
-        let mut x = map(rx, rangex, w);
-        let mut y = map(ry, rangey, h);
-        if self.mirror_x {
-            x = w - 1 - x;
-        }
-        if self.mirror_y {
-            y = h - 1 - y;
-        }
-        (x, y)
+        let (x, y) = (map(rx, rangex, w), map(ry, rangey, h));
+        (if t.mirror_x { w - 1 - x } else { x }, if t.mirror_y { h - 1 - y } else { y })
     }
 
     /// Short description for logs and selftest output.
     pub fn describe(&self) -> String {
+        let t = self.transform;
         format!(
             "x {:?} y {:?} -> {}x{} {}{}{}{}",
             self.range_x,
@@ -426,9 +376,9 @@ impl TouchMapping {
             self.screen.0,
             self.screen.1,
             if self.pixels { "pixels" } else { "scaled" },
-            if self.swap_xy { " swap" } else { "" },
-            if self.mirror_x { " mirror_x" } else { "" },
-            if self.mirror_y { " mirror_y" } else { "" },
+            if t.swap { " swap" } else { "" },
+            if t.mirror_x { " mirror_x" } else { "" },
+            if t.mirror_y { " mirror_y" } else { "" },
         )
     }
 }
@@ -879,7 +829,7 @@ mod tests {
     #[test]
     fn mapping_options_and_record_bytes() {
         let m = TouchMapping::identity(100, 200).with_options("swap,mirror_x");
-        assert!(m.swap_xy && m.mirror_x && !m.mirror_y);
+        assert_eq!(m.transform, TouchTransform { swap: true, mirror_x: true, mirror_y: false });
         let e = ev(1234, EV_KEY, KEY_POWER, 1);
         assert_eq!(RawEvent::from_bytes(&e.to_bytes()), e);
     }
@@ -1013,16 +963,16 @@ fts_ts: 1792868250693 ms type 0 code 0 value 0";
 
     #[test]
     fn override_replaces_transforms_and_keeps_mode() {
-        let p = TouchProfile { swap_xy: true, mirror_x: true, ..TouchProfile::for_device("pt_mt") };
+        let swap_mirror_x = TouchTransform { swap: true, mirror_x: true, mirror_y: false };
+        let p = TouchProfile { transform: swap_mirror_x, ..TouchProfile::for_device("pt_mt") };
         let m = TouchMapping::for_profile(&p, (0, 1695), (0, 1271), 1272, 1696);
-        assert!(m.swap_xy && m.mirror_x && m.pixels);
+        assert!(m.transform == swap_mirror_x && m.pixels);
         // swap: raw (y, x) -> x from raw y; mirror_x flips.
         assert_eq!(m.to_screen((100, 10)), (1271 - 10, 100));
         let o = TouchOverride::parse("mirror_y");
         let m2 = m.with_override(&o);
-        assert!(!m2.swap_xy && !m2.mirror_x && m2.mirror_y && m2.pixels);
-        let none = m.with_options("none");
-        assert!(!none.swap_xy && !none.mirror_x && !none.mirror_y);
+        assert!(m2.transform == TouchTransform { mirror_y: true, ..TouchTransform::NONE } && m2.pixels);
+        assert_eq!(m.with_options("none").transform, TouchTransform::NONE);
         let o = TouchOverride::parse(" profile=fts_ts , device=pt , bogus,scale");
         assert_eq!(o.profile.as_deref(), Some("fts_ts"));
         assert_eq!(o.device.as_deref(), Some("pt"));

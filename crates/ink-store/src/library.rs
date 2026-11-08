@@ -19,10 +19,12 @@
 //! index unsaveable.
 
 use crate::sidecar::{BookState, ReadingStatus};
-use crate::{load_recovering, save_with_backup, LoadSource, Result, StoreError};
+use crate::{load_recovering, parse_json, save_with_backup, LoadSource, Result, StoreError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 /// File extensions the scanner lists (lowercase, without dot).
@@ -176,10 +178,77 @@ pub struct BookEntry {
     /// DRM or unsupported format detected (listed, refused on open).
     #[serde(skip_serializing_if = "is_false")]
     pub unsupported: bool,
+    /// Lowercase title, authors and series for [`BookEntry::matches`]; not saved.
+    /// Built when the index is loaded and when a book is added or gets metadata. After
+    /// editing those fields directly, call [`BookEntry::refresh_search_key`]; until then
+    /// an edit that changes a length is noticed and the key is not used.
+    #[serde(skip)]
+    pub search_key: SearchKey,
 }
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
+}
+
+/// The lowercase text a library search looks in, with the lengths of the fields it
+/// was made from. It never makes two entries unequal.
+#[derive(Clone, Debug, Default)]
+pub struct SearchKey {
+    /// [`SourceLens`] of the fields when `text` was made; `None` = never made.
+    made_from: Option<SourceLens>,
+    /// Lowercase title, each author and the series, separated by NUL.
+    text: String,
+}
+
+/// Byte lengths of title, authors and series: a check that costs a few additions per
+/// book (comparing or hashing the text would cost about as much as lowercasing it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceLens {
+    title: usize,
+    authors: usize,
+    author_bytes: usize,
+    series: Option<usize>,
+}
+
+impl SourceLens {
+    fn of(b: &BookEntry) -> Self {
+        SourceLens { title: b.title.len(), authors: b.authors.len(), author_bytes: b.authors.iter().map(String::len).sum(), series: b.series.as_ref().map(String::len) }
+    }
+}
+
+impl PartialEq for SearchKey {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl BookEntry {
+    /// Rebuilds [`BookEntry::search_key`] from the title, authors and series.
+    pub fn refresh_search_key(&mut self) {
+        let mut text = self.title.to_lowercase();
+        for a in &self.authors {
+            text.push('\0');
+            text.push_str(&a.to_lowercase());
+        }
+        if let Some(s) = &self.series {
+            text.push('\0');
+            text.push_str(&s.to_lowercase());
+        }
+        self.search_key = SearchKey { made_from: Some(SourceLens::of(self)), text };
+    }
+
+    /// True when the title, an author or the series contains `query`, which must
+    /// already be lowercase. Uses the cached key when it is current, else lowercases
+    /// the fields on the spot (same answer, slower).
+    pub fn matches(&self, query: &str) -> bool {
+        let key = &self.search_key;
+        if key.made_from.is_some_and(|l| l == SourceLens::of(self)) && !query.contains('\0') {
+            return key.text.contains(query);
+        }
+        self.title.to_lowercase().contains(query)
+            || self.authors.iter().any(|a| a.to_lowercase().contains(query))
+            || self.series.as_deref().is_some_and(|s| s.to_lowercase().contains(query))
+    }
 }
 
 /// A named collection.
@@ -242,14 +311,73 @@ pub struct LibraryIndex {
     pub books: Vec<BookEntry>,
     /// Collections, in display order.
     pub collections: Vec<Collection>,
+    #[serde(skip)]
+    lookup: PathLookup,
+}
+
+/// Where each book is in [`LibraryIndex::books`] by path, so [`LibraryIndex::get`] is not a
+/// scan of every book (the library screen looks a book up several times while it takes
+/// its metadata, for every book). `books` is public, so the map is checked on each use:
+/// it is rebuilt when the list moved or changed length, a hit must name a book with that
+/// path, and a path the map does not have is looked for by a scan.
+#[derive(Default)]
+struct PathLookup(Mutex<Option<Positions>>);
+
+/// Path hash to the first book with it, for `books` at `shape` (address and length).
+struct Positions {
+    shape: (usize, usize),
+    map: HashMap<u64, usize>,
+}
+
+impl PathLookup {
+    fn hash(path: &Path) -> u64 {
+        BuildHasherDefault::<DefaultHasher>::default().hash_one(path)
+    }
+
+    /// The position of the first book with `path`.
+    fn find(&self, books: &[BookEntry], path: &Path) -> Option<usize> {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let shape = (books.as_ptr() as usize, books.len());
+        let map = match &mut *slot {
+            Some(p) if p.shape == shape => &p.map,
+            slot => {
+                let map = books.iter().enumerate().rev().map(|(i, b)| (Self::hash(&b.path), i)).collect();
+                &slot.insert(Positions { shape, map }).map
+            }
+        };
+        match map.get(&Self::hash(path)) {
+            Some(&i) if books[i].path == path => Some(i),
+            hit => {
+                if hit.is_some() {
+                    // Books were replaced or reordered in place: build the map again next time.
+                    *slot = None;
+                }
+                books.iter().position(|b| b.path == path)
+            }
+        }
+    }
+}
+
+impl Clone for PathLookup {
+    fn clone(&self) -> Self {
+        PathLookup::default()
+    }
+}
+
+impl PartialEq for PathLookup {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for PathLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PathLookup")
+    }
 }
 
 fn mtime_secs(m: &std::fs::Metadata) -> u64 {
     m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn parse_index(b: &[u8]) -> std::result::Result<LibraryIndex, String> {
-    serde_json::from_slice(b).map_err(|e| e.to_string())
 }
 
 impl LibraryIndex {
@@ -259,9 +387,12 @@ impl LibraryIndex {
     /// Loads `path`; a missing file gives an empty index. A corrupt file is moved aside
     /// and its `.old` backup is used; [`StoreError::Format`] only if neither parses.
     pub fn load(path: &Path) -> Result<Self> {
-        let r = load_recovering(path, parse_index)?;
+        let r = load_recovering(path, parse_json::<LibraryIndex>)?;
         match (r.value, r.source) {
-            (Some(v), _) => Ok(v),
+            (Some(mut v), _) => {
+                v.refresh_search_keys();
+                Ok(v)
+            }
             (None, LoadSource::Missing) if r.errors.is_empty() => Ok(LibraryIndex::default()),
             _ => Err(StoreError::Format(r.errors.join("; "))),
         }
@@ -269,23 +400,28 @@ impl LibraryIndex {
 
     /// Saves atomically as compact JSON (with a `.old` backup at most once a minute).
     pub fn save(&self, path: &Path) -> Result<()> {
-        let mut copy_version = self.version;
-        if copy_version < Self::VERSION {
-            copy_version = Self::VERSION;
-        }
-        let json = serde_json::to_vec(&VersionedRef { version: copy_version, books: &self.books, collections: &self.collections })
+        let json = serde_json::to_vec(&VersionedRef { version: self.version.max(Self::VERSION), books: &self.books, collections: &self.collections })
             .map_err(|e| StoreError::Format(e.to_string()))?;
-        save_with_backup(path, &json, |b| parse_index(b).is_ok())
+        save_with_backup(path, &json, |b| parse_json::<LibraryIndex>(b).is_ok())
+    }
+
+    /// Rebuilds the search key of every book (after editing titles, authors or series
+    /// through `books` directly; [`LibraryIndex::search`] is right without it, only
+    /// slower for the edited books).
+    pub fn refresh_search_keys(&mut self) {
+        for b in &mut self.books {
+            b.refresh_search_key();
+        }
     }
 
     /// Finds a book by path.
     pub fn get(&self, path: &Path) -> Option<&BookEntry> {
-        self.books.iter().find(|b| b.path == path)
+        self.lookup.find(&self.books, path).map(|i| &self.books[i])
     }
 
     /// Finds a book by path, mutably.
     pub fn get_mut(&mut self, path: &Path) -> Option<&mut BookEntry> {
-        self.books.iter_mut().find(|b| b.path == path)
+        self.lookup.find(&self.books, path).map(|i| &mut self.books[i])
     }
 
     /// Finds a book by partial MD5.
@@ -310,10 +446,13 @@ impl LibraryIndex {
     /// are in no scanned folder are dropped. Symbolic links to book files are followed;
     /// links to folders are not.
     pub fn scan_report<P: AsRef<Path>>(&mut self, dirs: &[P], now: u64) -> ScanReport {
-        let mut w = Walk::default();
-        for d in dirs {
-            walk(d.as_ref(), 0, &mut w);
-        }
+        self.apply_scan(FolderScan::read(dirs), now)
+    }
+
+    /// [`LibraryIndex::scan_report`] with folders read before (possibly on another
+    /// thread, while the index was shown).
+    pub fn apply_scan(&mut self, scan: FolderScan, now: u64) -> ScanReport {
+        let mut w = scan.0;
         let found = std::mem::take(&mut w.found);
         let present: HashSet<&Path> = found.iter().map(|(p, _)| p.as_path()).collect();
         let before = self.books.len();
@@ -336,7 +475,7 @@ impl LibraryIndex {
                     let format = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
                     let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                     index.insert(path.clone(), self.books.len());
-                    self.books.push(BookEntry {
+                    let mut entry = BookEntry {
                         title,
                         unsupported: format == "kfx",
                         format,
@@ -345,7 +484,9 @@ impl LibraryIndex {
                         added: now,
                         path,
                         ..Default::default()
-                    });
+                    };
+                    entry.refresh_search_key();
+                    self.books.push(entry);
                 }
             }
         }
@@ -375,6 +516,7 @@ impl LibraryIndex {
         b.cover = meta.cover.or(b.cover.take());
         b.unsupported = meta.unsupported;
         b.meta_mtime = b.mtime.max(1);
+        b.refresh_search_key();
         true
     }
 
@@ -423,31 +565,22 @@ impl LibraryIndex {
             SortKey::Author => v.sort_by_cached_key(|b| (lower(b.authors.first().map(String::as_str).unwrap_or("\u{10FFFF}")), lower(&b.title))),
             SortKey::Added => v.sort_by_key(|b| std::cmp::Reverse(b.added)),
             SortKey::Progress => v.sort_by(|a, b| b.percent.unwrap_or(0.0).total_cmp(&a.percent.unwrap_or(0.0))),
-            SortKey::Series => v.sort_by(|a, b| {
-                let ka = (a.series.as_deref().map(lower), a.series_index.unwrap_or(0.0));
-                let kb = (b.series.as_deref().map(lower), b.series_index.unwrap_or(0.0));
+            SortKey::Series => {
                 // Books without a series go last.
-                match (&ka.0, &kb.0) {
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    _ => ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1)),
-                }
-            }),
+                let mut keyed: Vec<_> = v.into_iter().map(|b| (b.series.as_deref().map(lower), b.series_index.unwrap_or(0.0), b)).collect();
+                keyed.sort_by(|a, b| (a.0.is_none(), &a.0).cmp(&(b.0.is_none(), &b.0)).then(a.1.total_cmp(&b.1)));
+                return keyed.into_iter().map(|k| k.2).collect();
+            }
         }
         v
     }
 
     /// Books whose title, author or series contains `query` (case-insensitive).
+    /// Each book's lowercase text is cached ([`BookEntry::search_key`]), so a query
+    /// lowercases only itself.
     pub fn search(&self, query: &str) -> Vec<&BookEntry> {
         let q = query.to_lowercase();
-        self.books
-            .iter()
-            .filter(|b| {
-                b.title.to_lowercase().contains(&q)
-                    || b.authors.iter().any(|a| a.to_lowercase().contains(&q))
-                    || b.series.as_deref().is_some_and(|s| s.to_lowercase().contains(&q))
-            })
-            .collect()
+        self.books.iter().filter(|b| b.matches(&q)).collect()
     }
 
     /// Books with status `status`.
@@ -479,12 +612,8 @@ impl LibraryIndex {
         }
         let c = self.collections.iter_mut().find(|c| c.name == old).ok_or_else(|| StoreError::NotFound(format!("collection {old:?}")))?;
         c.name = new.to_string();
-        for b in &mut self.books {
-            for n in &mut b.collections {
-                if n == old {
-                    *n = new.to_string();
-                }
-            }
+        for n in self.books.iter_mut().flat_map(|b| &mut b.collections).filter(|n| *n == old) {
+            *n = new.to_string();
         }
         Ok(())
     }
@@ -526,7 +655,7 @@ impl LibraryIndex {
 
     /// Removes a book from the index (the file is not touched). Returns the entry.
     pub fn remove(&mut self, path: &Path) -> Option<BookEntry> {
-        let i = self.books.iter().position(|b| b.path == path)?;
+        let i = self.lookup.find(&self.books, path)?;
         Some(self.books.swap_remove(i))
     }
 }
@@ -551,6 +680,22 @@ pub struct ScanReport {
     pub errors: Vec<String>,
 }
 
+/// The book files under some folders, read without an index
+/// ([`FolderScan::read`]) and put into one by [`LibraryIndex::apply_scan`].
+pub struct FolderScan(Walk);
+
+impl FolderScan {
+    /// Lists `dirs` recursively as [`LibraryIndex::scan_report`] does (it opens no
+    /// file and touches no index, so it can run on another thread).
+    pub fn read<P: AsRef<Path>>(dirs: &[P]) -> FolderScan {
+        let mut w = Walk::default();
+        for d in dirs {
+            walk(d.as_ref(), 0, &mut w);
+        }
+        FolderScan(w)
+    }
+}
+
 #[derive(Default)]
 struct Walk {
     found: Vec<(PathBuf, std::fs::Metadata)>,
@@ -559,7 +704,8 @@ struct Walk {
     errors: Vec<String>,
 }
 
-fn is_book_name(path: &Path) -> bool {
+/// True if `path` has one of [`BOOK_EXTENSIONS`] (any case).
+pub(crate) fn is_book_name(path: &Path) -> bool {
     let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
     BOOK_EXTENSIONS.contains(&ext.as_str())
 }
@@ -589,8 +735,6 @@ fn walk(dir: &Path, depth: usize, w: &mut Walk) {
             }
         };
         let path = e.path();
-        let name = e.file_name();
-        let name_b = crate::os_bytes(&name);
         let meta = match e.file_type() {
             // Follow links to files only (links to folders could loop).
             Ok(t) if t.is_symlink() => match std::fs::metadata(&path) {
@@ -598,6 +742,17 @@ fn walk(dir: &Path, depth: usize, w: &mut Walk) {
                 Ok(_) => continue,
                 Err(err) => Err(err),
             },
+            // The listing tells folders and files apart: no `stat` for a folder or for a
+            // file that is not a book (covers and metadata.opf in a Calibre library).
+            Ok(t) if t.is_dir() => {
+                let name = e.file_name();
+                let name_b = crate::os_bytes(&name);
+                if !name_b.starts_with(b".") && !name_b.ends_with(b".sdr") {
+                    walk(&path, depth + 1, w);
+                }
+                continue;
+            }
+            Ok(t) if t.is_file() && !is_book_name(&path) => continue,
             Ok(_) => e.metadata(),
             Err(err) => Err(err),
         };
@@ -605,22 +760,18 @@ fn walk(dir: &Path, depth: usize, w: &mut Walk) {
             Ok(m) => m,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
+                w.errors.push(format!("{}: {err}", path.display()));
+                // Anything that is not a book file could be a folder of books: keep
+                // anything under it.
                 if is_book_name(&path) {
-                    w.errors.push(format!("{}: {err}", path.display()));
                     w.keep_files.insert(path);
                 } else {
-                    // Could be a folder of books: keep anything under it.
-                    w.errors.push(format!("{}: {err}", path.display()));
                     w.keep_dirs.push(path);
                 }
                 continue;
             }
         };
-        if meta.is_dir() {
-            if !name_b.starts_with(b".") && !name_b.ends_with(b".sdr") {
-                walk(&path, depth + 1, w);
-            }
-        } else if is_book_name(&path) {
+        if is_book_name(&path) {
             w.found.push((path, meta));
         }
     }
@@ -656,6 +807,7 @@ pub fn synthetic_index(n: usize) -> LibraryIndex {
             rating: (i % 7 == 0).then_some(4),
             collections: if i % 5 == 0 { vec![format!("Collection {}", i % 20)] } else { Vec::new() },
             unsupported: false,
+            search_key: SearchKey::default(),
         });
     }
     lib
@@ -693,6 +845,62 @@ mod tests {
         expect.version = LibraryIndex::VERSION;
         assert_eq!(LibraryIndex::load(&file).unwrap(), expect);
         assert_eq!(LibraryIndex::load(&dir.join("none.json")).unwrap(), LibraryIndex::default());
+    }
+
+    /// Folders read on another thread and applied later give the index the same books
+    /// as a scan; a book added to the folders after the read waits for the next scan.
+    #[test]
+    fn folders_read_on_a_thread_apply_like_a_scan() {
+        let tmp = TempDir::new("lib-apply");
+        let dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.epub"), b"1").unwrap();
+        std::fs::write(dir.join("sub/b.pdf"), b"22").unwrap();
+        let mut scanned = LibraryIndex::default();
+        scanned.scan(&[&dir], 100);
+        let mut applied = LibraryIndex::default();
+        let d = dir.clone();
+        let read = std::thread::spawn(move || FolderScan::read(&[d])).join().unwrap();
+        std::fs::write(dir.join("c.epub"), b"3").unwrap();
+        let r = applied.apply_scan(read, 100);
+        assert_eq!((r.added, r.removed), (2, 0));
+        let paths = |l: &LibraryIndex| {
+            let mut v: Vec<PathBuf> = l.books.iter().map(|b| b.path.clone()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(paths(&applied), paths(&scanned));
+        assert_eq!(applied.get(&dir.join("sub/b.pdf")).unwrap().size, 2);
+        assert_eq!(applied.scan(&[&dir], 200), (1, 0), "the later book on the next scan");
+    }
+
+    /// `get` finds books by path however `books` was changed since the last lookup: in
+    /// place (reordered, a path edited), grown, shrunk or replaced; the first of equal
+    /// paths wins; `Path` equality (`a//b` is `a/b`) as before.
+    #[test]
+    fn lookups_follow_every_change_to_the_books() {
+        let book = |p: &str| BookEntry { path: PathBuf::from(p), title: p.into(), ..Default::default() };
+        let mut lib = LibraryIndex { books: (0..50).map(|i| book(&format!("/b/{i}.epub"))).collect(), ..Default::default() };
+        let title = |lib: &LibraryIndex, p: &str| lib.get(Path::new(p)).map(|b| b.title.clone());
+        assert_eq!(title(&lib, "/b/7.epub").as_deref(), Some("/b/7.epub"));
+        assert_eq!(title(&lib, "/b//7.epub").as_deref(), Some("/b/7.epub"));
+        assert_eq!(title(&lib, "/b/50.epub"), None);
+        lib.books.swap(3, 40);
+        assert_eq!(lib.get(Path::new("/b/3.epub")).unwrap().path, Path::new("/b/3.epub"));
+        assert_eq!(lib.get(Path::new("/b/40.epub")).unwrap().path, Path::new("/b/40.epub"));
+        lib.books[10].path = PathBuf::from("/b/renamed.epub");
+        assert_eq!(title(&lib, "/b/renamed.epub").as_deref(), Some("/b/10.epub"));
+        assert_eq!(title(&lib, "/b/10.epub"), None);
+        lib.books.push(BookEntry { title: "second".into(), ..book("/b/1.epub") });
+        lib.books.push(book("/b/new.epub"));
+        assert_eq!(title(&lib, "/b/1.epub").as_deref(), Some("/b/1.epub"));
+        assert!(lib.get(Path::new("/b/new.epub")).is_some());
+        assert_eq!(lib.remove(Path::new("/b/1.epub")).unwrap().title, "/b/1.epub");
+        assert_eq!(title(&lib, "/b/1.epub").as_deref(), Some("second"));
+        lib.get_mut(Path::new("/b/2.epub")).unwrap().path = PathBuf::from("/b/two.epub");
+        assert!(lib.get(Path::new("/b/2.epub")).is_none() && lib.get(Path::new("/b/two.epub")).is_some());
+        lib.books = vec![book("/c/x.epub")];
+        assert!(lib.get(Path::new("/b/7.epub")).is_none() && lib.get(Path::new("/c/x.epub")).is_some());
     }
 
     #[test]
@@ -796,6 +1004,49 @@ mod tests {
         std::fs::write(&file, b"nope").unwrap();
         std::fs::write(crate::backup_path(&file), b"nope").unwrap();
         assert!(matches!(LibraryIndex::load(&file), Err(StoreError::Format(_))));
+    }
+
+    #[test]
+    fn search_keys_follow_edits_and_never_change_equality() {
+        let mut lib = LibraryIndex::default();
+        lib.books.push(BookEntry { path: "/b/a.epub".into(), title: "Über Alles".into(), authors: vec!["Ann Zebra".into()], series: Some("Saga".into()), ..Default::default() });
+        // Not built yet: lowercases on the spot.
+        assert_eq!(lib.search("über").len(), 1);
+        let plain = lib.clone();
+        lib.refresh_search_keys();
+        assert_eq!(lib, plain, "the key is not part of equality");
+        for q in ["ÜBER", "zebra", "saga", "ann z", ""] {
+            assert_eq!(lib.search(q).len(), 1, "{q}");
+        }
+        // No match across fields, even though the key holds them together.
+        assert!(lib.search("alles\0ann").is_empty() && lib.search("allesann").is_empty());
+        // A direct edit that changes a length makes the key stale; search notices.
+        lib.books[0].title = "Different".into();
+        assert!(lib.search("über").is_empty());
+        assert_eq!(lib.search("differ").len(), 1);
+        lib.books[0].series = None;
+        assert!(lib.search("saga").is_empty());
+        // set_metadata rebuilds it.
+        let p = lib.books[0].path.clone();
+        lib.set_metadata(&p, BookMeta { title: Some("New Title".into()), ..Default::default() });
+        assert_eq!(lib.books[0].search_key.text, "new title\0ann zebra");
+        assert_eq!(lib.search("new t").len(), 1);
+    }
+
+    #[test]
+    #[ignore = "measurement: time of LibraryIndex::search over 10k books, per query"]
+    fn library_10k_search_time() {
+        let mut lib = synthetic_index(10_000);
+        lib.refresh_search_keys();
+        for q in ["number 9999", "zzz", "author 1", "e"] {
+            let n = lib.search(q).len();
+            let reps = 50u32;
+            let t = Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(lib.search(std::hint::black_box(q)));
+            }
+            eprintln!("search {q:?} over 10k: {n} hits, {:.2} ms per query", t.elapsed().as_secs_f64() * 1000.0 / reps as f64);
+        }
     }
 
     /// 10k books: save and load times (debug build here; the release ARM number is in

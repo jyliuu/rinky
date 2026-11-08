@@ -6,7 +6,7 @@
 //! A [`Rewrite`] sees every element before it is written and can rename it, change its
 //! attributes, drop it or unwrap it (keep the children only).
 
-use crate::xml::{escape_attr, escape_text, is_xml_name};
+use crate::xml::{is_xml_name, push_attr, push_text, tag_end};
 use html5ever::tendril::StrTendril;
 use html5ever::tokenizer::{BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts};
 use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, Tracer, TreeBuilder, TreeBuilderOpts, TreeSink};
@@ -45,6 +45,11 @@ const VOID: &[&str] =
 /// True for HTML void elements (written as `<x/>`).
 pub fn is_void(name: &str) -> bool {
     VOID.contains(&name)
+}
+
+/// [`is_void`] for a local name in any letter case (`BR`, `Img`).
+pub(crate) fn is_void_ignore_case(name: &str) -> bool {
+    VOID.iter().any(|v| v.eq_ignore_ascii_case(name))
 }
 
 /// Most handles the HTML tree builder may hold (open elements plus active formatting
@@ -96,6 +101,15 @@ struct Counting {
     created: Cell<usize>,
 }
 
+/// `TreeSink` methods that go straight to the inner [`RcDom`].
+macro_rules! forward {
+    ($($name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)*) => {
+        $(fn $name(&self, $($arg: $ty),*) $(-> $ret)? {
+            self.dom.$name($($arg),*)
+        })*
+    };
+}
+
 impl TreeSink for Counting {
     type Handle = Handle;
     type Output = RcDom;
@@ -107,12 +121,6 @@ impl TreeSink for Counting {
     fn finish(self) -> RcDom {
         self.dom
     }
-    fn parse_error(&self, msg: Cow<'static, str>) {
-        self.dom.parse_error(msg)
-    }
-    fn get_document(&self) -> Handle {
-        self.dom.get_document()
-    }
     fn elem_name<'a>(&'a self, target: &'a Handle) -> Self::ElemName<'a> {
         self.dom.elem_name(target)
     }
@@ -120,65 +128,29 @@ impl TreeSink for Counting {
         self.created.set(self.created.get() + 1);
         self.dom.create_element(name, attrs, flags)
     }
-    fn create_comment(&self, text: StrTendril) -> Handle {
-        self.dom.create_comment(text)
-    }
-    fn create_pi(&self, target: StrTendril, data: StrTendril) -> Handle {
-        self.dom.create_pi(target, data)
-    }
-    fn append(&self, parent: &Handle, child: NodeOrText<Handle>) {
-        self.dom.append(parent, child)
-    }
-    fn append_based_on_parent_node(&self, element: &Handle, prev_element: &Handle, child: NodeOrText<Handle>) {
-        self.dom.append_based_on_parent_node(element, prev_element, child)
-    }
-    fn append_doctype_to_document(&self, name: StrTendril, public_id: StrTendril, system_id: StrTendril) {
-        self.dom.append_doctype_to_document(name, public_id, system_id)
-    }
-    fn mark_script_already_started(&self, node: &Handle) {
-        self.dom.mark_script_already_started(node)
-    }
-    fn pop(&self, node: &Handle) {
-        self.dom.pop(node)
-    }
-    fn get_template_contents(&self, target: &Handle) -> Handle {
-        self.dom.get_template_contents(target)
-    }
-    fn same_node(&self, x: &Handle, y: &Handle) -> bool {
-        self.dom.same_node(x, y)
-    }
-    fn set_quirks_mode(&self, mode: QuirksMode) {
-        self.dom.set_quirks_mode(mode)
-    }
-    fn append_before_sibling(&self, sibling: &Handle, new_node: NodeOrText<Handle>) {
-        self.dom.append_before_sibling(sibling, new_node)
-    }
-    fn add_attrs_if_missing(&self, target: &Handle, attrs: Vec<Attribute>) {
-        self.dom.add_attrs_if_missing(target, attrs)
-    }
-    fn associate_with_form(&self, target: &Handle, form: &Handle, nodes: (&Handle, Option<&Handle>)) {
-        self.dom.associate_with_form(target, form, nodes)
-    }
-    fn remove_from_parent(&self, target: &Handle) {
-        self.dom.remove_from_parent(target)
-    }
-    fn reparent_children(&self, node: &Handle, new_parent: &Handle) {
-        self.dom.reparent_children(node, new_parent)
-    }
-    fn is_mathml_annotation_xml_integration_point(&self, handle: &Handle) -> bool {
-        self.dom.is_mathml_annotation_xml_integration_point(handle)
-    }
-    fn set_current_line(&self, line_number: u64) {
-        self.dom.set_current_line(line_number)
-    }
-    fn allow_declarative_shadow_roots(&self, intended_parent: &Handle) -> bool {
-        self.dom.allow_declarative_shadow_roots(intended_parent)
-    }
-    fn attach_declarative_shadow(&self, location: &Handle, template: &Handle, attrs: &[Attribute]) -> bool {
-        self.dom.attach_declarative_shadow(location, template, attrs)
-    }
-    fn maybe_clone_an_option_into_selectedcontent(&self, option: &Handle) {
-        self.dom.maybe_clone_an_option_into_selectedcontent(option)
+    forward! {
+        parse_error(msg: Cow<'static, str>);
+        get_document() -> Handle;
+        create_comment(text: StrTendril) -> Handle;
+        create_pi(target: StrTendril, data: StrTendril) -> Handle;
+        append(parent: &Handle, child: NodeOrText<Handle>);
+        append_based_on_parent_node(element: &Handle, prev_element: &Handle, child: NodeOrText<Handle>);
+        append_doctype_to_document(name: StrTendril, public_id: StrTendril, system_id: StrTendril);
+        mark_script_already_started(node: &Handle);
+        pop(node: &Handle);
+        get_template_contents(target: &Handle) -> Handle;
+        same_node(x: &Handle, y: &Handle) -> bool;
+        set_quirks_mode(mode: QuirksMode);
+        append_before_sibling(sibling: &Handle, new_node: NodeOrText<Handle>);
+        add_attrs_if_missing(target: &Handle, attrs: Vec<Attribute>);
+        associate_with_form(target: &Handle, form: &Handle, nodes: (&Handle, Option<&Handle>));
+        remove_from_parent(target: &Handle);
+        reparent_children(node: &Handle, new_parent: &Handle);
+        is_mathml_annotation_xml_integration_point(handle: &Handle) -> bool;
+        set_current_line(line_number: u64);
+        allow_declarative_shadow_roots(intended_parent: &Handle) -> bool;
+        attach_declarative_shadow(location: &Handle, template: &Handle, attrs: &[Attribute]) -> bool;
+        maybe_clone_an_option_into_selectedcontent(option: &Handle);
     }
 }
 
@@ -254,11 +226,6 @@ pub(crate) fn parse_counted(html: &str) -> (RcDom, usize) {
     (tok.sink.tb.sink.dom, skipped)
 }
 
-/// Concatenated text below `node`.
-pub fn text_of(node: &Handle) -> String {
-    text_of_max(node, usize::MAX)
-}
-
 /// Concatenated text below `node`, stopping after about `max` bytes (titles and
 /// headings; a heading may hold a whole broken document).
 pub fn text_of_max(node: &Handle, max: usize) -> String {
@@ -274,24 +241,6 @@ pub fn text_of_max(node: &Handle, max: usize) -> String {
         }
     }
     s
-}
-
-/// The value of attribute `name` of an element node.
-pub fn attr_of(node: &Handle, name: &str) -> Option<String> {
-    match &node.data {
-        NodeData::Element { attrs, .. } => {
-            attrs.borrow().iter().find(|a| &*a.name.local == name).map(|a| a.value.to_string())
-        }
-        _ => None,
-    }
-}
-
-/// Local name of an element node.
-pub fn name_of(node: &Handle) -> Option<String> {
-    match &node.data {
-        NodeData::Element { name, .. } => Some(name.local.to_string()),
-        _ => None,
-    }
 }
 
 fn attr_name(a: &html5ever::Attribute) -> Option<String> {
@@ -353,7 +302,7 @@ impl Writer<'_> {
         };
         match &node.data {
             NodeData::Document => push_children(stack, true),
-            NodeData::Text { contents } => self.out.push_str(&escape_text(&contents.borrow())),
+            NodeData::Text { contents } => push_text(&mut self.out, &contents.borrow()),
             NodeData::Element { name, attrs, .. } => {
                 let mut n = name.local.to_string();
                 if n == "script" || n == "noscript" || n == "template" {
@@ -386,14 +335,13 @@ impl Writer<'_> {
                 } else {
                     a.retain(|(k, _)| !k.starts_with("xmlns"));
                 }
+                // A repeated name keeps its first value. Elements have a few attributes:
+                // the earlier ones are scanned, a set is built only for long lists.
                 let mut seen = std::collections::HashSet::new();
-                for (k, v) in &a {
-                    if seen.insert(k.clone()) {
-                        self.out.push(' ');
-                        self.out.push_str(k);
-                        self.out.push_str("=\"");
-                        self.out.push_str(&escape_attr(v));
-                        self.out.push('"');
+                for (i, (k, v)) in a.iter().enumerate() {
+                    let repeated = if a.len() <= 8 { a[..i].iter().any(|(p, _)| p == k) } else { !seen.insert(k.as_str()) };
+                    if !repeated {
+                        push_attr(&mut self.out, k, v);
                     }
                 }
                 if node.children.borrow().is_empty() && is_void(&n) {
@@ -438,35 +386,17 @@ pub fn expand_self_closing(xml: &str) -> String {
             i = start + 1;
             continue;
         }
-        // Find the end of the tag, honouring quotes.
-        let mut j = start + 1;
-        let mut quote = 0u8;
-        while j < bytes.len() {
-            let c = bytes[j];
-            if quote != 0 {
-                if c == quote {
-                    quote = 0;
-                }
-            } else if c == b'"' || c == b'\'' {
-                quote = c;
-            } else if c == b'>' {
-                break;
-            }
-            j += 1;
-        }
-        if j >= bytes.len() {
-            break;
-        }
+        let Some(j) = tag_end(bytes, start) else { break };
         if bytes[j - 1] == b'/' {
             let tag = &xml[start + 1..j - 1];
-            let name: String = tag.chars().take_while(|c| !c.is_whitespace() && *c != '/').collect();
-            let local = name.rsplit(':').next().unwrap_or(&name).to_ascii_lowercase();
-            if !name.is_empty() && !is_void(&local) {
+            let name = &tag[..tag.find(|c: char| c.is_whitespace() || c == '/').unwrap_or(tag.len())];
+            let local = name.rsplit(':').next().unwrap_or(name);
+            if !name.is_empty() && !is_void_ignore_case(local) {
                 out.push_str(&xml[last..start]);
                 out.push('<');
                 out.push_str(tag.trim_end());
                 out.push_str("></");
-                out.push_str(&name);
+                out.push_str(name);
                 out.push('>');
                 last = j + 1;
             }
@@ -586,7 +516,7 @@ mod tests {
                 "mbp:pagebreak" => Action::Drop,
                 "font" => Action::Unwrap,
                 "h1" => {
-                    attrs.push(("id".into(), text_of(node).to_lowercase()));
+                    attrs.push(("id".into(), text_of_max(node, usize::MAX).to_lowercase()));
                     Action::Keep
                 }
                 _ => Action::Keep,

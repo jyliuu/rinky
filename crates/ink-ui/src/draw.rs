@@ -40,40 +40,37 @@ fn circle_points(cx: f32, cy: f32, r: f32) -> Vec<(f32, f32)> {
     .collect()
 }
 
+/// Appends a quarter circle of radius `r` around `(cx, cy)`, clockwise on screen from
+/// angle `a0`: the corner of a rounded rectangle, in a few segments for its size.
+fn corner(pts: &mut Vec<(f32, f32)>, (cx, cy): (f32, f32), r: f32, a0: f32) {
+    let steps = ((r / 2.0) as usize).clamp(3, 16);
+    for i in 0..=steps {
+        let a = a0 + i as f32 / steps as f32 * PI / 2.0;
+        pts.push((cx + r * a.cos(), cy + r * a.sin()));
+    }
+}
+
 fn round_rect_points(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
     let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
     if r < 0.5 {
         return vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
     }
     let mut pts = Vec::new();
-    let steps = ((r / 2.0) as usize).clamp(3, 16);
-    let corners = [(x + w - r, y + r, -PI / 2.0), (x + w - r, y + h - r, 0.0), (x + r, y + h - r, PI / 2.0), (x + r, y + r, PI)];
-    for (cx, cy, a0) in corners {
-        for i in 0..=steps {
-            let a = a0 + i as f32 / steps as f32 * PI / 2.0;
-            pts.push((cx + r * a.cos(), cy + r * a.sin()));
-        }
-    }
+    corner(&mut pts, (x + w - r, y + r), r, -PI / 2.0);
+    corner(&mut pts, (x + w - r, y + h - r), r, 0.0);
+    corner(&mut pts, (x + r, y + h - r), r, PI / 2.0);
+    corner(&mut pts, (x + r, y + r), r, PI);
     pts
 }
 
 /// A rectangle with only its top corners rounded (sheets attached to the bottom edge).
 fn top_round_rect_points(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
     let r = r.min(w / 2.0).min(h).max(0.0);
-    let steps = ((r / 2.0) as usize).clamp(3, 16);
     let mut pts = Vec::new();
-    for (cx, cy, a0) in [(x + w - r, y + r, -PI / 2.0)] {
-        for i in 0..=steps {
-            let a = a0 + i as f32 / steps as f32 * PI / 2.0;
-            pts.push((cx + r * a.cos(), cy + r * a.sin()));
-        }
-    }
+    corner(&mut pts, (x + w - r, y + r), r, -PI / 2.0);
     pts.push((x + w, y + h));
     pts.push((x, y + h));
-    for i in 0..=steps {
-        let a = PI + i as f32 / steps as f32 * PI / 2.0;
-        pts.push((x + r + r * a.cos(), y + r + r * a.sin()));
-    }
+    corner(&mut pts, (x + r, y + r), r, PI);
     pts
 }
 
@@ -195,37 +192,114 @@ impl Path {
         }
         let local: Vec<Vec<(f32, f32)>> =
             self.contours.iter().map(|c| c.iter().map(|p| (p.0 - b.x as f32, p.1 - b.y as f32)).collect()).collect();
-        let cov = fill_contours(b.w as usize, b.h as usize, &local);
-        blend(canvas, b, &cov, value);
+        COVERAGE.with_borrow_mut(|cache| {
+            let (cov, runs) = cache.get(b.w as usize, b.h as usize, local);
+            blend_runs(canvas, b, cov, runs, value);
+        });
+    }
+}
+
+/// Bytes the per-thread [`CoverageCache`] keeps (keys, coverage and runs).
+const COVERAGE_BUDGET: usize = 4 << 20;
+
+thread_local! {
+    static COVERAGE: std::cell::RefCell<CoverageCache> = std::cell::RefCell::default();
+}
+
+/// The coverage of recently filled paths, by their exact local contours. Widgets repaint
+/// the same shapes at the same places frame after frame (key outlines, buttons, panels),
+/// and `fill_contours` is a pure function: a bit-identical input gets its earlier output.
+#[derive(Default)]
+struct CoverageCache {
+    /// (key, coverage, its [`runs`]), least recently used first. The key holds the size,
+    /// each contour's length and the bits of every point.
+    entries: Vec<(Vec<u32>, Vec<u8>, Vec<Run>)>,
+    bytes: usize,
+}
+
+/// Memory of one [`CoverageCache`] entry.
+fn entry_bytes((key, cov, runs): &(Vec<u32>, Vec<u8>, Vec<Run>)) -> usize {
+    4 * key.len() + cov.len() + runs.len() * std::mem::size_of::<Run>()
+}
+
+impl CoverageCache {
+    fn get(&mut self, w: usize, h: usize, contours: Vec<Vec<(f32, f32)>>) -> (&[u8], &[Run]) {
+        let mut key = vec![w as u32, h as u32];
+        for c in &contours {
+            key.push(c.len() as u32);
+            key.extend(c.iter().flat_map(|p| [p.0.to_bits(), p.1.to_bits()]));
+        }
+        let entry = match self.entries.iter().position(|e| e.0 == key) {
+            Some(i) => self.entries.remove(i),
+            None => {
+                let cov = fill_contours(w, h, &contours);
+                let runs = runs(&cov, w);
+                let entry = (key, cov, runs);
+                self.bytes += entry_bytes(&entry);
+                entry
+            }
+        };
+        while self.bytes > COVERAGE_BUDGET && !self.entries.is_empty() {
+            self.bytes -= entry_bytes(&self.entries.remove(0));
+        }
+        self.entries.push(entry);
+        let (_, cov, runs) = self.entries.last().expect("just pushed");
+        (cov, runs)
+    }
+}
+
+/// A run of covered pixels in one row of a coverage mask: (start, end) indices and
+/// whether every pixel of it is fully covered.
+type Run = (usize, usize, bool);
+
+/// The runs of nonzero coverage of `cov`, a mask `w` wide.
+fn runs(cov: &[u8], w: usize) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::new();
+    if w == 0 {
+        return out;
+    }
+    // Row by row, each run found with a scan for its first and its last pixel.
+    for (row0, row) in (0..).step_by(w).zip(cov.chunks_exact(w)) {
+        let mut x = 0;
+        while let Some(s) = row[x..].iter().position(|&a| a != 0) {
+            let s = x + s;
+            let full = row[s] == 255;
+            let n = row[s..].iter().position(|&a| a == 0 || (a == 255) != full).unwrap_or(row.len() - s);
+            out.push((row0 + s, row0 + s + n, full));
+            x = s + n;
+        }
+    }
+    out
+}
+
+/// [`blend`] of a mask through its [`runs`]: pixels without coverage are not visited and
+/// fully covered ones are set, so a large outline or fill costs only its covered pixels.
+/// Row slices of the part of `r` that drawing may change, not a get/set per pixel.
+fn blend_runs(canvas: &mut Canvas, r: Rect, cov: &[u8], runs: &[Run], value: u8) {
+    let (area, rw, v) = (drawable(canvas, r), r.w as usize, value as u32);
+    for &(s, e, full) in runs {
+        let (y, x) = (r.y + (s / rw) as i32, r.x + (s % rw) as i32);
+        let (x0, x1) = (x.max(area.x), (x + (e - s) as i32).min(area.right()));
+        if y < area.y || y >= area.bottom() || x0 >= x1 {
+            continue;
+        }
+        let p0 = y as usize * canvas.width + x0 as usize;
+        let row = &mut canvas.pixels[p0..p0 + (x1 - x0) as usize];
+        if full {
+            row.fill(value);
+            continue;
+        }
+        // One formula for every coverage: with no branch the loop vectorizes.
+        for (p, &a) in row.iter_mut().zip(&cov[s + (x0 - x) as usize..]) {
+            let a = a as u32;
+            *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
+        }
     }
 }
 
 /// Blends `value` into `r` of the canvas with per-pixel coverage `cov` (`r.w * r.h`).
 pub fn blend(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {
-    // Row slices of the part of `r` on the canvas and inside its clip (what
-    // `Canvas::set` would write), instead of a bounds-checked get/set per pixel: the
-    // sheets and panels blend their full-size outlines on every paint.
-    let area = match canvas.clip() {
-        Some(c) => r.intersect(&canvas.bounds()).intersect(&c),
-        None => r.intersect(&canvas.bounds()),
-    };
-    if area.is_empty() {
-        return;
-    }
-    let (rw, cw, n) = (r.w as usize, canvas.width, area.w as usize);
-    let v = value as u32;
-    for y in area.y..area.bottom() {
-        let c0 = (y - r.y) as usize * rw + (area.x - r.x) as usize;
-        let p0 = y as usize * cw + area.x as usize;
-        let row = &mut canvas.pixels[p0..p0 + n];
-        for (p, &a) in row.iter_mut().zip(&cov[c0..c0 + n]) {
-            let a = a as u32;
-            if a == 0 {
-                continue;
-            }
-            *p = if a >= 255 { value } else { ((*p as u32 * (255 - a) + v * a) / 255) as u8 };
-        }
-    }
+    blend_runs(canvas, r, cov, &runs(cov, r.w as usize), value);
 }
 
 /// Fills a rounded rectangle.
@@ -238,6 +312,40 @@ pub fn stroke_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, width: f32, 
     Path::new().round_rect_outline(r.x as f32, r.y as f32, r.w as f32, r.h as f32, radius, width).fill(canvas, value);
 }
 
+/// Rows at the top of a [`Path::top_round_rect`] of radius `radius` that its corners
+/// reach, or `None` when they reach the whole of `r` (a short shape).
+fn top_band(r: Rect, radius: f32) -> Option<u32> {
+    let band = radius.max(0.0).ceil() as u32 + 2;
+    (band < r.h).then_some(band)
+}
+
+/// Fills [`Path::top_round_rect`] of `r` with the same pixels: the rounded rows through
+/// the path, the rest as one rectangle. A sheet as tall as the screen would otherwise
+/// take a coverage mask of its whole area (a few MB, most of the coverage cache).
+pub fn fill_top_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, value: u8) {
+    let (x, y, w) = (r.x as f32, r.y as f32, r.w as f32);
+    let Some(band) = top_band(r, radius) else {
+        Path::new().top_round_rect(x, y, w, r.h as f32, radius).fill(canvas, value);
+        return;
+    };
+    Path::new().top_round_rect(x, y, w, band as f32, radius).fill(canvas, value);
+    canvas.fill_rect(r.x, r.y + band as i32, r.w as i32, (r.h - band) as i32, value);
+}
+
+/// Fills [`Path::top_round_rect_outline`] of `r` (`width` whole pixels) with the same
+/// pixels: the rounded rows through the path, the side edges below them as rectangles.
+pub fn stroke_top_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, width: i32, value: u8) {
+    let (x, y, w, wf) = (r.x as f32, r.y as f32, r.w as f32, width as f32);
+    let Some(band) = top_band(r, radius).filter(|b| *b as i32 > width) else {
+        Path::new().top_round_rect_outline(x, y, w, r.h as f32, radius, wf).fill(canvas, value);
+        return;
+    };
+    Path::new().top_round_rect_outline(x, y, w, band as f32, radius, wf).fill(canvas, value);
+    let (y0, h) = (r.y + band as i32, (r.h - band) as i32);
+    canvas.fill_rect(r.x, y0, width, h, value);
+    canvas.fill_rect(r.right() - width, y0, width, h, value);
+}
+
 /// Draws `src` scaled to fit inside `r` (aspect kept, centred; each target pixel is the
 /// mean of the source pixels it covers). Returns the rectangle actually covered.
 pub fn blit_fit(canvas: &mut Canvas, src: &Canvas, r: Rect) -> Rect {
@@ -247,23 +355,30 @@ pub fn blit_fit(canvas: &mut Canvas, src: &Canvas, r: Rect) -> Rect {
     let scale = (r.w as f32 / src.width as f32).min(r.h as f32 / src.height as f32);
     let (w, h) = (((src.width as f32 * scale).round() as u32).clamp(1, r.w), ((src.height as f32 * scale).round() as u32).clamp(1, r.h));
     let dst = Rect::new(r.x + (r.w - w) as i32 / 2, r.y + (r.h - h) as i32 / 2, w, h);
+    // Source span `(start, end, sample step)` of target column or row `i`: at most 4
+    // samples per axis, enough for thumbnails and cheap for big images.
+    let span = |i: u32, scale: f32, len: usize| {
+        let end = (((i + 1) as f32 * scale) as usize).clamp(1, len);
+        let start = ((i as f32 * scale) as usize).min(end - 1);
+        (start, end, (end - start).div_ceil(4).max(1))
+    };
     let (sx, sy) = (src.width as f32 / w as f32, src.height as f32 / h as f32);
-    for y in 0..h {
-        let (y0, y1) = ((y as f32 * sy) as usize, (((y + 1) as f32 * sy) as usize).clamp(1, src.height));
-        let y0 = y0.min(y1 - 1);
-        for x in 0..w {
-            let (x0, x1) = ((x as f32 * sx) as usize, (((x + 1) as f32 * sx) as usize).clamp(1, src.width));
-            let x0 = x0.min(x1 - 1);
-            // At most 4 x 4 samples per pixel: enough for thumbnails, cheap for big images.
-            let (stx, sty) = ((x1 - x0).div_ceil(4), (y1 - y0).div_ceil(4));
+    // Only the part that drawing may change; the column spans are the same on every row.
+    let vis = drawable(canvas, dst);
+    let (vx, vy) = ((vis.x - dst.x) as u32, (vis.y - dst.y) as u32);
+    let cols: Vec<(usize, usize, usize)> = (vx..vx + vis.w).map(|x| span(x, sx, src.width)).collect();
+    for y in vy..vy + vis.h {
+        let (y0, y1, sty) = span(y, sy, src.height);
+        let row = (dst.y + y as i32) as usize * canvas.width + vis.x as usize;
+        for (p, &(x0, x1, stx)) in canvas.pixels[row..row + cols.len()].iter_mut().zip(&cols) {
             let (mut sum, mut n) = (0u32, 0u32);
-            for yy in (y0..y1).step_by(sty.max(1)) {
-                for xx in (x0..x1).step_by(stx.max(1)) {
+            for yy in (y0..y1).step_by(sty) {
+                for xx in (x0..x1).step_by(stx) {
                     sum += src.pixels[yy * src.width + xx] as u32;
                     n += 1;
                 }
             }
-            canvas.set(dst.x + x as i32, dst.y + y as i32, (sum / n.max(1)) as u8);
+            *p = (sum / n.max(1)) as u8;
         }
     }
     dst
@@ -272,13 +387,22 @@ pub fn blit_fit(canvas: &mut Canvas, src: &Canvas, r: Rect) -> Rect {
 /// Forces `r` of the canvas to two levels (black below `threshold`, else white): what a
 /// DU animation frame shows, so the simulator and screenshots match the panel.
 pub fn two_level(canvas: &mut Canvas, r: Rect, threshold: u8) {
-    let r = r.intersect(&canvas.bounds());
+    let r = drawable(canvas, r);
     for y in r.y..r.bottom() {
-        for x in r.x..r.right() {
-            if let Some(v) = canvas.get(x, y) {
-                canvas.set(x, y, if v < threshold { 0 } else { 255 });
-            }
+        let i = y as usize * canvas.width + r.x as usize;
+        for p in &mut canvas.pixels[i..i + r.w as usize] {
+            *p = if *p < threshold { 0 } else { 255 };
         }
+    }
+}
+
+/// The part of `r` that drawing may change: on the canvas and inside its clip (what
+/// `Canvas::set` writes).
+fn drawable(canvas: &Canvas, r: Rect) -> Rect {
+    let r = r.intersect(&canvas.bounds());
+    match canvas.clip() {
+        Some(c) => r.intersect(&c),
+        None => r,
     }
 }
 
@@ -295,6 +419,33 @@ pub fn center(r: Rect) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The banded top-rounded fill and outline draw exactly what one path over the whole
+    /// shape draws, also clipped, short and on a gray background.
+    #[test]
+    fn top_round_rect_bands_match_the_whole_path() {
+        let cases = [
+            (Rect::new(0, 240, 1272, 1456), 24.0, 3),
+            (Rect::new(0, 7, 300, 200), 24.5, 3),
+            (Rect::new(-5, 10, 200, 90), 10.0, 1),
+            (Rect::new(3, 20, 180, 20), 24.0, 3),
+            (Rect::new(10, 30, 150, 60), 0.0, 4),
+        ];
+        for (r, radius, width) in cases {
+            for clip in [None, Some(Rect::new(0, r.y + 5, 120, 40))] {
+                let (mut a, mut b) = (Canvas::new(400.max(r.right() as usize + 4), r.bottom() as usize + 4), Canvas::new(1, 1));
+                a.pixels.fill(0x88);
+                a.set_clip(clip);
+                b.clone_from(&a);
+                let (x, y, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+                Path::new().top_round_rect(x, y, w, h, radius).fill(&mut a, 255);
+                Path::new().top_round_rect_outline(x, y, w, h, radius, width as f32).fill(&mut a, 0);
+                fill_top_round_rect(&mut b, r, radius, 255);
+                stroke_top_round_rect(&mut b, r, radius, width, 0);
+                assert!(a.pixels == b.pixels, "{r:?} radius {radius} width {width} clip {clip:?}");
+            }
+        }
+    }
 
     /// `blend` before the row-slice version (2026-11-02): get/set per pixel.
     fn blend_reference(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {
@@ -344,6 +495,25 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_fill_reuses_its_coverage_and_draws_the_same() {
+        let shape = |x: f32| {
+            let mut p = Path::new();
+            p.round_rect_outline(x, 30.5, 70.0, 40.0, 9.0, 3.0);
+            p
+        };
+        let (mut a, mut b) = (Canvas::new(200, 120), Canvas::new(200, 120));
+        shape(20.0).fill(&mut a, 0);
+        let cached = COVERAGE.with_borrow(|c| c.entries.len());
+        shape(20.0).fill(&mut b, 0);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.len()), cached, "the second fill is a hit");
+        assert_eq!(a.pixels, b.pixels);
+        // Another place is another key; the old entry stays usable.
+        shape(90.0).fill(&mut a, 0);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.len()), cached + 1);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.iter().map(entry_bytes).sum::<usize>()), COVERAGE.with_borrow(|c| c.bytes));
+    }
+
+    #[test]
     fn shapes_cover_their_area() {
         let mut c = Canvas::new(100, 100);
         Path::new().circle(50.0, 50.0, 20.0).fill(&mut c, 0);
@@ -388,11 +558,32 @@ mod tests {
         assert_eq!(c.get(50, 90), Some(255));
         assert_eq!(c.get(10, 10), Some(255), "outside the picture");
         assert_eq!(blit_fit(&mut c, &Canvas::new(0, 0), Rect::new(0, 0, 10, 10)).w, 0);
+        // A gradient scaled down, also partly off the canvas and under a clip: the same
+        // pixels where they land, nothing elsewhere.
+        let grad = Canvas::from_pixels(300, 200, (0..300 * 200).map(|i| ((i % 300) * 255 / 300 + i / 300 % 7) as u8).collect());
+        let mut full = Canvas::new(100, 100);
+        blit_fit(&mut full, &grad, Rect::new(5, 5, 90, 90));
+        let mut cut = Canvas::new(100, 100);
+        cut.set_clip(Some(Rect::new(20, 30, 50, 10)));
+        blit_fit(&mut cut, &grad, Rect::new(5, 5, 90, 90));
+        for (i, (a, b)) in full.pixels.iter().zip(&cut.pixels).enumerate() {
+            let inside = Rect::new(20, 30, 50, 10).contains(ink_device::Point::new((i % 100) as i32, (i / 100) as i32));
+            assert_eq!(*b, if inside { *a } else { 255 }, "pixel {i}");
+        }
+        let mut edge = Canvas::new(100, 100);
+        let r = blit_fit(&mut edge, &grad, Rect::new(-40, 60, 90, 90));
+        assert_eq!(r, Rect::new(-40, 75, 90, 60));
+        assert_eq!(edge.get(0, 80), full.get(45, 25));
         let mut g = Canvas::new(4, 1);
         for (x, v) in [0x22, 0x77, 0x99, 0xDD].iter().enumerate() {
             g.set(x as i32, 0, *v);
         }
         two_level(&mut g, Rect::new(0, 0, 10, 10), 0x80);
         assert_eq!(g.pixels, vec![0, 0, 255, 255]);
+        // Only inside the canvas's clip.
+        let mut g = Canvas::from_pixels(4, 1, vec![0x22, 0x77, 0x99, 0xDD]);
+        g.set_clip(Some(Rect::new(1, 0, 2, 1)));
+        two_level(&mut g, Rect::new(-5, -5, 20, 20), 0x80);
+        assert_eq!(g.pixels, vec![0x22, 0, 255, 0xDD]);
     }
 }

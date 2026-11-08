@@ -9,32 +9,47 @@ use crate::css::{self, Declaration, Selector, SelectorElement, Stylesheet, Tok};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// `display`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum Display {
-    /// `inline` (also `ruby`, `run-in`, unknown values).
-    #[default]
-    Inline,
-    /// `inline-block` (laid out as an inline atom of text here).
-    InlineBlock,
-    /// `block` (also `flex`, `grid`, `flow-root`).
-    Block,
-    /// `list-item`.
-    ListItem,
-    /// `table` / `inline-table`.
-    Table,
-    /// `table-row-group`, `table-header-group`, `table-footer-group`.
-    TableRowGroup,
-    /// `table-row`.
-    TableRow,
-    /// `table-cell`.
-    TableCell,
-    /// `table-caption`.
-    TableCaption,
-    /// `table-column`, `table-column-group` (not rendered).
-    TableColumn,
-    /// `none`.
-    None,
+/// Declares a CSS keyword enum (`#[derive(Default)]` on the variant marked
+/// `#[default]`) whose variants each list the keywords that select them, and
+/// `from_keyword` mapping a lowercase keyword to its variant.
+macro_rules! keyword_enum {
+    ($(#[$m:meta])* $name:ident { $($(#[$vm:meta])* $variant:ident = $($kw:literal)|+,)+ }) => {
+        $(#[$m])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+        pub enum $name {
+            $($(#[$vm])* #[doc = concat!($("`", $kw, "` "),+)] $variant,)+
+        }
+
+        impl $name {
+            /// The variant a lowercase keyword selects.
+            pub fn from_keyword(k: &str) -> Option<Self> {
+                Some(match k {
+                    $($($kw)|+ => $name::$variant,)+
+                    _ => return None,
+                })
+            }
+        }
+    };
+}
+
+keyword_enum! {
+    /// `display` (the first keyword of two-value forms such as `block flow`).
+    Display {
+        #[default]
+        Inline = "inline" | "ruby" | "run-in" | "contents",
+        /// Laid out as an inline atom of text.
+        InlineBlock = "inline-block" | "inline-flex" | "inline-grid",
+        Block = "block" | "flex" | "grid" | "flow-root" | "-webkit-box" | "box",
+        ListItem = "list-item",
+        Table = "table" | "inline-table",
+        TableRowGroup = "table-row-group" | "table-header-group" | "table-footer-group",
+        TableRow = "table-row",
+        TableCell = "table-cell",
+        TableCaption = "table-caption",
+        /// Not rendered.
+        TableColumn = "table-column" | "table-column-group",
+        None = "none",
+    }
 }
 
 impl Display {
@@ -44,20 +59,16 @@ impl Display {
     }
 }
 
-/// `white-space`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum WhiteSpace {
-    /// `normal`.
-    #[default]
-    Normal,
-    /// `nowrap`.
-    NoWrap,
-    /// `pre-line`.
-    PreLine,
-    /// `pre`.
-    Pre,
-    /// `pre-wrap` / `break-spaces`.
-    PreWrap,
+keyword_enum! {
+    /// `white-space`.
+    WhiteSpace {
+        #[default]
+        Normal = "normal",
+        NoWrap = "nowrap",
+        PreLine = "pre-line",
+        Pre = "pre",
+        PreWrap = "pre-wrap" | "break-spaces",
+    }
 }
 
 impl WhiteSpace {
@@ -79,18 +90,15 @@ impl WhiteSpace {
     }
 }
 
-/// `text-align`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum TextAlign {
-    /// `left` / `start`.
-    #[default]
-    Left,
-    /// `right` / `end`.
-    Right,
-    /// `center`.
-    Center,
-    /// `justify`.
-    Justify,
+keyword_enum! {
+    /// `text-align`.
+    TextAlign {
+        #[default]
+        Left = "left" | "start",
+        Right = "right" | "end",
+        Center = "center" | "-webkit-center",
+        Justify = "justify",
+    }
 }
 
 /// `vertical-align` (inline boxes).
@@ -113,70 +121,55 @@ pub enum VAlign {
     Raise(f32),
 }
 
-/// `list-style-type`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum ListStyle {
-    /// `disc`.
-    #[default]
-    Disc,
-    /// `circle`.
-    Circle,
-    /// `square`.
-    Square,
-    /// `decimal`.
-    Decimal,
-    /// `decimal-leading-zero`.
-    DecimalLeadingZero,
-    /// `lower-alpha` / `lower-latin`.
-    LowerAlpha,
-    /// `upper-alpha` / `upper-latin`.
-    UpperAlpha,
-    /// `lower-roman`.
-    LowerRoman,
-    /// `upper-roman`.
-    UpperRoman,
-    /// `lower-greek`.
-    LowerGreek,
-    /// `none`.
-    None,
+keyword_enum! {
+    /// `list-style-type`.
+    ListStyle {
+        #[default]
+        Disc = "disc",
+        Circle = "circle",
+        Square = "square",
+        Decimal = "decimal",
+        DecimalLeadingZero = "decimal-leading-zero",
+        LowerAlpha = "lower-alpha" | "lower-latin",
+        UpperAlpha = "upper-alpha" | "upper-latin",
+        LowerRoman = "lower-roman",
+        UpperRoman = "upper-roman",
+        LowerGreek = "lower-greek",
+        None = "none",
+    }
 }
 
-/// `page-break-*` / `break-*`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum PageBreak {
-    /// `auto`.
-    #[default]
-    Auto,
-    /// `always`, `page`, `left`, `right`.
-    Always,
-    /// `avoid`.
-    Avoid,
+keyword_enum! {
+    /// `page-break-*` / `break-*` (other keywords are `auto`).
+    PageBreak {
+        #[default]
+        Auto = "auto",
+        Always = "always" | "page" | "left" | "right" | "recto" | "verso",
+        Avoid = "avoid" | "avoid-page",
+    }
 }
 
-/// `text-transform`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum TextTransform {
-    /// `none`.
-    #[default]
-    None,
-    /// `uppercase`.
-    Upper,
-    /// `lowercase`.
-    Lower,
-    /// `capitalize`.
-    Capitalize,
+keyword_enum! {
+    /// `text-transform` (other keywords are `none`).
+    TextTransform {
+        #[default]
+        None = "none",
+        Upper = "uppercase",
+        Lower = "lowercase",
+        Capitalize = "capitalize",
+    }
 }
 
-/// `hyphens`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum Hyphens {
-    /// `none`.
-    None,
-    /// `manual` (soft hyphens only).
-    Manual,
-    /// `auto` (the user's hyphenation setting decides).
-    #[default]
-    Auto,
+keyword_enum! {
+    /// `hyphens`.
+    Hyphens {
+        None = "none",
+        /// Soft hyphens only.
+        Manual = "manual",
+        /// The user's hyphenation setting decides.
+        #[default]
+        Auto = "auto" | "explicit",
+    }
 }
 
 /// A length that may depend on the containing block width.
@@ -229,6 +222,36 @@ impl<T: Copy> Edges<T> {
     pub fn all(v: T) -> Self {
         Edges { top: v, right: v, bottom: v, left: v }
     }
+
+    /// One to four values of a CSS box shorthand (top, right, bottom, left; a missing
+    /// side copies its opposite); `None` for no values.
+    fn from_values(v: &[T]) -> Option<Self> {
+        let at = |i: usize, or: usize| v[if i < v.len() { i } else { or }];
+        Some(Edges { top: *v.first()?, right: at(1, 0), bottom: at(2, 0), left: at(3, if v.len() > 1 { 1 } else { 0 }) })
+    }
+
+    /// Each side of `self` combined with the same side of `o`.
+    fn zip<U: Copy, V>(self, o: Edges<U>, f: impl Fn(T, U) -> V) -> Edges<V> {
+        Edges { top: f(self.top, o.top), right: f(self.right, o.right), bottom: f(self.bottom, o.bottom), left: f(self.left, o.left) }
+    }
+
+    /// The side a CSS property suffix names (`top`, `block-start`, `inline-end`, ...).
+    fn side(&mut self, name: &str) -> &mut T {
+        match name {
+            "top" | "block-start" => &mut self.top,
+            "right" | "inline-end" => &mut self.right,
+            "bottom" | "block-end" => &mut self.bottom,
+            _ => &mut self.left,
+        }
+    }
+}
+
+impl Edges<Len> {
+    /// Every side resolved against the containing block width `base` (`auto` = 0).
+    pub fn resolve(&self, base: f32) -> Edges<f32> {
+        let r = |l: Len| l.resolve(base, 0.0);
+        Edges { top: r(self.top), right: r(self.right), bottom: r(self.bottom), left: r(self.left) }
+    }
 }
 
 /// `line-height`.
@@ -243,8 +266,9 @@ pub enum LineHeight {
     Px(f32),
 }
 
-/// The computed style of an element (text nodes use their parent's).
-#[derive(Clone, Debug, PartialEq)]
+/// The computed style of an element (text nodes use their parent's). The `Default`
+/// values are the initial values of the properties [`ComputedStyle::root`] leaves.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ComputedStyle {
     /// `display`.
     pub display: Display,
@@ -321,39 +345,12 @@ impl ComputedStyle {
     pub fn root(font_px: f32) -> Self {
         ComputedStyle {
             display: Display::Block,
-            white_space: WhiteSpace::Normal,
-            float: 0,
-            clear: false,
             font_family: Arc::from(vec!["serif".to_string()]),
             font_size: font_px,
-            bold: false,
-            italic: false,
-            small_caps: false,
-            line_height: LineHeight::Normal,
-            text_align: TextAlign::Left,
             text_indent: Len::Px(0.0),
             margin: Edges::all(Len::Px(0.0)),
             padding: Edges::all(Len::Px(0.0)),
-            border: Edges::all(0.0),
-            width: Len::Auto,
-            height: Len::Auto,
-            max_width: Len::Auto,
-            max_height: Len::Auto,
-            break_before: PageBreak::Auto,
-            break_after: PageBreak::Auto,
-            avoid_break_inside: false,
-            vertical_align: VAlign::Baseline,
-            list_style: ListStyle::Disc,
-            list_inside: false,
-            text_transform: TextTransform::None,
-            underline: false,
-            line_through: false,
-            hyphens: Hyphens::Auto,
-            letter_spacing: 0.0,
-            word_spacing: 0.0,
-            hidden: false,
-            color: 0,
-            lang: None,
+            ..Default::default()
         }
     }
 
@@ -572,10 +569,6 @@ impl StyleContext {
 
 /// Element data the cascade reads beyond selector matching.
 pub trait StyledElement: SelectorElement {
-    /// The `style` attribute.
-    fn style_attr(&self) -> Option<&str> {
-        self.attr("style")
-    }
     /// Presentational hints (`align`, `width`, `height`, `valign`, `<font size>`) as declarations.
     fn hints(&self) -> Vec<Declaration> {
         let mut out = Vec::new();
@@ -656,90 +649,74 @@ pub struct StructStyle {
     pub float: bool,
 }
 
+/// Where a declaration stands in the cascade: (important, origin, specificity, order).
+type CascadeKey = (bool, Origin, u32, u32);
+
 impl Cascade {
-    fn gather<E: StyledElement>(&self, e: E) -> Vec<(u8, Origin, u32, u32, Declaration)> {
+    /// Calls `f` with the declarations that apply to `e` in cascade order (a later one
+    /// wins). The rules' declarations are borrowed, not copied.
+    fn gather<E: StyledElement, R>(&self, e: E, f: impl FnOnce(&[(CascadeKey, &Declaration)]) -> R) -> R {
         let mut matched = Vec::new();
         self.ua.matching(e, &mut matched);
         if self.publisher {
             self.author.matching(e, &mut matched);
         }
-        let mut decls: Vec<(u8, Origin, u32, u32, Declaration)> = Vec::new();
-        for (origin, spec, order, ds) in matched {
-            for d in ds.iter() {
-                decls.push((d.important as u8, origin, spec, order, d.clone()));
-            }
-        }
+        // Presentational hints and the `style` attribute: (origin, specificity, order).
+        let mut extra: Vec<(Origin, u32, u32, Declaration)> = Vec::new();
         if self.publisher {
-            for d in e.hints() {
-                decls.push((0, Origin::Hint, 0, 0, d));
-            }
-            if let Some(s) = e.style_attr() {
-                for (i, d) in css::parse_declarations(s).into_iter().enumerate() {
-                    decls.push((d.important as u8, Origin::Inline, u32::MAX, i as u32, d));
-                }
+            extra.extend(e.hints().into_iter().map(|d| (Origin::Hint, 0, 0, d)));
+            if let Some(s) = e.attr("style") {
+                extra.extend(css::parse_declarations(s).into_iter().enumerate().map(|(i, d)| (Origin::Inline, u32::MAX, i as u32, d)));
             }
         } else if matches!(e.local_name(), "img" | "image" | "svg") {
             // Image sizes from attributes stay meaningful without publisher styles.
-            for d in e.hints() {
-                if d.name == "width" || d.name == "height" {
-                    decls.push((0, Origin::Hint, 0, 0, d));
-                }
-            }
+            extra.extend(e.hints().into_iter().filter(|d| d.name == "width" || d.name == "height").map(|d| (Origin::Hint, 0, 0, d)));
         }
+        let mut decls: Vec<(CascadeKey, &Declaration)> =
+            matched.iter().flat_map(|(origin, spec, order, ds)| ds.iter().map(move |d| ((d.important, *origin, *spec, *order), d))).collect();
+        decls.extend(extra.iter().map(|(origin, spec, order, d)| ((d.important, *origin, *spec, *order), d)));
         // Stable sort: importance, then origin (important UA before author would be
         // reversed by CSS rules for user origin; there is none here), then specificity, order.
-        decls.sort_by_key(|d| (d.0, d.1, d.2, d.3));
-        decls
+        decls.sort_by_key(|d| d.0);
+        f(&decls)
     }
 
     /// Only `display`, `white-space` and `float` (used while parsing).
     pub fn structure<E: StyledElement>(&self, e: E, parent_ws: WhiteSpace) -> StructStyle {
         let mut s = StructStyle { display: Display::Inline, white_space: parent_ws, float: false };
-        for (_, _, _, _, d) in self.gather(e) {
-            match d.name.as_str() {
-                "display" => {
-                    if let Some(v) = parse_display(&d.value) {
-                        s.display = v;
-                    }
+        self.gather(e, |decls| {
+            for (_, d) in decls {
+                match d.name.as_str() {
+                    "display" => set(&mut s.display, parse_display(&d.value)),
+                    "white-space" => set(&mut s.white_space, parse_white_space(&d.value, parent_ws)),
+                    "float" => s.float = matches!(ident(&d.value).as_deref(), Some("left" | "right")),
+                    _ => {}
                 }
-                "white-space" => {
-                    if let Some(v) = parse_white_space(&d.value, parent_ws) {
-                        s.white_space = v;
-                    }
-                }
-                "float" => s.float = matches!(ident(&d.value).as_deref(), Some("left" | "right")),
-                _ => {}
             }
-        }
-        if matches!(e.local_name(), "img" | "image") && s.display.is_block_like() && !matches!(s.display, Display::Block | Display::ListItem) {
-            s.display = Display::Block;
-        }
+        });
+        s.display = image_display(e.local_name(), s.display);
         s
     }
 
     /// The full computed style of `e` given its parent's.
     pub fn compute<E: StyledElement>(&self, e: E, parent: &ComputedStyle) -> ComputedStyle {
-        let decls = self.gather(e);
-        let mut s = ComputedStyle::inherit_from(parent);
+        let mut s = self.gather(e, |decls| self.compute_from(decls, parent));
+        s.display = image_display(e.local_name(), s.display);
         if let Some(l) = e.lang() {
             let l = l.trim().to_ascii_lowercase();
             s.lang = if l.is_empty() { None } else { Some(Arc::from(l.as_str())) };
         }
+        s
+    }
+
+    /// The computed style from the declarations that apply, in cascade order.
+    fn compute_from(&self, decls: &[(CascadeKey, &Declaration)], parent: &ComputedStyle) -> ComputedStyle {
+        let mut s = ComputedStyle::inherit_from(parent);
         // Pass 1: font size (everything in em depends on it).
-        for (_, _, _, _, d) in &decls {
+        for (_, d) in decls {
             match d.name.as_str() {
-                "font-size" => {
-                    if let Some(v) = self.font_size(&d.value, parent) {
-                        s.font_size = v;
-                    }
-                }
-                "font" => {
-                    if let Some(sz) = font_shorthand_size(&d.value) {
-                        if let Some(v) = self.font_size(&sz, parent) {
-                            s.font_size = v;
-                        }
-                    }
-                }
+                "font-size" => set(&mut s.font_size, self.font_size(&d.value, parent)),
+                "font" => set(&mut s.font_size, font_shorthand_size(&d.value).and_then(|sz| self.font_size(&sz, parent))),
                 _ => {}
             }
         }
@@ -747,11 +724,8 @@ impl Cascade {
             s.font_size = parent.font_size;
         }
         s.font_size = s.font_size.clamp(self.ctx.font_px * 0.3, self.ctx.font_px * 5.0);
-        for (_, _, _, _, d) in &decls {
+        for (_, d) in decls {
             self.apply(&mut s, d, parent);
-        }
-        if matches!(e.local_name(), "img" | "image") && s.display.is_block_like() && !matches!(s.display, Display::Block | Display::ListItem) {
-            s.display = Display::Block;
         }
         s
     }
@@ -817,28 +791,24 @@ impl Cascade {
                 _ => return None,
             },
             Tok::Pct(p) => parent.font_size * p / 100.0,
-            Tok::Dim(_, u) if u == "em" || u == "ex" || u == "ch" => match self.len(t, parent.font_size)? {
-                Len::Px(v) => v,
-                _ => return None,
-            },
-            _ => match self.len(t, parent.font_size)? {
-                Len::Px(v) => v,
-                _ => return None,
-            },
+            _ => self.px(t, parent.font_size)?,
         })
+    }
+
+    /// A length in device px (not a percentage or `auto`).
+    fn px(&self, t: &Tok, font: f32) -> Option<f32> {
+        match self.len(t, font)? {
+            Len::Px(v) => Some(v),
+            _ => None,
+        }
     }
 
     fn edges(&self, v: &[Tok], font: f32) -> Option<Edges<Len>> {
         let vals: Vec<Len> = v.iter().filter_map(|t| self.len(t, font)).collect();
-        if vals.is_empty() || vals.len() != v.iter().filter(|t| !matches!(t, Tok::Comma)).count() {
+        if vals.len() != v.iter().filter(|t| !matches!(t, Tok::Comma)).count() {
             return None;
         }
-        Some(match vals.len() {
-            1 => Edges::all(vals[0]),
-            2 => Edges { top: vals[0], right: vals[1], bottom: vals[0], left: vals[1] },
-            3 => Edges { top: vals[0], right: vals[1], bottom: vals[2], left: vals[1] },
-            _ => Edges { top: vals[0], right: vals[1], bottom: vals[2], left: vals[3] },
-        })
+        Edges::from_values(&vals)
     }
 
     fn border_width(&self, t: &Tok, font: f32) -> Option<f32> {
@@ -849,31 +819,17 @@ impl Cascade {
                 "thick" => Some(5.0 * self.ctx.px_scale()),
                 _ => None,
             },
-            _ => match self.len(t, font)? {
-                Len::Px(v) => Some(v.max(0.0)),
-                _ => None,
-            },
+            _ => self.px(t, font).map(|v| v.max(0.0)),
         }
     }
 
     /// `border` / `border-top` style shorthands: (width, visible).
     fn border_parts(&self, v: &[Tok], font: f32) -> (Option<f32>, Option<bool>) {
-        let mut w = None;
-        let mut visible = None;
+        let (mut w, mut visible) = (None, None);
         for t in v {
-            if let Tok::Ident(k) = t {
-                let k = k.to_ascii_lowercase();
-                match k.as_str() {
-                    "none" | "hidden" => visible = Some(false),
-                    "solid" | "dotted" | "dashed" | "double" | "groove" | "ridge" | "inset" | "outset" => visible = Some(true),
-                    _ => {
-                        if let Some(x) = self.border_width(t, font) {
-                            w = Some(x);
-                        }
-                    }
-                }
-            } else if let Some(x) = self.border_width(t, font) {
-                w = Some(x);
+            match border_style(t) {
+                Some(on) => visible = Some(on),
+                None => w = self.border_width(t, font).or(w),
             }
         }
         (w, visible)
@@ -888,16 +844,8 @@ impl Cascade {
             return;
         }
         match d.name.as_str() {
-            "display" => {
-                if let Some(x) = parse_display(v) {
-                    s.display = x;
-                }
-            }
-            "white-space" => {
-                if let Some(x) = parse_white_space(v, parent.white_space) {
-                    s.white_space = x;
-                }
-            }
+            "display" => set(&mut s.display, parse_display(v)),
+            "white-space" => set(&mut s.white_space, parse_white_space(v, parent.white_space)),
             "float" => {
                 s.float = match kw.as_deref() {
                     Some("left") => -1,
@@ -906,12 +854,7 @@ impl Cascade {
                 }
             }
             "clear" => s.clear = matches!(kw.as_deref(), Some("left" | "right" | "both")),
-            "font-family" => {
-                let f = css::family_names(v);
-                if !f.is_empty() {
-                    s.font_family = Arc::from(f);
-                }
-            }
+            "font-family" => set(&mut s.font_family, family(v)),
             "font-weight" => {
                 if let Some(w) = css::parse_weight(v) {
                     s.bold = match kw.as_deref() {
@@ -948,169 +891,64 @@ impl Cascade {
                 // size
                 i += 1;
                 if i < v.len() && v[i] == Tok::Slash {
-                    if let Some(lh) = self.line_height(&v[i + 1..i + 2], font) {
-                        s.line_height = lh;
-                    }
+                    set(&mut s.line_height, self.line_height(&v[i + 1..i + 2], font));
                     i += 2;
                 }
                 if i < v.len() {
-                    let f = css::family_names(&v[i..]);
-                    if !f.is_empty() {
-                        s.font_family = Arc::from(f);
-                    }
+                    set(&mut s.font_family, family(&v[i..]));
                 }
             }
             "font-size" => {}
-            "line-height" => {
-                if let Some(lh) = self.line_height(v, font) {
-                    s.line_height = lh;
-                }
-            }
-            "text-align" => {
-                s.text_align = match kw.as_deref() {
-                    Some("left" | "start") => TextAlign::Left,
-                    Some("right" | "end") => TextAlign::Right,
-                    Some("center" | "-webkit-center") => TextAlign::Center,
-                    Some("justify") => TextAlign::Justify,
-                    _ => s.text_align,
-                }
-            }
-            "text-indent" => {
-                if let Some(l) = v.first().and_then(|t| self.len(t, font)) {
-                    s.text_indent = l;
-                }
-            }
-            "margin" => {
-                if let Some(e) = self.edges(v, font) {
-                    s.margin = e;
-                }
-            }
-            "padding" => {
-                if let Some(e) = self.edges(v, font) {
-                    s.padding = e;
-                }
-            }
+            "line-height" => set(&mut s.line_height, self.line_height(v, font)),
+            "text-align" => set(&mut s.text_align, kw.as_deref().and_then(TextAlign::from_keyword)),
+            "text-indent" => set(&mut s.text_indent, v.first().and_then(|t| self.len(t, font))),
+            "margin" => set(&mut s.margin, self.edges(v, font)),
+            "padding" => set(&mut s.padding, self.edges(v, font)),
             "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "padding-top" | "padding-right" | "padding-bottom"
-            | "padding-left" => {
+            | "padding-left" | "margin-block-start" | "margin-block-end" | "margin-inline-start" | "margin-inline-end"
+            | "padding-inline-start" => {
                 if let Some(l) = v.first().and_then(|t| self.len(t, font)) {
                     let (edges, side) = d.name.split_once('-').unwrap();
-                    let e = if edges == "margin" { &mut s.margin } else { &mut s.padding };
-                    match side {
-                        "top" => e.top = l,
-                        "right" => e.right = l,
-                        "bottom" => e.bottom = l,
-                        _ => e.left = l,
-                    }
+                    *if edges == "margin" { &mut s.margin } else { &mut s.padding }.side(side) = l;
                 }
             }
-            "margin-block-start" | "margin-block-end" | "margin-inline-start" | "margin-inline-end" => {
-                if let Some(l) = v.first().and_then(|t| self.len(t, font)) {
-                    match d.name.as_str() {
-                        "margin-block-start" => s.margin.top = l,
-                        "margin-block-end" => s.margin.bottom = l,
-                        "margin-inline-start" => s.margin.left = l,
-                        _ => s.margin.right = l,
-                    }
-                }
-            }
-            "padding-inline-start" => {
-                if let Some(l) = v.first().and_then(|t| self.len(t, font)) {
-                    s.padding.left = l;
-                }
-            }
-            "border" => {
+            "border" | "border-top" | "border-right" | "border-bottom" | "border-left" => {
+                // A width alone (no visible style) draws no border.
                 let (w, vis) = self.border_parts(v, font);
-                let width = match vis {
-                    Some(false) => 0.0,
-                    Some(true) => w.unwrap_or(3.0 * self.ctx.px_scale()),
-                    None => w.unwrap_or(0.0).min(0.0),
-                };
-                s.border = Edges::all(width);
-            }
-            "border-top" | "border-right" | "border-bottom" | "border-left" => {
-                let (w, vis) = self.border_parts(v, font);
-                let width = match vis {
-                    Some(false) => 0.0,
-                    Some(true) => w.unwrap_or(3.0 * self.ctx.px_scale()),
-                    None => 0.0,
-                };
-                match &d.name[7..] {
-                    "top" => s.border.top = width,
-                    "right" => s.border.right = width,
-                    "bottom" => s.border.bottom = width,
-                    _ => s.border.left = width,
+                let width = if vis == Some(true) { w.unwrap_or(3.0 * self.ctx.px_scale()) } else { 0.0 };
+                match d.name.strip_prefix("border-") {
+                    Some(side) => *s.border.side(side) = width,
+                    None => s.border = Edges::all(width),
                 }
             }
             "border-width" => {
                 let ws: Vec<f32> = v.iter().filter_map(|t| self.border_width(t, font)).collect();
-                if !ws.is_empty() {
-                    let get = |i: usize| ws[i.min(ws.len() - 1)];
-                    let e = match ws.len() {
-                        1 => Edges::all(ws[0]),
-                        2 => Edges { top: ws[0], right: ws[1], bottom: ws[0], left: ws[1] },
-                        3 => Edges { top: ws[0], right: ws[1], bottom: ws[2], left: ws[1] },
-                        _ => Edges { top: get(0), right: get(1), bottom: get(2), left: get(3) },
-                    };
+                if let Some(e) = Edges::from_values(&ws) {
                     // Only sides that already have a visible style keep a width.
-                    s.border = Edges {
-                        top: if s.border.top > 0.0 { e.top } else { 0.0 },
-                        right: if s.border.right > 0.0 { e.right } else { 0.0 },
-                        bottom: if s.border.bottom > 0.0 { e.bottom } else { 0.0 },
-                        left: if s.border.left > 0.0 { e.left } else { 0.0 },
-                    };
+                    s.border = s.border.zip(e, |cur, w| if cur > 0.0 { w } else { 0.0 });
                 }
             }
             "border-style" => {
-                let styles: Vec<bool> = v
-                    .iter()
-                    .filter_map(|t| match t {
-                        Tok::Ident(k) => Some(!matches!(k.to_ascii_lowercase().as_str(), "none" | "hidden")),
-                        _ => None,
-                    })
-                    .collect();
-                if !styles.is_empty() {
-                    let get = |i: usize| styles[i.min(styles.len() - 1)];
-                    let (t, r, b, l) = match styles.len() {
-                        1 => (get(0), get(0), get(0), get(0)),
-                        2 => (get(0), get(1), get(0), get(1)),
-                        3 => (get(0), get(1), get(2), get(1)),
-                        _ => (get(0), get(1), get(2), get(3)),
-                    };
+                // Any word but `none` and `hidden` draws the side.
+                let styles: Vec<bool> = v.iter().filter(|t| matches!(t, Tok::Ident(_))).map(|t| border_style(t) != Some(false)).collect();
+                if let Some(on) = Edges::from_values(&styles) {
                     let def = 3.0 * self.ctx.px_scale();
-                    let pick = |on: bool, cur: f32| if on { if cur > 0.0 { cur } else { def } } else { 0.0 };
-                    s.border = Edges {
-                        top: pick(t, s.border.top),
-                        right: pick(r, s.border.right),
-                        bottom: pick(b, s.border.bottom),
-                        left: pick(l, s.border.left),
-                    };
+                    s.border = s.border.zip(on, |cur, on| if !on { 0.0 } else if cur > 0.0 { cur } else { def });
                 }
             }
             "width" | "height" | "max-width" | "max-height" => {
-                let l = match kw.as_deref() {
-                    Some("none") => Some(Len::Auto),
-                    _ => v.first().and_then(|t| self.len(t, font)),
+                let l = if kw.as_deref() == Some("none") { Some(Len::Auto) } else { v.first().and_then(|t| self.len(t, font)) };
+                let slot = match d.name.as_str() {
+                    "width" => &mut s.width,
+                    "height" => &mut s.height,
+                    "max-width" => &mut s.max_width,
+                    _ => &mut s.max_height,
                 };
-                if let Some(l) = l {
-                    match d.name.as_str() {
-                        "width" => s.width = l,
-                        "height" => s.height = l,
-                        "max-width" => s.max_width = l,
-                        _ => s.max_height = l,
-                    }
-                }
+                set(slot, l);
             }
             "page-break-before" | "break-before" | "page-break-after" | "break-after" => {
-                let b = match kw.as_deref() {
-                    Some("always" | "page" | "left" | "right" | "recto" | "verso") => PageBreak::Always,
-                    Some("avoid" | "avoid-page") => PageBreak::Avoid,
-                    _ => PageBreak::Auto,
-                };
-                if d.name.ends_with("before") {
-                    s.break_before = b;
-                } else {
-                    s.break_after = b;
-                }
+                let slot = if d.name.ends_with("before") { &mut s.break_before } else { &mut s.break_after };
+                *slot = kw.as_deref().and_then(PageBreak::from_keyword).unwrap_or_default();
             }
             "page-break-inside" | "break-inside" => s.avoid_break_inside = matches!(kw.as_deref(), Some("avoid" | "avoid-page")),
             "vertical-align" => {
@@ -1132,7 +970,7 @@ impl Cascade {
                 for t in v {
                     if let Tok::Ident(k) = t {
                         let k = k.to_ascii_lowercase();
-                        if let Some(ls) = list_style(&k) {
+                        if let Some(ls) = ListStyle::from_keyword(&k) {
                             s.list_style = ls;
                         } else if k == "inside" {
                             s.list_inside = true;
@@ -1143,44 +981,21 @@ impl Cascade {
                 }
             }
             "list-style-position" => s.list_inside = matches!(kw.as_deref(), Some("inside")),
-            "text-transform" => {
-                s.text_transform = match kw.as_deref() {
-                    Some("uppercase") => TextTransform::Upper,
-                    Some("lowercase") => TextTransform::Lower,
-                    Some("capitalize") => TextTransform::Capitalize,
-                    _ => TextTransform::None,
-                }
-            }
+            "text-transform" => s.text_transform = kw.as_deref().and_then(TextTransform::from_keyword).unwrap_or_default(),
             "text-decoration" | "text-decoration-line" => {
-                let words: Vec<String> = v.iter().filter_map(|t| if let Tok::Ident(k) = t { Some(k.to_ascii_lowercase()) } else { None }).collect();
-                if words.iter().any(|w| w == "none") {
-                    s.underline = false;
-                    s.line_through = false;
+                let has = |w: &str| v.iter().any(|t| matches!(t, Tok::Ident(k) if k.eq_ignore_ascii_case(w)));
+                if has("none") {
+                    (s.underline, s.line_through) = (false, false);
                 } else {
-                    if words.iter().any(|w| w == "underline") {
-                        s.underline = true;
-                    }
-                    if words.iter().any(|w| w == "line-through") {
-                        s.line_through = true;
-                    }
+                    s.underline |= has("underline");
+                    s.line_through |= has("line-through");
                 }
             }
             "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens" | "adobe-hyphenate" => {
-                s.hyphens = match kw.as_deref() {
-                    Some("none") => Hyphens::None,
-                    Some("manual") => Hyphens::Manual,
-                    Some("auto" | "explicit") => Hyphens::Auto,
-                    _ => s.hyphens,
-                }
+                set(&mut s.hyphens, kw.as_deref().and_then(Hyphens::from_keyword))
             }
             "letter-spacing" | "word-spacing" => {
-                let px = match kw.as_deref() {
-                    Some("normal") => Some(0.0),
-                    _ => match v.first().and_then(|t| self.len(t, font)) {
-                        Some(Len::Px(p)) => Some(p),
-                        _ => None,
-                    },
-                };
+                let px = if kw.as_deref() == Some("normal") { Some(0.0) } else { v.first().and_then(|t| self.px(t, font)) };
                 if let Some(p) = px {
                     if d.name == "letter-spacing" {
                         s.letter_spacing = p.clamp(-font * 0.2, font);
@@ -1190,11 +1005,7 @@ impl Cascade {
                 }
             }
             "visibility" => s.hidden = matches!(kw.as_deref(), Some("hidden" | "collapse")),
-            "color" => {
-                if let Some(g) = parse_color(v) {
-                    s.color = g;
-                }
-            }
+            "color" => set(&mut s.color, parse_color(v)),
             _ => {}
         }
     }
@@ -1204,13 +1015,44 @@ impl Cascade {
             Tok::Ident(k) if k.eq_ignore_ascii_case("normal") => return Some(LineHeight::Normal),
             Tok::Num(n) => *n,
             Tok::Pct(p) => p / 100.0,
-            t => match self.len(t, font)? {
-                Len::Px(px) => px / font.max(1.0),
-                _ => return None,
-            },
+            t => self.px(t, font)? / font.max(1.0),
         };
         // At most 20 lines' worth (hostile values: 1e39, NaN).
         (!f.is_nan()).then_some(LineHeight::Factor(f.clamp(0.0, 20.0)))
+    }
+}
+
+/// An image (`img`, `image`) with a block-like display other than block or list item
+/// is a block.
+fn image_display(name: &str, d: Display) -> Display {
+    if matches!(name, "img" | "image") && d.is_block_like() && !matches!(d, Display::Block | Display::ListItem) {
+        Display::Block
+    } else {
+        d
+    }
+}
+
+/// Sets `slot` to `v` when there is one (a declaration with an invalid value is
+/// ignored).
+fn set<T>(slot: &mut T, v: Option<T>) {
+    if let Some(v) = v {
+        *slot = v;
+    }
+}
+
+/// The family list of a `font-family` value, `None` when it names none.
+fn family(v: &[Tok]) -> Option<Arc<[String]>> {
+    let f = css::family_names(v);
+    (!f.is_empty()).then(|| Arc::from(f))
+}
+
+/// Whether a `border-style` keyword draws the border; `None` for other tokens.
+fn border_style(t: &Tok) -> Option<bool> {
+    let Tok::Ident(k) = t else { return None };
+    match k.to_ascii_lowercase().as_str() {
+        "none" | "hidden" => Some(false),
+        "solid" | "dotted" | "dashed" | "double" | "groove" | "ridge" | "inset" | "outset" => Some(true),
+        _ => None,
     }
 }
 
@@ -1235,53 +1077,16 @@ fn inherit_prop(s: &mut ComputedStyle, p: &ComputedStyle, name: &str) {
     }
 }
 
-fn list_style(k: &str) -> Option<ListStyle> {
-    Some(match k {
-        "disc" => ListStyle::Disc,
-        "circle" => ListStyle::Circle,
-        "square" => ListStyle::Square,
-        "decimal" => ListStyle::Decimal,
-        "decimal-leading-zero" => ListStyle::DecimalLeadingZero,
-        "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
-        "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
-        "lower-roman" => ListStyle::LowerRoman,
-        "upper-roman" => ListStyle::UpperRoman,
-        "lower-greek" => ListStyle::LowerGreek,
-        "none" => ListStyle::None,
-        _ => return None,
-    })
-}
-
 /// `display` keyword.
 pub fn parse_display(v: &[Tok]) -> Option<Display> {
-    let k = ident(v)?;
-    // `display: block flow` and similar two-value forms: first keyword decides.
-    Some(match k.as_str() {
-        "inline" | "ruby" | "run-in" | "contents" => Display::Inline,
-        "inline-block" | "inline-flex" | "inline-grid" => Display::InlineBlock,
-        "block" | "flex" | "grid" | "flow-root" | "-webkit-box" | "box" => Display::Block,
-        "list-item" => Display::ListItem,
-        "table" | "inline-table" => Display::Table,
-        "table-row-group" | "table-header-group" | "table-footer-group" => Display::TableRowGroup,
-        "table-row" => Display::TableRow,
-        "table-cell" => Display::TableCell,
-        "table-caption" => Display::TableCaption,
-        "table-column" | "table-column-group" => Display::TableColumn,
-        "none" => Display::None,
-        _ => return None,
-    })
+    Display::from_keyword(&ident(v)?)
 }
 
 fn parse_white_space(v: &[Tok], parent: WhiteSpace) -> Option<WhiteSpace> {
-    Some(match ident(v)?.as_str() {
-        "normal" => WhiteSpace::Normal,
-        "nowrap" => WhiteSpace::NoWrap,
-        "pre" => WhiteSpace::Pre,
-        "pre-wrap" | "break-spaces" => WhiteSpace::PreWrap,
-        "pre-line" => WhiteSpace::PreLine,
-        "inherit" => parent,
-        _ => return None,
-    })
+    match ident(v)?.as_str() {
+        "inherit" => Some(parent),
+        k => WhiteSpace::from_keyword(k),
+    }
 }
 
 /// A color as a gray level for e-ink (0 = black, 255 = white).
@@ -1456,6 +1261,38 @@ mod tests {
         assert_eq!(p.vertical_align, VAlign::Super);
         assert_eq!(p.text_transform, TextTransform::Upper);
         assert_eq!(p.list_style, ListStyle::UpperRoman, "inherited");
+    }
+
+    #[test]
+    fn box_shorthands_and_sides() {
+        let c = cascade(
+            "div { margin: 1px 2px 3px; padding: 1px 2px; border-style: solid none; border-width: 1px 2px 3px 4px }
+             p { margin-block-start: 5px; margin-inline-end: 6px; padding-inline-start: 7px; border: 1px; border-left: 2px solid }",
+        );
+        let root = ComputedStyle::root(32.0);
+        let d = c.compute(E { tree: TREE, i: 1 }, &root);
+        let px = |a: f32, b: f32, c: f32, d: f32| Edges { top: Len::Px(a), right: Len::Px(b), bottom: Len::Px(c), left: Len::Px(d) };
+        assert_eq!(d.margin, px(2.0, 4.0, 6.0, 4.0));
+        assert_eq!(d.padding, px(2.0, 4.0, 2.0, 4.0));
+        assert_eq!(d.border, Edges { top: 2.0, right: 0.0, bottom: 6.0, left: 0.0 }, "widths only on styled sides");
+        let p = c.compute(E { tree: TREE, i: 2 }, &d);
+        assert_eq!((p.margin.top, p.margin.right, p.padding.left), (Len::Px(10.0), Len::Px(12.0), Len::Px(14.0)));
+        assert_eq!(p.border, Edges { top: 0.0, right: 0.0, bottom: 0.0, left: 4.0 }, "a width without a style draws nothing");
+    }
+
+    #[test]
+    fn root_initial_values() {
+        let r = ComputedStyle::root(20.0);
+        assert_eq!((r.display, r.white_space, r.float, r.clear), (Display::Block, WhiteSpace::Normal, 0, false));
+        assert_eq!((&*r.font_family, r.font_size), (&["serif".to_string()][..], 20.0));
+        assert_eq!((r.bold, r.italic, r.small_caps, r.line_height), (false, false, false, LineHeight::Normal));
+        assert_eq!((r.text_align, r.text_indent), (TextAlign::Left, Len::Px(0.0)));
+        assert_eq!((r.margin, r.padding, r.border), (Edges::all(Len::Px(0.0)), Edges::all(Len::Px(0.0)), Edges::all(0.0)));
+        assert_eq!((r.width, r.height, r.max_width, r.max_height), (Len::Auto, Len::Auto, Len::Auto, Len::Auto));
+        assert_eq!((r.break_before, r.break_after, r.avoid_break_inside), (PageBreak::Auto, PageBreak::Auto, false));
+        assert_eq!((r.vertical_align, r.list_style, r.list_inside), (VAlign::Baseline, ListStyle::Disc, false));
+        assert_eq!((r.text_transform, r.underline, r.line_through, r.hyphens), (TextTransform::None, false, false, Hyphens::Auto));
+        assert_eq!((r.letter_spacing, r.word_spacing, r.hidden, r.color, r.lang), (0.0, 0.0, false, 0, None));
     }
 
     #[test]

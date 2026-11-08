@@ -9,6 +9,7 @@
 
 use crate::prompts::SelectionInfo;
 use crate::provider::Usage;
+use ink_plugin::kit::squeeze;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -56,6 +57,18 @@ pub struct Message {
     /// Tokens and cost of this answer (assistant turns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Totals>,
+}
+
+impl Message {
+    /// The user's turn, sent now.
+    pub fn user(content: &str, selection: Option<SelectionInfo>, label: Option<&str>) -> Message {
+        Message { role: "user".into(), content: content.into(), selection, model: None, label: label.map(str::to_string), timestamp: now(), usage: None }
+    }
+
+    /// An answer of `model`, received now.
+    pub fn answer(content: String, model: &str, usage: Totals) -> Message {
+        Message { role: "assistant".into(), content, selection: None, model: Some(model.into()), label: None, timestamp: now(), usage: Some(usage) }
+    }
 }
 
 /// Token and cost totals.
@@ -187,9 +200,7 @@ pub struct BookChats {
 }
 
 /// Seconds since 1970.
-pub fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
+pub use ink_store::now_secs as now;
 
 /// File name of a book's chats (in the data folder).
 pub fn file_name(book_id: &str) -> String {
@@ -198,7 +209,7 @@ pub fn file_name(book_id: &str) -> String {
 }
 
 fn short(text: &str, n: usize) -> String {
-    let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = squeeze(text);
     if t.chars().count() <= n {
         t
     } else {
@@ -264,11 +275,6 @@ impl BookChats {
         self.chats.len() != n
     }
 
-    /// `(label, id)` for a menu, newest first.
-    pub fn list(&self) -> Vec<(String, String)> {
-        self.chats.iter().rev().map(|c| (format!("{} ({} messages)", c.title, c.messages.len()), c.id.clone())).collect()
-    }
-
     /// Totals over all chats.
     pub fn totals(&self) -> Totals {
         let mut t = Totals::default();
@@ -320,7 +326,7 @@ fn guard(text: &str) -> String {
 
 /// One line for a block argument (no `|` separator, no line breaks).
 fn arg(text: &str) -> String {
-    text.replace('|', "/").split_whitespace().collect::<Vec<_>>().join(" ")
+    squeeze(&text.replace('|', "/"))
 }
 
 /// Replaces `<question>q</question>` items with links; returns the new text and adds
@@ -491,18 +497,9 @@ pub fn render(conv: &Conversation, x: Extras) -> (String, Vec<String>) {
 
 /// `12 Oct 2026` for seconds since 1970 (UTC).
 pub fn date(secs: u64) -> String {
-    // Days to civil date (Howard Hinnant's algorithm).
-    let z = (secs / 86_400) as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (y, m, d) = ink_device::clock::civil_from_days((secs / 86_400) as i64);
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    format!("{d} {} {y}", MONTHS[(m - 1) as usize])
+    format!("{d} {} {y}", MONTHS[m as usize - 1])
 }
 
 /// The chat list as viewer Markdown (`chat_list.lua`): "Start new chat", then a card
@@ -626,9 +623,7 @@ mod tests {
 
     #[test]
     fn corrupt_chat_file_is_kept_aside_and_chats_start_empty() {
-        let dir = std::env::temp_dir().join(format!("insightful-chats-bad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ink_plugin::testing::TempDir::new("insightful-chats-bad");
         let path = dir.join("abcd.json");
         std::fs::write(&path, b"{\"book_id\": \"abcd\", \"chats\": [{\"id\"").unwrap(); // truncated
         let mut b = BookChats::load(&path, "abcd").unwrap();
@@ -639,13 +634,11 @@ mod tests {
         b.create("new");
         b.save(&path).unwrap();
         assert_eq!(BookChats::load(&path, "abcd").unwrap().chats.len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn store_list_delete() {
-        let dir = std::env::temp_dir().join(format!("insightful-chats-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = ink_plugin::testing::TempDir::new("insightful-chats");
         let path = dir.join(file_name("ab/../cd"));
         assert!(path.ends_with("conversations/abcd.json"));
         let mut b = BookChats::load(&path, "abcd").unwrap();
@@ -657,12 +650,11 @@ mod tests {
         b.save(&path).unwrap();
         let mut back = BookChats::load(&path, "abcd").unwrap();
         assert_eq!(back, b);
-        assert_eq!(back.list()[0], ("Who is Tybalt? (0 messages)".to_string(), two.clone()));
-        assert!(back.list()[1].0.ends_with("… (1 messages)"));
+        assert_eq!(back.chats[1].title, "Who is Tybalt?");
+        assert!(back.chats[0].title.ends_with('…') && back.chats[0].title.chars().count() == 60, "long titles are cut");
         assert_eq!(back.totals().total_tokens, 3);
         assert!(back.delete(&one) && !back.delete(&one));
         let three = back.create("again");
         assert_eq!(three, "c3", "ids are not reused");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

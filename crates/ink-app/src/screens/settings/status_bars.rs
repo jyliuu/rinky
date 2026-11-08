@@ -1,4 +1,4 @@
-//! Status bars page of the settings screen (owner: the `statusbar` builder): a live
+//! Status bars page of the settings screen: a live
 //! preview of both bars at the top, a Top / Bottom switch, the text size slider of the
 //! chosen bar, then its rows: on/off switch, the widgets of the left, centre and right
 //! slots (a tap opens Move / Remove; "Add widget" opens a picker), the progress bar style,
@@ -29,6 +29,8 @@ use ink_ui::{Icon, PaintCx, Segmented, Slider, Widget};
 pub const SEPARATORS: &[(&str, &str)] = &[(" · ", "Dot"), (" | ", "Vertical bar"), (" – ", "Dash"), (" / ", "Slash"), ("   ", "Space")];
 /// Slot names, by index.
 const SLOTS: [&str; 3] = ["Left", "Centre", "Right"];
+/// Slot names in `sbar-move` actions, by index.
+const SLOT_KEYS: [&str; 3] = ["left", "center", "right"];
 /// Height of the preview.
 pub const PREVIEW_H: u32 = 300;
 
@@ -71,19 +73,24 @@ pub enum Step {
     Saved(View, String),
 }
 
+/// Each bar's action name and title, by `Edge as usize`.
+const EDGES: [(Edge, &str, &str); 2] = [(Edge::Top, "top", "Top bar"), (Edge::Bottom, "bottom", "Bottom bar")];
+
 fn edge_name(e: Edge) -> &'static str {
-    match e {
-        Edge::Top => "top",
-        Edge::Bottom => "bottom",
-    }
+    EDGES[e as usize].1
 }
 
 fn edge_of(s: &str) -> Option<Edge> {
-    match s {
-        "top" => Some(Edge::Top),
-        "bottom" => Some(Edge::Bottom),
-        _ => None,
-    }
+    EDGES.iter().find(|(_, n, _)| *n == s).map(|(e, ..)| *e)
+}
+
+/// "Top bar" / "Bottom bar".
+fn bar_title(e: Edge) -> &'static str {
+    EDGES[e as usize].2
+}
+
+fn bar_ref(bars: &StatusBars, e: Edge) -> &StatusBar {
+    [&bars.top, &bars.bottom][e as usize]
 }
 
 fn bar_mut(bars: &mut StatusBars, e: Edge) -> &mut StatusBar {
@@ -93,36 +100,12 @@ fn bar_mut(bars: &mut StatusBars, e: Edge) -> &mut StatusBar {
     }
 }
 
-fn bar_ref(bars: &StatusBars, e: Edge) -> &StatusBar {
-    match e {
-        Edge::Top => &bars.top,
-        Edge::Bottom => &bars.bottom,
-    }
-}
-
 fn slot_mut(bar: &mut StatusBar, slot: usize) -> Option<&mut Vec<String>> {
-    match slot {
-        0 => Some(&mut bar.left),
-        1 => Some(&mut bar.center),
-        2 => Some(&mut bar.right),
-        _ => None,
-    }
+    [&mut bar.left, &mut bar.center, &mut bar.right].into_iter().nth(slot)
 }
 
 fn slot_ref(bar: &StatusBar, slot: usize) -> &[String] {
-    match slot {
-        0 => &bar.left,
-        1 => &bar.center,
-        _ => &bar.right,
-    }
-}
-
-/// "Top bar" / "Bottom bar".
-fn bar_title(e: Edge) -> &'static str {
-    match e {
-        Edge::Top => "Top bar",
-        Edge::Bottom => "Bottom bar",
-    }
+    [&bar.left, &bar.center, &bar.right][slot.min(2)]
 }
 
 /// The page title of `view`.
@@ -206,7 +189,7 @@ pub fn rows(bars: &StatusBars, view: &View) -> Vec<Row> {
             if i + 1 < len {
                 rows.push(mv("down", "Move later").icon(Icon::Forward));
             }
-            for (k, slot) in ["left", "center", "right"].iter().enumerate() {
+            for (k, slot) in SLOT_KEYS.iter().enumerate() {
                 if k != s {
                     rows.push(mv(slot, &format!("Move to the {} slot", SLOTS[k].to_lowercase())));
                 }
@@ -294,10 +277,7 @@ pub fn action(a: &str, bars: &mut StatusBars, view: &View) -> Option<Step> {
                     let to = j.unwrap_or(i);
                     return Some(Step::Saved(View::Item(e, s, to), format!("{} moved", label(STATUS_WIDGETS, &list[to]))));
                 }
-                "left" => 0,
-                "center" => 1,
-                "right" => 2,
-                _ => return None,
+                key => SLOT_KEYS.iter().position(|k| *k == key)?,
             };
             if target == s {
                 return Some(Step::Open(View::Item(e, s, i)));
@@ -340,7 +320,7 @@ fn sample_info(clock: String) -> FooterInfo {
         author: "Frank Herbert".into(),
         chapter_title: Some("Book One: Dune".into()),
         bookmarked: true,
-        device: DeviceStatus { clock, battery: Some((76, false)), wifi: Some(true), light: Some(12) },
+        device: DeviceStatus { clock, battery: Some((76, false)), wifi: Some(ink_device::NetStatus::Connected { essid: String::new(), signal: None }), light: Some(12) },
         ..FooterInfo::default()
     }
 }
@@ -368,7 +348,7 @@ impl Preview {
     /// bar's inner edge as if the bar were on, plus [`footer::BAR_EDGE`] / 2.
     fn band(b: Rect, bars: &StatusBars, edge: Edge) -> Rect {
         let bar = bar_ref(bars, edge);
-        let h = (footer::BAR_EDGE + footer::band_h(bar, true, footer::has_progress(bar)) + footer::BAR_EDGE / 2) as u32;
+        let h = (footer::BAR_EDGE + bar.band_h(true, bar.has_progress()) + footer::BAR_EDGE / 2) as u32;
         match edge {
             Edge::Top => Rect::new(b.x, b.y, b.w, h),
             Edge::Bottom => Rect::new(b.x, b.bottom() - h as i32, b.w, h),
@@ -440,7 +420,7 @@ impl Widget for Preview {
 impl SettingsScreen {
     /// Builds the status bars page `view` in `content`.
     pub(super) fn build_status_bars(&mut self, cx: &mut AppCtx, content: Rect, view: &View) {
-        let s = cx.settings_update.as_ref().unwrap_or(cx.settings);
+        let s = super::current_settings(cx);
         let bars = s.status_bars.clone();
         let x = content.x + space(4);
         let w = content.w.saturating_sub(2 * space(4) as u32);
@@ -454,7 +434,7 @@ impl SettingsScreen {
             self.tree.add(None, Box::new(tab), Rect::new(x, y, w, cx.theme.control_h()));
             y += cx.theme.control_h() as i32 + space(2);
             let bar = bar_ref(&bars, *e);
-            let slider = Slider::new("Text size", MIN_FONT_PX, MAX_FONT_PX, 2.0, footer::bar_px(bar), "sbar-size");
+            let slider = Slider::new("Text size", MIN_FONT_PX, MAX_FONT_PX, 2.0, bar.text_px(), "sbar-size");
             self.tree.add(None, Box::new(slider), Rect::new(x, y, w, LIGHT_SLIDER_H));
             y += LIGHT_SLIDER_H as i32 + space(1);
         }
@@ -473,7 +453,7 @@ impl SettingsScreen {
             Page::StatusBars(v) => v.clone(),
             _ => View::default(),
         };
-        let mut s = cx.settings_update.as_ref().unwrap_or(cx.settings).clone();
+        let mut s = super::current_settings(cx).clone();
         let (next, text) = match action(a, &mut s.status_bars, &view) {
             None => {
                 log::info!("settings status bars: '{a}' ignored");

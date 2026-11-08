@@ -26,25 +26,17 @@ use std::path::Path;
 /// An Ion value (binary Ion 1.0, the subset KFX metadata uses).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ion {
-    /// Null of any type.
+    /// Null of any type, or a boolean.
     Null,
-    /// Boolean.
-    Bool(bool),
     /// Integer.
     Int(i64),
-    /// Float.
-    Float(f64),
-    /// Symbol id.
-    Symbol(u32),
     /// String.
     Str(String),
-    /// Blob or clob.
-    Bytes(Vec<u8>),
     /// List or s-expression.
     List(Vec<Ion>),
     /// Struct: (field symbol id, value).
     Struct(Vec<(u32, Ion)>),
-    /// Decimal, timestamp: not decoded.
+    /// Float, decimal, timestamp, symbol, blob or clob: not decoded.
     Other,
 }
 
@@ -90,9 +82,15 @@ struct Reader<'a> {
     b: &'a [u8],
     pos: usize,
     depth: u32,
+    /// The first annotation of the last value read when it had any.
+    annotation: Option<u64>,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    fn new(b: &'a [u8], pos: usize, depth: u32) -> Self {
+        Reader { b, pos, depth, annotation: None }
+    }
+
     fn varuint(&mut self) -> Option<u64> {
         let mut v: u64 = 0;
         for _ in 0..10 {
@@ -114,6 +112,7 @@ impl Reader<'_> {
 
     /// Reads one value; `None` at the end or on malformed data.
     fn value(&mut self) -> Option<Ion> {
+        self.annotation = None;
         loop {
             // Skip Ion version markers between values.
             if self.b.get(self.pos..self.pos + 4) == Some(&[0xE0, 0x01, 0x00, 0xEA]) {
@@ -123,14 +122,8 @@ impl Reader<'_> {
             let td = *self.b.get(self.pos)?;
             self.pos += 1;
             let (t, l) = (td >> 4, td & 0x0F);
-            if t == 1 {
-                return Some(match l {
-                    0 => Ion::Bool(false),
-                    1 => Ion::Bool(true),
-                    _ => Ion::Null,
-                });
-            }
-            if l == 15 {
+            // A boolean has its value in L, a null no body.
+            if t == 1 || l == 15 {
                 return Some(Ion::Null);
             }
             let len = if l == 14 { usize::try_from(self.varuint()?).ok()? } else { l as usize };
@@ -140,6 +133,10 @@ impl Reader<'_> {
             if end > self.b.len() {
                 return None;
             }
+            if (11..=14).contains(&t) && self.depth > MAX_ION_DEPTH {
+                return None;
+            }
+            let mut sub = Reader::new(&self.b[..end], self.pos, self.depth + 1);
             let v = match t {
                 0 => {
                     // NOP padding.
@@ -148,55 +145,29 @@ impl Reader<'_> {
                 }
                 2 => Ion::Int(self.uint(len)? as i64),
                 3 => Ion::Int((self.uint(len)? as i64).wrapping_neg()),
-                4 => {
-                    let v = match len {
-                        4 => f32::from_bits(self.uint(4)? as u32) as f64,
-                        8 => f64::from_bits(self.uint(8)?),
-                        _ => 0.0,
-                    };
-                    Ion::Float(v)
-                }
-                7 => Ion::Symbol(self.uint(len)? as u32),
                 8 => Ion::Str(String::from_utf8_lossy(&self.b[self.pos..end]).into_owned()),
-                9 | 10 => Ion::Bytes(self.b[self.pos..end].to_vec()),
-                11..=13 => {
-                    if self.depth > MAX_ION_DEPTH {
-                        return None;
-                    }
-                    let mut sub = Reader { b: &self.b[..end], pos: self.pos, depth: self.depth + 1 };
-                    if t == 13 {
-                        let mut fields = Vec::new();
-                        while sub.pos < end {
-                            let k = sub.varuint()? as u32;
-                            match sub.value() {
-                                Some(v) => fields.push((k, v)),
-                                None => break,
-                            }
+                13 => {
+                    let mut fields = Vec::new();
+                    while sub.pos < end {
+                        let k = sub.varuint()? as u32;
+                        match sub.value() {
+                            Some(v) => fields.push((k, v)),
+                            None => break,
                         }
-                        Ion::Struct(fields)
-                    } else {
-                        let mut items = Vec::new();
-                        while sub.pos < end {
-                            match sub.value() {
-                                Some(v) => items.push(v),
-                                None => break,
-                            }
-                        }
-                        Ion::List(items)
                     }
+                    Ion::Struct(fields)
                 }
+                11 | 12 => Ion::List(std::iter::from_fn(|| (sub.pos < end).then(|| sub.value()).flatten()).collect()),
                 14 => {
-                    // Annotation wrapper: skip the annotations, read the value. Wrappers
-                    // nest through `value`, so they count towards the depth limit too.
-                    if self.depth > MAX_ION_DEPTH {
-                        return None;
-                    }
-                    let mut sub = Reader { b: &self.b[..end], pos: self.pos, depth: self.depth + 1 };
+                    // Annotation wrapper: the annotations, then the value. Wrappers nest
+                    // through `value`, so they count towards the depth limit too.
                     let alen = usize::try_from(sub.varuint()?).ok()?;
-                    sub.pos = sub.pos.checked_add(alen).filter(|p| *p <= end)?;
+                    let annotations = sub.pos.checked_add(alen).filter(|p| *p <= end)?;
+                    let first = Reader::new(&self.b[..annotations], sub.pos, 0).varuint();
+                    sub.pos = annotations;
                     let v = sub.value()?;
-                    self.pos = end;
-                    return Some(v);
+                    self.annotation = first;
+                    v
                 }
                 _ => Ion::Other,
             };
@@ -206,41 +177,14 @@ impl Reader<'_> {
     }
 }
 
-/// Annotations of the value at the start of `b` (after an optional version marker).
-fn annotations(b: &[u8]) -> Vec<u32> {
-    let mut r = Reader { b, pos: 0, depth: 0 };
-    if b.starts_with(&[0xE0, 0x01, 0x00, 0xEA]) {
-        r.pos = 4;
-    }
-    let Some(&td) = b.get(r.pos) else { return Vec::new() };
-    if td >> 4 != 14 {
-        return Vec::new();
-    }
-    r.pos += 1;
-    if td & 0x0F == 14 && r.varuint().is_none() {
-        return Vec::new();
-    }
-    let Some(alen) = r.varuint() else { return Vec::new() };
-    let end = r.pos.saturating_add(usize::try_from(alen).unwrap_or(usize::MAX));
-    let mut out = Vec::new();
-    while r.pos < end {
-        match r.varuint() {
-            Some(s) => out.push(s as u32),
-            None => break,
-        }
-    }
-    out
-}
-
 /// Reads the values of an Ion binary stream, skipping symbol tables (`$ion_symbol_table`, SID 3).
 pub fn parse_ion(b: &[u8]) -> Vec<Ion> {
-    let mut r = Reader { b, pos: 0, depth: 0 };
+    let mut r = Reader::new(b, 0, 0);
     let mut out = Vec::new();
     loop {
         let start = r.pos;
         let Some(v) = r.value() else { break };
-        let ann = annotations(&b[start..]);
-        if ann.first() != Some(&3) {
+        if r.annotation != Some(3) {
             out.push(v);
         }
         if r.pos <= start {
@@ -458,7 +402,11 @@ pub(crate) mod tests {
         assert_eq!(vals[0].get(12).unwrap().items()[1].as_str(), Some("a long string value here"));
         // A symbol table (annotation $3) is skipped.
         let st = tl(14, [varuint(1), varuint(3), strukt(vec![])].concat());
-        assert_eq!(parse_ion(&[st, int(5)].concat()), vec![Ion::Int(5)]);
+        assert_eq!(parse_ion(&[st.clone(), int(5)].concat()), vec![Ion::Int(5)]);
+        // Also after NOP padding (two pad bytes) and a version marker.
+        assert_eq!(parse_ion(&[vec![0x01, 0x00, 0xE0, 0x01, 0x00, 0xEA], st, int(5)].concat()), vec![Ion::Int(5)]);
+        // Booleans and floats are read past, not decoded.
+        assert_eq!(parse_ion(&[0x11, 0x44, 0, 0, 0, 0, 0x21, 7]), vec![Ion::Null, Ion::Other, Ion::Int(7)]);
         assert_eq!(parse_ion(&[0x2E, 0xFF]), Vec::<Ion>::new());
     }
 

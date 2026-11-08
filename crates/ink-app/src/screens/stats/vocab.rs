@@ -3,13 +3,15 @@
 //! shows the word large; a tap on it flips it to the meaning and the context (only the
 //! card is refreshed).
 
-use super::{button, header, now_and_offset, pager, swipe_step, tap_pos, HEADER_H, MARGIN, PAGER_H};
+use super::{header, now_and_offset, pager, HEADER_H, MARGIN, PAGER_H};
+use crate::screens::common::{input, paint_cx, pill, Input};
 use crate::router::{AppCtx, AppScreen, Transition};
 use ink_device::{Key, Rect, RefreshClass, Size};
 use ink_stats::{VocabDb, VocabWord};
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::theme::space;
+use ink_ui::dialog::wrap_lines;
 use ink_ui::{Damage, PaintCx, ProgressBar, UiEvent, Widget};
 use std::path::PathBuf;
 
@@ -81,19 +83,9 @@ pub fn context_line(w: &VocabWord) -> String {
     if prev.is_empty() && next.is_empty() {
         return String::new();
     }
-    let mut s = String::new();
-    if !prev.is_empty() {
-        s.push('…');
-        s.push_str(prev);
-        s.push(' ');
-    }
-    s.push_str(&w.word);
-    if !next.is_empty() {
-        s.push(' ');
-        s.push_str(next);
-        s.push('…');
-    }
-    s
+    let before = if prev.is_empty() { String::new() } else { format!("…{prev} ") };
+    let after = if next.is_empty() { String::new() } else { format!(" {next}…") };
+    format!("{before}{}{after}", w.word)
 }
 
 impl VocabScreen {
@@ -236,13 +228,9 @@ impl VocabScreen {
                 p.canvas.fill_rect(MARGIN, y - t.rule_px / 2, w - 2 * MARGIN, t.rule_px, t.light);
             }
             // Word (bold) with the lookup count and the review streak on the right.
-            let mut right = String::new();
-            if wd.lookup_count > 1 {
-                right.push_str(&format!("×{}", wd.lookup_count));
-            }
-            if wd.streak_count > 0 {
-                right.push_str(&format!("{}known {}×", if right.is_empty() { "" } else { " · " }, wd.streak_count));
-            }
+            let count = (wd.lookup_count > 1).then(|| format!("×{}", wd.lookup_count));
+            let streak = (wd.streak_count > 0).then(|| format!("known {}×", wd.streak_count));
+            let right = count.into_iter().chain(streak).collect::<Vec<_>>().join(" · ");
             let rw = if right.is_empty() { 0.0 } else { p.text_width(t.caption.style, t.caption.px, &right) + space(3) as f32 };
             let word = p.ellipsize(&wd.word, t.body.px, Style::Bold, tw as f32 - rw);
             p.text_left(Rect::new(MARGIN, y + 12, tw, 56), &word, t.body.px, Style::Bold, t.fg);
@@ -251,11 +239,7 @@ impl VocabScreen {
                 let x = (w - MARGIN) as f32 - p.text_width(t.caption.style, t.caption.px, &right);
                 p.draw_text(t.caption.style, t.caption.px, x, base, &right, t.muted);
             }
-            let detail = match (&wd.definition, context_line(wd)) {
-                (Some(d), _) => d.clone(),
-                (None, c) if !c.is_empty() => c,
-                _ => String::new(),
-            };
+            let detail = wd.definition.clone().unwrap_or_else(|| context_line(wd));
             let detail = p.ellipsize(&detail, t.caption.px, t.caption.style, tw as f32);
             p.text_left(Rect::new(MARGIN, y + 70, tw, 40), &detail, t.caption.px, t.caption.style, t.fg);
             let book = p.ellipsize(wd.title.as_deref().unwrap_or(""), t.caption.px, Style::Italic, tw as f32);
@@ -282,7 +266,7 @@ impl VocabScreen {
             let msg = format!("{} words reviewed. The next ones are due later.", round.total);
             p.text_centered(Rect::new(MARGIN, y + 120, tw, 60), &msg, t.label.px, t.label.style, t.muted);
             let r = Rect::new(w / 2 - 220, y + 240, 440, 104);
-            button(p, r, "Back to the list", true);
+            pill(p, r, "Back to the list", None, true);
             self.hits.push((r, Hit::Back));
             return;
         };
@@ -290,8 +274,8 @@ impl VocabScreen {
         self.paint_card(p, cr, card, round.shown);
         self.hits.push((cr, Hit::Show));
         let (no, yes) = answer_rects(w, h);
-        button(p, no, "Don't know", false);
-        button(p, yes, "Know", true);
+        pill(p, no, "Don't know", None, false);
+        pill(p, yes, "Know", None, true);
         self.hits.push((no, Hit::Know(false)));
         self.hits.push((yes, Hit::Know(true)));
     }
@@ -328,7 +312,7 @@ impl VocabScreen {
         p.canvas.fill_rect(x, y, iw as i32, t.rule_px, t.light);
         y += space(4);
         if let Some(d) = &card.definition {
-            for line in wrap(p, d, t.body.px, iw as f32).into_iter().take(6) {
+            for line in wrap_lines(p, &one_paragraph(d), t.body.px, t.body.style, iw as f32).into_iter().take(6) {
                 p.text_left(Rect::new(x, y, iw, 56), &line, t.body.px, t.body.style, t.fg);
                 y += 56;
             }
@@ -336,7 +320,7 @@ impl VocabScreen {
         }
         let ctx = context_line(card);
         if !ctx.is_empty() {
-            for line in wrap(p, &ctx, t.label.px, iw as f32).into_iter().take(4) {
+            for line in wrap_lines(p, &one_paragraph(&ctx), t.label.px, Style::Italic, iw as f32).into_iter().take(4) {
                 p.text_left(Rect::new(x, y, iw, 52), &line, t.label.px, Style::Italic, t.muted);
                 y += 52;
             }
@@ -352,22 +336,11 @@ impl VocabScreen {
     }
 }
 
-/// Greedy word wrap of `text` to lines at most `max` pixels wide.
-fn wrap(p: &mut PaintCx, text: &str, px: f32, max: f32) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut cur = String::new();
-    for word in text.split_whitespace() {
-        let cand = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-        if !cur.is_empty() && p.text_width(Style::Regular, px, &cand) > max {
-            lines.push(std::mem::replace(&mut cur, word.to_string()));
-        } else {
-            cur = cand;
-        }
-    }
-    if !cur.is_empty() {
-        lines.push(cur);
-    }
-    lines
+/// `text` with every run of whitespace (newlines too) as one space: the card shows the
+/// meaning and the context as one flowing paragraph each, as the card's own wrap did
+/// before it used [`wrap_lines`], which starts a new line at every `\n`.
+fn one_paragraph(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl AppScreen for VocabScreen {
@@ -387,37 +360,23 @@ impl AppScreen for VocabScreen {
     fn handle(&mut self, ev: &UiEvent, cx: &mut AppCtx) -> anyhow::Result<Transition> {
         let size = cx.screen.size();
         let (now, _) = now_and_offset(cx);
-        if matches!(ev, UiEvent::Quit) {
-            return Ok(Transition::Exit);
-        }
-        if let UiEvent::Key(k) = ev {
-            if !k.pressed {
-                return Ok(Transition::None);
-            }
-            return Ok(match k.key {
-                Key::Back => self.act(Hit::Back, now, size),
-                Key::PageNext if self.round.is_none() => self.act(Hit::NextPage, now, size),
-                Key::PagePrev if self.round.is_none() => self.act(Hit::PrevPage, now, size),
-                _ => Transition::None,
-            });
-        }
-        if let Some(step) = swipe_step(ev) {
-            if self.round.is_none() {
-                return Ok(self.act(if step > 0 { Hit::NextPage } else { Hit::PrevPage }, now, size));
-            }
-            return Ok(Transition::None);
-        }
-        if let Some(pos) = tap_pos(ev) {
-            if let Some(hit) = self.hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, h)| h.clone()) {
-                return Ok(self.act(hit, now, size));
-            }
-        }
-        Ok(Transition::None)
+        // Pages turn on the list only, not during a practice round.
+        let list = self.round.is_none();
+        let hit = match input(ev, &self.hits) {
+            Some(Input::Quit) => return Ok(Transition::Exit),
+            Some(Input::Key(Key::Back)) => Hit::Back,
+            Some(Input::Key(Key::PageNext)) if list => Hit::NextPage,
+            Some(Input::Key(Key::PagePrev)) if list => Hit::PrevPage,
+            Some(Input::Swipe(step)) if list => if step > 0 { Hit::NextPage } else { Hit::PrevPage },
+            Some(Input::Hit(hit)) => hit,
+            _ => return Ok(Transition::None),
+        };
+        Ok(self.act(hit, now, size))
     }
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {
         let Some(class) = self.dirty.take() else { return Ok(Vec::new()) };
-        let mut p = PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme };
+        let mut p = paint_cx(cx);
         self.draw(&mut p);
         let rect = self.dirty_rect.take().unwrap_or_else(|| cx.canvas.bounds());
         Ok(vec![Damage { rect, class }])
@@ -427,6 +386,11 @@ impl AppScreen for VocabScreen {
 #[cfg(test)]
 mod unit {
     use super::*;
+
+    #[test]
+    fn card_text_flows_as_one_paragraph() {
+        assert_eq!(one_paragraph("a long-standing\n\n resentment\t"), "a long-standing resentment");
+    }
 
     #[test]
     fn context_lines() {

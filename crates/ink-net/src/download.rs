@@ -42,8 +42,9 @@
 //!    to `dest`.
 
 use crate::connectivity::{Connectivity, KeepAwake, NetActivity};
-use crate::http::{HttpClient, Request, Response};
+use crate::http::{HttpClient, Request};
 use crate::{hex, CancelToken, NetError, Result};
+use md5::Digest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions, TryLockError};
@@ -141,11 +142,7 @@ pub struct Hooks<'a> {
     pub on_progress: Option<ProgressFn<'a>>,
 }
 
-impl std::fmt::Debug for Hooks<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Hooks").field("cancel", &self.cancel).field("connectivity", &self.connectivity.is_some()).field("keep_awake", &self.keep_awake.is_some()).finish_non_exhaustive()
-    }
-}
+debug_fields!([] Hooks<'_>, "Hooks", |s| "cancel": s.cancel, "connectivity": s.connectivity.is_some(), "keep_awake": s.keep_awake.is_some());
 
 /// A download job.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,24 +179,24 @@ struct PartMeta {
     total: Option<u64>,
 }
 
-/// `<dest>.part`.
-pub fn part_path(dest: &Path) -> PathBuf {
+fn with_suffix(dest: &Path, suffix: &str) -> PathBuf {
     let mut s = dest.as_os_str().to_owned();
-    s.push(".part");
+    s.push(suffix);
     PathBuf::from(s)
 }
 
+/// `<dest>.part`.
+pub fn part_path(dest: &Path) -> PathBuf {
+    with_suffix(dest, ".part")
+}
+
 fn meta_path(dest: &Path) -> PathBuf {
-    let mut s = dest.as_os_str().to_owned();
-    s.push(".part.json");
-    PathBuf::from(s)
+    with_suffix(dest, ".part.json")
 }
 
 /// `<dest>.part.lock`.
 pub fn lock_path(dest: &Path) -> PathBuf {
-    let mut s = dest.as_os_str().to_owned();
-    s.push(".part.lock");
-    PathBuf::from(s)
+    with_suffix(dest, ".part.lock")
 }
 
 /// `bytes A-B/T` -> `(Some(A), Some(T))`; `T` may be `*` (`None`); `bytes */T`, the form
@@ -210,12 +207,6 @@ fn parse_content_range(v: &str) -> Option<(Option<u64>, Option<u64>)> {
     let range = range.trim();
     let start = if range == "*" { None } else { Some(range.split('-').next()?.trim().parse().ok()?) };
     Some((start, total.trim().parse().ok()))
-}
-
-/// True when the body ends with a zero-length chunk (ureq reports a cut chunked body as
-/// an error).
-fn is_chunked(resp: &Response) -> bool {
-    resp.header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
 }
 
 /// Destinations with a run in this process (key: canonical directory + file name).
@@ -371,14 +362,17 @@ impl Download {
         let part = part_path(&self.dest);
         let mut restarted = false;
         loop {
-            // What is on disk?
-            let meta = if self.resume { self.load_meta() } else { None };
-            let mut have = if meta.is_some() { std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0) } else { 0 };
-            if meta.is_none() || restarted {
-                self.discard_partial();
-                have = 0;
-            }
-            let meta = if have > 0 { meta.unwrap_or_default() } else { PartMeta::default() };
+            // What is on disk? A .part counts only with metadata for this URL, and not
+            // after the server refused to resume it.
+            let meta = (self.resume && !restarted).then(|| self.load_meta()).flatten();
+            let have = match meta {
+                Some(_) => self.partial_bytes(),
+                None => {
+                    self.discard_partial();
+                    0
+                }
+            };
+            let meta = meta.filter(|_| have > 0).unwrap_or_default();
 
             let mut req = Request::get(&self.url).read_timeout(self.read_timeout).set_header("Accept-Encoding", "identity");
             for (k, v) in &self.headers {
@@ -394,13 +388,10 @@ impl Download {
             let resp = client.send(req)?;
             let mut append = false;
             let total;
+            let content_range = resp.header("content-range").and_then(parse_content_range);
             match resp.status {
                 206 if have > 0 => {
-                    let (start, t) = resp
-                        .header("content-range")
-                        .and_then(parse_content_range)
-                        .and_then(|(s, t)| Some((s?, t)))
-                        .ok_or_else(|| NetError::Format("206 without a valid Content-Range".into()))?;
+                    let (start, t) = content_range.and_then(|(s, t)| Some((s?, t))).ok_or_else(|| NetError::Format("206 without a valid Content-Range".into()))?;
                     if start != have {
                         log::warn!("download: asked for bytes {have}-, server sent from {start}; starting over");
                         if restarted {
@@ -413,11 +404,13 @@ impl Download {
                     total = t.or(meta.total);
                 }
                 416 if have > 0 => {
-                    let t = resp.header("content-range").and_then(parse_content_range).and_then(|(_, t)| t).or(meta.total);
+                    let t = content_range.and_then(|(_, t)| t).or(meta.total);
                     if t == Some(have) {
                         drop(resp);
                         log::info!("download: {} already complete ({have} bytes)", part.display());
-                        return self.finish(&part, have, have, &self.url, String::new(), None);
+                        let mut digests = self.digests();
+                        digests.add_file(&part)?;
+                        return self.finish(digests, have, have, &self.url, String::new(), None);
                     }
                     if restarted {
                         return Err(NetError::Status(416));
@@ -425,6 +418,14 @@ impl Download {
                     restarted = true;
                     continue;
                 }
+                // A part of the file to a request without Range (a broken server or
+                // cache): its Content-Length is the part's, so the length to reach is the
+                // Content-Range total. A short body then fails below and keeps the .part
+                // for a resume, instead of being renamed as the whole book.
+                206 => match content_range {
+                    Some((Some(0), Some(t))) => total = Some(t),
+                    _ => return Err(NetError::Format(format!("206 to a request without Range (Content-Range {:?})", resp.header("content-range").unwrap_or("")))),
+                },
                 200..=299 => {
                     total = resp.content_length();
                 }
@@ -435,8 +436,10 @@ impl Download {
                     return Err(NetError::TooLarge(max as usize));
                 }
             }
-            // Does the body have an end of its own (a length or a last chunk)?
-            let framed = total.is_some() || resp.content_length().is_some() || is_chunked(&resp);
+            // Does the body have an end of its own (a length or a last chunk; ureq reports a
+            // cut chunked body as an error)?
+            let chunked = resp.header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+            let framed = total.is_some() || resp.content_length().is_some() || chunked;
             let new_meta = PartMeta {
                 url: self.url.clone(),
                 etag: resp.header("etag").map(str::to_string),
@@ -448,14 +451,22 @@ impl Download {
             let url = resp.url.clone();
             let mime = resp.mime();
             let server_filename = resp.header("content-disposition").and_then(content_disposition_filename);
+            // The digests are taken while the body is written, so the file is not read
+            // again after the last byte (only a resumed .part is read first).
+            let mut digests = self.digests();
+            if append {
+                digests.add_file(&part)?;
+            }
             let mut file = if append { OpenOptions::new().append(true).open(&part)? } else { File::create(&part)? };
             let mut received = resumed_from;
             let mut body = resp.body;
             let mut buf = vec![0u8; 64 * 1024];
-            let mut progress = DownloadProgress { received, total, resumed_from };
-            if let Some(cb) = hooks.on_progress.as_mut() {
-                cb(&progress);
-            }
+            let mut report = |received| {
+                if let Some(cb) = hooks.on_progress.as_mut() {
+                    cb(&DownloadProgress { received, total, resumed_from });
+                }
+            };
+            report(received);
             let copy: Result<()> = loop {
                 if let Err(e) = hooks.cancel.check() {
                     break Err(e);
@@ -469,6 +480,7 @@ impl Download {
                 if let Err(e) = file.write_all(&buf[..n]) {
                     break Err(e.into());
                 }
+                digests.add(&buf[..n]);
                 received += n as u64;
                 if let Some(max) = self.max_bytes {
                     if received > max {
@@ -476,10 +488,7 @@ impl Download {
                     }
                 }
                 guard.tick();
-                progress.received = received;
-                if let Some(cb) = hooks.on_progress.as_mut() {
-                    cb(&progress);
-                }
+                report(received);
             };
             file.flush()?;
             file.sync_all()?;
@@ -509,56 +518,65 @@ impl Download {
                 }
             }
             drop(body);
-            return self.finish(&part, received, resumed_from, &url, mime, server_filename);
+            return self.finish(digests, received, resumed_from, &url, mime, server_filename);
         }
     }
 
-    fn finish(&self, part: &Path, bytes: u64, resumed_from: u64, url: &str, mime: String, server_filename: Option<String>) -> Result<DownloadOutcome> {
-        let (sha256, md5) = digest_file(part)?;
+    /// The digests a run takes: SHA-256 always ([`DownloadOutcome::sha256`]), MD5 only for
+    /// an MD5 checksum.
+    fn digests(&self) -> Digests {
+        Digests { sha: ring::digest::Context::new(&ring::digest::SHA256), md5: matches!(self.checksum, Some(Checksum::Md5(_))).then(md5::Md5::new) }
+    }
+
+    fn finish(&self, digests: Digests, bytes: u64, resumed_from: u64, url: &str, mime: String, server_filename: Option<String>) -> Result<DownloadOutcome> {
+        let sha256 = hex(digests.sha.finish().as_ref());
+        let md5 = digests.md5.map(|m| hex(&m.finalize()));
         if let Some(c) = &self.checksum {
             let actual = match c {
-                Checksum::Sha256(_) => &sha256,
-                Checksum::Md5(_) => &md5,
+                Checksum::Sha256(_) => sha256.clone(),
+                Checksum::Md5(_) => md5.unwrap_or_default(),
             };
-            if *actual != c.expected() {
+            if actual != c.expected() {
                 self.discard_partial();
-                return Err(NetError::Checksum { expected: c.expected(), actual: actual.clone() });
+                return Err(NetError::Checksum { expected: c.expected(), actual });
             }
         }
-        std::fs::rename(part, &self.dest)?;
+        std::fs::rename(part_path(&self.dest), &self.dest)?;
         let _ = std::fs::remove_file(meta_path(&self.dest));
-        sync_dir(&self.dest);
+        // Make the rename durable.
+        #[cfg(unix)]
+        if let Some(dir) = self.dest.parent().filter(|d| !d.as_os_str().is_empty()) {
+            let _ = File::open(dir).and_then(|d| d.sync_all());
+        }
         Ok(DownloadOutcome { path: self.dest.clone(), bytes, resumed_from, sha256, url: url.to_string(), mime, server_filename })
     }
 }
 
-fn sync_dir(path: &Path) {
-    #[cfg(unix)]
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        if let Ok(d) = File::open(dir) {
-            let _ = d.sync_all();
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+/// The running digests of the bytes in a `.part`.
+struct Digests {
+    sha: ring::digest::Context,
+    md5: Option<md5::Md5>,
 }
 
-/// SHA-256 and MD5 of a file (lowercase hex).
-pub fn digest_file(path: &Path) -> Result<(String, String)> {
-    use md5::Digest;
-    let mut f = File::open(path)?;
-    let mut sha = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut md5 = md5::Md5::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
+impl Digests {
+    fn add(&mut self, bytes: &[u8]) {
+        self.sha.update(bytes);
+        if let Some(m) = self.md5.as_mut() {
+            m.update(bytes);
         }
-        sha.update(&buf[..n]);
-        md5.update(&buf[..n]);
     }
-    Ok((hex(sha.finish().as_ref()), hex(&md5.finalize())))
+
+    /// Adds the whole file at `path`.
+    fn add_file(&mut self, path: &Path) -> Result<()> {
+        let mut f = File::open(path)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match f.read(&mut buf)? {
+                0 => return Ok(()),
+                n => self.add(&buf[..n]),
+            }
+        }
+    }
 }
 
 /// SHA-256 of bytes (lowercase hex).
@@ -826,6 +844,7 @@ mod tests {
         dl.save_meta(&PartMeta { url: dl.url.clone(), etag: Some("\"f2000\"".into()), last_modified: None, total: Some(2000) }).unwrap();
         let out = dl.run(&UreqClient::new(), &mut Hooks::default()).unwrap();
         assert_eq!(out.bytes, 2000);
+        assert_eq!(out.sha256, sha256_hex(&file_bytes(2000)), "the digest of the part read back");
         assert_eq!(std::fs::read(&dest).unwrap(), file_bytes(2000));
         assert_eq!(s.state.requests_to("/files/")[0].header("range"), Some("bytes=2000-"));
     }

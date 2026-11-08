@@ -136,12 +136,33 @@ impl Accumulator {
     }
 
     fn finish(self) -> Vec<u8> {
+        // The running sum is one long chain of dependent float additions. Large shapes
+        // (panels, keys, sheets) have long runs of 0 cells (inside or outside the
+        // shape); adding 0 leaves the sum and its coverage as they are, so a block of
+        // CHUNK zero cells repeats the last value without an add. The test is per block,
+        // not per cell: a per-cell branch mispredicts on small glyphs, whose zero and
+        // non-zero cells alternate, and made them slower than the plain sum.
+        const CHUNK: usize = 16;
+        let cells = &self.a[..self.w * self.h];
+        let mut out = Vec::with_capacity(cells.len());
         let mut acc = 0.0f32;
-        let mut out = Vec::with_capacity(self.w * self.h);
-        for a in &self.a[..self.w * self.h] {
-            acc += a;
-            out.push((acc.abs().min(1.0) * 255.0 + 0.5) as u8);
+        let mut sum = |out: &mut Vec<u8>, part: &[f32]| {
+            for a in part {
+                acc += a;
+                out.push((acc.abs().min(1.0) * 255.0 + 0.5) as u8);
+            }
+        };
+        let (chunks, rest) = cells.as_chunks::<CHUNK>();
+        for c in chunks {
+            // Zero or minus zero in every cell (sign bit masked off).
+            if c.iter().fold(0u32, |m, a| m | a.to_bits()) & 0x7fff_ffff == 0 {
+                let v = out.last().copied().unwrap_or(0);
+                out.resize(out.len() + CHUNK, v);
+            } else {
+                sum(&mut out, c);
+            }
         }
+        sum(&mut out, rest);
         out
     }
 }
@@ -168,6 +189,21 @@ impl Builder {
         self.acc.line(l.0, l.1, p.0, p.1);
         self.last = p;
     }
+
+    /// Flattens a curve whose control polygon bends by `dev` pixels into lines through
+    /// `at(t)`: about sqrt(3 dev) of them.
+    fn flatten(&mut self, dev: f32, at: impl Fn(f32, f32) -> (f32, f32)) {
+        let n = 1 + (3.0 * dev).sqrt().floor() as usize;
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            self.line_px(at(t, 1.0 - t));
+        }
+    }
+}
+
+/// How far `b` bends away from the line `a`-`c` (the second difference), in pixels.
+fn bend(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    (a.0 - 2.0 * b.0 + c.0).hypot(a.1 - 2.0 * b.1 + c.1)
 }
 
 impl OutlineBuilder for Builder {
@@ -183,37 +219,18 @@ impl OutlineBuilder for Builder {
     }
 
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        let p0 = self.last;
-        let p1 = self.map(x1, y1);
-        let p2 = self.map(x, y);
-        let dev = (p0.0 - 2.0 * p1.0 + p2.0).hypot(p0.1 - 2.0 * p1.1 + p2.1);
-        let n = 1 + (3.0 * dev).sqrt().floor() as usize;
-        for i in 1..=n {
-            let t = i as f32 / n as f32;
-            let mt = 1.0 - t;
-            let q = (
-                mt * mt * p0.0 + 2.0 * mt * t * p1.0 + t * t * p2.0,
-                mt * mt * p0.1 + 2.0 * mt * t * p1.1 + t * t * p2.1,
-            );
-            self.line_px(q);
-        }
+        let (p0, p1, p2) = (self.last, self.map(x1, y1), self.map(x, y));
+        self.flatten(bend(p0, p1, p2), |t, mt| {
+            (mt * mt * p0.0 + 2.0 * mt * t * p1.0 + t * t * p2.0, mt * mt * p0.1 + 2.0 * mt * t * p1.1 + t * t * p2.1)
+        });
     }
 
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        let p0 = self.last;
-        let p1 = self.map(x1, y1);
-        let p2 = self.map(x2, y2);
-        let p3 = self.map(x, y);
-        let dev1 = (p0.0 - 2.0 * p1.0 + p2.0).hypot(p0.1 - 2.0 * p1.1 + p2.1);
-        let dev2 = (p1.0 - 2.0 * p2.0 + p3.0).hypot(p1.1 - 2.0 * p2.1 + p3.1);
-        let n = 1 + (3.0 * dev1.max(dev2)).sqrt().floor() as usize;
-        for i in 1..=n {
-            let t = i as f32 / n as f32;
-            let mt = 1.0 - t;
+        let (p0, p1, p2, p3) = (self.last, self.map(x1, y1), self.map(x2, y2), self.map(x, y));
+        self.flatten(bend(p0, p1, p2).max(bend(p1, p2, p3)), |t, mt| {
             let (a, b, c, d) = (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
-            let q = (a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0, a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1);
-            self.line_px(q);
-        }
+            (a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0, a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1)
+        });
     }
 
     fn close(&mut self) {
@@ -389,6 +406,49 @@ mod tests {
         assert_eq!(m[5 * 10 + 5], 0, "hole");
         assert_eq!(m.iter().filter(|v| **v == 255).count(), 100 - 16);
         assert!(fill_contours(0, 5, &[]).is_empty());
+    }
+
+    /// `finish` skips blocks of zero cells; the result is the plain running sum's, bit for bit.
+    #[test]
+    fn finish_matches_the_plain_running_sum() {
+        let plain = |a: &Accumulator| {
+            let mut acc = 0.0f32;
+            a.a[..a.w * a.h].iter().map(|v| {
+                acc += v;
+                (acc.abs().min(1.0) * 255.0 + 0.5) as u8
+            }).collect::<Vec<u8>>()
+        };
+        let mut seed = 11u32;
+        let mut rnd = move |m: f32| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 * m
+        };
+        for n in 3..40 {
+            let mut a = Accumulator::new(37, 23);
+            // A random polygon, self-intersecting and partly off the bitmap.
+            let pts: Vec<(f32, f32)> = (0..n).map(|_| (rnd(50.0) - 6.0, rnd(34.0) - 5.0)).collect();
+            for i in 0..n {
+                let (p, q) = (pts[i], pts[(i + 1) % n]);
+                a.line(p.0, p.1, q.0, q.1);
+            }
+            let want = plain(&a);
+            assert_eq!(a.finish(), want, "polygon of {n} points");
+        }
+        // A large shape: whole blocks of zero cells inside and outside it, between
+        // blocks with edges; minus zero cells count as zero.
+        let mut a = Accumulator::new(101, 61);
+        let sq = [(3.3, 2.7), (90.6, 4.1), (88.2, 57.9), (5.1, 55.4)];
+        for i in 0..4 {
+            let (p, q) = (sq[i], sq[(i + 1) % 4]);
+            a.line(p.0, p.1, q.0, q.1);
+        }
+        for i in (0..a.a.len()).step_by(7) {
+            if a.a[i] == 0.0 {
+                a.a[i] = -0.0;
+            }
+        }
+        let want = plain(&a);
+        assert_eq!(a.finish(), want, "large shape");
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //! ([`ink_ui::refresh::trim_to_changes`]), so a popup over a screen that repaints the
 //! whole canvas is a GL16 of the popup, not a full-screen GC16.
 
-use ink_device::{Canvas, Rect, RefreshClass, Rotation, Screen, Size};
+use ink_device::{Canvas, Rect, RefreshClass, Rotation, Screen, Size, Wave};
 use std::cell::RefCell;
+use std::ops::DerefMut;
 use std::rc::Rc;
 
 /// What the panel shows (logical coordinates); `None` while unknown: before the first
@@ -13,19 +14,36 @@ use std::rc::Rc;
 pub type Shown = Rc<RefCell<Option<Canvas>>>;
 
 /// The device screen, copying every update into [`Shown`].
-pub struct ShownScreen {
-    inner: Box<dyn Screen>,
-    shown: Shown,
+pub type ShownScreen = Tap<Box<dyn Screen>, Shown>;
+
+/// What a [`Tap`] tells about the updates going through it.
+pub trait Watch {
+    /// `rect` of `canvas` goes to the panel with `class` (`wave`: a page turn).
+    fn sent(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass, wave: Option<Wave>);
+
+    /// The panel stops showing what was sent: a new rotation or night polarity (it
+    /// keeps the old picture outside the next updates).
+    fn changed(&mut self) {}
 }
 
-impl ShownScreen {
-    /// Wraps `inner`; the copy is shared with the app loop.
-    pub fn new(inner: Box<dyn Screen>, shown: Shown) -> Self {
-        ShownScreen { inner, shown }
-    }
+/// A screen that tells `watch` about every update it passes on to `inner`.
+pub struct Tap<S, W> {
+    /// The screen updates go to.
+    pub inner: S,
+    /// Told about each update.
+    pub watch: W,
+}
 
-    fn record(&self, canvas: &Canvas, rect: Rect) {
-        let mut s = self.shown.borrow_mut();
+impl<S, W> Tap<S, W> {
+    /// Wraps `inner`.
+    pub fn new(inner: S, watch: W) -> Self {
+        Tap { inner, watch }
+    }
+}
+
+impl Watch for Shown {
+    fn sent(&mut self, canvas: &Canvas, rect: Rect, _class: RefreshClass, _wave: Option<Wave>) {
+        let mut s = self.borrow_mut();
         let r = rect.intersect(&canvas.bounds());
         let same = s.as_ref().is_some_and(|c| c.width == canvas.width && c.height == canvas.height);
         if r == canvas.bounds() {
@@ -48,12 +66,12 @@ impl ShownScreen {
         }
     }
 
-    fn forget(&self) {
-        *self.shown.borrow_mut() = None;
+    fn changed(&mut self) {
+        *self.borrow_mut() = None;
     }
 }
 
-impl Screen for ShownScreen {
+impl<S: DerefMut<Target: Screen>, W: Watch> Screen for Tap<S, W> {
     fn panel_size(&self) -> Size {
         self.inner.panel_size()
     }
@@ -62,7 +80,7 @@ impl Screen for ShownScreen {
     }
     fn set_rotation(&mut self, rotation: Rotation) -> ink_device::Result<()> {
         if rotation != self.inner.rotation() {
-            self.forget();
+            self.watch.changed();
         }
         self.inner.set_rotation(rotation)
     }
@@ -73,22 +91,21 @@ impl Screen for ShownScreen {
         self.inner.night_mode()
     }
     fn set_night_mode(&mut self, on: bool) -> ink_device::Result<()> {
-        // The panel keeps the old polarity outside the next updates.
         if on != self.inner.night_mode() {
-            self.forget();
+            self.watch.changed();
         }
         self.inner.set_night_mode(on)
     }
     fn update(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass) -> ink_device::Result<()> {
-        self.record(canvas, rect);
+        self.watch.sent(canvas, rect, class, None);
         self.inner.update(canvas, rect, class)
     }
-    fn update_wave(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass, wave: ink_device::Wave) -> ink_device::Result<()> {
-        self.record(canvas, rect);
+    fn update_wave(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass, wave: Wave) -> ink_device::Result<()> {
+        self.watch.sent(canvas, rect, class, Some(wave));
         self.inner.update_wave(canvas, rect, class, wave)
     }
     fn update_all(&mut self, canvas: &Canvas, class: RefreshClass) -> ink_device::Result<()> {
-        self.record(canvas, canvas.bounds());
+        self.watch.sent(canvas, canvas.bounds(), class, None);
         self.inner.update_all(canvas, class)
     }
     fn refresh_all(&mut self) -> ink_device::Result<()> {

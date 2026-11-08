@@ -1,16 +1,14 @@
 //! Text for rinky: fonts, glyph caches, measuring and drawing ([`Fonts`]), shaping
-//! ([`shape`], `rustybuzz`), fallback faces ([`face`], [`registry`]), glyph rasterizing
+//! (`rustybuzz`, [`Fonts::shape`]), fallback faces ([`face`], [`registry`]), glyph rasterizing
 //! ([`raster`]), line breaking ([`linebreak`]) and hyphenation ([`hyphen`]).
 //!
 //! Two text paths share one [`Fonts`]:
 //!
 //! - the prototype path (`text_width`, `draw_text`): char by char with `fontdue` and pair
 //!   kerning. Golden pages depend on its exact math; it never changes silently.
-//! - the shaped path (`shape`, `draw_run`, `draw_shaped`): `rustybuzz` shaping (kerning,
+//! - the shaped path (`shape`, `draw_run`, `draw_run_clipped`): `rustybuzz` shaping (kerning,
 //!   ligatures, marks), fallback faces for characters the main face lacks (CJK,
 //!   symbols), synthetic bold and italic, and a bounded glyph cache.
-//!
-//! Owner from wave A: the `ui` agent (with `ink-ui`).
 
 #![warn(missing_docs)]
 
@@ -18,15 +16,14 @@ pub mod face;
 pub mod fonts;
 pub mod hyphen;
 pub mod linebreak;
+mod parsed;
 pub mod raster;
 pub mod registry;
-pub mod shape;
 
 pub use face::{FaceData, FaceInfo};
 pub use fonts::{embedded_font_bytes, FaceId, Fonts, Glyph, ShapeOptions, TextRun};
 pub use hyphen::{hyphenator_for, Hyphenator, Language, NoHyphenation, PatternHyphenator};
 pub use raster::{GlyphMask, Synth};
-pub use shape::{RustybuzzShaper, ShapedGlyph, ShapedRun, Shaper, SimpleShaper};
 
 /// Font style of a text run.
 ///
@@ -47,16 +44,6 @@ pub enum Style {
 }
 
 impl Style {
-    /// The style with the given weight and slant.
-    pub fn from_flags(bold: bool, italic: bool) -> Style {
-        match (bold, italic) {
-            (false, false) => Style::Regular,
-            (true, false) => Style::Bold,
-            (false, true) => Style::Italic,
-            (true, true) => Style::BoldItalic,
-        }
-    }
-
     /// Bold or bold italic.
     pub fn is_bold(self) -> bool {
         matches!(self, Style::Bold | Style::BoldItalic)
@@ -101,10 +88,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn style_flags_round_trip() {
-        for s in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
-            assert_eq!(Style::from_flags(s.is_bold(), s.is_italic()), s);
-        }
+    fn style_flags() {
+        let flags = |s: Style| (s.is_bold(), s.is_italic());
+        assert_eq!(flags(Style::Regular), (false, false));
+        assert_eq!(flags(Style::Bold), (true, false));
+        assert_eq!(flags(Style::Italic), (false, true));
+        assert_eq!(flags(Style::BoldItalic), (true, true));
     }
 
     #[test]

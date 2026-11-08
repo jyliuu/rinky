@@ -22,11 +22,11 @@
 //! There is no hidden exit anywhere on the page: `exit` is an action like any other and
 //! asks first ("Exit to Kindle?") when `settings.ui.confirm_exit` is on.
 
-use super::overlay::{Overlay, OverlayKind, PageScrim};
-use super::ReaderScreen;
+use super::overlay::{Overlay, OverlayKind};
+use super::{light_gestures, ReaderScreen};
 use crate::router::{AppCtx, Transition};
 use crate::screens::settings::quick_light;
-use ink_device::{Point, Rect, Size};
+use ink_device::{Point, Size};
 use ink_store::prefs::{GestureMap, LONG_PRESS_ACTIONS};
 use ink_store::Settings;
 use ink_ui::{Direction, DoubleTapMode, Gesture};
@@ -134,6 +134,52 @@ fn edge_swipe(from: Point, dir: Direction, w: i32, h: i32) -> Option<&'static st
     }
 }
 
+/// The two page-turn actions.
+const TURNS: [&str; 2] = ["next_page", "prev_page"];
+
+/// `g` seen in a mirror: left and right swapped on a `size` screen (taps, swipes and
+/// two-finger swipes; other gestures stay).
+fn mirrored(g: &Gesture, size: Size) -> Gesture {
+    let w = size.w as i32;
+    let m = |p: Point| Point::new(w - 1 - p.x, p.y);
+    let flip = |d: Direction| match d {
+        Direction::Left => Direction::Right,
+        Direction::Right => Direction::Left,
+        d => d,
+    };
+    match *g {
+        Gesture::Tap { pos } => Gesture::Tap { pos: m(pos) },
+        Gesture::Swipe { from, to, dir } => Gesture::Swipe { from: m(from), to: m(to), dir: flip(dir) },
+        Gesture::TwoFingerSwipe { from, to, dir } => Gesture::TwoFingerSwipe { from: m(from), to: m(to), dir: flip(dir) },
+        other => other,
+    }
+}
+
+/// The page turn `g` makes in a right-to-left book, when `action` (its mapped action)
+/// is a page turn: the turn mapped where the gesture lands on a mirrored screen, so the
+/// wide tap zone on the left and a swipe to the right go forward; the other turn when
+/// the mirrored side has none. `None` for any other action, which stays as it is.
+pub fn rtl_turn(g: &Gesture, size: Size, map: &GestureMap, action: &str) -> Option<&'static str> {
+    if !TURNS.contains(&action) {
+        return None;
+    }
+    let mirror = resolve(&mirrored(g, size), size, map).map(|(_, a)| a);
+    let other = if action == TURNS[0] { TURNS[1] } else { TURNS[0] };
+    Some(TURNS.into_iter().find(|t| mirror == Some(*t)).unwrap_or(other))
+}
+
+/// The turn of a long press on blank space at `x` on a screen `w` wide: back in the
+/// left third, forward elsewhere; mirrored when the book reads right to left (back in
+/// the right third), like the tap zones.
+fn long_press_turn(x: i32, w: u32, rtl: bool) -> i64 {
+    let x = if rtl { w as i32 - 1 - x } else { x };
+    if x < w as i32 / 3 {
+        -1
+    } else {
+        1
+    }
+}
+
 /// True when a long press on a word selects it (`long_press` is `dictionary` or
 /// `select`); otherwise a hold runs the mapped action and starts no selection.
 pub fn long_press_selects(settings: &Settings) -> bool {
@@ -209,10 +255,16 @@ impl ReaderScreen {
         if action == "none" {
             return Ok(None);
         }
+        // Right to left (manga): page turns go the other way round.
+        let rtl = self.reads_right_to_left();
+        if let Some(turn) = rtl.then(|| rtl_turn(g, size, &cx.settings.gestures, &action)).flatten() {
+            log::info!("reader gesture {trigger}: right to left, {action} -> {turn}");
+            action = turn.to_string();
+        }
         // A long press that selected nothing (blank space): it turns the page by side,
-        // as before the gesture map.
+        // as before the gesture map (the left side forward when right to left).
         if trigger == "long_press" && LONG_PRESS_ACTIONS.iter().any(|(n, _)| *n == action) {
-            self.turn(if p.x < size.w as i32 / 3 { -1 } else { 1 }, cx);
+            self.turn(long_press_turn(p.x, size.w, rtl), cx);
             return Ok(Some(Transition::None));
         }
         self.run_action(&action, cx).map(Some)
@@ -247,7 +299,7 @@ impl ReaderScreen {
             "light_up" | "light_down" | "warmth_up" | "warmth_down" => light_step(action, cx),
             "light_toggle" | "warmth_toggle" => {
                 let now = cx.services.clock.local_now();
-                super::light_gestures::toggle(action == "warmth_toggle", &mut *cx.services.light, &now);
+                light_gestures::toggle(action == "warmth_toggle", &mut *cx.services.light, &now);
             }
             // Edge slides follow the finger (light_gestures); as a tap or swipe: nothing.
             "light_slide" | "warmth_slide" => {}
@@ -303,8 +355,7 @@ impl ReaderScreen {
     /// Opens the "Exit to Kindle?" dialog (Cancel closes it, Exit leaves the app).
     fn confirm_exit(&mut self, cx: &mut AppCtx) {
         let size = cx.screen.size();
-        let mut o = Overlay::new(OverlayKind::Popup);
-        o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
+        let mut o = Overlay::over_page(OverlayKind::Popup, size, "close");
         let dialog = ink_ui::Dialog {
             title: format!("Exit to {}?", ink_platform::current().device_name()),
             body: format!("rinky closes and the {} home screen starts.", ink_platform::current().device_name()),
@@ -321,26 +372,13 @@ impl ReaderScreen {
 /// Brighter, dimmer, warmer or cooler by [`LIGHT_STEP_PERCENT`] of the range, through
 /// the control center's light code (auto warmth keeps the user's warmth).
 fn light_step(action: &str, cx: &mut AppCtx) {
-    let light = &mut *cx.services.light;
     let warmth = action.starts_with("warmth");
-    let up = action.ends_with("_up");
-    let ((lo, hi), cur) = if warmth { (light.warmth_range(), light.warmth()) } else { (light.brightness_range(), light.brightness()) };
-    let cur = match cur {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("reader: {action}: {e}");
-            return;
-        }
-    };
+    let Some(((lo, hi), cur)) = light_gestures::level(&*cx.services.light, warmth, action) else { return };
     let step = ((hi.saturating_sub(lo)) * LIGHT_STEP_PERCENT / 100).max(1);
-    let v = if up { cur.saturating_add(step).min(hi) } else { cur.saturating_sub(step).max(lo) };
-    let name = if warmth { quick_light::WARMTH } else { quick_light::BRIGHTNESS };
-    if let Some(text) = quick_light::apply(&format!("{name}:{v}"), light) {
+    let v = if action.ends_with("_up") { cur.saturating_add(step).min(hi) } else { cur.saturating_sub(step).max(lo) };
+    let now = cx.services.clock.local_now();
+    if let Some(text) = light_gestures::set_level(&mut *cx.services.light, warmth, v, &now) {
         log::info!("reader: {action}: {cur} -> {text}");
-    }
-    if warmth {
-        let now = cx.services.clock.local_now();
-        quick_light::with_auto_warmth(&mut *cx.services.light, |w, light| w.manual(v, light, &now));
     }
 }
 
@@ -359,6 +397,36 @@ mod tests {
         Gesture::Swipe { from: Point::new(x, y), to: Point::new(x, y), dir }
     }
 
+    /// Right to left: the left side and a swipe to the right turn forward, the bottom
+    /// middle (no side) still turns forward, and other actions are left alone.
+    #[test]
+    fn right_to_left_turns_mirror_the_page_turn_sides() {
+        let map = GestureMap::default();
+        let rtl = |g: Gesture| {
+            let (_, a) = resolve(&g, SIZE, &map).unwrap();
+            rtl_turn(&g, SIZE, &map, a).unwrap_or(a)
+        };
+        assert_eq!(rtl(tap(100, 900)), "next_page");
+        assert_eq!(rtl(tap(1000, 900)), "prev_page");
+        // Low in the middle third, inside the mirrored wide zone (the left two thirds):
+        // forward too. The zones are mirrored, not only the actions swapped.
+        assert_eq!(rtl(tap(600, 1500)), "next_page");
+        assert_eq!(rtl(tap(636, 1600)), "next_page");
+        assert_eq!(rtl(swipe(600, 800, Direction::Right)), "next_page");
+        assert_eq!(rtl(swipe(600, 800, Direction::Left)), "prev_page");
+        // Swipe left from the right edge: its mirror is the "back" edge, so the plain
+        // turn is swapped instead.
+        assert_eq!(rtl(swipe(1260, 800, Direction::Left)), "prev_page");
+        assert_eq!(rtl(tap(636, 848)), "menu");
+        assert_eq!(rtl(tap(50, 50)), "bookmark");
+        assert_eq!(rtl(tap(40, 1680)), "light_toggle");
+        // A long press on blank space turns by side, mirrored the same way: only the
+        // right third goes back, the middle goes forward.
+        let w = SIZE.w;
+        assert_eq!([100, 636, 1100].map(|x| long_press_turn(x, w, false)), [-1, 1, 1]);
+        assert_eq!([100, 636, 1100].map(|x| long_press_turn(x, w, true)), [1, 1, -1]);
+    }
+
     #[test]
     fn defaults_resolve_with_fallback_to_plain_triggers() {
         let map = GestureMap::default();
@@ -366,6 +434,8 @@ mod tests {
         assert_eq!(r(tap(100, 900)), ("tap_left", "prev_page"));
         assert_eq!(r(tap(1000, 900)), ("tap_right", "next_page"));
         assert_eq!(r(tap(636, 848)), ("tap_center", "menu"));
+        // The top band opens the menu across the whole width.
+        assert_eq!(r(tap(400, 60)), ("tap_center", "menu"));
         assert_eq!(r(tap(50, 50)), ("tap_top_left", "bookmark"));
         // Unused corners fall back to their zone: no hidden exit top right.
         assert_eq!(r(tap(1250, 40)), ("tap_center", "menu"));

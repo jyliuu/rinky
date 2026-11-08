@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: User guide
+    url: https://github.com/jyliuu/rinky/blob/main/docs/user-guide.md
+    about: Install, update, troubleshooting and the files rinky writes.

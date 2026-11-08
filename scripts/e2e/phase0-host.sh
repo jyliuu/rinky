@@ -165,10 +165,11 @@ sim_window() {
 
 device_sh_no_args() { ! bash scripts/device.sh; }   # must refuse: no default address
 
+# The sections of docs/ARCHITECTURE.md that other docs and AGENTS.md point to.
+ARCH_HEADINGS="^## Where things are$|^## Device layer$|^## Running on the Kindle$|^## Plugins$|^## Extending rinky$|^## Build and toolchain$|^### Sleep and the Kindle framework$|^### Kindle system services$"
 arch_doc() {
-  grep -n "## Ownership map\|## Changing a shared API\|## Emulator slots\|## How to add a screen\|## How plugins register\|## Evidence layout\|## Test commands" docs/ARCHITECTURE.md
-  [ "$(grep -c "## Ownership map\|## Changing a shared API\|## Emulator slots\|## How to add a screen\|## How plugins register\|## Evidence layout\|## Test commands" docs/ARCHITECTURE.md)" = 7 ] &&
-    grep -q "## Sleep and the Kindle framework" docs/ARCHITECTURE.md
+  grep -nE "$ARCH_HEADINGS" docs/ARCHITECTURE.md
+  [ "$(grep -cE "$ARCH_HEADINGS" docs/ARCHITECTURE.md)" = 8 ]
 }
 
 step layout -- layout

@@ -45,6 +45,9 @@ pub struct FakeState {
     pub connects: Vec<(String, Option<String>)>,
     /// NTP syncs requested.
     pub ntp_syncs: u32,
+    /// Joins and scans "run in the background": they happen at once, but the screen is
+    /// told to wait for network events (a script's `net` steps).
+    pub background: bool,
 }
 
 impl Default for FakeState {
@@ -65,6 +68,7 @@ impl Default for FakeState {
             stale: Vec::new(),
             connects: Vec::new(),
             ntp_syncs: 0,
+            background: false,
         }
     }
 }
@@ -151,6 +155,14 @@ impl Wifi for Fake {
             return Err(DeviceError::Backend("Wi-Fi is off".into()));
         }
         Ok(s.networks.iter().map(|n| WifiNetwork { known: s.profiles.iter().any(|p| p.essid == n.essid), ..n.clone() }).collect())
+    }
+    fn connect_in_background(&mut self, essid: &str, password: Option<&str>) -> Result<bool> {
+        let background = self.0.borrow().background;
+        self.connect(essid, password).map(|()| background)
+    }
+    fn scan_in_background(&mut self) -> Result<bool> {
+        let background = self.0.borrow().background;
+        self.scan().map(|_| background)
     }
     fn connect(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
         let mut s = self.0.borrow_mut();

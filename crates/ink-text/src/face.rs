@@ -28,6 +28,8 @@ pub struct FaceInfo {
     pub italic: bool,
     /// Fixed pitch.
     pub monospace: bool,
+    /// Can set Latin body text (has `a`, `A`, `e` and `0`).
+    pub latin: bool,
     /// Units per em.
     pub units_per_em: u16,
     /// Number of glyphs.
@@ -66,6 +68,7 @@ impl FaceInfo {
             bold: face.is_bold() || weight >= 600,
             italic: face.is_italic() || face.is_oblique(),
             monospace: face.is_monospaced(),
+            latin: ['a', 'A', 'e', '0'].iter().all(|c| face.glyph_index(*c).is_some()),
             units_per_em: face.units_per_em(),
             glyphs: face.number_of_glyphs(),
             path: path.map(Path::to_path_buf),

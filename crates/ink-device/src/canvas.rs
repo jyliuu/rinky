@@ -129,24 +129,13 @@ impl Canvas {
     /// Darkens pixels with a glyph coverage mask (black ink on the existing background).
     /// `mask` is `w * h` coverage values, 255 = full ink.
     pub fn draw_mask(&mut self, x: i32, y: i32, w: usize, h: usize, mask: &[u8]) {
-        let d = self.drawable();
-        for my in 0..h {
-            let py = y + my as i32;
-            if py < d.y || py >= d.bottom() {
-                continue;
-            }
-            let row = py as usize * self.width;
-            for mx in 0..w {
-                let px = x + mx as i32;
-                if px < d.x || px >= d.right() {
-                    continue;
-                }
-                let a = mask[my * w + mx] as u32;
-                if a == 0 {
-                    continue;
-                }
-                let dst = &mut self.pixels[row + px as usize];
-                *dst = (*dst as u32 * (255 - a) / 255) as u8;
+        let r = self.drawable().intersect(&Rect::new(x, y, w as u32, h as u32));
+        let (mx, n) = ((r.x - x) as usize, r.w as usize);
+        for py in r.y..r.bottom() {
+            let m = (py - y) as usize * w + mx;
+            let d = py as usize * self.width + r.x as usize;
+            for (dst, &a) in self.pixels[d..d + n].iter_mut().zip(&mask[m..m + n]) {
+                *dst = (*dst as u32 * (255 - a as u32) / 255) as u8;
             }
         }
     }
@@ -201,33 +190,42 @@ impl Canvas {
         }
         let (sw, sh) = (self.width as f32, self.height as f32);
         let (fx, fy) = (sw / w as f32, sh / h as f32);
-        for y in 0..h {
-            for x in 0..w {
-                let v = if fx > 1.0 || fy > 1.0 {
-                    // Average the source box this pixel covers.
-                    let x0 = (x as f32 * fx) as usize;
-                    let y0 = (y as f32 * fy) as usize;
-                    let x1 = (((x + 1) as f32 * fx) as usize).clamp(x0 + 1, self.width);
-                    let y1 = (((y + 1) as f32 * fy) as usize).clamp(y0 + 1, self.height);
-                    let mut sum = 0u32;
-                    for yy in y0..y1 {
-                        for xx in x0..x1 {
-                            sum += self.pixels[yy * self.width + xx] as u32;
-                        }
-                    }
-                    (sum / ((x1 - x0) * (y1 - y0)) as u32) as u8
-                } else {
-                    let sx = ((x as f32 + 0.5) * fx - 0.5).clamp(0.0, sw - 1.0);
-                    let sy = ((y as f32 + 0.5) * fy - 0.5).clamp(0.0, sh - 1.0);
-                    let (x0, y0) = (sx as usize, sy as usize);
-                    let (x1, y1) = ((x0 + 1).min(self.width - 1), (y0 + 1).min(self.height - 1));
-                    let (tx, ty) = (sx - x0 as f32, sy - y0 as f32);
-                    let p = |xx: usize, yy: usize| self.pixels[yy * self.width + xx] as f32;
-                    let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
-                    let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-                    (top * (1.0 - ty) + bot * ty).round() as u8
-                };
-                out.pixels[y * w + x] = v;
+        if fx > 1.0 || fy > 1.0 {
+            // Average the source box each pixel covers: the rows of an output row are
+            // summed per source column once, then each output column sums its span.
+            let span = |i: usize, f: f32, n: usize| {
+                let a = (i as f32 * f) as usize;
+                (a, (((i + 1) as f32 * f) as usize).clamp(a + 1, n))
+            };
+            let cols: Vec<(usize, usize)> = (0..w).map(|x| span(x, fx, self.width)).collect();
+            let mut sums = vec![0u32; self.width];
+            for (y, out_row) in out.pixels.chunks_exact_mut(w).enumerate() {
+                let (y0, y1) = span(y, fy, self.height);
+                sums.fill(0);
+                for row in self.pixels[y0 * self.width..y1 * self.width].chunks_exact(self.width) {
+                    sums.iter_mut().zip(row).for_each(|(s, p)| *s += *p as u32);
+                }
+                for (o, &(x0, x1)) in out_row.iter_mut().zip(&cols) {
+                    *o = (sums[x0..x1].iter().sum::<u32>() / ((x1 - x0) * (y1 - y0)) as u32) as u8;
+                }
+            }
+        } else {
+            // Bilinear: the two source pixels and the weight of the second, per column
+            // and per row.
+            let taps = |i: usize, f: f32, n: usize| {
+                let s = ((i as f32 + 0.5) * f - 0.5).clamp(0.0, n as f32 - 1.0);
+                let a = s as usize;
+                (a, (a + 1).min(n - 1), s - a as f32)
+            };
+            let cols: Vec<(usize, usize, f32)> = (0..w).map(|x| taps(x, fx, self.width)).collect();
+            for (y, out_row) in out.pixels.chunks_exact_mut(w).enumerate() {
+                let (y0, y1, ty) = taps(y, fy, self.height);
+                let (r0, r1) = (&self.pixels[y0 * self.width..], &self.pixels[y1 * self.width..]);
+                for (o, &(x0, x1, tx)) in out_row.iter_mut().zip(&cols) {
+                    let top = r0[x0] as f32 * (1.0 - tx) + r0[x1] as f32 * tx;
+                    let bot = r1[x0] as f32 * (1.0 - tx) + r1[x1] as f32 * tx;
+                    *o = (top * (1.0 - ty) + bot * ty).round() as u8;
+                }
             }
         }
         out
@@ -249,8 +247,20 @@ impl Canvas {
 
     /// Writes an 8-bit grayscale PNG.
     pub fn save_png(&self, path: &Path) -> std::io::Result<()> {
+        self.write_png(path, png::Compression::Balanced)
+    }
+
+    /// Writes an 8-bit grayscale PNG with the png crate's fast deflate: several times
+    /// quicker than [`Canvas::save_png`] for a somewhat bigger file, for images written
+    /// often and kept only as a cache (library cover thumbnails).
+    pub fn save_png_fast(&self, path: &Path) -> std::io::Result<()> {
+        self.write_png(path, png::Compression::Fast)
+    }
+
+    fn write_png(&self, path: &Path, compression: png::Compression) -> std::io::Result<()> {
         let file = BufWriter::new(File::create(path)?);
         let mut enc = png::Encoder::new(file, self.width as u32, self.height as u32);
+        enc.set_compression(compression);
         enc.set_color(png::ColorType::Grayscale);
         enc.set_depth(png::BitDepth::Eight);
         let mut w = enc.write_header().map_err(std::io::Error::other)?;
@@ -288,18 +298,19 @@ impl Canvas {
         let info = reader.next_frame(&mut buf).map_err(std::io::Error::other)?;
         let (w, h) = (info.width as usize, info.height as usize);
         let channels = info.color_type.samples();
-        let mut out = Canvas::new(w, h);
-        for i in 0..w * h {
-            let px = &buf[i * channels..(i + 1) * channels];
-            out.pixels[i] = match channels {
-                1 => px[0],
-                2 => composite(px[0], px[1]),
-                3 => ((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8,
-                _ => composite(((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8, px[3]),
-            };
-        }
-        Ok(out)
+        let px = buf.chunks_exact(channels).take(w * h);
+        let pixels = match channels {
+            1 => px.map(|p| p[0]).collect(),
+            2 => px.map(|p| composite(p[0], p[1])).collect(),
+            3 => px.map(rgb_gray).collect(),
+            _ => px.map(|p| composite(rgb_gray(p), p[3])).collect(),
+        };
+        Ok(Canvas::from_pixels(w, h, pixels))
     }
+}
+
+fn rgb_gray(p: &[u8]) -> u8 {
+    ((p[0] as u32 + p[1] as u32 + p[2] as u32) / 3) as u8
 }
 
 fn composite(gray: u8, alpha: u8) -> u8 {
@@ -320,6 +331,28 @@ mod tests {
         let path = dir.join("c.png");
         c.save_png(&path).unwrap();
         assert_eq!(Canvas::load_png(&path).unwrap(), c);
+        let fast = dir.join("fast.png");
+        c.save_png_fast(&fast).unwrap();
+        assert_eq!(Canvas::load_png(&fast).unwrap(), c);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn color_and_alpha_pngs_become_gray_on_white() {
+        let dir = crate::sysfs::test_dir("canvas-color");
+        let path = dir.join("c.png");
+        let cases: [(png::ColorType, &[u8], [u8; 2]); 3] = [
+            (png::ColorType::GrayscaleAlpha, &[0, 255, 0, 0], [0, 255]),
+            (png::ColorType::Rgb, &[30, 60, 90, 255, 0, 0], [60, 85]),
+            (png::ColorType::Rgba, &[30, 60, 90, 255, 0, 0, 0, 128], [60, 127]),
+        ];
+        for (color, data, want) in cases {
+            let mut enc = png::Encoder::new(BufWriter::new(File::create(&path).unwrap()), 2, 1);
+            enc.set_color(color);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(data).unwrap();
+            assert_eq!(Canvas::load_png(&path).unwrap().pixels, want, "{color:?}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -390,6 +423,24 @@ mod tests {
         assert_eq!(c.get(0, 0), Some(0));
         assert_eq!(c.get(1, 1), Some(0));
         assert_eq!(c.get(2, 2), Some(255));
+        // Every offset in and around a clipped canvas: the same pixels as darkening
+        // each covered pixel on its own.
+        let mask: Vec<u8> = (0..5 * 3).map(|i| (i * 40 % 256) as u8).collect();
+        for clip in [None, Some(Rect::new(1, 2, 4, 3))] {
+            for (x, y) in (-6..9).flat_map(|x| (-4..8).map(move |y| (x, y))) {
+                let mut got = Canvas::from_pixels(6, 5, (0..30).map(|i| 200 - i as u8).collect());
+                let mut want = got.clone();
+                got.set_clip(clip);
+                got.draw_mask(x, y, 5, 3, &mask);
+                for (i, a) in mask.iter().enumerate() {
+                    let (px, py) = (x + (i % 5) as i32, y + (i / 5) as i32);
+                    if let Some(v) = want.get(px, py).filter(|_| clip.is_none_or(|c| c.contains(crate::Point::new(px, py)))) {
+                        want.pixels[py as usize * 6 + px as usize] = (v as u32 * (255 - *a as u32) / 255) as u8;
+                    }
+                }
+                assert_eq!(got.pixels, want.pixels, "mask at {x},{y} clip {clip:?}");
+            }
+        }
     }
 
     #[test]
@@ -406,6 +457,25 @@ mod tests {
         assert_eq!(f.get(0, 0), Some(128), "letterbox");
         assert_eq!(f.get(1, 4), Some(0));
         assert_eq!(f.get(9, 4), Some(255));
+    }
+
+    /// Shrinking averages exactly the source box each pixel covers, in either
+    /// direction, also when the other one grows.
+    #[test]
+    fn shrinking_averages_each_source_box() {
+        let mut c = Canvas::new(61, 37);
+        c.pixels.iter_mut().enumerate().for_each(|(i, p)| *p = (i * 37 % 251) as u8);
+        for (w, h) in [(20, 12), (7, 37), (61, 5), (100, 9), (1, 1)] {
+            let (fx, fy) = (61.0 / w as f32, 37.0 / h as f32);
+            let s = c.scaled(w, h);
+            for (y, x) in (0..h).flat_map(|y| (0..w).map(move |x| (y, x))) {
+                let (x0, y0) = ((x as f32 * fx) as usize, (y as f32 * fy) as usize);
+                let x1 = (((x + 1) as f32 * fx) as usize).clamp(x0 + 1, 61);
+                let y1 = (((y + 1) as f32 * fy) as usize).clamp(y0 + 1, 37);
+                let sum: u32 = (y0..y1).flat_map(|yy| (x0..x1).map(move |xx| (xx, yy))).map(|(xx, yy)| c.pixels[yy * 61 + xx] as u32).sum();
+                assert_eq!(s.pixels[y * w + x] as u32, sum / ((x1 - x0) * (y1 - y0)) as u32, "{w}x{h} at {x},{y}");
+            }
+        }
     }
 
     #[test]

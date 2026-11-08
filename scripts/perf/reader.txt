@@ -1,5 +1,8 @@
 # Reader timing script for scripts/perf-bench.sh (panel pixels, 1272 x 1696).
 # A `wait` lets the gesture recogniser settle, so one step gives one frame.
+# The taps follow the reader's layout (the log prints "reader button ACTION panel X Y"
+# for every overlay button); perf-summary.py exits with an error when a reader log
+# lacks one of the steps below, so a tap that misses after a layout change shows.
 wait 500
 key next
 key next
@@ -39,10 +42,10 @@ wait 500
 tap 764 68               # Aa sheet
 wait 500
 shot aa
-tap 560 1076             # font size +
+tap 1196 890             # font size + (plus button of the Font size row)
 wait 500
 shot aa-bigger
-tap 1158 572             # Done
+tap 1158 315             # Done
 wait 500
 key next
 key next

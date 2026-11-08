@@ -13,13 +13,15 @@
 //!   claimed by one thread in the shared map ([`Claim`]), so no chapter is laid out twice
 //!   and the foreground waits for a chapter a worker is doing instead of repeating it.
 
-use crate::book::Book;
+use crate::book::{Book, ChapterDom};
 use crate::layout::{compute_styles, ChapterLayout, Env, Flow, Params};
+use crate::style::ComputedStyle;
+use ink_doc::timing::step;
 use md5::{Digest, Md5};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Bump when layout results change (invalidates cached page maps). The golden test
 /// `page_maps_match_engine_version` fails when page breaks change without a bump.
@@ -105,8 +107,6 @@ pub struct MapState {
     pub claims: Vec<Claim>,
     /// Set when every chapter is known.
     pub complete: bool,
-    /// Layout generation the map belongs to.
-    pub generation: u64,
     /// The background threads have finished (map complete and the cache file written,
     /// or cancelled).
     pub finished: bool,
@@ -150,23 +150,23 @@ impl MapState {
 
     /// Pages known in the contiguous prefix of chapters, and whether that is all.
     pub fn known_pages(&self) -> (usize, bool) {
-        let mut n = 0;
-        for c in &self.chapters {
-            match c {
-                Some(p) => n += p.keys.len(),
-                None => return (n, false),
-            }
-        }
-        (n, true)
+        let n = self.chapters.iter().map_while(Option::as_ref).map(|c| c.keys.len()).sum();
+        (n, self.chapters.iter().all(Option::is_some))
     }
 
     /// First global page of chapter `i`, when all chapters before it are known.
     pub fn first_page(&self, i: usize) -> Option<usize> {
-        let mut n = 0;
-        for c in &self.chapters[..i] {
-            n += c.as_ref()?.keys.len();
-        }
-        Some(n)
+        self.chapters[..i].iter().map(|c| Some(c.as_ref()?.keys.len())).sum()
+    }
+
+    /// [`MapState::first_page`] of every chapter, in one pass.
+    pub fn first_pages(&self) -> Vec<Option<usize>> {
+        let firsts = self.chapters.iter().scan(Some(0), |next, c| {
+            let first = *next;
+            *next = first.zip(c.as_ref()).map(|(n, c)| n + c.keys.len());
+            Some(first)
+        });
+        firsts.collect()
     }
 
     /// (chapter, local page) of global page `p`, within the known prefix.
@@ -248,24 +248,18 @@ pub fn start_full_layout(book: Arc<Book>, params: Params, fonts: crate::fonts::F
         }
     }
     let sh = shared.clone();
+    // The guard moves into the thread; a thread that cannot start drops it at once.
+    let done = Done(shared);
     let spawned = std::thread::Builder::new().name("ink-html-layout".into()).stack_size(16 << 20).spawn(move || {
-        let _done = Done(sh.clone());
+        let _done = done;
         lower_priority();
         if sh.cancel.load(Ordering::Relaxed) {
             return;
         }
         let t = std::time::Instant::now();
-        let mut fb = fonts.build();
-        let mut unknown = false;
-        let mut size = |p: &str| {
-            let (s, known) = shared_image_size_known(&book, p);
-            unknown |= !known;
-            s
-        };
-        let mut env = Env { fonts: &mut fb, image_size: &mut size };
-        let lay = layout_chapter(&book, c, &params, &mut env);
+        let (lay, known) = with_shared_env(&book, &mut fonts.build(), |env| layout_chapter(&book, c, &params, env));
         let pages = paginate(&lay, params.content_h);
-        if unknown || sh.cancel.load(Ordering::Relaxed) {
+        if !known || sh.cancel.load(Ordering::Relaxed) {
             log::info!("ink-html: background layout of spine item {c} dropped (image sizes unknown here or cancelled)");
             return;
         }
@@ -274,7 +268,6 @@ pub fn start_full_layout(book: Arc<Book>, params: Params, fonts: crate::fonts::F
     });
     if let Err(e) = spawned {
         log::warn!("ink-html: cannot start the layout thread: {e}");
-        shared.full.lock().unwrap().running = false;
     }
 }
 
@@ -284,7 +277,7 @@ pub fn chapter_text_bytes(dom: &crate::dom::Dom) -> u64 {
     for &id in &dom.preorder {
         if let Some(t) = dom.text(id) {
             let p = dom.node(id).parent;
-            if dom.element(p).is_some_and(|e| e.in_svg || e.name == "svg") {
+            if dom.element(p).is_some_and(crate::dom::Element::in_svg_tree) {
                 continue;
             }
             n += t.len() as u64;
@@ -293,17 +286,21 @@ pub fn chapter_text_bytes(dom: &crate::dom::Dom) -> u64 {
     n
 }
 
-/// Lays out chapter `i` and returns its layout (no pages).
-/// Records `chapter parse`, `chapter style` and `chapter layout` in [`ink_doc::timing`].
-pub fn layout_chapter(book: &Book, i: usize, params: &Params, env: &mut Env) -> ChapterLayout {
-    use ink_doc::timing::step;
-    let t = std::time::Instant::now();
+/// Chapter `i` parsed and styled, and when that was done. Records `chapter parse` and
+/// `chapter style` in [`ink_doc::timing`].
+fn styled_chapter(book: &Book, i: usize, params: &Params) -> (Arc<ChapterDom>, Vec<Option<Box<ComputedStyle>>>, Instant) {
+    let t = Instant::now();
     let ch = book.chapter(i);
     let t = step("chapter parse", t);
     let styles = compute_styles(book, &ch, params);
-    let t = step("chapter style", t);
-    let path = &book.chapters[i].path;
-    let lay = Flow::layout(env, params, &ch.dom, &styles, path, book.meta.language.clone());
+    (ch, styles, step("chapter style", t))
+}
+
+/// Lays out chapter `i` and returns its layout (no pages).
+/// Records `chapter parse`, `chapter style` and `chapter layout` in [`ink_doc::timing`].
+pub fn layout_chapter(book: &Book, i: usize, params: &Params, env: &mut Env) -> ChapterLayout {
+    let (ch, styles, t) = styled_chapter(book, i, params);
+    let lay = Flow::layout(env, params, &ch.dom, &styles, &book.chapters[i].path, book.meta.language.clone());
     step("chapter layout", t);
     lay
 }
@@ -337,12 +334,7 @@ pub fn prefix_pages(lay: &ChapterLayout, complete: bool, page_h: f32) -> Vec<Pag
 /// not reach far enough (a giant paragraph, a tall table), the chapter is laid out whole.
 /// Records the same [`ink_doc::timing`] steps as [`layout_chapter`].
 pub fn layout_chapter_until(book: &Book, i: usize, params: &Params, env: &mut Env, key: (u32, u32), pages_after: usize) -> (ChapterLayout, Vec<PageSpan>, bool) {
-    use ink_doc::timing::step;
-    let t = std::time::Instant::now();
-    let ch = book.chapter(i);
-    let t = step("chapter parse", t);
-    let styles = compute_styles(book, &ch, params);
-    let t = step("chapter style", t);
+    let (ch, styles, t) = styled_chapter(book, i, params);
     let path = &book.chapters[i].path;
     let extra = (pages_after as f32 + PREFIX_MARGIN_PAGES + 2.0) * params.content_h;
     let stop = crate::layout::StopAt::new(key, extra);
@@ -361,11 +353,14 @@ pub fn layout_chapter_until(book: &Book, i: usize, params: &Params, env: &mut En
     out
 }
 
-/// Lays out and paginates chapter `i` for the page map.
+/// Lays out and paginates chapter `i` for the page map (slices only: the page starts
+/// are those of [`layout_chapter`]'s pages). Records the same [`ink_doc::timing`] steps.
 pub fn chapter_pages(book: &Book, i: usize, params: &Params, env: &mut Env) -> ChapterPages {
-    let lay = layout_chapter(book, i, params, env);
+    let (ch, styles, t) = styled_chapter(book, i, params);
+    let lay = Flow::layout_slices(env, params, &ch.dom, &styles, &book.chapters[i].path, book.meta.language.clone());
+    step("chapter layout", t);
     let pages = paginate(&lay, params.content_h);
-    let text_bytes = chapter_text_bytes(&book.chapter(i).dom);
+    let text_bytes = chapter_text_bytes(&ch.dom);
     ChapterPages { keys: pages.iter().map(|p| p.key).collect(), text_bytes }
 }
 
@@ -413,22 +408,20 @@ pub fn resolve_interest(book: &Book, i: usize, keys: &[(u32, u32)], interest: &I
     }
 }
 
-/// The image size function used off the main thread: cached sizes, else the shared loader.
-pub fn shared_image_size(book: &Book, path: &str) -> Option<(u32, u32)> {
-    shared_image_size_known(book, path).0
-}
-
-/// Like [`shared_image_size`], plus whether the size is known: false when the image is
-/// neither in the size cache nor readable here (no shared loader). A layout made with an
-/// unknown size is not the foreground's layout.
-pub fn shared_image_size_known(book: &Book, path: &str) -> (Option<(u32, u32)>, bool) {
-    if let Some(s) = book.images.lock().unwrap().get(path) {
-        return (*s, true);
-    }
-    let Some(loader) = book.loader.as_ref() else { return (None, false) };
-    let size = loader.read(path).ok().and_then(|b| crate::images::intrinsic_size(&b));
-    book.images.lock().unwrap().insert(path.to_string(), size);
-    (size, true)
+/// Runs `f` with an [`Env`] for a thread off the main thread: image sizes come from the
+/// size cache, else the shared loader. Also returns whether every size was known (false
+/// when an image is neither cached nor readable here); a layout made with an unknown
+/// size is not the foreground's layout.
+fn with_shared_env<R>(book: &Book, fonts: &mut crate::fonts::FontBook, f: impl FnOnce(&mut Env) -> R) -> (R, bool) {
+    let mut known = true;
+    let loader = book.size_loader();
+    let mut size = |p: &str| {
+        let s = book.image_size(p, loader);
+        known &= s.is_some();
+        s.flatten()
+    };
+    let r = f(&mut Env { fonts, image_size: &mut size });
+    (r, known)
 }
 
 /// The cache file for a book and layout.
@@ -491,17 +484,13 @@ pub fn read_cache(path: &Path, n: usize) -> Option<Vec<Option<ChapterPages>>> {
     (out.len() == n).then_some(out)
 }
 
-/// Number of background pagination threads: `RINKY_PAGINATE_THREADS` when set
-/// (1-8), else the cores minus one for the UI thread, at most 2. The PW12 has four
-/// Cortex-A53 cores; each thread holds one chapter's DOM and layout (about 50 MB for a
-/// 36 000-word chapter on the host), so a third thread costs more memory than it saves
-/// time (big36: 1 thread 720 ms / 255 MB, 2: 430 ms / 309 MB, 3: 310 ms / 354 MB).
+/// Number of background pagination threads: `RINKY_PAGINATE_THREADS` when set (1-8),
+/// else one. Two threads crashed with corrupted memory in 2 of 16 cold opens of a long
+/// book on the Kindle emulator (never with one thread, never on the host); until that
+/// is understood, more than one is opt-in. The threads run at nice 10
+/// ([`lower_priority`]), so the UI thread still gets a core as soon as it needs one.
 pub fn worker_threads() -> usize {
-    if let Some(n) = std::env::var("RINKY_PAGINATE_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
-        return n.clamp(1, 8);
-    }
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    cores.saturating_sub(1).clamp(1, 2)
+    std::env::var("RINKY_PAGINATE_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).map_or(1, |n| n.clamp(1, 8))
 }
 
 /// Lowers the calling thread's scheduling priority (nice 10 on Linux) so page turns on
@@ -530,7 +519,6 @@ const EVICT_BYTES: usize = 256 * 1024;
 pub struct Worker {
     /// Shared state.
     pub shared: Arc<Shared>,
-    handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// Work the last background thread runs on the shared state when it ends.
@@ -574,49 +562,28 @@ impl Worker {
             m.claims.resize(n, Claim::Free);
         }
         log::info!("ink-html: background pagination of {} spine items on {threads} threads", book.chapters.len());
-        let mut handles = Vec::with_capacity(threads);
         for t in 0..threads {
             let (book, params, fonts, sh, interest) = (book.clone(), params.clone(), fonts.clone(), shared.clone(), interest.clone());
-            // Every thread gets the path: whichever ends last writes the file.
-            let cache = cache.clone();
-            let n = book.chapters.len();
-            // The last thread to end writes the cache (when the map is complete), marks
-            // the map complete and logs the total time.
-            let last: Box<dyn FnOnce(&Shared) + Send> = Box::new(move |sh: &Shared| finish_map(sh, cache, n, started));
+            // Every thread gets the path: whichever ends last writes the file (when the
+            // map is complete), marks the map complete and logs the total time.
+            let (cache, n) = (cache.clone(), book.chapters.len());
+            let last: LastWork = Box::new(move |sh: &Shared| finish_map(sh, cache, n, started));
+            // The guard moves into the thread; a thread that cannot start drops it at
+            // once, so the running count never waits for it.
+            let guard = RunGuard { shared: sh.clone(), last: Some(last) };
             let spawned = std::thread::Builder::new()
                 .name(format!("ink-html-paginate-{t}"))
                 .stack_size(16 << 20)
                 .spawn(move || {
-                    let _guard = RunGuard { shared: sh.clone(), last: Some(last) };
+                    let _guard = guard;
                     lower_priority();
                     paginate_claimed(&book, &params, &fonts, &sh, &interest);
                 });
-            match spawned {
-                Ok(h) => handles.push(h),
-                Err(e) => {
-                    // Fewer threads: the running count must not wait for this one.
-                    log::warn!("ink-html: cannot start paginator thread {t}: {e}");
-                    let done = {
-                        let mut m = shared.map.lock().unwrap();
-                        m.running = m.running.saturating_sub(1);
-                        m.running == 0
-                    };
-                    if done && handles.is_empty() {
-                        shared.map.lock().unwrap().finished = true;
-                        shared.changed.notify_all();
-                    }
-                }
+            if let Err(e) = spawned {
+                log::warn!("ink-html: cannot start paginator thread {t}: {e}");
             }
         }
-        Worker { shared, handles }
-    }
-
-    /// Stops the threads (waits for the chapters in progress).
-    pub fn stop(&mut self) {
-        self.shared.cancel.store(true, Ordering::Relaxed);
-        for h in self.handles.drain(..) {
-            let _ = h.join();
-        }
+        Worker { shared }
     }
 
     /// Waits until the threads have finished (map complete, cache file written) or
@@ -645,16 +612,9 @@ fn paginate_claimed(book: &Book, params: &Params, fonts: &crate::fonts::FontSour
         }
         let Some(i) = sh.map.lock().unwrap().claim_next() else { return };
         let was_parsed = book.has_chapter(i);
-        let mut unknown = false;
-        let mut size = |p: &str| {
-            let (s, known) = shared_image_size_known(book, p);
-            unknown |= !known;
-            s
-        };
-        let mut env = Env { fonts: &mut fb, image_size: &mut size };
-        let pages = chapter_pages(book, i, params, &mut env);
+        let (pages, known) = with_shared_env(book, &mut fb, |env| chapter_pages(book, i, params, env));
         let mut m = sh.map.lock().unwrap();
-        if unknown {
+        if !known {
             // An image whose size only the foreground can read (the EPUB loader is not
             // shared and the prefill scan missed it): leave the chapter to the
             // foreground instead of storing a layout without the image.
@@ -671,7 +631,7 @@ fn paginate_claimed(book: &Book, params: &Params, fonts: &crate::fonts::FontSour
         }
         sh.changed.notify_all();
         // Keep memory flat on big books: drop the DOMs only this thread parsed.
-        if !was_parsed && (n > 40 || book.chapters[i].html.len() > EVICT_BYTES) {
+        if !was_parsed && (n > 40 || book.chapters[i].src_len() > EVICT_BYTES) {
             book.evict_chapter(i);
         }
     }
@@ -775,5 +735,10 @@ mod tests {
         assert_eq!(m.locate(2), None);
         assert_eq!(m.first_page(2), None);
         assert_eq!(m.first_page(1), Some(2));
+        assert_eq!(m.first_pages(), vec![Some(0), Some(2), None]);
+        let full = MapState { chapters: vec![chapters[0].clone(), chapters[1].clone(), chapters[0].clone()], ..Default::default() };
+        assert_eq!(full.known_pages(), (4, true));
+        assert_eq!(full.first_pages(), vec![Some(0), Some(2), Some(2)]);
+        assert_eq!((full.first_page(3), full.locate(3)), (Some(4), Some((2, 1))));
     }
 }

@@ -131,13 +131,31 @@ impl Table {
 
     /// Number of entries (keys counted once).
     pub fn len(&self) -> usize {
-        let mut n = 0;
-        for (i, (k, _)) in self.entries.iter().enumerate() {
-            if !self.entries[i + 1..].iter().any(|(k2, _)| k2 == k) {
-                n += 1;
-            }
+        /// A key that can be hashed. The parser stores no NaN and no integral number as
+        /// [`Key::Num`], but `entries` is public: a hand-built -0.0 equals 0.0 (`+ 0.0`
+        /// makes their bits equal) and a NaN equals nothing, so each NaN counts on its own.
+        #[derive(PartialEq, Eq, Hash)]
+        enum K<'a> {
+            Int(i64),
+            Num(u64),
+            Str(&'a str),
+            Bool(bool),
         }
-        n
+        let mut nans = 0;
+        let mut keys = std::collections::HashSet::with_capacity(self.entries.len());
+        for (k, _) in &self.entries {
+            keys.insert(match k {
+                Key::Int(i) => K::Int(*i),
+                Key::Num(n) if n.is_nan() => {
+                    nans += 1;
+                    continue;
+                }
+                Key::Num(n) => K::Num((n + 0.0).to_bits()),
+                Key::Str(s) => K::Str(s),
+                Key::Bool(b) => K::Bool(*b),
+            });
+        }
+        keys.len() + nans
     }
 
     /// True if the table has no entries.
@@ -260,10 +278,8 @@ pub fn parse(input: &[u8]) -> Result<Value, LuaError> {
     if p.s.starts_with(b"\xEF\xBB\xBF") {
         p.i = 3;
     }
-    if p.s[p.i..].starts_with(b"#") {
-        while p.i < p.s.len() && p.s[p.i] != b'\n' {
-            p.i += 1;
-        }
+    if p.peek() == Some(b'#') {
+        p.skip_while(|c| c != b'\n');
     }
     p.skip_space()?;
     if p.peek_word() == Some(b"return") {
@@ -308,6 +324,11 @@ struct Parser<'a> {
     values: usize,
 }
 
+/// Lua's white space.
+fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\r' | b'\n' | b'\x0b' | b'\x0c')
+}
+
 fn is_ident_start(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_'
 }
@@ -333,33 +354,29 @@ impl Parser<'_> {
 
     /// The identifier starting at the cursor, if any.
     fn peek_word(&self) -> Option<&[u8]> {
-        let start = self.i;
-        if !self.peek().is_some_and(is_ident_start) {
-            return None;
+        let rest = self.s.get(self.i..)?;
+        let n = rest.iter().take_while(|&&c| is_ident(c)).count();
+        self.peek().is_some_and(is_ident_start).then(|| &rest[..n])
+    }
+
+    /// Moves the cursor past the bytes that satisfy `keep`.
+    fn skip_while(&mut self, keep: impl Fn(u8) -> bool) {
+        while self.peek().is_some_and(&keep) {
+            self.i += 1;
         }
-        let mut end = start;
-        while end < self.s.len() && is_ident(self.s[end]) {
-            end += 1;
-        }
-        Some(&self.s[start..end])
     }
 
     /// Skips white space and comments.
     fn skip_space(&mut self) -> Result<(), LuaError> {
         loop {
             match self.peek() {
-                Some(b' ' | b'\t' | b'\r' | b'\n' | b'\x0b' | b'\x0c') => self.i += 1,
+                Some(c) if is_space(c) => self.i += 1,
                 Some(b'-') if self.peek_at(1) == Some(b'-') => {
                     self.i += 2;
                     if let Some(level) = self.long_bracket_level() {
                         self.long_body(level, "comment")?;
                     } else {
-                        while let Some(c) = self.peek() {
-                            if c == b'\n' {
-                                break;
-                            }
-                            self.i += 1;
-                        }
+                        self.skip_while(|c| c != b'\n');
                     }
                 }
                 _ => return Ok(()),
@@ -367,22 +384,18 @@ impl Parser<'_> {
         }
     }
 
+    /// At `bracket` `=`* `bracket` (a long bracket's opener or closer): the number of `=`.
+    /// Nothing is consumed.
+    fn level_at(&self, bracket: u8) -> Option<usize> {
+        let eq = self.s.get(self.i + 1..)?.iter().take_while(|&&c| c == b'=').count();
+        (self.peek() == Some(bracket) && self.s.get(self.i + 1 + eq) == Some(&bracket)).then_some(eq)
+    }
+
     /// At `[` `=`* `[`: consumes the opener and returns the level (number of `=`).
     fn long_bracket_level(&mut self) -> Option<usize> {
-        if self.peek() != Some(b'[') {
-            return None;
-        }
-        let mut j = self.i + 1;
-        while self.s.get(j) == Some(&b'=') {
-            j += 1;
-        }
-        if self.s.get(j) == Some(&b'[') {
-            let level = j - self.i - 1;
-            self.i = j + 1;
-            Some(level)
-        } else {
-            None
-        }
+        let level = self.level_at(b'[')?;
+        self.i += level + 2;
+        Some(level)
     }
 
     /// Body of a long string or comment after its opener; returns the bytes with line
@@ -394,17 +407,9 @@ impl Parser<'_> {
         loop {
             match self.peek() {
                 None => return Err(self.err(format!("unfinished long {what}"))),
-                Some(b']') => {
-                    let mut j = self.i + 1;
-                    while self.s.get(j) == Some(&b'=') {
-                        j += 1;
-                    }
-                    if j - self.i - 1 == level && self.s.get(j) == Some(&b']') {
-                        self.i = j + 1;
-                        return Ok(out);
-                    }
-                    out.push(b']');
-                    self.i += 1;
+                Some(b']') if self.level_at(b']') == Some(level) => {
+                    self.i += level + 2;
+                    return Ok(out);
                 }
                 Some(b'\r' | b'\n') => {
                     self.skip_newline();
@@ -547,17 +552,10 @@ impl Parser<'_> {
         if matches!(self.peek(), Some(b'p' | b'P')) {
             is_float = true;
             self.i += 1;
-            let neg = match self.peek() {
-                Some(b'-') => {
-                    self.i += 1;
-                    true
-                }
-                Some(b'+') => {
-                    self.i += 1;
-                    false
-                }
-                _ => false,
-            };
+            let neg = self.peek() == Some(b'-');
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.i += 1;
+            }
             let mut e: i64 = 0;
             let mut digits = false;
             while let Some(c) = self.peek().filter(u8::is_ascii_digit) {
@@ -607,21 +605,11 @@ impl Parser<'_> {
     }
 
     fn escape(&mut self, out: &mut Vec<u8>) -> Result<(), LuaError> {
+        /// One-character escapes and the byte each stands for.
+        const SIMPLE: [(u8, u8); 10] =
+            [(b'a', 7), (b'b', 8), (b'f', 12), (b'n', b'\n'), (b'r', b'\r'), (b't', b'\t'), (b'v', 11), (b'\\', b'\\'), (b'"', b'"'), (b'\'', b'\'')];
         let Some(c) = self.peek() else { return Err(self.err("unfinished escape".into())) };
-        let simple = match c {
-            b'a' => Some(7),
-            b'b' => Some(8),
-            b'f' => Some(12),
-            b'n' => Some(b'\n'),
-            b'r' => Some(b'\r'),
-            b't' => Some(b'\t'),
-            b'v' => Some(11),
-            b'\\' => Some(b'\\'),
-            b'"' => Some(b'"'),
-            b'\'' => Some(b'\''),
-            _ => None,
-        };
-        if let Some(b) = simple {
+        if let Some(&(_, b)) = SIMPLE.iter().find(|e| e.0 == c) {
             out.push(b);
             self.i += 1;
             return Ok(());
@@ -643,9 +631,7 @@ impl Parser<'_> {
             }
             b'z' => {
                 self.i += 1;
-                while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n' | b'\x0b' | b'\x0c')) {
-                    self.i += 1;
-                }
+                self.skip_while(is_space);
             }
             b'u' => {
                 self.i += 1;
@@ -729,14 +715,10 @@ impl Parser<'_> {
             };
             self.skip_space()?;
             let v = self.value()?;
-            let key = match key {
-                Some(k) => k,
-                None => {
-                    let k = Key::Int(next_pos);
-                    next_pos += 1;
-                    k
-                }
-            };
+            let key = key.unwrap_or_else(|| {
+                next_pos += 1;
+                Key::Int(next_pos - 1)
+            });
             if v != Value::Nil {
                 t.entries.push((key, v));
             }
@@ -864,6 +846,12 @@ mod tests {
         assert_eq!(v.get_index(3), Some(&Value::Bool(true)));
         assert_eq!(v.get_index(4), Some(&Value::Str("fourth".into())));
         assert_eq!(v.seq().len(), 4);
+        // Keys counted once: a, b, 1..=4, 2.5, false, nested.
+        assert_eq!((v.entries.len(), v.len()), (10, 9));
+        assert_eq!(t(r#"{ [1.5] = 1, [1.5] = 2, x = 1, ["x"] = 2, [true] = 1, [true] = 2 }"#).len(), 3);
+        // Hand-built keys count as `==` compares them: -0.0 is 0.0, NaN equals nothing.
+        let hand = Table { entries: [Key::Num(0.0), Key::Num(-0.0), Key::Num(f64::NAN), Key::Num(f64::NAN)].into_iter().map(|k| (k, Value::Nil)).collect() };
+        assert_eq!(hand.len(), 3);
         assert!(v.get("gone").is_none());
         assert!(v.entries.iter().any(|(k, _)| *k == Key::Num(2.5)));
         assert!(v.entries.iter().any(|(k, _)| *k == Key::Bool(false)));

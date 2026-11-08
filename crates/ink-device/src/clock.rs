@@ -555,6 +555,8 @@ mod tests {
     #[test]
     fn civil_conversion_round_trips() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(20_758), (2026, 11, 1));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
         assert_eq!(days_from_civil(2000, 3, 1), 11_017);
         for d in [-1000i64, -1, 0, 59, 365, 11_016, 20_000, 20_750, 50_000] {
             let (y, m, dd) = civil_from_days(d);

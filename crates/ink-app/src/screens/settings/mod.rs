@@ -1,4 +1,4 @@
-//! Settings screen (owner: the wave B `settings` agent).
+//! Settings screen.
 //!
 //! One screen with pages. The main page is ONE vertically scrolling list ([`rows`]: a
 //! swipe jumps half a page, a long swipe a whole page, one GL16 repaint) with sections:
@@ -38,6 +38,7 @@ pub mod advanced;
 pub mod battery;
 pub mod control_buttons;
 pub mod diagnostics;
+#[cfg(test)]
 pub mod fakes;
 pub mod keyboard_layouts;
 pub mod order;
@@ -144,6 +145,43 @@ pub fn current_settings<'a>(cx: &'a AppCtx) -> &'a Settings {
     cx.settings_update.as_ref().unwrap_or(cx.settings)
 }
 
+/// The name of an export format in the settings list.
+fn export_format_name(f: ExportFormat) -> &'static str {
+    match f {
+        ExportFormat::Markdown => "Markdown",
+        ExportFormat::Clippings => "Kindle clippings",
+        ExportFormat::Json => "JSON",
+    }
+}
+
+/// Where "Export all highlights" writes in format `f`.
+fn export_subtitle(f: ExportFormat) -> &'static str {
+    match f {
+        ExportFormat::Markdown => "One Markdown file per book, in rinky/exports",
+        ExportFormat::Clippings => "All books in rinky/exports/My Clippings.txt",
+        ExportFormat::Json => "One JSON file per book, in rinky/exports",
+    }
+}
+
+/// Rows of the KOReader import page (import, library, highlight export and its format).
+pub(crate) fn koreader_rows(format: ExportFormat) -> Vec<Row> {
+    let mut rows = vec![
+        Row::header("From KOReader"),
+        Row::item("Import from KOReader", "ko-import").icon(Icon::Download).subtitle("Positions, highlights, notes, status, statistics"),
+        Row::note("KOReader's files are only read, never changed."),
+        Row::header("Library"),
+        Row::item("Rescan the library", "lib-rescan").icon(Icon::Sync).subtitle("Read the book folders again"),
+        Row::item("Browse files", "lib-files").icon(Icon::Folder).subtitle("Open a book from any folder"),
+        Row::note("These run on the library screen; it opens when you tap."),
+        Row::header("Highlights"),
+        Row::item("Export all highlights", "export-all").icon(Icon::Download).subtitle(export_subtitle(format)),
+        Row::header("Export format"),
+    ];
+    rows.extend(ExportFormat::ALL.iter().map(|f| Row::choice(export_format_name(*f), *f == format, format!("exportfmt:{}", f.name()))));
+    rows.push(Row::note("Export highlights in the reader menu and the book menu use it too."));
+    rows
+}
+
 /// A module page that is not wired yet.
 struct ComingSoon;
 
@@ -169,18 +207,21 @@ fn make_module(info: &PageInfo) -> Box<dyn PageModule> {
     }
 }
 
-/// The main-list rows of the module pages in `section`.
 /// Value of the Reader gestures row: how many gestures have an action.
 fn gestures_summary(map: &ink_store::prefs::GestureMap) -> String {
     let set = ink_store::prefs::GESTURES.iter().filter(|(g, _)| map.action(g) != "none").count();
     format!("{set} of {} set", ink_store::prefs::GESTURES.len())
 }
 
+/// The main-list rows of the module pages in `section`, without values.
+fn module_nav_rows(section: &str) -> impl Iterator<Item = (&'static PageInfo, Row)> + '_ {
+    PAGE_MODULES.iter().filter(move |p| p.section == section).map(|p| (p, Row::nav(p.icon, p.title, format!("page:mod:{}", p.key))))
+}
+
+/// The main-list rows of the module pages in `section`, with their values.
 fn module_rows(section: &str, s: &Settings) -> Vec<Row> {
-    PAGE_MODULES
-        .iter()
-        .filter(|p| p.section == section)
-        .map(|p| {
+    module_nav_rows(section)
+        .map(|(p, row)| {
             // fonts and status_bars are Page variants (not PageModule): their own summaries.
             let value = match p.key {
                 "fonts" => fonts::summary(s),
@@ -188,22 +229,24 @@ fn module_rows(section: &str, s: &Settings) -> Vec<Row> {
                 "gestures" => gestures_summary(&s.gestures),
                 _ => make_module(p).summary(s),
             };
-            Row::nav(p.icon, p.title, format!("page:mod:{}", p.key)).value(value)
+            row.value(value)
         })
         .collect()
 }
 
+use crate::screens::common::paint_cx;
 use crate::router::{AppCtx, AppScreen, ScreenRegistry, Transition};
 use crate::plugin_host::{self, hooks, PluginEntry};
 use crate::update;
-use ink_device::{Device, Key, Rect, RefreshClass, Rotation, Size, WifiNetwork, WifiState};
+use ink_device::{Device, Key, NetEvent, NetStatus, PowerEvent, Rect, RefreshClass, Rotation, Size, WifiNetwork};
+use ink_store::export::ExportFormat;
 use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::{Paths, Settings};
 use ink_ui::bars::APP_BAR_H;
 use ink_ui::input::InputResult;
 use ink_ui::theme::space;
 use ink_ui::{
-    AppBar, BarAction, Button, Card, CardKind, Damage, Dialog, EventResult, Icon, KeyAction, Keyboard, Label, PaintCx,
+    AppBar, BarAction, Button, Card, CardKind, Damage, Dialog, EventResult, Icon, KeyAction, Keyboard, Label,
     Scrim, TextBlock, TextInput, UiEvent, WidgetId, WidgetTree,
 };
 use ink_plugin::UiRequest;
@@ -242,7 +285,7 @@ pub fn register(reg: &mut ScreenRegistry) {
         }
         Ok(Box::new(screen))
     });
-    reg.register("quicklight", |_| Ok(Box::new(quick_light::QuickLightScreen::default())));
+    reg.register("quicklight", |_| Ok(Box::new(quick_light::ControlCenterScreen::default())));
 }
 
 pub use page::{app_bar_rect, content_rect, STATUS_H};
@@ -328,16 +371,24 @@ pub fn refresh_name(n: u32) -> String {
     }
 }
 
+/// A plugin and whether the user wants it on (`plugins/disabled.txt`).
+pub type PluginChoice = (ink_plugin::PluginInfo, bool);
+
+/// How a plugin's running state differs from the user's choice `wanted` (`None`: it
+/// runs as chosen).
+fn plugin_change(p: &ink_plugin::PluginInfo, wanted: bool) -> Option<String> {
+    match (p.enabled, wanted) {
+        (true, true) | (false, false) => None,
+        (true, false) => Some("off at the next start".to_string()),
+        (false, true) if p.errors > 0 => Some(format!("stopped after {} errors", p.errors)),
+        (false, true) => Some("on at the next start".to_string()),
+    }
+}
+
 /// Second line of a plugin row: kind, state and description. `wanted` is the user's
 /// choice in `plugins/disabled.txt` (applied at the next start).
 pub fn plugin_detail(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
-    let state = match (p.enabled, wanted) {
-        (true, true) => "on".to_string(),
-        (false, false) => "off".to_string(),
-        (true, false) => "off at the next start".to_string(),
-        (false, true) if p.errors > 0 => format!("stopped after {} errors", p.errors),
-        (false, true) => "on at the next start".to_string(),
-    };
+    let state = plugin_change(p, wanted).unwrap_or_else(|| if wanted { "on" } else { "off" }.to_string());
     let mut s = format!("{} · {state}", p.kind);
     if !p.manifest.description.is_empty() {
         s.push_str(" · ");
@@ -351,12 +402,7 @@ pub fn plugin_detail(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
 /// and "Lua plugin" for a user plugin. The implementation kind of a built-in plugin
 /// ("rust") and a plain "on"/"off" are left out: the switch shows them.
 pub fn plugin_summary(p: &ink_plugin::PluginInfo, wanted: bool) -> String {
-    let state = match (p.enabled, wanted) {
-        (true, true) | (false, false) => None,
-        (true, false) => Some("off at the next start".to_string()),
-        (false, true) if p.errors > 0 => Some(format!("stopped after {} errors", p.errors)),
-        (false, true) => Some("on at the next start".to_string()),
-    };
+    let state = plugin_change(p, wanted);
     let kind = (p.kind == "lua").then(|| "Lua plugin".to_string());
     let desc = Some(p.manifest.description.clone()).filter(|d| !d.is_empty());
     let parts: Vec<String> = [state, kind, desc].into_iter().flatten().collect();
@@ -557,11 +603,7 @@ pub struct MainValues {
 fn section_modules(v: &MainValues, section: &str) -> Vec<Row> {
     match v.modules.iter().find(|(s, _)| *s == section) {
         Some((_, rows)) => rows.clone(),
-        None => PAGE_MODULES
-            .iter()
-            .filter(|p| p.section == section)
-            .map(|p| Row::nav(p.icon, p.title, format!("page:mod:{}", p.key)))
-            .collect(),
+        None => module_nav_rows(section).map(|(_, row)| row).collect(),
     }
 }
 
@@ -637,7 +679,7 @@ pub fn light_rows(q: &QuickLight) -> Vec<Row> {
 
 /// The Plugins section of the main list: every plugin with its switch (`(info,
 /// wanted)`), followed by its settings pages (`(label, plugin)`, action `ppage:<index>`).
-pub fn plugin_section(pages: &[(String, String)], plugins: &[(ink_plugin::PluginInfo, bool)]) -> Vec<Row> {
+pub fn plugin_section(pages: &[(String, String)], plugins: &[PluginChoice]) -> Vec<Row> {
     let mut rows = Vec::new();
     for (p, wanted) in plugins {
         let name = &p.manifest.name;
@@ -677,28 +719,29 @@ pub fn plugin_title(name: &str) -> String {
 
 /// The Wi-Fi page: switches, saved networks, then the networks found (signal bars, a
 /// lock on secured ones, a check on the connected one).
-pub fn wifi_rows(state: &WifiState, airplane: bool, networks: &[WifiNetwork]) -> Vec<Row> {
-    let line = match (&state.essid, state.signal) {
-        (Some(e), Some(s)) => format!("Connected to {e} (signal {s}/5)"),
-        (Some(e), None) => format!("Connected to {e}"),
-        (None, _) if state.enabled => "Not connected".to_string(),
-        (None, _) => "Off".to_string(),
-    };
+pub fn wifi_rows(state: &NetStatus, airplane: bool, networks: &[WifiNetwork]) -> Vec<Row> {
+    let line = wifi_line(state);
     let mut rows = vec![
         Row::header("Connection"),
-        Row::toggle("Wi-Fi", state.enabled, "wifi").icon(Icon::Wifi).subtitle(line),
+        Row::toggle("Wi-Fi", state.radio_on(), "wifi").icon(Icon::Wifi).subtitle(line),
         Row::toggle("Airplane mode", airplane, "airplane").icon(Icon::Globe),
         Row::nav(Icon::Bookmark, "Saved networks", "page:saved"),
         Row::header("Networks"),
     ];
     if networks.is_empty() {
-        rows.push(Row::note(if state.enabled { "No networks listed. Tap Scan." } else { "Turn Wi-Fi on to see networks." }));
+        rows.push(Row::note(if state.radio_on() { "No networks listed. Tap Scan." } else { "Turn Wi-Fi on to see networks." }));
     }
+    let joining = match state {
+        NetStatus::Connecting { essid } => essid.as_deref(),
+        _ => None,
+    };
     for (i, n) in networks.iter().enumerate() {
-        let connected = state.essid.as_deref() == Some(n.essid.as_str());
+        let connected = state.connected_to() == Some(n.essid.as_str());
         let mut row = Row::choice(n.essid.clone(), connected, format!("net:{i}")).lead(Lead::Signal(n.signal)).lock(n.secured);
         if connected {
             row = row.subtitle("Connected");
+        } else if joining == Some(n.essid.as_str()) {
+            row = row.subtitle("Connecting…");
         } else if n.known {
             row = row.subtitle("Saved");
         }
@@ -707,9 +750,21 @@ pub fn wifi_rows(state: &WifiState, airplane: bool, networks: &[WifiNetwork]) ->
     rows
 }
 
+/// What the network is doing, in one line (the Wi-Fi row, the Wi-Fi page).
+pub fn wifi_line(state: &NetStatus) -> String {
+    match state {
+        NetStatus::Connected { essid, signal: Some(s) } => format!("Connected to {essid} (signal {s}/5)"),
+        NetStatus::Connected { essid, signal: None } => format!("Connected to {essid}"),
+        NetStatus::Connecting { essid: Some(e) } => format!("Connecting to {e}…"),
+        NetStatus::Connecting { essid: None } => "Looking for saved networks…".into(),
+        NetStatus::NoNetwork => "Not connected".into(),
+        NetStatus::Off => "Off".into(),
+    }
+}
+
 /// The Plugins page: plugin settings pages (`(label, plugin)`), the plugins with their
 /// on/off switch (`(info, wanted)`), and the notifications row.
-pub fn plugin_rows(pages: &[(String, String)], plugins: &[(ink_plugin::PluginInfo, bool)], notifications: &str) -> Vec<Row> {
+pub fn plugin_rows(pages: &[(String, String)], plugins: &[PluginChoice], notifications: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     if !pages.is_empty() {
         rows.push(Row::header("Plugin settings"));
@@ -943,6 +998,10 @@ pub struct SettingsScreen {
     keyboard: Option<WidgetId>,
     input: Option<WidgetId>,
     networks: Vec<WifiNetwork>,
+    /// A join started here runs in the background (the network's events end it).
+    pending_join: Option<String>,
+    /// A scan started here runs in the background.
+    scanning: bool,
     release: Option<update::Release>,
     /// An update was installed and the launcher runs it when rinky exits: the next timer
     /// ends rinky (after the status line said so). The installed version.
@@ -1030,8 +1089,21 @@ impl SettingsScreen {
         self.rebuild = Some(RefreshClass::Gl16);
     }
 
+    /// [`Self::go`] with the status line kept (the result of what led there).
+    fn go_keep_status(&mut self, page: Page, cx: &mut AppCtx) {
+        let text = std::mem::take(&mut self.status_text);
+        self.go(page, cx);
+        self.status_text = text;
+    }
+
     fn set_status(&mut self, text: impl Into<String>) {
         self.set_status_class(text, RefreshClass::Gl16);
+    }
+
+    /// Builds the page again (the next paint) with `text` in the status line.
+    fn rebuild_with(&mut self, text: impl Into<String>) {
+        self.status_text = text.into();
+        self.rebuild = Some(RefreshClass::Gl16);
     }
 
     fn set_status_class(&mut self, text: impl Into<String>, class: RefreshClass) {
@@ -1055,14 +1127,10 @@ impl SettingsScreen {
     /// Shows a status line at once (before a call that blocks).
     fn say_now(&mut self, text: &str, cx: &mut AppCtx) -> anyhow::Result<()> {
         self.set_status(text);
-        for d in self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme }) {
+        for d in self.tree.paint(&mut paint_cx(cx)) {
             cx.show(d.rect, d.class)?;
         }
         Ok(())
-    }
-
-    fn edit(cx: &mut AppCtx, f: impl FnOnce(&mut Settings)) {
-        edit_settings(cx, f);
     }
 
     /// Adds a list of `rows` in the content area, at the scroll offset the previous
@@ -1110,7 +1178,7 @@ impl SettingsScreen {
             Page::Layout => self.build_layout(cx, content),
             Page::Nav => self.build_nav(cx, content),
             Page::Folders => self.build_folders(cx, content),
-            Page::Koreader => self.build_koreader(content),
+            Page::Koreader => self.build_koreader(cx, content),
             Page::Language => self.build_language(cx, content),
             Page::Module(_) => self.build_module(cx, content),
             Page::Refresh => self.build_refresh(cx, content),
@@ -1122,7 +1190,7 @@ impl SettingsScreen {
             Page::StatusBars(v) => self.build_status_bars(cx, content, &v),
             Page::Gestures(p) => {
                 let plugins = crate::plugin_entries::gesture_choices(cx.plugins);
-                self.add_rows(gestures::rows(&cx.settings_update.as_ref().unwrap_or(cx.settings).gestures, p.as_deref(), &plugins), content)
+                self.add_rows(gestures::rows(&current_settings(cx).gestures, p.as_deref(), &plugins), content)
             }
             Page::Plugin(..) => {
                 let rows = self.plugin_page.as_ref().map_or_else(|| vec![Row::note("Not available")], PluginPage::rows);
@@ -1142,28 +1210,20 @@ impl SettingsScreen {
             _ => "Not available".into(),
         };
         let airplane = s.wifi.airplane_mode().unwrap_or(false);
-        let wifi = match s.wifi.state() {
+        let wifi = match s.wifi.status() {
             _ if airplane => "Airplane mode".into(),
-            Ok(st) if !st.enabled => "Off".into(),
-            Ok(st) => st.essid.unwrap_or_else(|| "Not connected".into()),
+            Ok(NetStatus::Connected { essid, .. }) => essid,
+            Ok(NetStatus::Connecting { essid: Some(e) }) => format!("Connecting to {e}…"),
+            Ok(NetStatus::Connecting { essid: None }) => "Connecting…".into(),
+            Ok(NetStatus::NoNetwork) => "Not connected".into(),
+            Ok(NetStatus::Off) => "Off".into(),
             Err(_) => "Not available".into(),
         };
         let device = match s.battery.state() {
             Ok(b) => format!("Battery {}%{}", b.percent, if b.charging { ", charging" } else { "" }),
             Err(_) => s.info.model.clone(),
         };
-        self.plugin_pages = hooks::settings_pages(cx);
-        let off = plugin_host::user_disabled(cx.paths);
-        let pages: Vec<(String, String)> = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
-        let plugins: Vec<(ink_plugin::PluginInfo, bool)> = cx
-            .plugins
-            .plugins()
-            .into_iter()
-            .map(|p| {
-                let wanted = !off.contains(&p.manifest.name);
-                (p, wanted)
-            })
-            .collect();
+        let (pages, plugins) = self.plugin_lists(cx);
         let st = current_settings(cx);
         let r = &st.reader;
         let v = MainValues {
@@ -1196,7 +1256,7 @@ impl SettingsScreen {
 
     /// The Light page: a slider row for the brightness and one for the warmth.
     fn build_light(&mut self, cx: &mut AppCtx, content: Rect) {
-        self.add_rows(light_rows(&QuickLight::from_services(&cx.services)), content);
+        self.add_rows(light_rows(&QuickLight::read(&*cx.services.light)), content);
     }
 
     fn build_sleep(&mut self, cx: &mut AppCtx, content: Rect) {
@@ -1228,7 +1288,7 @@ impl SettingsScreen {
 
     fn build_wifi(&mut self, cx: &mut AppCtx, content: Rect) {
         let wifi = &mut cx.services.wifi;
-        let state = match wifi.state() {
+        let state = match wifi.status() {
             Ok(s) => s,
             Err(e) => {
                 let text = format!("Wi-Fi is not available: {e}");
@@ -1335,22 +1395,8 @@ impl SettingsScreen {
         self.add_rows(rows, content);
     }
 
-    fn build_koreader(&mut self, content: Rect) {
-        let rows = vec![
-            Row::header("From KOReader"),
-            Row::item("Import from KOReader", "ko-import")
-                .icon(Icon::Download)
-                .subtitle("Positions, highlights, notes, status, statistics"),
-            Row::note("KOReader's files are only read, never changed."),
-            Row::header("Library"),
-            Row::item("Rescan the library", "lib-rescan").icon(Icon::Sync).subtitle("Read the book folders again"),
-            Row::item("Browse files", "lib-files").icon(Icon::Folder).subtitle("Open a book from any folder"),
-            Row::note("These run on the library screen; it opens when you tap."),
-            Row::header("Highlights"),
-            Row::item("Export all highlights", "export-all")
-                .icon(Icon::Download)
-                .subtitle("One Markdown file per book, in rinky/exports"),
-        ];
+    fn build_koreader(&mut self, cx: &mut AppCtx, content: Rect) {
+        let rows = koreader_rows(current_settings(cx).export_format());
         self.add_rows(rows, content);
     }
 
@@ -1425,12 +1471,18 @@ impl SettingsScreen {
         self.tree.add(None, Box::new(Button::filled("Set time (NTP)", "ntp")), button);
     }
 
-    fn build_plugins(&mut self, cx: &mut AppCtx, content: Rect) {
+    /// Reads the plugin settings pages (kept for `ppage:<index>`) as `(label, plugin)`
+    /// and every plugin with the user's choice (`(info, wanted)`).
+    fn plugin_lists(&mut self, cx: &mut AppCtx) -> (Vec<(String, String)>, Vec<PluginChoice>) {
         self.plugin_pages = hooks::settings_pages(cx);
         let off = plugin_host::user_disabled(cx.paths);
-        let pages: Vec<(String, String)> = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
-        let plugins: Vec<(ink_plugin::PluginInfo, bool)> =
-            cx.plugins.plugins().into_iter().map(|p| { let wanted = !off.contains(&p.manifest.name); (p, wanted) }).collect();
+        let pages = self.plugin_pages.iter().map(|e| (e.label.clone(), e.plugin.clone())).collect();
+        let plugins = cx.plugins.plugins().into_iter().map(|p| { let wanted = !off.contains(&p.manifest.name); (p, wanted) }).collect();
+        (pages, plugins)
+    }
+
+    fn build_plugins(&mut self, cx: &mut AppCtx, content: Rect) {
+        let (pages, plugins) = self.plugin_lists(cx);
         let rows = plugin_rows(&pages, &plugins, &notifications_summary(cx));
         self.add_rows(rows, content);
     }
@@ -1649,10 +1701,17 @@ impl SettingsScreen {
         }
     }
 
+    /// Joins `essid`: in the background when the device can (the page then follows the
+    /// network's events), else waiting here. False when it failed at once.
     fn connect(&mut self, essid: &str, password: Option<&str>, cx: &mut AppCtx) -> anyhow::Result<bool> {
         self.say_now(&format!("Connecting to {essid}…"), cx)?;
-        match cx.services.wifi.connect(essid, password) {
-            Ok(()) => {
+        match cx.services.wifi.connect_in_background(essid, password) {
+            Ok(true) => {
+                self.pending_join = Some(essid.to_string());
+                self.status_text = format!("Connecting to {essid}…");
+                Ok(true)
+            }
+            Ok(false) => {
                 self.status_text = format!("Connected to {essid}");
                 Ok(true)
             }
@@ -1663,13 +1722,56 @@ impl SettingsScreen {
         }
     }
 
+    /// The network worker's news: the Wi-Fi rows show it, a join or scan started here
+    /// ends.
+    fn network_event(&mut self, e: &NetEvent, cx: &mut AppCtx) {
+        let shows_wifi = matches!(self.page, Page::Main | Page::Wifi);
+        match e {
+            NetEvent::Status(st) => {
+                if let (Some(j), Some(c)) = (&self.pending_join, st.connected_to()) {
+                    if j == c {
+                        self.status_text = format!("Connected to {c}");
+                        self.pending_join = None;
+                    }
+                }
+                if shows_wifi {
+                    self.rebuild = Some(RefreshClass::Gl16);
+                }
+            }
+            NetEvent::JoinFailed(essid) if self.pending_join.as_deref() == Some(essid.as_str()) => {
+                self.pending_join = None;
+                let text = format!("Couldn't connect to {essid}");
+                let secured = self.networks.iter().any(|n| n.essid == *essid && n.secured);
+                if secured && self.page == Page::Wifi {
+                    // The saved password may be wrong (a failed join keeps the profile):
+                    // ask for it again instead of retrying the saved one forever.
+                    self.go(Page::Join(essid.clone()), cx);
+                }
+                self.set_status(text);
+            }
+            NetEvent::Scanned(r) => {
+                if self.page == Page::Wifi {
+                    self.networks = cx.services.wifi.scan_list().unwrap_or_default();
+                    self.rebuild = Some(RefreshClass::Gl16);
+                }
+                if std::mem::take(&mut self.scanning) {
+                    self.status_text = match r {
+                        Ok(n) => format!("{n} network{} found", if *n == 1 { "" } else { "s" }),
+                        Err(e) => format!("Scan failed: {e}"),
+                    };
+                    self.log_status();
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn action(&mut self, a: &str, cx: &mut AppCtx) -> anyhow::Result<Transition> {
         log::info!("settings action: {a}");
         self.last_action = Some(a.to_string());
         if let Some(text) = fonts::action(a, cx) {
             // aa: the Fonts page's own actions.
-            self.status_text = text;
-            self.rebuild = Some(RefreshClass::Gl16);
+            self.rebuild_with(text);
             return Ok(Transition::None);
         }
         if let Some(text) = quick_light::apply(a, cx.services.light) {
@@ -1720,7 +1822,7 @@ impl SettingsScreen {
             }
             "confirm-exit" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.ui.confirm_exit = on);
+                edit_settings(cx, |s| s.ui.confirm_exit = on);
                 self.set_status(if on { "Exit asks first" } else { "Exit does not ask" });
             }
             "dlg-cancel" => self.close_dialog(),
@@ -1731,22 +1833,20 @@ impl SettingsScreen {
             }
             "sleep" => {
                 let Ok(m) = arg.parse::<u32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.device.sleep_minutes = m);
+                edit_settings(cx, |s| s.device.sleep_minutes = m);
                 let r = cx.services.power.set_auto_sleep(auto_sleep(m));
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("Sleep: {}", sleep_name(m).to_lowercase()),
                     Err(e) => format!("Saved; the device says: {e}"),
-                };
+                });
             }
             "saver" => {
-                Self::edit(cx, |s| set_screensaver_setting(s, arg));
+                edit_settings(cx, |s| set_screensaver_setting(s, arg));
                 let r = cx.services.power.set_screensaver(crate::sleep_cover::screensaver(arg, cx.paths));
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("Screensaver: {}", screensaver_name(arg)),
                     Err(e) => format!("Saved; the device says: {e}"),
-                };
+                });
             }
             "wifi" | "airplane" => {
                 let on = arg == "on";
@@ -1755,22 +1855,26 @@ impl SettingsScreen {
                 if self.page == Page::Wifi {
                     self.networks = cx.services.wifi.scan_list().unwrap_or_default();
                 }
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => String::new(),
                     Err(e) => format!("{verb}: {e}"),
-                };
+                });
             }
             "scan" => {
                 self.say_now("Scanning…", cx)?;
-                let r = cx.services.wifi.scan();
-                self.go(Page::Wifi, cx);
-                match r {
-                    Ok(n) => {
-                        self.status_text = format!("{} network{} found", n.len(), if n.len() == 1 { "" } else { "s" });
-                        self.networks = n;
+                match cx.services.wifi.scan_in_background() {
+                    // The page follows when the scan ends (NetEvent::Scanned).
+                    Ok(true) => self.scanning = true,
+                    Ok(false) => {
+                        self.go(Page::Wifi, cx);
+                        self.networks = cx.services.wifi.scan_list().unwrap_or_default();
+                        let n = self.networks.len();
+                        self.status_text = format!("{n} network{} found", if n == 1 { "" } else { "s" });
                     }
-                    Err(e) => self.status_text = format!("Scan failed: {e}"),
+                    Err(e) => {
+                        self.go(Page::Wifi, cx);
+                        self.status_text = format!("Scan failed: {e}");
+                    }
                 }
             }
             "net" => {
@@ -1780,30 +1884,25 @@ impl SettingsScreen {
                 if n.secured && !n.known {
                     self.go(Page::Join(n.essid), cx);
                 } else if self.connect(&n.essid, None, cx)? {
-                    let text = std::mem::take(&mut self.status_text);
-                    self.go(Page::Wifi, cx);
-                    self.status_text = text;
+                    self.go_keep_status(Page::Wifi, cx);
                 } else if n.secured {
                     // The saved password may be wrong (a failed join keeps the profile):
                     // ask for it again instead of retrying the saved one forever.
-                    let text = std::mem::take(&mut self.status_text);
-                    self.go(Page::Join(n.essid), cx);
-                    self.status_text = text;
+                    self.go_keep_status(Page::Join(n.essid), cx);
                 }
             }
             "join" => self.join(cx)?,
             "forget" => self.confirm(Confirm::Forget(arg.to_string())),
             "rot" => {
                 let Ok(r) = arg.parse::<u8>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.device.rotation = r % 4);
+                edit_settings(cx, |s| s.device.rotation = r % 4);
                 // The app applies the rotation after this event; the canvas size change
                 // lays the page out again (on_resize). Same size: rebuild for the check.
-                self.status_text = format!("Orientation: {}", rotation_name(Rotation::ALL[(r % 4) as usize]).to_lowercase());
-                self.rebuild = Some(RefreshClass::Gl16);
+                self.rebuild_with(format!("Orientation: {}", rotation_name(Rotation::ALL[(r % 4) as usize]).to_lowercase()));
             }
             "night" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.device.night_mode = on);
+                edit_settings(cx, |s| s.device.night_mode = on);
                 if let Err(e) = cx.screen.set_night_mode(on) {
                     self.status_text = format!("Night mode: {e}");
                 }
@@ -1811,41 +1910,35 @@ impl SettingsScreen {
             }
             "anim" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| set_page_wave(s, on));
+                edit_settings(cx, |s| set_page_wave(s, on));
                 self.set_status(if on { "Page turn wave on" } else { "Page turn wave off" });
             }
-            "font-px" | "spacing" | "margin" => {
+            "font-px" | "spacing" | "margin" | "pspace" | "indent" | "weight" => {
                 let Ok(v) = arg.parse::<f32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| match verb {
-                    "font-px" => s.reader.font_px = v,
-                    "spacing" => s.reader.line_spacing = v,
-                    _ => s.reader.margin_x = v,
+                edit_settings(cx, |s| {
+                    let r = &mut s.reader;
+                    match verb {
+                        "font-px" => r.font_px = v,
+                        "spacing" => r.line_spacing = v,
+                        "margin" => r.margin_x = v,
+                        "pspace" => r.paragraph_spacing = v.clamp(0.0, 3.0),
+                        "indent" => r.paragraph_indent = if v < 0.0 { INDENT_BOOK } else { v.min(6.0) },
+                        _ => r.font_weight = (v.max(0.0) as u8).min(WEIGHT_MAX),
+                    }
                 });
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match verb {
+                self.rebuild_with(match verb {
                     "font-px" => format!("Default text size {v} px"),
                     "spacing" => format!("Default line spacing {v:.1}"),
-                    _ => format!("Default side margins {v} px"),
-                };
-            }
-            "pspace" | "indent" | "weight" => {
-                let Ok(v) = arg.parse::<f32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| match verb {
-                    "pspace" => s.reader.paragraph_spacing = v.clamp(0.0, 3.0),
-                    "indent" => s.reader.paragraph_indent = if v < 0.0 { INDENT_BOOK } else { v.min(6.0) },
-                    _ => s.reader.font_weight = (v.max(0.0) as u8).min(WEIGHT_MAX),
-                });
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match verb {
+                    "margin" => format!("Default side margins {v} px"),
                     "pspace" => format!("Default paragraph spacing {v} em"),
                     "indent" if v < 0.0 => "Default indent: the book's own".to_string(),
                     "indent" => format!("Default first-line indent {v} em"),
                     _ => format!("Default text weight {}", WEIGHTS.iter().find(|(l, _)| *l as f32 == v).map_or("", |w| w.1).to_lowercase()),
-                };
+                });
             }
             "hyph" | "publisher" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| if verb == "hyph" { s.reader.hyphenate = on } else { s.reader.publisher_styles = on });
+                edit_settings(cx, |s| if verb == "hyph" { s.reader.hyphenate = on } else { s.reader.publisher_styles = on });
                 self.set_status(match (verb, on) {
                     ("hyph", true) => "Hyphenation on",
                     ("hyph", false) => "Hyphenation off",
@@ -1855,22 +1948,15 @@ impl SettingsScreen {
             }
             "justify" => {
                 let on = arg == "on";
-                Self::edit(cx, |s| s.reader.justify = on);
+                edit_settings(cx, |s| s.reader.justify = on);
                 self.set_status(if on { "Justified text" } else { "Ragged right text" });
             }
             "nav" => {
-                let Some((name, op)) = order::split(arg) else { return Ok(Transition::None) };
-                let mut items = crate::plugin_entries::nav_chosen(current_settings(cx), cx.plugins);
+                let items = crate::plugin_entries::nav_chosen(current_settings(cx), cx.plugins);
                 let extra = crate::plugin_entries::nav_choices(cx.plugins);
                 let list = crate::plugin_entries::merged(ink_store::prefs::NAV_ITEMS, &extra);
-                match order::apply(&mut items, &list, name, op, NAV_MIN, NAV_MAX) {
-                    Ok(text) => {
-                        log::info!("settings: navigation bar {items:?}");
-                        Self::edit(cx, |s| s.ui.nav_items = items);
-                        self.status_text = text;
-                    }
-                    Err(text) => self.status_text = text,
-                }
+                let Some(reply) = order::page_action(a, "nav", &list, items, (NAV_MIN, NAV_MAX), cx, |s, v| s.ui.nav_items = v) else { return Ok(Transition::None) };
+                self.status_text = reply.status.unwrap_or_default();
                 // The switch flipped in the list even when refused: build it again.
                 self.rebuild = Some(RefreshClass::Gl16);
             }
@@ -1884,19 +1970,19 @@ impl SettingsScreen {
                     dirs.push(dir.clone());
                 } else if on == "off" {
                     if dirs.len() <= 1 {
-                        self.status_text = "At least one folder must stay on".into();
-                        self.rebuild = Some(RefreshClass::Gl16);
+                        self.rebuild_with("At least one folder must stay on");
                         return Ok(Transition::None);
                     }
                     dirs.retain(|d| *d != dir);
                 }
                 log::info!("settings: library folders {dirs:?}");
-                Self::edit(cx, |s| s.library_dirs = dirs);
+                edit_settings(cx, |s| s.library_dirs = dirs);
                 self.set_status(format!("{} {}", dir.display(), if on == "on" { "added" } else { "removed" }));
             }
             "export-all" => {
+                let format = current_settings(cx).export_format();
                 let text = match crate::export::load_index(cx.paths) {
-                    Ok(index) => crate::export::export_everything(cx.paths, &index),
+                    Ok(index) => crate::export::export_everything(cx.paths, &index, format),
                     Err(e) => {
                         log::warn!("settings: export all: {e}");
                         format!("Export failed: {e}")
@@ -1914,19 +2000,22 @@ impl SettingsScreen {
                 log::info!("settings: library request {req:?}; back to the screen below");
                 return Ok(Transition::Pop);
             }
+            "exportfmt" => {
+                let Some(f) = ExportFormat::from_name(arg) else { return Ok(Transition::None) };
+                edit_settings(cx, |s| s.export_format = f.name().to_string());
+                self.rebuild_with(format!("Export format: {}", export_format_name(f)));
+            }
             "lang" => {
                 if !LANGUAGES.iter().any(|(c, _)| *c == arg) {
                     return Ok(Transition::None);
                 }
-                Self::edit(cx, |s| s.language = arg.to_string());
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = format!("Language: {}", language_name(arg));
+                edit_settings(cx, |s| s.language = arg.to_string());
+                self.rebuild_with(format!("Language: {}", language_name(arg)));
             }
             "refresh" => {
                 let Ok(n) = arg.parse::<u32>() else { return Ok(Transition::None) };
-                Self::edit(cx, |s| s.reader.flash_every = n);
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = format!("Full refresh: {}; used from the next start", refresh_name(n).to_lowercase());
+                edit_settings(cx, |s| s.reader.flash_every = n);
+                self.rebuild_with(format!("Full refresh: {}; used from the next start", refresh_name(n).to_lowercase()));
             }
             "ntp" => {
                 self.say_now("Asking the time server…", cx)?;
@@ -1958,11 +2047,10 @@ impl SettingsScreen {
                 let Some((name, on)) = arg.rsplit_once(':') else { return Ok(Transition::None) };
                 let on = on == "on";
                 let r = plugin_host::set_user_enabled(cx.paths, name, on);
-                self.rebuild = Some(RefreshClass::Gl16);
-                self.status_text = match r {
+                self.rebuild_with(match r {
                     Ok(()) => format!("{name} turned {}; restart rinky to apply", if on { "on" } else { "off" }),
                     Err(e) => format!("Cannot change {name}: {e}"),
-                };
+                });
             }
             _ => {}
         }
@@ -1993,9 +2081,7 @@ impl SettingsScreen {
             return Ok(());
         }
         if self.connect(&essid, Some(&password), cx)? {
-            let text = std::mem::take(&mut self.status_text);
-            self.go(Page::Wifi, cx);
-            self.status_text = text;
+            self.go_keep_status(Page::Wifi, cx);
         }
         Ok(())
     }
@@ -2023,7 +2109,7 @@ impl SettingsScreen {
     fn poll_job(&mut self) {
         let Some(job) = self.job.as_mut() else { return };
         match job.poll() {
-            Poll::Running(_) => {
+            Poll::Running => {
                 let text = job.status();
                 if text != self.status_text {
                     // Not logged: the elapsed seconds change every second.
@@ -2105,6 +2191,10 @@ impl AppScreen for SettingsScreen {
         if matches!(ev, UiEvent::Quit) {
             return Ok(Transition::Exit);
         }
+        if let UiEvent::Power(PowerEvent::Network(e)) = ev {
+            self.network_event(e, cx);
+            return Ok(Transition::None);
+        }
         // The status line showed "Restarting rinky…": the launcher starts the new version.
         if let (Some(v), UiEvent::Timer(_)) = (&self.restarting, ev) {
             crate::logging::set_exit_reason(format!("update {v} installed: restarting into it"), true);
@@ -2175,7 +2265,7 @@ impl AppScreen for SettingsScreen {
             self.build(cx, class);
             self.built = Some(key);
         }
-        let damage = self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme });
+        let damage = self.tree.paint(&mut paint_cx(cx));
         let damage = match before {
             Some(old) => ink_ui::refresh::changed_bands(&old, cx.canvas, damage),
             None => damage,

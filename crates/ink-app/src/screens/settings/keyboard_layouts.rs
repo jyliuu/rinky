@@ -5,7 +5,7 @@
 
 use super::order;
 use super::rows::Row;
-use super::{current_settings, edit_settings, PageModule, Reply};
+use super::{current_settings, PageModule, Reply};
 use crate::router::AppCtx;
 use ink_store::prefs::KEYBOARD_LAYOUTS;
 use ink_store::Settings;
@@ -52,21 +52,9 @@ impl PageModule for Page {
     }
 
     fn action(&mut self, action: &str, cx: &mut AppCtx) -> Reply {
-        let Some((name, op)) = action.strip_prefix(PREFIX).and_then(|a| a.strip_prefix(':')).and_then(order::split) else {
-            return Reply::default();
-        };
-        let mut chosen = layouts(current_settings(cx));
-        match order::apply(&mut chosen, KEYBOARD_LAYOUTS, name, op, MIN, KEYBOARD_LAYOUTS.len()) {
-            Ok(text) => {
-                log::info!("settings: keyboard layouts {name} {op} -> {chosen:?}");
-                edit_settings(cx, |s| s.ui.keyboard_layouts = chosen);
-                Reply::rebuild(text)
-            }
-            Err(text) => {
-                log::info!("settings: keyboard layouts {name} {op} refused: {text}");
-                Reply { status: Some(text), ..Reply::default() }
-            }
-        }
+        let chosen = layouts(current_settings(cx));
+        let range = (MIN, KEYBOARD_LAYOUTS.len());
+        order::page_action(action, PREFIX, KEYBOARD_LAYOUTS, chosen, range, cx, |s, v| s.ui.keyboard_layouts = v).unwrap_or_default()
     }
 }
 

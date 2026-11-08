@@ -16,8 +16,6 @@
 //! - [`open`]: the plain engine document ([`HtmlDocument`], kept for golden tests).
 //! - [`load`]: the converted [`Book`] (chapters, TOC, page list, resources, info).
 //! - [`read_info`]: metadata and cover for the library, without laying anything out.
-//!
-//! Owner from wave A: the `formats` agent (also owns `testdata/formats`).
 
 #![warn(missing_docs)]
 
@@ -38,8 +36,10 @@ pub use book::{Book, BookDocument, BookInfo, Cover, Identifier, PageTarget, Targ
 
 use ink_doc::{DocError, Document, Provider, Result};
 use ink_html::HtmlDocument;
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use zip::ZipArchive;
 
 /// Formats this crate recognises.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -78,48 +78,62 @@ impl Format {
     }
 }
 
+/// File extensions (lowercase, without the dot) and their formats, in the order the
+/// provider lists them.
+const EXTENSIONS: [(&str, Format); 20] = [
+    ("epub", Format::Epub),
+    ("kepub", Format::Epub),
+    ("html", Format::Html),
+    ("htm", Format::Html),
+    ("xhtml", Format::Html),
+    ("txt", Format::Txt),
+    ("fb2", Format::Fb2),
+    ("fb2.zip", Format::Fb2),
+    ("fbz", Format::Fb2),
+    ("fb3", Format::Fb3),
+    ("mobi", Format::Mobi),
+    ("azw3", Format::Mobi),
+    ("azw", Format::Mobi),
+    ("prc", Format::Mobi),
+    ("pdb", Format::Mobi),
+    ("kfx", Format::Kfx),
+    ("azw8", Format::Kfx),
+    ("kfx-zip", Format::Kfx),
+    ("tpz", Format::Topaz),
+    ("azw1", Format::Topaz),
+];
+
+/// The extensions of [`EXTENSIONS`] alone ([`Provider::extensions`] wants a static slice).
+const EXTENSION_NAMES: [&str; EXTENSIONS.len()] = {
+    let mut out = [""; EXTENSIONS.len()];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = EXTENSIONS[i].0;
+        i += 1;
+    }
+    out
+};
+
 /// Detects the format by file name.
 pub fn detect(path: &Path) -> Option<Format> {
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    let ends = |e: &str| name.ends_with(e);
-    Some(if ends(".epub") || ends(".kepub") {
-        Format::Epub
-    } else if ends(".html") || ends(".htm") || ends(".xhtml") {
-        Format::Html
-    } else if ends(".txt") {
-        Format::Txt
-    } else if ends(".fb2") || ends(".fb2.zip") || ends(".fbz") {
-        Format::Fb2
-    } else if ends(".fb3") {
-        Format::Fb3
-    } else if ends(".mobi") || ends(".azw3") || ends(".azw") || ends(".prc") || ends(".pdb") {
-        Format::Mobi
-    } else if ends(".kfx") || ends(".azw8") || ends(".kfx-zip") {
-        Format::Kfx
-    } else if ends(".tpz") || ends(".azw1") {
-        Format::Topaz
-    } else {
-        return None;
-    })
+    EXTENSIONS
+        .iter()
+        .find(|(ext, _)| name.strip_suffix(ext).is_some_and(|stem| stem.ends_with('.')))
+        .map(|&(_, f)| f)
 }
 
 /// Detects the format from the first bytes of the file (and zip entry names). `None`
-/// when the content says nothing (plain text, HTML) or the file cannot be read.
-pub fn sniff(path: &Path) -> Option<Format> {
-    let mut head = [0u8; 80];
-    let n = {
-        let mut f = std::fs::File::open(path).ok()?;
-        let mut n = 0;
-        while n < head.len() {
-            match f.read(&mut head[n..]) {
-                Ok(0) => break,
-                Ok(k) => n += k,
-                Err(_) => return None,
-            }
-        }
-        n
-    };
-    let head = &head[..n];
+/// when the content says nothing (plain text, HTML) or the file cannot be read. The open
+/// archive of a zip file comes with it: the zip readers use it instead of opening the
+/// file and reading its central directory again.
+pub fn sniff(path: &Path) -> (Option<Format>, Option<ZipArchive<File>>) {
+    let Ok(mut f) = File::open(path) else { return (None, None) };
+    let mut head = Vec::with_capacity(80);
+    if (&mut f).take(80).read_to_end(&mut head).is_err() {
+        return (None, None);
+    }
+    let head = head.as_slice();
     // KFX container: "CONT", little-endian version 1 or 2, header length >= 18. A text
     // file starting with "CONTENTS" must not match.
     let cont = head.len() >= 10
@@ -127,48 +141,47 @@ pub fn sniff(path: &Path) -> Option<Format> {
         && matches!(u16::from_le_bytes([head[4], head[5]]), 1 | 2)
         && u32::from_le_bytes([head[6], head[7], head[8], head[9]]) >= 18;
     if cont || head.starts_with(b"\xeaDRMION\xee") {
-        return Some(Format::Kfx);
+        return (Some(Format::Kfx), None);
     }
     // Topaz: "TPZ" and a version digit.
     if head.len() >= 4 && head.starts_with(b"TPZ") && head[3].is_ascii_digit() {
-        return Some(Format::Topaz);
+        return (Some(Format::Topaz), None);
     }
     if head.len() >= 68 && (&head[60..68] == b"BOOKMOBI" || &head[60..68] == b"TEXtREAd") {
-        return Some(Format::Mobi);
+        return (Some(Format::Mobi), None);
     }
     if head.starts_with(b"PK\x03\x04") {
-        let f = std::fs::File::open(path).ok()?;
-        let zip = zip::ZipArchive::new(f).ok()?;
+        let Ok(zip) = ZipArchive::new(f) else { return (None, None) };
         let names: Vec<String> = zip.file_names().filter_map(|n| n.ok()).map(|n| n.to_ascii_lowercase()).collect();
-        if names.iter().any(|n| n == "meta-inf/container.xml" || n == "mimetype") {
-            return Some(Format::Epub);
-        }
-        if names.iter().any(|n| n.ends_with(".fb2")) {
-            return Some(Format::Fb2);
-        }
-        if names.iter().any(|n| n.starts_with("fb3/") || n.ends_with("fb3/description.xml")) {
-            return Some(Format::Fb3);
-        }
-        if names.iter().any(|n| n.ends_with(".kfx") || n.ends_with(".azw") || n.contains("assets/")) {
-            return Some(Format::Kfx);
-        }
-        return None;
+        let format = if names.iter().any(|n| n == "meta-inf/container.xml" || n == "mimetype") {
+            Some(Format::Epub)
+        } else if names.iter().any(|n| n.ends_with(".fb2")) {
+            Some(Format::Fb2)
+        } else if names.iter().any(|n| n.starts_with("fb3/") || n.ends_with("fb3/description.xml")) {
+            Some(Format::Fb3)
+        } else if names.iter().any(|n| n.ends_with(".kfx") || n.ends_with(".azw") || n.contains("assets/")) {
+            Some(Format::Kfx)
+        } else {
+            None
+        };
+        return (format, Some(zip));
     }
     let text = String::from_utf8_lossy(head);
     if text.contains("<FictionBook") || (text.starts_with("<?xml") && path.to_string_lossy().to_lowercase().ends_with(".fb2")) {
-        return Some(Format::Fb2);
+        return (Some(Format::Fb2), None);
     }
-    None
+    (None, None)
 }
 
 /// The format of `path`: content first, then file name.
 pub fn format_of(path: &Path) -> Option<Format> {
-    match (sniff(path), detect(path)) {
-        // A zip named .fb2.zip is FB2 even if it also looks like something else.
-        (Some(s), Some(d)) if s == d => Some(s),
-        (Some(s), _) => Some(s),
-        (None, d) => d,
-    }
+    format_and_zip(path).0
+}
+
+/// [`format_of`] with the open archive of a zip file.
+fn format_and_zip(path: &Path) -> (Option<Format>, Option<ZipArchive<File>>) {
+    let (format, zip) = sniff(path);
+    (format.or_else(|| detect(path)), zip)
 }
 
 pub(crate) fn title_from(path: &Path) -> String {
@@ -182,32 +195,6 @@ pub(crate) fn title_from(path: &Path) -> String {
     path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
 }
 
-/// Opens an HTML/XHTML file as a one-chapter book (markup repaired, see [`html`]).
-pub fn open_html(path: &Path) -> Result<HtmlDocument> {
-    html::load(path)?.into_html_document()
-}
-
-/// Converts plain text to XHTML: blank lines separate paragraphs (the phase 0 helper;
-/// [`txt`] does detection and chapters).
-pub fn txt_to_xhtml(text: &str) -> String {
-    let mut out = String::from("<html><body>");
-    for para in text.replace("\r\n", "\n").split("\n\n") {
-        let p = para.trim();
-        if !p.is_empty() {
-            out.push_str("<p>");
-            out.push_str(&xml::escape_text(p));
-            out.push_str("</p>");
-        }
-    }
-    out.push_str("</body></html>");
-    out
-}
-
-/// Opens a text file with encoding detection and chapter guessing.
-pub fn open_txt(path: &Path) -> Result<HtmlDocument> {
-    txt::open(path)?.into_html_document()
-}
-
 fn unknown(path: &Path) -> DocError {
     DocError::Unsupported(format!("unknown format: {}", path.display()))
 }
@@ -215,13 +202,14 @@ fn unknown(path: &Path) -> DocError {
 /// Converts any supported format to a [`Book`]. DRM-protected, KFX and Topaz books are
 /// refused with [`DocError::Unsupported`] and a message for the user.
 pub fn load(path: &Path) -> Result<Book> {
-    match format_of(path) {
-        Some(Format::Epub) => epub::load(path),
+    let (format, zip) = format_and_zip(path);
+    match format {
+        Some(Format::Epub) => epub::load(path, zip),
         Some(Format::Txt) => txt::open(path),
         Some(Format::Html) => html::load(path),
         Some(Format::Fb2) => fb2::load(path),
         Some(Format::Mobi) => mobi::load(path),
-        Some(Format::Fb3) => fb3::load(path),
+        Some(Format::Fb3) => fb3::load(path, zip),
         Some(f @ (Format::Kfx | Format::Topaz)) => {
             let info = kfx::read_info(path, f)?;
             Err(DocError::Unsupported(info.refusal.unwrap_or_else(|| kfx::KFX_MESSAGE.into())))
@@ -232,30 +220,35 @@ pub fn load(path: &Path) -> Result<Book> {
 
 /// Opens any supported format as the plain engine document.
 pub fn open(path: &Path) -> Result<HtmlDocument> {
-    match format_of(path) {
+    match format_and_zip(path) {
         // EPUB: the engine also gets the book's NCX / nav (crengine-exact TOC and page
         // list resolved by ink-html; api-request html.md).
-        Some(Format::Epub) => epub::open(path),
+        (Some(Format::Epub), zip) => epub::open(path, zip),
         _ => load(path)?.into_html_document(),
     }
 }
 
 /// Opens any supported format with the book's own TOC and page list.
 pub fn open_book(path: &Path) -> Result<BookDocument> {
-    load(path)?.into_document()
+    match format_and_zip(path) {
+        // EPUB: spine items are read when the engine first needs them.
+        (Some(Format::Epub), zip) => epub::open_book(path, zip),
+        _ => load(path)?.into_document(),
+    }
 }
 
 /// Metadata, identifiers, cover and DRM status of a book file, for the library. Works
 /// for DRM-protected and KFX books too (as far as their metadata is readable); check
 /// [`BookInfo::refusal`] before opening.
 pub fn read_info(path: &Path) -> Result<BookInfo> {
-    match format_of(path) {
-        Some(Format::Epub) => epub::read_info(path),
+    let (format, zip) = format_and_zip(path);
+    match format {
+        Some(Format::Epub) => epub::read_info(path, zip),
         Some(Format::Txt) => txt::read_info(path),
         Some(Format::Html) => html::read_info(path),
         Some(Format::Fb2) => fb2::read_info(path),
         Some(Format::Mobi) => mobi::read_info(path),
-        Some(Format::Fb3) => fb3::read_info(path),
+        Some(Format::Fb3) => fb3::read_info(path, zip),
         Some(f @ (Format::Kfx | Format::Topaz)) => kfx::read_info(path, f),
         None => Err(unknown(path)),
     }
@@ -271,10 +264,7 @@ impl Provider for FormatsProvider {
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &[
-            "epub", "kepub", "html", "htm", "xhtml", "txt", "fb2", "fb2.zip", "fbz", "fb3", "mobi", "azw3", "azw", "prc",
-            "pdb", "kfx", "azw8", "kfx-zip", "tpz", "azw1",
-        ]
+        &EXTENSION_NAMES
     }
 
     fn open(&self, path: &Path) -> Result<Box<dyn Document>> {
@@ -304,13 +294,13 @@ mod tests {
         assert_eq!(detect(Path::new("x.kfx")), Some(Format::Kfx));
         assert_eq!(detect(Path::new("x.azw1")), Some(Format::Topaz));
         assert_eq!(detect(Path::new("x.zip")), None);
-        assert_eq!(sniff(&testdata("juliet.epub")), Some(Format::Epub));
+        assert_eq!(sniff(&testdata("juliet.epub")).0, Some(Format::Epub));
         assert_eq!(title_from(Path::new("/a/Book.fb2.zip")), "Book");
     }
 
     #[test]
     fn juliet_opens_like_the_prototype() {
-        let mut d = epub::open(&testdata("juliet.epub")).unwrap();
+        let mut d = epub::open(&testdata("juliet.epub"), None).unwrap();
         assert_eq!(d.metadata().title, "Romeo and Juliet");
         assert_eq!(d.chapter_count(), 29);
         d.set_layout(&LayoutSettings::for_screen(1272, 1696)).unwrap();
@@ -338,7 +328,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let t = dir.join("note.txt");
         std::fs::write(&t, "First <para>.\r\n\r\nSecond & last.\n").unwrap();
-        let mut d = open_txt(&t).unwrap();
+        let mut d = open(&t).unwrap();
         assert_eq!(d.metadata().title, "note");
         let start = ink_doc::Position::Flow(ink_doc::FlowAnchor::default());
         assert!(d.read_around(&start, 100).unwrap().contains("Second & last."));
@@ -347,6 +337,5 @@ mod tests {
         let d = FormatsProvider.open(&h).unwrap();
         assert_eq!(d.toc().len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
-        assert!(txt_to_xhtml("a<b").contains("a&lt;b"));
     }
 }

@@ -1,19 +1,20 @@
 //! Painting of the browse views (library list and grid, collections, file browser) and
 //! the app bar of every view. The browse views show a screenful of rows at a time with
 //! a [`ScrollBar`] on the right (no pager footer). Built from the ink-ui design system:
-//! `AppBar`, chips, `ProgressBar`, `paint_cover`, `paint_button` and the palette tokens.
+//! `AppBar`, chips, `ProgressBar`, `paint_cover`, buttons and the palette tokens.
 //!
 //! Rows, cells and covers here are separate from the Home tab's helpers in `view.rs`.
 
 use super::model::sort_label;
 use super::view::{MARGIN, TAB_H, TOOLBAR_H};
-use super::{files, Hit, LibraryScreen, Overlay, StatusFilter, View, ViewMode};
+use super::{files, Hit, LibraryScreen, Overlay, StatusFilter, ViewMode};
 use ink_device::Rect;
 use ink_store::{BookEntry, ReadingStatus};
 use ink_text::Style;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::theme::space;
-use ink_ui::{paint_button, paint_cover, AppBar, BarAction, ButtonKind, Cover, Icon, PaintCx, ProgressBar, ScrollBar, Widget};
+use crate::screens::common::pill;
+use ink_ui::{paint_cover, AppBar, BarAction, Cover, Icon, PaintCx, ProgressBar, ScrollBar, Widget};
 
 /// Height of a list row with a cover thumbnail.
 pub const LIST_ROW_H: i32 = 164;
@@ -71,7 +72,7 @@ pub fn book_state(b: &BookEntry) -> Result<f32, Badge> {
     }
 }
 
-/// `42%`.
+/// `42%` (clamped; NaN reads `0%`).
 pub fn percent_text(v: f32) -> String {
     format!("{}%", (v.clamp(0.0, 1.0) * 100.0).round() as u32)
 }
@@ -182,37 +183,38 @@ impl LibraryScreen {
     /// overflow menu (no exit: only Settings has "Exit to Kindle") as icon buttons.
     /// While the search keyboard is
     /// open: the field (painted by the overlay) and a filled "Done".
-    pub(super) fn draw_app_bar(&mut self, p: &mut PaintCx, w: i32, title: &str, back: bool) {
+    /// `count`: the books the library view lists (`None` on the other views).
+    pub(super) fn draw_app_bar(&mut self, p: &mut PaintCx, w: i32, title: &str, back: bool, count: Option<usize>) {
         let bar = Rect::new(0, 0, w as u32, super::view::HEADER_H as u32);
         let searching = matches!(self.overlay, Some(Overlay::Input { search: true, .. }));
         if searching {
             let t = p.theme.clone();
             let done = Rect::new(w - MARGIN - 200, (bar.h as i32 - 104) / 2, 200, 104);
-            paint_button(p, done, "Done", None, ButtonKind::Filled, true, false);
+            pill(p, done, "Done", None, true);
             self.hits.push((done, Hit::Back));
             p.canvas.fill_rect(0, bar.bottom() - t.rule_px, w, t.rule_px, t.fg);
             return;
         }
-        let books = self.view == View::Books;
+        let books = count.is_some();
         let mut ab = AppBar::new("");
         if back {
             ab = ab.with_back();
         }
+        let mut actions = Vec::new();
         if books {
-            let icon = if self.mode == ViewMode::List { Icon::Grid } else { Icon::ListView };
-            ab = ab.action(BarAction::icon(icon, "mode"));
+            actions.push((if self.mode == ViewMode::List { Icon::Grid } else { Icon::ListView }, "mode", Hit::ToggleMode));
         }
         // Stats and Settings icons only when the navigation bar does not already have
         // them (the overflow menu keeps both as labelled entries).
-        let in_nav = |id: &str| self.nav.iter().any(|n| n == id);
-        let (stats, gear) = (!in_nav("stats"), !in_nav("settings"));
-        if stats {
-            ab = ab.action(BarAction::icon(Icon::Chart, "stats"));
+        for (icon, id, hit) in [(Icon::Chart, "stats", Hit::Stats), (Icon::Settings, "settings", Hit::Settings)] {
+            if !self.nav.iter().any(|n| n == id) {
+                actions.push((icon, id, hit));
+            }
         }
-        if gear {
-            ab = ab.action(BarAction::icon(Icon::Settings, "settings"));
+        actions.push((Icon::More, "more", Hit::More));
+        for (icon, id, _) in &actions {
+            ab = ab.action(BarAction::icon(*icon, *id));
         }
-        ab = ab.action(BarAction::icon(Icon::More, "more"));
         let rects = ab.action_rects(bar);
         let right = rects.iter().filter(|r| r.w > 0).map(|r| r.x).min().unwrap_or(bar.right()) - space(2);
         let role = if back { p.theme.heading } else { p.theme.title };
@@ -223,26 +225,14 @@ impl LibraryScreen {
         let shown = p.ellipsize(title, role.px, role.style, max_title);
         let tw = p.text_width(role.style, role.px, &shown).ceil() as i32;
         ab.title = shown;
-        if books {
-            let n = self.lib.as_ref().map_or(0, |l| l.query(&self.query).len());
+        if let Some(n) = count {
             ab = ab.with_subtitle(format!("{n} book{}", if n == 1 { "" } else { "s" }));
         }
         ab.paint(p, bar);
         if back {
             self.hits.push((AppBar::back_rect(bar), Hit::Back));
         }
-        let mut hits = Vec::new();
-        if books {
-            hits.push(Hit::ToggleMode);
-        }
-        if stats {
-            hits.push(Hit::Stats);
-        }
-        if gear {
-            hits.push(Hit::Settings);
-        }
-        hits.push(Hit::More);
-        for (r, h) in rects.into_iter().zip(hits) {
+        for (r, (.., h)) in rects.into_iter().zip(actions) {
             if r.w > 0 {
                 self.hits.push((r, h));
             }
@@ -254,7 +244,7 @@ impl LibraryScreen {
             } else {
                 // No room (long collection name): the field shrinks to its icon.
                 let r = Rect::new(right - 96, (bar.h as i32 - 96) / 2, 96, 96);
-                paint_button(p, r, "", Some(Icon::Search), ButtonKind::Outlined, true, false);
+                pill(p, r, "", Some(Icon::Search), false);
                 self.hits.push((r, Hit::Search));
             }
         }
@@ -335,9 +325,10 @@ impl LibraryScreen {
     }
 
     /// The library view: chips, then rows or the cover grid, then the pager.
-    pub(super) fn draw_books(&mut self, p: &mut PaintCx, w: i32, h: i32) {
+    /// `shelf`: [`LibraryScreen::page_books`].
+    pub(super) fn draw_books(&mut self, p: &mut PaintCx, w: i32, h: i32, shelf: (Vec<BookEntry>, usize, usize)) {
         self.draw_filter_chips(p, w);
-        let (books, total, page) = self.page_books(w, h);
+        let (books, total, page) = shelf;
         let (top, bottom) = Self::content_span(h);
         let rw = Self::rows_w(w, h);
         if books.is_empty() {
@@ -361,7 +352,7 @@ impl LibraryScreen {
                 }
             }
         }
-        let per = self.per_page(w, h);
+        let per = self.per_page(h);
         self.draw_scroll_bar(p, w, h, total, per, page);
     }
 
@@ -439,7 +430,7 @@ impl LibraryScreen {
         let t = p.theme.clone();
         let bh = t.control_h();
         let r = Rect::new(MARGIN, super::view::HEADER_H + (TOOLBAR_H - bh as i32) / 2, 420, bh);
-        paint_button(p, r, "New collection", Some(Icon::Plus), ButtonKind::Outlined, true, false);
+        pill(p, r, "New collection", Some(Icon::Plus), false);
         self.hits.push((r, Hit::NewCollection));
         let (top, _) = Self::content_span(h);
         let per = Self::coll_per_page(h);
@@ -550,5 +541,17 @@ impl LibraryScreen {
             p.text_left(Rect::new(MARGIN + 10, y, tw - 20, 60), &n, t.caption.px, Style::Italic, t.muted);
         }
         self.draw_scroll_bar(p, w, h, total, per, page);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_labels_clamp() {
+        assert_eq!(percent_text(0.424), "42%");
+        assert_eq!(percent_text(f32::NAN), "0%");
+        assert_eq!(percent_text(3.0), "100%");
     }
 }

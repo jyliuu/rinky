@@ -3,7 +3,9 @@
 //! a defect that is still open; run it with
 //! `cargo test -p ink-store --release verifier2_ -- --ignored --nocapture`.
 //! Tests marked `#[ignore = "measurement: ..."]` only print numbers (for the evidence);
-//! tests/e2e/store-verify2.sh runs them on ARM under a time limit.
+//! tests/e2e/store-verify2.sh runs them on ARM under a time limit. Tests marked
+//! `#[ignore = "slow: ..."]` reproduced a defect that is fixed and are timing ratios now;
+//! docs/TESTING.md lists them with the release run.
 
 use crate::koreader;
 use crate::lua;
@@ -124,28 +126,25 @@ fn scaling(name: &str, make: &dyn Fn(usize) -> Vec<u8>, n: usize, paging: bool) 
 
 /// A KOReader metadata file with many highlights (all within MAX_INPUT and MAX_VALUES)
 /// must import in time linear in its size: doubling the highlights may at most about
-/// double the time. `merge_into` checks every new highlight against every highlight
-/// already added (`state.highlights.iter().any(..)`), which is quadratic.
+/// double the time (a timing ratio: run on an idle machine).
 #[test]
-#[ignore = "verifier: KOReader import is quadratic in the number of highlights (merge_into dedup); a file within MAX_INPUT/MAX_VALUES hangs the import"]
+#[ignore = "slow: run with --ignored before a release"]
 fn verifier2_koreader_import_highlights_scale_linearly() {
     let r = scaling("modern highlights", &modern_highlights, 20_000, false);
     assert!(r < 3.0, "doubling the highlights multiplied the import time by {r:.2}");
 }
 
-/// The same for page bookmarks: `BookState::add_bookmark` checks every bookmark already
-/// added.
+/// The same for page bookmarks.
 #[test]
-#[ignore = "verifier: KOReader import is quadratic in the number of bookmarks (add_bookmark dedup); a file within MAX_INPUT/MAX_VALUES hangs the import"]
+#[ignore = "slow: run with --ignored before a release"]
 fn verifier2_koreader_import_bookmarks_scale_linearly() {
     let r = scaling("modern bookmarks", &modern_bookmarks, 20_000, false);
     assert!(r < 3.0, "doubling the bookmarks multiplied the import time by {r:.2}");
 }
 
-/// The same for the pre-2024 format: every highlighted bookmark is compared with every
-/// highlight (`legacy_annotations`).
+/// The same for the pre-2024 format (bookmarks matched to highlights).
 #[test]
-#[ignore = "verifier: legacy KOReader import is quadratic (bookmark x highlight matching); a file within MAX_INPUT/MAX_VALUES hangs the import"]
+#[ignore = "slow: run with --ignored before a release"]
 fn verifier2_koreader_legacy_import_scales_linearly() {
     let r = scaling("legacy pairs", &legacy_pairs, 5_000, false);
     assert!(r < 3.0, "doubling the legacy bookmarks and highlights multiplied the import time by {r:.2}");
@@ -275,12 +274,10 @@ fn verifier2_sidecar_deep_plugin_value_never_makes_the_file_unloadable() {
 }
 
 /// One plugin value that is too deep must not stop the book's reading position from
-/// being saved. Today `BookState::save` refuses the whole state with `Invalid` (nothing
-/// written), so after one such `plugin_set` every later save of that book fails and the
-/// position is lost for the rest of the session. Expected: the position is saved (the
-/// bad value may be dropped, like non-finite numbers in `sanitized`).
+/// being saved. `BookState::save` used to refuse the whole state with `Invalid`
+/// (nothing written), so after one such `plugin_set` every later save of that book
+/// failed. Now `sanitized` drops the value, like non-finite numbers.
 #[test]
-#[ignore = "verifier: one too-deep plugin value makes every later BookState::save fail with Invalid (reading position no longer saved)"]
 fn verifier2_sidecar_deep_plugin_value_does_not_block_position_saves() {
     use crate::sidecar::BookState;
     let dir = crate::testutil::TempDir::new("v2-deep-pos");
@@ -296,14 +293,11 @@ fn verifier2_sidecar_deep_plugin_value_does_not_block_position_saves() {
     assert_eq!(BookState::load(&book).unwrap().position.as_deref(), Some("flow:4.0.0"));
 }
 
-/// The same value through `PluginStore::set`: it writes `settings.json` without reading
-/// the bytes back (unlike `BookState::save` since cycle 1). If the deep value reaches the
-/// disk, the next `open` finds a file that does not parse, moves it aside and uses the
-/// `.old` backup: settings written after the backup are lost silently. Expected: `set`
-/// refuses the value (nothing written) or the value loads again; either way every other
-/// setting survives a reopen.
+/// The same value through `PluginStore::set`. If the deep value reached the disk, the
+/// next `open` would find a file that does not parse, move it aside and use the `.old`
+/// backup: settings written after the backup would be lost silently. `set` refuses the
+/// value (nothing written), so every other setting survives a reopen.
 #[test]
-#[ignore = "verifier: PluginStore::set writes a value serde_json cannot read back; on the next open the whole settings.json is set aside and later settings are lost"]
 fn verifier2_plugin_settings_deep_value_never_loses_other_settings() {
     use crate::plugin::PluginStore;
     use crate::Paths;
@@ -323,10 +317,9 @@ fn verifier2_plugin_settings_deep_value_never_loses_other_settings() {
     assert!(!names.iter().any(|n| n.contains(".corrupt-")), "a file was set aside: {names:?}");
 }
 
-/// A deep value as the very first plugin setting (no `.old` backup exists yet): if it is
-/// written, the reopened store is empty.
+/// A deep value as the very first plugin setting (no `.old` backup exists yet): if it
+/// were written, the reopened store would be empty.
 #[test]
-#[ignore = "verifier: PluginStore::set writes a value serde_json cannot read back; with no backup yet the reopened plugin settings are empty"]
 fn verifier2_plugin_settings_first_deep_value_keeps_the_file_loadable() {
     use crate::plugin::PluginStore;
     use crate::Paths;
@@ -360,9 +353,9 @@ fn settings_deep_round_trip(f: &Path, shape: &str, depth: usize) -> (bool, bool,
 /// The global settings: a plugin's `[plugins.<name>]` table nested deeper than the TOML
 /// reader accepts. After `set_plugin_value` and `save`, the strict `Settings::load`
 /// (what ink-app calls at start) must still read the file, or `set_plugin_value`/`save`
-/// must refuse the value. Prints the smallest depth that breaks it.
+/// must refuse the value (it does). Prints the smallest depth that breaks it, if any
+/// (before the fix: 80 nested tables or 81 nested arrays).
 #[test]
-#[ignore = "verifier: Settings::save writes a [plugins.<name>] value nested deeper than the TOML reader accepts; strict Settings::load then fails on the whole settings.toml"]
 fn verifier2_settings_deep_plugin_value_keeps_settings_loadable() {
     let dir = crate::testutil::TempDir::new("v2-settings-deep");
     let f = dir.path().join("settings.toml");
@@ -417,16 +410,14 @@ fn verifier2_settings_load_or_recover_waits_for_a_save_in_progress() {
     std::fs::rename(&f, &tmp).unwrap();
     let strict = Settings::load(&f).unwrap();
     eprintln!("verifier2 settings gap: strict Settings::load returned language {:?} (saved: \"de\")", strict.language);
-    // load_or_recover in the gap, the writer finishes its rename 30 ms later.
-    let t = std::thread::spawn({
+    // load_or_recover in the gap: the writer finishes its rename while the load waits.
+    // (A writer thread that slept 30 ms first could miss the 127 ms of waits on a busy
+    // machine, and the load then returned the backup.)
+    crate::on_settle_wait({
         let (f, tmp) = (f.clone(), tmp.clone());
-        move || {
-            std::thread::sleep(Duration::from_millis(30));
-            std::fs::rename(&tmp, &f).unwrap();
-        }
+        move || std::fs::rename(&tmp, &f).unwrap()
     });
     let (back, warning) = Settings::load_or_recover(&f).unwrap();
-    t.join().unwrap();
     assert_eq!((back.language.as_str(), warning), ("de", None));
 }
 

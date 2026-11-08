@@ -8,11 +8,13 @@
 //! against the URL the feed was fetched from (after redirects). `data:` URIs pass through.
 
 use crate::download::{extension_for_mime, sanitize_filename, Download};
-use crate::http::{HttpClient, Request};
+use crate::http::{basic_auth_value, HttpClient, Request};
 use crate::url::{encode_component, resolve};
 use crate::{NetError, Result};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Prefix of every acquisition relation.
@@ -112,22 +114,13 @@ impl OpdsEntry {
 
     /// The best acquisition for a reader: free first, then EPUB, then any.
     pub fn best_acquisition(&self) -> Option<&OpdsLink> {
-        let acq = self.acquisitions();
+        // The first marker the file type contains gives its rank; anything else ranks 3.
+        const FORMATS: &[(&str, u8)] = &[("epub", 0), ("pdf", 2), ("mobi", 1), ("fb2", 1), ("cbz", 1), ("comicbook", 1)];
         let rank = |l: &&OpdsLink| {
-            let free = if l.is_free_acquisition() { 0 } else { 10 };
-            let m = l.final_mime();
-            let fmt = if m.contains("epub") {
-                0
-            } else if m.contains("pdf") {
-                2
-            } else if m.contains("mobi") || m.contains("fb2") || m.contains("cbz") || m.contains("comicbook") {
-                1
-            } else {
-                3
-            };
-            free + fmt
+            let fmt = FORMATS.iter().find(|(marker, _)| l.final_mime().contains(marker)).map_or(3, |(_, r)| *r);
+            if l.is_free_acquisition() { fmt } else { fmt + 10 }
         };
-        acq.into_iter().min_by_key(rank)
+        self.links.iter().filter(|l| l.is_acquisition()).min_by_key(rank)
     }
 
     /// The link to follow for a navigation entry: a catalog link with no `rel`,
@@ -229,29 +222,23 @@ impl OpdsFeed {
         self.links.iter().find(|l| l.rel == rel)
     }
 
+    fn href(&self, rel: &str) -> Option<&str> {
+        self.link(rel).map(|l| l.href.as_str())
+    }
+
     /// Next page.
     pub fn next_url(&self) -> Option<&str> {
-        self.link("next").map(|l| l.href.as_str())
+        self.href("next")
     }
 
     /// Previous page (`previous` or `prev`).
     pub fn prev_url(&self) -> Option<&str> {
-        self.link("previous").or_else(|| self.link("prev")).map(|l| l.href.as_str())
-    }
-
-    /// First page.
-    pub fn first_url(&self) -> Option<&str> {
-        self.link("first").map(|l| l.href.as_str())
-    }
-
-    /// Last page.
-    pub fn last_url(&self) -> Option<&str> {
-        self.link("last").map(|l| l.href.as_str())
+        self.href("previous").or_else(|| self.href("prev"))
     }
 
     /// Catalog root.
     pub fn start_url(&self) -> Option<&str> {
-        self.link("start").map(|l| l.href.as_str())
+        self.href("start")
     }
 
     /// Navigation or acquisition.
@@ -293,33 +280,26 @@ impl OpdsFeed {
 /// Decodes XML/HTML character references: the five XML entities, numeric references and
 /// common HTML names. Unknown references are kept as written.
 pub fn decode_entities(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
     let mut out = String::with_capacity(s.len());
+    push_decoded(&mut out, s);
+    out
+}
+
+/// [`decode_entities`] of `s`, appended to `out`.
+fn push_decoded(out: &mut String, s: &str) {
     let mut rest = s;
+    let mut utf8 = [0; 4];
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
         let end = rest[1..].find(|c: char| c == ';' || c == '&' || c.is_whitespace()).map(|j| j + 1);
-        let Some(end) = end.filter(|&e| rest.as_bytes().get(e) == Some(&b';') && e <= 12) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
+        let decoded = match end.filter(|&e| rest.as_bytes().get(e) == Some(&b';') && e <= 12) {
+            Some(e) => entity(&rest[1..e], &mut utf8).map(|text| (e, text)),
+            None => None,
         };
-        let name = &rest[1..end];
-        let ch: Option<String> = if let Some(num) = name.strip_prefix('#') {
-            let v = match num.strip_prefix(['x', 'X']) {
-                Some(h) => u32::from_str_radix(h, 16).ok(),
-                None => num.parse().ok(),
-            };
-            v.and_then(char::from_u32).map(String::from)
-        } else {
-            named_entity(name).map(str::to_string)
-        };
-        match ch {
-            Some(c) => {
-                out.push_str(&c);
+        match decoded {
+            Some((end, text)) => {
+                out.push_str(text);
                 rest = &rest[end + 1..];
             }
             None => {
@@ -329,7 +309,20 @@ pub fn decode_entities(s: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
+}
+
+/// The text of the character reference `&name;`, encoded into `utf8` when numeric.
+fn entity<'a>(name: &str, utf8: &'a mut [u8; 4]) -> Option<&'a str> {
+    match name.strip_prefix('#') {
+        Some(num) => {
+            let v = match num.strip_prefix(['x', 'X']) {
+                Some(h) => u32::from_str_radix(h, 16).ok(),
+                None => num.parse().ok(),
+            };
+            Some(&*char::from_u32(v?)?.encode_utf8(utf8))
+        }
+        None => named_entity(name),
+    }
 }
 
 fn named_entity(name: &str) -> Option<&'static str> {
@@ -374,12 +367,36 @@ fn named_entity(name: &str) -> Option<&'static str> {
 }
 
 fn is_block(tag: &str) -> bool {
-    matches!(tag.to_ascii_lowercase().as_str(), "p" | "div" | "br" | "li" | "ul" | "ol" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "tr" | "blockquote" | "pre" | "dt" | "dd" | "hr" | "table")
+    const BLOCKS: &[&str] = &["p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "blockquote", "pre", "dt", "dd", "hr", "table"];
+    BLOCKS.iter().any(|b| b.eq_ignore_ascii_case(tag))
 }
 
 /// Normalizes whitespace per line and drops empty lines.
 fn tidy_lines(s: &str) -> String {
-    s.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        let mut words = line.split_whitespace().peekable();
+        if words.peek().is_some() && !out.is_empty() {
+            out.push('\n');
+        }
+        push_words(&mut out, words);
+    }
+    out
+}
+
+/// Appends `words` separated by single spaces.
+fn push_words<'a>(out: &mut String, words: impl Iterator<Item = &'a str>) {
+    for (i, w) in words.enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+}
+
+/// Appends `s` with line breaks turned into spaces.
+fn push_flat(out: &mut String, s: &str) {
+    out.extend(s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }));
 }
 
 /// HTML markup (already unescaped from the XML) to plain text: tags removed, block tags
@@ -388,57 +405,104 @@ pub fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
     // Line breaks in the markup are spaces; block elements make the lines.
-    let flat = |t: &str| t.replace(['\n', '\r'], " ");
     while let Some(i) = rest.find('<') {
-        out.push_str(&flat(&rest[..i]));
+        push_flat(&mut out, &rest[..i]);
         let Some(j) = rest[i..].find('>') else {
-            out.push_str(&flat(&rest[i..]));
+            push_flat(&mut out, &rest[i..]);
             rest = "";
             break;
         };
         let tag = rest[i + 1..i + j].trim_start_matches('/');
-        let name: String = tag.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-        if is_block(&name) {
+        let name = &tag[..tag.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(tag.len())];
+        if is_block(name) {
             out.push('\n');
         } else if !name.is_empty() {
             out.push(' ');
         }
         rest = &rest[i + j + 1..];
     }
-    out.push_str(&flat(rest));
+    push_flat(&mut out, rest);
     tidy_lines(&decode_entities(&out))
 }
 
 fn one_line(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(s.len());
+    push_words(&mut out, s.split_whitespace());
+    out
 }
 
 // ---------------------------------------------------------------------------------------
 // Atom parser.
 
-fn local(name: &[u8]) -> String {
+fn local(name: &[u8]) -> Cow<'_, str> {
     let n = match name.iter().position(|&b| b == b':') {
         Some(i) => &name[i + 1..],
         None => name,
     };
-    String::from_utf8_lossy(n).into_owned()
+    String::from_utf8_lossy(n)
 }
 
-fn attrs(e: &BytesStart<'_>) -> Vec<(String, String, String)> {
-    // (full name, local name, value)
-    e.attributes()
-        .with_checks(false)
-        .flatten()
-        .map(|a| {
-            let full = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-            let value = decode_entities(&String::from_utf8_lossy(&a.value));
-            (full.clone(), local(full.as_bytes()), value)
-        })
-        .collect()
+/// The open elements of the lenient parse. End tags need the innermost open element of
+/// their name; scanning the stack for it made a feed of unmatched end tags quadratic, so
+/// each name keeps the depths where it is open.
+#[derive(Default)]
+struct OpenElements {
+    /// Name ids, outermost first.
+    stack: Vec<usize>,
+    ids: HashMap<String, usize>,
+    /// Per name id: the stack indices where it is open, innermost last.
+    open_at: Vec<Vec<usize>>,
 }
 
-fn attr<'a>(list: &'a [(String, String, String)], local_name: &str) -> Option<&'a str> {
-    list.iter().find(|(_, l, _)| l == local_name).map(|(_, _, v)| v.as_str())
+impl OpenElements {
+    fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn push(&mut self, name: &str) {
+        let id = match self.ids.get(name) {
+            Some(&id) => id,
+            None => {
+                self.ids.insert(name.to_string(), self.open_at.len());
+                self.open_at.push(Vec::new());
+                self.open_at.len() - 1
+            }
+        };
+        self.open_at[id].push(self.stack.len());
+        self.stack.push(id);
+    }
+
+    /// Stack index of the innermost open element named `name`.
+    fn innermost(&self, name: &str) -> Option<usize> {
+        self.ids.get(name).and_then(|&id| self.open_at[id].last().copied())
+    }
+
+    /// Closes the element at stack index `p` and everything inside it.
+    fn truncate(&mut self, p: usize) {
+        for id in self.stack.drain(p.min(self.stack.len())..) {
+            self.open_at[id].pop();
+        }
+    }
+}
+
+/// `(local name, value)` of every attribute, borrowed from the document where possible.
+fn attrs<'a>(e: &'a BytesStart<'_>) -> Vec<(Cow<'a, str>, Cow<'a, str>)> {
+    let value = |v: Cow<'a, [u8]>| {
+        let v = match v {
+            Cow::Borrowed(b) => String::from_utf8_lossy(b),
+            Cow::Owned(b) => Cow::Owned(String::from_utf8_lossy(&b).into_owned()),
+        };
+        if v.contains('&') {
+            Cow::Owned(decode_entities(&v))
+        } else {
+            v
+        }
+    };
+    e.attributes().with_checks(false).flatten().map(|a| (local(a.key.into_inner()), value(a.value))).collect()
+}
+
+fn attr<'a>(list: &'a [(Cow<'_, str>, Cow<'_, str>)], local_name: &str) -> Option<&'a str> {
+    list.iter().find(|(l, _)| l == local_name).map(|(_, v)| v.as_ref())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -455,6 +519,14 @@ struct Capture {
     buf: String,
 }
 
+/// The link element that is open (see `parse_feed`).
+fn open_link<'a>(link: Option<(bool, usize)>, entry: &'a mut Option<OpdsEntry>, feed: &'a mut OpdsFeed) -> Option<&'a mut OpdsLink> {
+    match link? {
+        (true, _) => entry.as_mut()?.links.last_mut(),
+        (false, _) => feed.links.last_mut(),
+    }
+}
+
 /// Parses an OPDS Atom feed (or a single `<entry>` document) fetched from `base_url`.
 pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
     let mut reader = Reader::from_str(xml);
@@ -466,20 +538,21 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
         c.expand_empty_elements = true;
     }
     let mut feed = OpdsFeed { version: OpdsVersion::Atom1, ..Default::default() };
-    let mut path: Vec<String> = Vec::new();
+    let mut path = OpenElements::default();
     let mut entry: Option<OpdsEntry> = None;
     let mut entry_depth = 0usize;
     let mut cap: Option<Capture> = None;
     let mut root: Option<String> = None;
     let mut author_depth: Option<usize> = None;
-    // (index into entry.links or feed.links, in entry?, depth)
-    let mut link: Option<(usize, bool, usize)> = None;
+    // The open <link>: (in the entry?, depth). It is the last link of the entry or feed.
+    let mut link: Option<(bool, usize)> = None;
     loop {
         let ev = reader.read_event().map_err(|e| NetError::Format(format!("xml at byte {}: {e}", reader.buffer_position())))?;
         match ev {
             Event::Start(e) => {
-                let name = local(e.name().as_ref());
-                path.push(name.clone());
+                let qname = e.name();
+                let name = local(qname.as_ref());
+                path.push(&name);
                 let depth = path.len();
                 if let Some(c) = cap.as_mut() {
                     if c.mode == Mode::Xhtml && is_block(&name) {
@@ -488,13 +561,13 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                     continue;
                 }
                 if root.is_none() {
-                    root = Some(name.clone());
+                    root = Some(name.to_string());
                     if name != "feed" && name != "entry" {
                         return Err(NetError::Format(format!("not an Atom feed (root <{name}>)")));
                     }
                 }
                 let a = attrs(&e);
-                match name.as_str() {
+                match &*name {
                     "entry" if entry.is_none() => {
                         entry = Some(OpdsEntry::default());
                         entry_depth = depth;
@@ -513,22 +586,14 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                             ..Default::default()
                         };
                         match entry.as_mut() {
-                            Some(en) => {
-                                en.links.push(l);
-                                link = Some((en.links.len() - 1, true, depth));
-                            }
-                            None => {
-                                feed.links.push(l);
-                                link = Some((feed.links.len() - 1, false, depth));
-                            }
+                            Some(en) => en.links.push(l),
+                            None => feed.links.push(l),
                         }
+                        link = Some((entry.is_some(), depth));
                     }
                     "indirectAcquisition" => {
-                        if let (Some((i, in_entry, _)), Some(t)) = (link, attr(&a, "type")) {
-                            let target = if in_entry { entry.as_mut().and_then(|en| en.links.get_mut(i)) } else { feed.links.get_mut(i) };
-                            if let Some(l) = target {
-                                l.indirect.push(t.to_string());
-                            }
+                        if let (Some(l), Some(t)) = (open_link(link, &mut entry, &mut feed), attr(&a, "type")) {
+                            l.indirect.push(t.to_string());
                         }
                     }
                     "price" => {
@@ -551,22 +616,22 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                         } else {
                             Mode::Text
                         };
-                        cap = Some(Capture { depth, name, mode, buf: String::new() });
+                        cap = Some(Capture { depth, name: name.into_owned(), mode, buf: String::new() });
                     }
                     "title" | "id" | "updated" | "published" | "issued" | "language" | "publisher" | "subtitle" | "icon" | "name" | "totalResults" | "itemsPerPage" | "startIndex" => {
-                        cap = Some(Capture { depth, name, mode: Mode::Text, buf: String::new() });
+                        cap = Some(Capture { depth, name: name.into_owned(), mode: Mode::Text, buf: String::new() });
                     }
                     _ => {}
                 }
             }
             Event::Text(t) => {
                 if let Some(c) = cap.as_mut() {
-                    let text = decode_entities(&String::from_utf8_lossy(&t));
+                    let text = String::from_utf8_lossy(&t);
                     if c.mode == Mode::Xhtml {
                         // XML line breaks are spaces; block elements make the lines.
-                        c.buf.push_str(&text.replace(['\n', '\r'], " "));
+                        push_flat(&mut c.buf, &decode_entities(&text));
                     } else {
-                        c.buf.push_str(&text);
+                        push_decoded(&mut c.buf, &text);
                     }
                 }
             }
@@ -576,9 +641,10 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                 }
             }
             Event::End(e) => {
-                let name = local(e.name().as_ref());
+                let qname = e.name();
+                let name = local(qname.as_ref());
                 // Pop to the matching open element (tolerates unclosed children).
-                let pos = path.iter().rposition(|p| *p == name);
+                let pos = path.innermost(&name);
                 if let Some(c) = cap.as_mut() {
                     match pos {
                         // An end tag that matches no open element: ignored.
@@ -605,12 +671,8 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                         Mode::Xhtml => tidy_lines(&c.buf),
                     };
                     if let Some(cur) = c.name.strip_prefix("price ") {
-                        if let Some((i, in_entry, _)) = link {
-                            let v = format!("{} {}", one_line(&text), cur.trim()).trim().to_string();
-                            let l = if in_entry { entry.as_mut().and_then(|en| en.links.get_mut(i)) } else { feed.links.get_mut(i) };
-                            if let Some(l) = l {
-                                l.price = Some(v);
-                            }
+                        if let Some(l) = open_link(link, &mut entry, &mut feed) {
+                            l.price = Some(format!("{} {}", one_line(&text), cur.trim()).trim().to_string());
                         }
                     } else if let Some(en) = entry.as_mut() {
                         match c.name.as_str() {
@@ -650,7 +712,7 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                     if author_depth.is_some_and(|d| d >= closing_depth) {
                         author_depth = None;
                     }
-                    if link.is_some_and(|(_, _, d)| d >= closing_depth) {
+                    if link.is_some_and(|(_, d)| d >= closing_depth) {
                         link = None;
                     }
                     if entry.is_some() && entry_depth >= closing_depth {
@@ -697,6 +759,11 @@ fn json_names(v: Option<&serde_json::Value>) -> Vec<String> {
     }
 }
 
+/// The array at `key` of a JSON object (empty when absent or not an array).
+fn json_array<'a>(v: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {
+    v.get(key).and_then(|a| a.as_array()).map_or(&[], Vec::as_slice)
+}
+
 fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
     let href = v.get("href")?.as_str()?;
     let templated = v.get("templated").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -707,12 +774,16 @@ fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
     };
     let props = v.get("properties");
     let mut indirect = Vec::new();
-    let mut ia = props.and_then(|p| p.get("indirectAcquisition")).and_then(|x| x.as_array()).and_then(|a| a.first()).cloned();
+    // Nested acquisitions, outermost first: the first of each level's array.
+    fn first(x: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
+        x?.as_array()?.first()
+    }
+    let mut ia = first(props.and_then(|p| p.get("indirectAcquisition")));
     while let Some(i) = ia {
         if let Some(t) = i.get("type").and_then(|t| t.as_str()) {
             indirect.push(t.to_string());
         }
-        ia = i.get("child").and_then(|c| c.as_array()).and_then(|a| a.first()).cloned();
+        ia = first(i.get("child"));
     }
     let price = props.and_then(|p| p.get("price")).map(|p| format!("{} {}", p.get("value").map(|v| v.to_string()).unwrap_or_default(), p.get("currency").and_then(|c| c.as_str()).unwrap_or("")).trim().to_string());
     Some(OpdsLink {
@@ -722,18 +793,16 @@ fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
         rel,
         mime: v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         title: v.get("title").and_then(json_str),
-        length: None,
         indirect,
-        facet_group: None,
-        active_facet: false,
         count: props.and_then(|p| p.get("numberOfItems")).and_then(|n| n.as_u64()),
         price,
         templated,
+        ..Default::default()
     })
 }
 
 fn json_publication(p: &serde_json::Value, base: &str) -> OpdsEntry {
-    let md = p.get("metadata").cloned().unwrap_or_default();
+    let md = p.get("metadata").unwrap_or(&serde_json::Value::Null);
     let mut e = OpdsEntry {
         id: md.get("identifier").and_then(json_str).unwrap_or_default(),
         title: md.get("title").and_then(json_str).map(|t| one_line(&t)).unwrap_or_default(),
@@ -750,38 +819,31 @@ fn json_publication(p: &serde_json::Value, base: &str) -> OpdsEntry {
         categories: json_names(md.get("subject")),
         ..Default::default()
     };
-    if let Some(links) = p.get("links").and_then(|l| l.as_array()) {
-        e.links.extend(links.iter().filter_map(|l| json_link(l, base)));
-    }
-    if let Some(images) = p.get("images").and_then(|l| l.as_array()) {
-        // The largest image is the cover, the smallest (if there are several) the thumbnail.
-        let area = |l: &serde_json::Value| l.get("width").and_then(|w| w.as_u64()).unwrap_or(0) * l.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
-        let imgs: Vec<(u64, OpdsLink)> = images.iter().filter_map(|l| json_link(l, base).map(|k| (area(l), k))).collect();
-        let largest = imgs.iter().enumerate().max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.0.cmp(&a.0))).map(|(i, _)| i);
-        let smallest = imgs.iter().enumerate().min_by(|a, b| a.1 .0.cmp(&b.1 .0).then(a.0.cmp(&b.0))).map(|(i, _)| i);
-        if let Some(i) = largest {
-            let mut c = imgs[i].1.clone();
-            c.rel = IMAGE_RELS[0].into();
-            e.links.push(c);
-        }
-        if let Some(i) = smallest.filter(|_| imgs.len() > 1) {
-            let mut t = imgs[i].1.clone();
-            t.rel = THUMBNAIL_RELS[0].into();
-            e.links.push(t);
+    e.links.extend(json_array(p, "links").iter().filter_map(|l| json_link(l, base)));
+    // The largest image is the cover, the smallest (if there are several) the thumbnail.
+    let area = |l: &serde_json::Value| l.get("width").and_then(|w| w.as_u64()).unwrap_or(0) * l.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
+    let imgs: Vec<(u64, OpdsLink)> = json_array(p, "images").iter().filter_map(|l| json_link(l, base).map(|k| (area(l), k))).collect();
+    // On ties the first image wins (max_by_key keeps the last maximum, hence the rev).
+    let largest = imgs.iter().rev().max_by_key(|(area, _)| *area);
+    let smallest = imgs.iter().min_by_key(|(area, _)| *area).filter(|_| imgs.len() > 1);
+    for (img, rel) in [(largest, IMAGE_RELS[0]), (smallest, THUMBNAIL_RELS[0])] {
+        if let Some((_, l)) = img {
+            e.links.push(OpdsLink { rel: rel.into(), ..l.clone() });
         }
     }
     e
 }
 
-fn json_navigation(n: &serde_json::Value, base: &str) -> Option<OpdsEntry> {
-    let mut l = json_link(n, base)?;
+/// A navigation entry for a link to another feed, titled `title` or else by the link;
+/// the link gets `subsection` and the OPDS 2 type when it has none.
+fn nav_entry(mut l: OpdsLink, title: Option<String>) -> OpdsEntry {
     if l.rel.is_empty() {
         l.rel = "subsection".into();
     }
     if l.mime.is_empty() {
         l.mime = "application/opds+json".into();
     }
-    Some(OpdsEntry { id: l.href.clone(), title: l.title.clone().unwrap_or_default(), links: vec![l], ..Default::default() })
+    OpdsEntry { id: l.href.clone(), title: title.or_else(|| l.title.clone()).unwrap_or_default(), links: vec![l], ..Default::default() }
 }
 
 /// Parses a basic OPDS 2 feed: metadata, links, navigation, publications, groups and
@@ -791,7 +853,7 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
     if !v.is_object() {
         return Err(NetError::Format("opds2: not a JSON object".into()));
     }
-    let md = v.get("metadata").cloned().unwrap_or_default();
+    let md = v.get("metadata").unwrap_or(&serde_json::Value::Null);
     let mut feed = OpdsFeed {
         id: md.get("identifier").and_then(json_str).unwrap_or_default(),
         title: md.get("title").and_then(json_str).unwrap_or_default(),
@@ -806,43 +868,26 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
         // Saturating: a hostile catalog may send page and size near u64::MAX.
         feed.start_index = Some(page.saturating_sub(1).saturating_mul(per).saturating_add(1));
     }
-    if let Some(links) = v.get("links").and_then(|l| l.as_array()) {
-        feed.links.extend(links.iter().filter_map(|l| json_link(l, base_url)));
-    }
+    feed.links.extend(json_array(&v, "links").iter().filter_map(|l| json_link(l, base_url)));
     let add_items = |obj: &serde_json::Value, feed: &mut OpdsFeed| {
-        if let Some(nav) = obj.get("navigation").and_then(|n| n.as_array()) {
-            feed.entries.extend(nav.iter().filter_map(|n| json_navigation(n, base_url)));
-        }
-        if let Some(pubs) = obj.get("publications").and_then(|n| n.as_array()) {
-            feed.entries.extend(pubs.iter().map(|p| json_publication(p, base_url)));
-        }
+        feed.entries.extend(json_array(obj, "navigation").iter().filter_map(|n| json_link(n, base_url)).map(|l| nav_entry(l, None)));
+        feed.entries.extend(json_array(obj, "publications").iter().map(|p| json_publication(p, base_url)));
     };
     add_items(&v, &mut feed);
-    if let Some(groups) = v.get("groups").and_then(|g| g.as_array()) {
-        for g in groups {
-            let title = g.get("metadata").and_then(|m| m.get("title")).and_then(json_str).unwrap_or_default();
-            if let Some(more) = g.get("links").and_then(|l| l.as_array()).and_then(|a| a.iter().filter_map(|l| json_link(l, base_url)).find(|l| l.rel == "self")) {
-                let mut l = more;
-                l.rel = "subsection".into();
-                if l.mime.is_empty() {
-                    l.mime = "application/opds+json".into();
-                }
-                feed.entries.push(OpdsEntry { id: l.href.clone(), title: title.clone(), links: vec![l], ..Default::default() });
-            }
-            add_items(g, &mut feed);
+    for g in json_array(&v, "groups") {
+        let title = g.get("metadata").and_then(|m| m.get("title")).and_then(json_str).unwrap_or_default();
+        if let Some(l) = json_array(g, "links").iter().filter_map(|l| json_link(l, base_url)).find(|l| l.rel == "self") {
+            feed.entries.push(nav_entry(OpdsLink { rel: "subsection".into(), ..l }, Some(title)));
         }
+        add_items(g, &mut feed);
     }
-    if let Some(facets) = v.get("facets").and_then(|f| f.as_array()) {
-        for f in facets {
-            let group = f.get("metadata").and_then(|m| m.get("title")).and_then(json_str);
-            for l in f.get("links").and_then(|l| l.as_array()).into_iter().flatten() {
-                if let Some(mut link) = json_link(l, base_url) {
-                    link.active_facet = link.rel == "self";
-                    link.rel = REL_FACET.into();
-                    link.facet_group = group.clone();
-                    feed.links.push(link);
-                }
-            }
+    for f in json_array(&v, "facets") {
+        let group = f.get("metadata").and_then(|m| m.get("title")).and_then(json_str);
+        for mut link in json_array(f, "links").iter().filter_map(|l| json_link(l, base_url)) {
+            link.active_facet = link.rel == "self";
+            link.rel = REL_FACET.into();
+            link.facet_group = group.clone();
+            feed.links.push(link);
         }
     }
     Ok(feed)
@@ -850,7 +895,9 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
 
 /// Parses Atom or JSON, chosen by MIME type, else by the first non-space byte.
 pub fn parse_any(body: &[u8], mime: &str, base_url: &str) -> Result<OpdsFeed> {
-    let text = String::from_utf8_lossy(body);
+    // The fast validator for the usual valid body; the lossy decoder's byte loop only for
+    // a broken one.
+    let text = std::str::from_utf8(body).map_or_else(|_| String::from_utf8_lossy(body), Cow::Borrowed);
     let text = text.trim_start_matches('\u{feff}');
     let m = mime.to_ascii_lowercase();
     if m.contains("json") || (!m.contains("xml") && text.trim_start().starts_with('{')) {
@@ -883,7 +930,8 @@ pub fn parse_opensearch(xml: &str, base_url: &str) -> Result<Vec<OpenSearchUrl>>
     loop {
         match reader.read_event().map_err(|e| NetError::Format(format!("opensearch xml: {e}")))? {
             Event::Start(e) | Event::Empty(e) => {
-                let name = local(e.name().as_ref());
+                let qname = e.name();
+                let name = local(qname.as_ref());
                 if name == "OpenSearchDescription" {
                     root_ok = true;
                 }
@@ -977,11 +1025,7 @@ pub struct OpdsClient<'a> {
     pub max_bytes: usize,
 }
 
-impl std::fmt::Debug for OpdsClient<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpdsClient").field("auth", &self.auth.as_ref().map(|(u, _)| u)).field("max_bytes", &self.max_bytes).finish_non_exhaustive()
-    }
-}
+debug_fields!([] OpdsClient<'_>, "OpdsClient", |s| "auth": s.auth.as_ref().map(|(u, _)| u), "max_bytes": s.max_bytes);
 
 impl<'a> OpdsClient<'a> {
     /// A client without credentials, 16 MB feed limit.
@@ -1057,14 +1101,11 @@ impl<'a> OpdsClient<'a> {
         let base = if entry.title.trim().is_empty() { crate::url::last_segment(&link.href) } else { entry.title.clone() };
         let name = sanitize_filename(&format!("{}{ext}", base.trim()));
         // The catalog's size confirms a body the server sends without a length.
-        let mut d = Download::new(&link.href, dir.join(name)).expected_len(link.length);
-        if let Some((u, p)) = &self.auth {
-            let r = Request::get("").basic_auth(u, p);
-            if let Some(v) = r.header_value("authorization") {
-                d = d.header("Authorization", v);
-            }
+        let d = Download::new(&link.href, dir.join(name)).expected_len(link.length);
+        match &self.auth {
+            Some((u, p)) => d.header("Authorization", &basic_auth_value(u, p)),
+            None => d,
         }
-        d
     }
 }
 

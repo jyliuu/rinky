@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use api::{Cache, Summary};
 use ink_net::Request;
+use ink_plugin::kit::Requests;
 use ink_plugin::serde_json::json;
 use ink_plugin::{HostCtx, HttpEvent, Permission, Plugin, PluginManifest, Registrar, Result, StreamMode};
 
@@ -75,13 +76,6 @@ enum Job {
     Article { lang: usize, sum: Summary, save: bool },
 }
 
-/// The request in flight (at most one).
-struct Running {
-    id: u32,
-    job: Job,
-    status: u16,
-}
-
 /// One language's answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Page {
@@ -113,14 +107,18 @@ pub struct WikipediaPlugin {
     cache: Option<Cache>,
     cache_path: Option<PathBuf>,
     session: Option<Session>,
-    running: Option<Running>,
+    /// The request in flight (at most one).
+    running: Requests<Job>,
     view_open: bool,
     full: Option<FullText>,
 }
 
 impl Default for WikipediaPlugin {
+    /// A plugin with nothing loaded.
     fn default() -> Self {
-        Self::new()
+        let mut manifest = PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]);
+        manifest.hosts = vec!["wikipedia.org".to_string()];
+        WikipediaPlugin { manifest, cache: None, cache_path: None, session: None, running: Requests::default(), view_open: false, full: None }
     }
 }
 
@@ -138,9 +136,9 @@ pub fn footer(lang: &str, page: usize, pages: usize) -> String {
 pub fn summary_card(s: &Summary, lang: &str, page: usize, pages: usize) -> (String, String) {
     let mut lines: Vec<String> = Vec::new();
     if let Some(d) = &s.description {
-        lines.push(format!("_{}_", d.split_whitespace().collect::<Vec<_>>().join(" ")));
+        lines.push(format!("_{}_", api::squeeze(d)));
     }
-    let extract = s.extract.split_whitespace().collect::<Vec<_>>().join(" ");
+    let extract = api::squeeze(&s.extract);
     lines.push(if extract.is_empty() { "No summary for this page. Open the full view.".to_string() } else { api::cut_at(&extract, CARD_CHARS) });
     lines.push(format!("— {}", footer(lang, page, pages)));
     (s.title.clone(), lines.join("\n"))
@@ -167,28 +165,24 @@ pub fn net_message(m: &str) -> String {
     }
 }
 
+/// The page's address: the summary's, else built from the title.
+fn page_url(sum: &Summary, lang: &str) -> String {
+    sum.url.clone().unwrap_or_else(|| format!("https://{}/wiki/{}", api::host(lang), api::title_segment(&sum.title)))
+}
+
 fn request(url: String, total: u64) -> Request {
     Request::get(url).header("Accept", "application/json").timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(15)).total_timeout(Some(Duration::from_secs(total)))
 }
 
 impl WikipediaPlugin {
-    /// A plugin with nothing loaded.
-    pub fn new() -> Self {
-        let mut manifest = PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]);
-        manifest.hosts = vec!["wikipedia.org".to_string()];
-        WikipediaPlugin { manifest, cache: None, cache_path: None, session: None, running: None, view_open: false, full: None }
-    }
-
     // ---- settings ----
 
     fn language(cx: &mut HostCtx) -> String {
-        let v = cx.storage().ok().and_then(|s| s.get("language"));
-        v.as_ref().and_then(|v| v.as_str()).map(|s| s.trim().to_lowercase()).filter(|s| api::valid_lang(s)).unwrap_or_else(|| DEFAULT_LANG.to_string())
+        cx.setting_str("language").map(|s| s.trim().to_lowercase()).filter(|s| api::valid_lang(s)).unwrap_or_else(|| DEFAULT_LANG.to_string())
     }
 
     fn extra_languages(cx: &mut HostCtx) -> Vec<String> {
-        let v = cx.storage().ok().and_then(|s| s.get("languages"));
-        let raw: Vec<String> = match v {
+        let raw: Vec<String> = match cx.setting("languages") {
             Some(ink_plugin::serde_json::Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
             Some(ink_plugin::serde_json::Value::String(s)) => s.split([',', ' ']).map(str::to_string).collect(),
             _ => Vec::new(),
@@ -236,16 +230,9 @@ impl WikipediaPlugin {
 
     // ---- requests ----
 
-    fn cancel(&mut self, cx: &mut HostCtx) {
-        if let Some(r) = self.running.take() {
-            log::debug!("wikipedia: cancel request {}", r.id);
-            cx.cancel_request(r.id);
-        }
-    }
-
     /// Starts `job`; a failure to start shows as a card or toast, never as an error.
     fn start(&mut self, cx: &mut HostCtx, job: Job) -> Result<()> {
-        self.cancel(cx);
+        self.running.cancel_all(cx);
         let Some(s) = self.session.as_ref() else { return Ok(()) };
         let (url, total, limit) = match &job {
             Job::Summary { lang, title } => (api::summary_url(&s.langs[*lang], title), 20, 1 << 20),
@@ -253,11 +240,8 @@ impl WikipediaPlugin {
             Job::Article { lang, sum, .. } => (api::article_url(&s.langs[*lang], &sum.title), 45, 3 << 20),
         };
         log::info!("wikipedia: GET {url}");
-        match cx.start_request(request(url, total), StreamMode::Whole { limit }) {
-            Ok(id) => {
-                self.running = Some(Running { id, job, status: 0 });
-                Ok(())
-            }
+        match self.running.start(cx, request(url, total), StreamMode::Whole { limit }, job.clone()) {
+            Ok(_) => Ok(()),
             Err(e) => {
                 log::warn!("wikipedia: cannot start the request: {e}");
                 self.failed(cx, &job, &format!("{e}"))
@@ -269,12 +253,11 @@ impl WikipediaPlugin {
     fn lookup(&mut self, cx: &mut HostCtx, text: &str) -> Result<()> {
         let query = api::clean_query(text);
         if query.is_empty() {
-            cx.ui()?.toast("Select a word to look up");
-            return Ok(());
+            return cx.toast("Select a word to look up");
         }
         let langs = Self::languages(cx);
         log::info!("wikipedia: lookup {query:?} in {langs:?}");
-        self.cancel(cx);
+        self.running.cancel_all(cx);
         self.session = Some(Session { query, pages: vec![None; langs.len()], langs, shown: 0, hits: Vec::new(), hits_lang: 0 });
         self.fetch_page(cx, 0)
     }
@@ -287,16 +270,29 @@ impl WikipediaPlugin {
             return self.show_card(cx);
         }
         let (lang, query) = (s.langs[i].clone(), s.query.clone());
-        if let Some(sum) = self.cache(cx).get(&lang, &query) {
-            log::info!("wikipedia: {query:?} in {lang} from the cache");
+        let toast = format!("Looking up “{}” on {}…", api::cut_at(&query, 30), api::host(&lang));
+        self.summary(cx, i, query, &toast)
+    }
+
+    /// Shows the summary of `title` in language `i`: from the cache, or after a request
+    /// (with `toast` meanwhile: the next card replaces it, and it shows that something
+    /// happens).
+    fn summary(&mut self, cx: &mut HostCtx, i: usize, title: String, toast: &str) -> Result<()> {
+        let Some(lang) = self.lang(i) else { return Ok(()) };
+        if let Some(sum) = self.cache(cx).get(&lang, &title) {
+            log::info!("wikipedia: {title:?} in {lang} from the cache");
             if let Some(s) = self.session.as_mut() {
                 s.pages[i] = Some(Page::Found(sum));
             }
             return self.show_card(cx);
         }
-        // A toast: the next card replaces it, and it shows that something happens.
-        cx.ui()?.toast(&format!("Looking up “{}” on {}…", api::cut_at(&query, 30), api::host(&lang)));
-        self.start(cx, Job::Summary { lang: i, title: query })
+        cx.toast(toast)?;
+        self.start(cx, Job::Summary { lang: i, title })
+    }
+
+    /// The code of language `i` of the session.
+    fn lang(&self, i: usize) -> Option<String> {
+        self.session.as_ref().map(|s| s.langs[i].clone())
     }
 
     /// Shows the card of the shown language.
@@ -306,11 +302,11 @@ impl WikipediaPlugin {
         match &s.pages[s.shown] {
             Some(Page::Found(sum)) => {
                 let (title, body) = summary_card(sum, lang, page, pages);
-                cx.ui()?.dialog(ID_CARD, &title, &body, &CARD_BUTTONS);
+                cx.dialog(ID_CARD, &title, &body, &CARD_BUTTONS)?;
             }
             _ => {
                 let (title, body) = missing_card(&s.query, lang, page, pages);
-                cx.ui()?.dialog(ID_CARD, &title, &body, &MISSING_BUTTONS);
+                cx.dialog(ID_CARD, &title, &body, &MISSING_BUTTONS)?;
             }
         }
         Ok(())
@@ -322,18 +318,15 @@ impl WikipediaPlugin {
         let msg = net_message(raw);
         log::warn!("wikipedia: request failed: {raw} -> {msg:?}");
         match job {
-            Job::Article { save: false, .. } if self.view_open => {
-                cx.ui()?.view_markdown(ID_VIEW, "Wikipedia", &format!(":::top\n\n{}\n", api::md_escape(&msg)));
-            }
-            Job::Article { .. } => cx.ui()?.toast(&msg),
+            Job::Article { save: false, .. } if self.view_open => cx.view_markdown(ID_VIEW, "Wikipedia", &format!(":::top\n\n{}\n", api::md_escape(&msg))),
+            Job::Article { .. } => cx.toast(&msg),
             _ => {
                 let Some(s) = self.session.as_ref() else { return Ok(()) };
                 let (page, pages, lang) = (s.shown + 1, s.langs.len(), &s.langs[s.shown]);
                 let body = format!("{msg}\n— {}", footer(lang, page, pages));
-                cx.ui()?.dialog(ID_CARD, &s.query, &body, &RETRY_BUTTONS);
+                cx.dialog(ID_CARD, &s.query, &body, &RETRY_BUTTONS)
             }
         }
-        Ok(())
     }
 
     fn turn(&mut self, cx: &mut HostCtx, step: isize) -> Result<()> {
@@ -350,23 +343,17 @@ impl WikipediaPlugin {
     fn pick_hit(&mut self, cx: &mut HostCtx, n: usize) -> Result<()> {
         let Some(s) = self.session.as_mut() else { return Ok(()) };
         let Some(title) = s.hits.get(n).cloned() else { return Ok(()) };
-        let (i, lang) = (s.hits_lang, s.langs[s.hits_lang].clone());
+        let i = s.hits_lang;
         s.shown = i;
-        if let Some(sum) = self.cache(cx).get(&lang, &title) {
-            if let Some(s) = self.session.as_mut() {
-                s.pages[i] = Some(Page::Found(sum));
-            }
-            return self.show_card(cx);
-        }
-        cx.ui()?.toast(&format!("Loading “{}”…", api::cut_at(&title, 30)));
-        self.start(cx, Job::Summary { lang: i, title })
+        let toast = format!("Loading “{}”…", api::cut_at(&title, 30));
+        self.summary(cx, i, title, &toast)
     }
 
     // ---- answers ----
 
-    fn done(&mut self, cx: &mut HostCtx, run: Running, body: &[u8]) -> Result<()> {
-        match run.job.clone() {
-            Job::Summary { lang, title } => match run.status {
+    fn done(&mut self, cx: &mut HostCtx, job: Job, status: u16, body: &[u8]) -> Result<()> {
+        match job.clone() {
+            Job::Summary { lang, title } => match status {
                 200 => match api::parse_summary(body) {
                     Ok(sum) => {
                         let Some(s) = self.session.as_mut() else { return Ok(()) };
@@ -376,17 +363,17 @@ impl WikipediaPlugin {
                         self.cache_put(cx, &l, &title, &sum);
                         self.show_card(cx)
                     }
-                    Err(e) => self.failed(cx, &run.job, &format!("bad answer: {e}")),
+                    Err(e) => self.failed(cx, &job, &format!("bad answer: {e}")),
                 },
                 404 => {
                     log::info!("wikipedia: no page {title:?}, searching");
                     self.start(cx, Job::Search { lang, query: title })
                 }
-                st => self.failed(cx, &run.job, &format!("Wikipedia answered HTTP {st}")),
+                st => self.failed(cx, &job, &format!("Wikipedia answered HTTP {st}")),
             },
             Job::Search { lang, query } => {
-                if run.status != 200 {
-                    return self.failed(cx, &run.job, &format!("Wikipedia answered HTTP {}", run.status));
+                if status != 200 {
+                    return self.failed(cx, &job, &format!("Wikipedia answered HTTP {status}"));
                 }
                 // No hit but a spelling suggestion (`mutinyy` -> `mutiny`): offer it as the hit.
                 let parsed = api::parse_search(body).map(|h| if h.is_empty() { api::parse_suggestion(body).map(|s| vec![(s, String::new())]).unwrap_or_default() } else { h });
@@ -395,11 +382,8 @@ impl WikipediaPlugin {
                         let Some(s) = self.session.as_mut() else { return Ok(()) };
                         s.hits = hits.iter().map(|(t, _)| t.clone()).collect();
                         s.hits_lang = lang;
-                        let items: Vec<(String, String)> = hits.iter().enumerate().map(|(i, (t, _))| (t.clone(), format!("h{i}"))).collect();
-                        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
                         let title = format!("No page “{}”. Did you mean", api::cut_at(&query, 24));
-                        cx.ui()?.menu(ID_HITS, &title, &refs);
-                        Ok(())
+                        cx.menu(ID_HITS, &title, hits.into_iter().enumerate().map(|(i, (t, _))| (t, format!("h{i}"))))
                     }
                     Ok(_) => {
                         let Some(s) = self.session.as_mut() else { return Ok(()) };
@@ -407,24 +391,24 @@ impl WikipediaPlugin {
                         s.shown = lang;
                         self.show_card(cx)
                     }
-                    Err(e) => self.failed(cx, &run.job, &format!("bad answer: {e}")),
+                    Err(e) => self.failed(cx, &job, &format!("bad answer: {e}")),
                 }
             }
             Job::Article { lang, sum, save } => {
-                if run.status != 200 {
-                    return self.failed(cx, &run.job, &format!("Wikipedia answered HTTP {}", run.status));
+                if status != 200 {
+                    return self.failed(cx, &job, &format!("Wikipedia answered HTTP {status}"));
                 }
-                let l = self.session.as_ref().map(|s| s.langs[lang].clone()).unwrap_or_else(|| DEFAULT_LANG.into());
+                let l = self.lang(lang).unwrap_or_else(|| DEFAULT_LANG.into());
                 let text = match api::parse_article(body) {
                     Ok(Some((_, t))) if !t.is_empty() => t,
-                    Ok(_) => return self.failed(cx, &run.job, "The article has no text."),
-                    Err(e) => return self.failed(cx, &run.job, &format!("bad answer: {e}")),
+                    Ok(_) => return self.failed(cx, &job, "The article has no text."),
+                    Err(e) => return self.failed(cx, &job, &format!("bad answer: {e}")),
                 };
-                let url = sum.url.clone().unwrap_or_else(|| format!("https://{}/wiki/{}", api::host(&l), api::title_segment(&sum.title)));
+                let url = page_url(&sum, &l);
                 if save {
                     self.save_article(cx, &l, &sum, &text, &url)?;
                 } else if self.view_open {
-                    cx.ui()?.view_markdown(ID_VIEW, &sum.title, &api::article_markdown(&text, Some(&url)));
+                    cx.view_markdown(ID_VIEW, &sum.title, &api::article_markdown(&text, Some(&url)))?;
                 }
                 self.full = Some(FullText { lang: l, title: sum.title, text, });
                 Ok(())
@@ -433,19 +417,19 @@ impl WikipediaPlugin {
     }
 
     fn save_article(&mut self, cx: &mut HostCtx, lang: &str, sum: &Summary, text: &str, url: &str) -> Result<()> {
-        let dir = cx.storage().ok().and_then(|s| s.get("save_dir")).and_then(|v| v.as_str().map(PathBuf::from)).unwrap_or_else(|| PathBuf::from(DEFAULT_SAVE_DIR));
+        let dir = PathBuf::from(cx.setting_str("save_dir").unwrap_or_else(|| DEFAULT_SAVE_DIR.into()));
         let name = api::file_name(&sum.title, lang);
         let html = api::article_html(lang, &sum.title, sum.description.as_deref(), text, url);
         match write_new(&dir, &name, html.as_bytes()) {
             Ok(true) => {
                 log::info!("wikipedia: saved {}", dir.join(&name).display());
-                cx.ui()?.toast(&format!("Saved “{}” to the library", sum.title));
+                cx.toast(&format!("Saved “{}” to the library", sum.title))?;
                 cx.ui()?.rescan_library();
             }
-            Ok(false) => cx.ui()?.toast(&format!("“{}” is already saved", sum.title)),
+            Ok(false) => cx.toast(&format!("“{}” is already saved", sum.title))?,
             Err(e) => {
                 log::warn!("wikipedia: cannot save {}: {e}", dir.join(&name).display());
-                cx.ui()?.toast(&format!("Cannot save the article: {e}"));
+                cx.toast(&format!("Cannot save the article: {e}"))?;
             }
         }
         Ok(())
@@ -463,18 +447,17 @@ impl WikipediaPlugin {
     fn full_view(&mut self, cx: &mut HostCtx) -> Result<()> {
         let Some((lang, sum)) = self.shown_summary() else { return Ok(()) };
         self.view_open = true;
-        cx.ui()?.view_markdown(ID_VIEW, &sum.title, "*Loading the article…*");
+        cx.view_markdown(ID_VIEW, &sum.title, "*Loading the article…*")?;
         self.start(cx, Job::Article { lang, sum, save: false })
     }
 
     fn save(&mut self, cx: &mut HostCtx) -> Result<()> {
         let Some((lang, sum)) = self.shown_summary() else { return Ok(()) };
-        let l = self.session.as_ref().map(|s| s.langs[lang].clone()).unwrap_or_default();
-        if let Some(f) = self.full.as_ref().filter(|f| f.lang == l && f.title == sum.title) {
-            let (text, url) = (f.text.clone(), sum.url.clone().unwrap_or_else(|| format!("https://{}/wiki/{}", api::host(&l), api::title_segment(&sum.title))));
-            return self.save_article(cx, &l, &sum, &text, &url);
+        let l = self.lang(lang).unwrap_or_default();
+        if let Some(text) = self.full.as_ref().filter(|f| f.lang == l && f.title == sum.title).map(|f| f.text.clone()) {
+            return self.save_article(cx, &l, &sum, &text, &page_url(&sum, &l));
         }
-        cx.ui()?.toast(&format!("Saving “{}”…", api::cut_at(&sum.title, 30)));
+        cx.toast(&format!("Saving “{}”…", api::cut_at(&sum.title, 30)))?;
         self.start(cx, Job::Article { lang, sum, save: true })
     }
 
@@ -488,18 +471,14 @@ impl WikipediaPlugin {
         if !extra.is_empty() {
             items.push(("Remove extra languages".to_string(), "clear"));
         }
-        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), *b)).collect();
-        cx.ui()?.menu(ID_SET, "Wikipedia", &refs);
-        Ok(())
+        cx.menu(ID_SET, "Wikipedia", items)
     }
 
     fn set_language(&mut self, cx: &mut HostCtx, text: &str) -> Result<()> {
         let l = text.trim().to_lowercase();
-        if api::valid_lang(&l) {
-            cx.storage()?.set("language", json!(l))?;
+        let bad = |t: &str| format!("“{}” is not a language code (examples: en, de, da)", api::cut_at(t, 20));
+        if cx.set_from_input("language", text, |t| if api::valid_lang(&l) { Ok(json!(l)) } else { Err(bad(t)) })? {
             log::info!("wikipedia: language {l}");
-        } else {
-            cx.ui()?.toast(&format!("“{}” is not a language code (examples: en, de, da)", api::cut_at(text.trim(), 20)));
         }
         self.show_settings(cx)
     }
@@ -515,11 +494,9 @@ impl WikipediaPlugin {
                 out.push(l);
             }
         }
-        if bad.is_empty() {
-            cx.storage()?.set("languages", json!(out))?;
+        let list = |_: &str| if bad.is_empty() { Ok(json!(out)) } else { Err(format!("Not a language code: {}", api::cut_at(&bad.join(", "), 30))) };
+        if cx.set_from_input("languages", text, list)? {
             log::info!("wikipedia: extra languages {out:?}");
-        } else {
-            cx.ui()?.toast(&format!("Not a language code: {}", api::cut_at(&bad.join(", "), 30)));
         }
         self.show_settings(cx)
     }
@@ -556,16 +533,10 @@ impl Plugin for WikipediaPlugin {
                 let sel = cx.document().ok().and_then(|d| d.selection());
                 match sel {
                     Some(sel) => self.lookup(cx, &sel.text),
-                    None => {
-                        cx.ui()?.toast("Select a word to look up");
-                        Ok(())
-                    }
+                    None => cx.toast("Select a word to look up"),
                 }
             }
-            ACTION_TYPE => {
-                cx.ui()?.input(ID_INPUT, "Search Wikipedia", "");
-                Ok(())
-            }
+            ACTION_TYPE => cx.input(ID_INPUT, "Search Wikipedia", ""),
             a if a.strip_prefix("settings:") == Some(SETTINGS_PAGE) => self.show_settings(cx),
             _ => Ok(()),
         }
@@ -583,15 +554,15 @@ impl Plugin for WikipediaPlugin {
             }
             (ID_CARD, _) => {
                 // Closed: a lookup still loading is dropped (an article keeps going).
-                if self.running.as_ref().is_some_and(|r| !matches!(r.job, Job::Article { .. })) {
-                    self.cancel(cx);
+                if self.running.jobs().any(|j| !matches!(j, Job::Article { .. })) {
+                    self.running.cancel_all(cx);
                 }
                 Ok(())
             }
             (ID_VIEW, "closed") => {
                 self.view_open = false;
-                if self.running.as_ref().is_some_and(|r| matches!(r.job, Job::Article { save: false, .. })) {
-                    self.cancel(cx);
+                if self.running.jobs().any(|j| matches!(j, Job::Article { save: false, .. })) {
+                    self.running.cancel_all(cx);
                 }
                 Ok(())
             }
@@ -602,51 +573,33 @@ impl Plugin for WikipediaPlugin {
             (ID_INPUT, text) if !text.trim().is_empty() => self.lookup(cx, text),
             (ID_SET, "lang") => {
                 let cur = Self::language(cx);
-                cx.ui()?.input(ID_LANG, "Wikipedia language code (en, de, da, fr)", &cur);
-                Ok(())
+                cx.input(ID_LANG, "Wikipedia language code (en, de, da, fr)", &cur)
             }
             (ID_SET, "extra") => {
                 let cur = Self::extra_languages(cx).join(" ");
-                cx.ui()?.input(ID_EXTRA, "Extra languages to swipe between (de fr)", &cur);
-                Ok(())
+                cx.input(ID_EXTRA, "Extra languages to swipe between (de fr)", &cur)
             }
             (ID_SET, "clear") => {
                 cx.storage()?.set("languages", json!([]))?;
                 self.show_settings(cx)
             }
-            (ID_LANG, text) if !text.trim().is_empty() => self.set_language(cx, text),
-            (ID_EXTRA, text) if !text.trim().is_empty() => self.set_extra(cx, text),
-            (ID_LANG | ID_EXTRA, _) => self.show_settings(cx),
+            (ID_LANG, text) => self.set_language(cx, text),
+            (ID_EXTRA, text) => self.set_extra(cx, text),
             _ => Ok(()),
         }
     }
 
     fn on_http(&mut self, cx: &mut HostCtx, id: u32, ev: &HttpEvent) -> Result<()> {
-        if self.running.as_ref().is_none_or(|r| r.id != id) {
-            log::debug!("wikipedia: event of an old request {id} ignored");
-            return Ok(());
-        }
-        match ev {
-            HttpEvent::Response { status, .. } => {
-                if let Some(r) = self.running.as_mut() {
-                    r.status = *status;
-                }
+        // Events of a cancelled request find no job and are dropped.
+        let Some((run, answer)) = self.running.event(id, ev) else { return Ok(()) };
+        match answer {
+            Ok(body) => self.done(cx, run.job, run.status, &body),
+            Err(m) if m.starts_with("interrupted") => {
+                // The device went to sleep; nothing to show on the screen saver.
+                log::info!("wikipedia: request interrupted by sleep");
                 Ok(())
             }
-            HttpEvent::Done { body } => {
-                let Some(run) = self.running.take() else { return Ok(()) };
-                self.done(cx, run, body.as_deref().unwrap_or_default())
-            }
-            HttpEvent::Error(m) => {
-                let Some(run) = self.running.take() else { return Ok(()) };
-                if m.starts_with("interrupted") {
-                    // The device went to sleep; nothing to show on the screen saver.
-                    log::info!("wikipedia: request interrupted by sleep");
-                    return Ok(());
-                }
-                self.failed(cx, &run.job, m)
-            }
-            _ => Ok(()),
+            Err(m) => self.failed(cx, &run.job, &m),
         }
     }
 }

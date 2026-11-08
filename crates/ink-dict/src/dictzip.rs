@@ -9,7 +9,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use flate2::{Decompress, FlushDecompress};
 
@@ -32,7 +32,7 @@ pub(crate) struct Dz {
     /// File offset of every chunk, plus the end of the last one.
     offsets: Vec<u64>,
     /// The last two chunks inflated: (index, bytes).
-    cache: Mutex<Vec<(usize, Vec<u8>)>>,
+    cache: Mutex<Vec<(usize, Arc<[u8]>)>>,
 }
 
 impl DictData {
@@ -118,7 +118,7 @@ impl Dz {
         Ok(out)
     }
 
-    fn chunk(&self, i: usize) -> Result<Vec<u8>> {
+    fn chunk(&self, i: usize) -> Result<Arc<[u8]>> {
         if let Some((_, b)) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(j, _)| *j == i) {
             return Ok(b.clone());
         }
@@ -148,6 +148,7 @@ impl Dz {
             }
         }
         out.truncate(self.chunk_len as usize);
+        let out: Arc<[u8]> = out.into();
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if cache.len() >= 2 {
             cache.remove(0);
@@ -160,39 +161,33 @@ impl Dz {
 /// Returns (start of the deflate data, chunk length, compressed chunk sizes) when `h` is a
 /// gzip header with a dictzip `RA` subfield.
 fn parse_header(h: &[u8]) -> Option<(usize, u32, Vec<u16>)> {
-    if h.len() < 12 || h[0] != 0x1f || h[1] != 0x8b || h[2] != 8 {
+    let le16 = |b: &[u8], p: usize| Some(u16::from_le_bytes([*b.get(p)?, *b.get(p + 1)?]));
+    if h.len() < 12 || h[..3] != [0x1f, 0x8b, 8] || h[3] & 4 == 0 {
         return None;
     }
     let flags = h[3];
-    if flags & 4 == 0 {
-        return None;
-    }
-    let u16le = |p: usize| -> Option<u16> { Some(u16::from_le_bytes([*h.get(p)?, *h.get(p + 1)?])) };
-    let xlen = u16le(10)? as usize;
+    let xlen = le16(h, 10)? as usize;
     let extra = h.get(12..12 + xlen)?;
-    let mut at = 12 + xlen;
     let mut ra = None;
     let mut p = 0;
     while p + 4 <= extra.len() {
-        let len = u16::from_le_bytes([extra[p + 2], extra[p + 3]]) as usize;
+        let len = le16(extra, p + 2)? as usize;
         let body = extra.get(p + 4..p + 4 + len)?;
         if &extra[p..p + 2] == b"RA" && body.len() >= 6 {
-            let ver = u16::from_le_bytes([body[0], body[1]]);
-            let chlen = u16::from_le_bytes([body[2], body[3]]) as u32;
-            let count = u16::from_le_bytes([body[4], body[5]]) as usize;
+            let (ver, chlen, count) = (le16(body, 0)?, le16(body, 2)? as u32, le16(body, 4)? as usize);
             if ver == 1 && chlen > 0 && body.len() >= 6 + 2 * count {
-                let sizes = (0..count).map(|k| u16::from_le_bytes([body[6 + 2 * k], body[7 + 2 * k]])).collect();
-                ra = Some((chlen, sizes));
+                ra = Some((chlen, (0..count).map(|k| le16(body, 6 + 2 * k)).collect::<Option<Vec<u16>>>()?));
             }
         }
         p += 4 + len;
     }
     let (chlen, sizes) = ra?;
-    if flags & 8 != 0 {
-        at += h.get(at..)?.iter().position(|b| *b == 0)? + 1;
-    }
-    if flags & 16 != 0 {
-        at += h.get(at..)?.iter().position(|b| *b == 0)? + 1;
+    let mut at = 12 + xlen;
+    // FNAME and FCOMMENT end at a NUL; FHCRC is two bytes.
+    for flag in [8, 16] {
+        if flags & flag != 0 {
+            at += h.get(at..)?.iter().position(|b| *b == 0)? + 1;
+        }
     }
     if flags & 2 != 0 {
         at += 2;

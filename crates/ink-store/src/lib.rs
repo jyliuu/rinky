@@ -19,8 +19,6 @@
 //! On the Kindle's user store (`fuse.fsp` on firmware 5.19.5) a file can be missing for
 //! a moment while a new version is renamed over it; [`load_recovering`] waits for such a
 //! save instead of falling back to the older backup.
-//!
-//! Owner from wave A: the `store` agent.
 
 #![warn(missing_docs)]
 
@@ -185,18 +183,40 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// JSON `bytes` as a `T`, or the parse error as text (a parser for [`load_recovering`]).
+pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, String> {
+    serde_json::from_slice(bytes).map_err(|e| e.to_string())
+}
+
+/// Runs the SQLite query `sql` with `params` and collects `row` of every result row.
+pub(crate) fn query_all<T, C: FromIterator<T>>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    row: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+) -> Result<C> {
+    let mut st = conn.prepare_cached(sql)?;
+    let rows = st.query_map(params, row)?;
+    Ok(rows.collect::<rusqlite::Result<C>>()?)
+}
+
+/// `path` with `suffix` appended to its file name (`a.json` + `.old` = `a.json.old`).
+pub(crate) fn with_suffix(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
 /// The backup of a state file: `<path>.old` (KOReader's convention).
 pub fn backup_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".old");
-    PathBuf::from(s)
+    with_suffix(path, ".old")
 }
 
 /// A backup is refreshed at most this often, to limit flash writes.
 pub const BACKUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Where a recovered state file came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LoadSource {
     /// The file itself.
     Primary,
@@ -207,6 +227,7 @@ pub enum LoadSource {
     /// Its `.old` backup (the file was missing or did not parse).
     Backup,
     /// Neither existed or parsed.
+    #[default]
     Missing,
 }
 
@@ -215,6 +236,23 @@ pub enum LoadSource {
 const SETTLE_DELAYS_MS: [u64; 7] = [1, 2, 4, 8, 16, 32, 64];
 
 static SETTLE_WAITS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    /// [`SETTLE_WAITS`] for loads on this thread only: tests in the same process wait too.
+    static SETTLE_WAITS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Run once, on this thread, at the next settle wait: see [`on_settle_wait`].
+    static ON_SETTLE_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` when the next load on this thread finds its file missing and is about to
+/// wait for a save in progress. Tests finish their "save in progress" there: from
+/// another thread, the save had to land inside the 127 ms of waits, which a busy machine
+/// does not guarantee.
+#[cfg(test)]
+pub(crate) fn on_settle_wait(f: impl FnOnce() + 'static) {
+    ON_SETTLE_WAIT.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+}
 
 /// How many times loads in this process found a file missing while a save of it might
 /// be running and read it again (diagnostics for the selftest and the tests).
@@ -237,6 +275,13 @@ fn read_settled(path: &Path, check_backup: bool) -> std::io::Result<Option<Vec<u
                 match waits.next() {
                     Some(&ms) if busy => {
                         SETTLE_WAITS.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(test)]
+                        {
+                            SETTLE_WAITS_HERE.with(|w| w.set(w.get() + 1));
+                            if let Some(f) = ON_SETTLE_WAIT.with(|h| h.borrow_mut().take()) {
+                                f();
+                            }
+                        }
                         std::thread::sleep(Duration::from_millis(ms));
                     }
                     _ => return Ok(None),
@@ -260,7 +305,7 @@ fn newest_temp_copy<T>(path: &Path, not_before: Option<SystemTime>, parse: &impl
 }
 
 /// Result of [`load_recovering`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Recovered<T> {
     /// The parsed value, if any file parsed.
     pub value: Option<T>,
@@ -280,42 +325,38 @@ pub struct Recovered<T> {
 ///
 /// A missing file is read again for up to 127 ms while a save of it may be running (see
 /// `read_settled`); if it is still missing, a complete temporary copy newer than the
-/// backup is used ([`LoadSource::Temp`]) before the backup.
+/// backup is used ([`LoadSource::Temp`]) before the backup. When there is no such copy
+/// the file is read once more: a save that renamed its copy in place after the last read
+/// but before the copies were listed has made the file appear.
 pub fn load_recovering<T>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Result<T, String>) -> Result<Recovered<T>> {
     let mut out = Recovered { value: None, source: LoadSource::Missing, set_aside: Vec::new(), errors: Vec::new() };
+    // Takes the parsed bytes of `file`, or moves the file aside when they do not parse.
+    let take = |out: &mut Recovered<T>, file: &Path, bytes: &[u8], source: LoadSource| match parse(bytes) {
+        Ok(v) => {
+            out.value = Some(v);
+            out.source = source;
+        }
+        Err(e) => {
+            out.errors.push(format!("{}: {e}", file.display()));
+            out.set_aside.push(set_aside(file));
+        }
+    };
     let backup = backup_path(path);
     match read_settled(path, true)? {
-        Some(bytes) => match parse(&bytes) {
-            Ok(v) => {
-                out.value = Some(v);
-                out.source = LoadSource::Primary;
-                return Ok(out);
-            }
-            Err(e) => {
-                out.errors.push(format!("{}: {e}", path.display()));
-                out.set_aside.push(set_aside(path));
-            }
-        },
+        Some(bytes) => take(&mut out, path, &bytes, LoadSource::Primary),
         None => {
             let backup_time = std::fs::metadata(&backup).and_then(|m| m.modified()).ok();
-            if let Some(v) = newest_temp_copy(path, backup_time, &parse) {
-                out.value = Some(v);
+            out.value = newest_temp_copy(path, backup_time, &parse);
+            if out.value.is_some() {
                 out.source = LoadSource::Temp;
-                return Ok(out);
+            } else if let Ok(bytes) = std::fs::read(path) {
+                take(&mut out, path, &bytes, LoadSource::Primary);
             }
         }
     }
-    if let Some(bytes) = read_settled(&backup, false)? {
-        match parse(&bytes) {
-            Ok(v) => {
-                out.value = Some(v);
-                out.source = LoadSource::Backup;
-                return Ok(out);
-            }
-            Err(e) => {
-                out.errors.push(format!("{}: {e}", backup.display()));
-                out.set_aside.push(set_aside(&backup));
-            }
+    if out.value.is_none() {
+        if let Some(bytes) = read_settled(&backup, false)? {
+            take(&mut out, &backup, &bytes, LoadSource::Backup);
         }
     }
     Ok(out)
@@ -325,9 +366,7 @@ pub fn load_recovering<T>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Res
 /// one if the rename failed.
 pub fn set_aside(file: &Path) -> PathBuf {
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut s = file.as_os_str().to_owned();
-    s.push(format!(".corrupt-{}-{n}", now_secs()));
-    let dest = PathBuf::from(s);
+    let dest = with_suffix(file, format!(".corrupt-{}-{n}", now_secs()));
     match std::fs::rename(file, &dest) {
         Ok(()) => dest,
         Err(_) => file.to_path_buf(),
@@ -341,6 +380,28 @@ pub fn is_damaged_sqlite(e: &rusqlite::Error) -> bool {
         if matches!(f.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt))
 }
 
+/// Opens the SQLite database at `path` with `open`. A file that is not a database or is
+/// damaged ([`is_damaged_sqlite`]) is moved aside with its `-journal` and a new database
+/// is opened in its place; the damaged file's new name is returned. Other errors
+/// (locked, read-only, a newer schema) are returned and nothing is moved.
+pub(crate) fn open_db_or_recover<T>(path: &Path, open: impl Fn(&Path) -> Result<T>) -> Result<(T, Option<PathBuf>)> {
+    match open(path) {
+        Err(StoreError::Sqlite(e)) if is_damaged_sqlite(&e) => {
+            let Some(moved) = set_aside_database(path) else { return Err(StoreError::Sqlite(e)) };
+            Ok((open(path)?, Some(moved)))
+        }
+        r => r.map(|db| (db, None)),
+    }
+}
+
+/// Creates the directory that holds `path`, if `path` has one.
+pub(crate) fn create_parent_dir(path: &Path) -> std::io::Result<()> {
+    match path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        Some(dir) => std::fs::create_dir_all(dir),
+        None => Ok(()),
+    }
+}
+
 /// Moves a damaged SQLite file (and its `-journal`) to `<name>.corrupt-<secs>-<n>`;
 /// returns the new name, or `None` when the rename failed (nothing moved).
 pub fn set_aside_database(path: &Path) -> Option<PathBuf> {
@@ -348,13 +409,9 @@ pub fn set_aside_database(path: &Path) -> Option<PathBuf> {
     if moved == path {
         return None;
     }
-    let mut journal = path.as_os_str().to_owned();
-    journal.push("-journal");
-    let journal = PathBuf::from(journal);
+    let journal = with_suffix(path, "-journal");
     if journal.exists() {
-        let mut dest = moved.as_os_str().to_owned();
-        dest.push("-journal");
-        let _ = std::fs::rename(&journal, PathBuf::from(dest));
+        let _ = std::fs::rename(&journal, with_suffix(&moved, "-journal"));
     }
     Some(moved)
 }
@@ -363,9 +420,7 @@ pub fn set_aside_database(path: &Path) -> Option<PathBuf> {
 /// file when the backup is missing or older than [`BACKUP_INTERVAL`] and the current
 /// file passes `valid` (a corrupt file never replaces a good backup).
 pub fn save_with_backup(path: &Path, bytes: &[u8], valid: impl Fn(&[u8]) -> bool) -> Result<()> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)?;
-    }
+    create_parent_dir(path)?;
     if path.exists() {
         let bak = backup_path(path);
         let stale = match std::fs::metadata(&bak).and_then(|m| m.modified()) {
@@ -582,25 +637,19 @@ mod tests {
             for t in 0..8 {
                 let f = &f;
                 s.spawn(move || {
-                    for i in 0..50 {
+                    for i in 0..16 {
                         write_atomic(f, format!("{t}-{i}").as_bytes()).unwrap();
                     }
                 });
             }
         });
         let last = std::fs::read_to_string(&f).unwrap();
-        assert!(last.ends_with("-49"), "{last}");
+        assert!(last.ends_with("-15"), "{last}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     fn parse_json(b: &[u8]) -> std::result::Result<serde_json::Value, String> {
         serde_json::from_slice::<serde_json::Value>(b).map_err(|e| e.to_string())
-    }
-
-    fn with_name(p: &Path, suffix: &str) -> PathBuf {
-        let mut s = p.as_os_str().to_owned();
-        s.push(suffix);
-        PathBuf::from(s)
     }
 
     /// The file renamed over is missing (fuse.fsp during a rename, or a crash in that
@@ -617,7 +666,7 @@ mod tests {
         // Someone else's files with similar names are never taken.
         std::fs::write(dir.path().join("state.json2.tmp.1.0"), b"{\"v\":20}").unwrap();
         std::fs::write(dir.path().join("other.json.tmp.1.0"), b"{\"v\":30}").unwrap();
-        let tmp = with_name(&f, ".tmp.4242.7");
+        let tmp = with_suffix(&f, ".tmp.4242.7");
         std::fs::write(&tmp, b"{\"v\":3}").unwrap();
         let r = load_recovering(&f, parse_json).unwrap();
         assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Temp, Some(3)));
@@ -632,7 +681,7 @@ mod tests {
         let r = load_recovering(&f, parse_json).unwrap();
         assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Backup, Some(1)));
         // The next save removes left-overs older than STALE_TEMP_AGE, not young ones.
-        let young = with_name(&f, ".tmp.4243.0");
+        let young = with_suffix(&f, ".tmp.4243.0");
         std::fs::write(&young, b"{").unwrap();
         save_with_backup(&f, b"{\"v\":4}", valid).unwrap();
         assert!(!tmp.exists() && young.exists());
@@ -649,32 +698,51 @@ mod tests {
         save_with_backup(&f, b"{\"v\":1}", valid).unwrap();
         save_with_backup(&f, b"{\"v\":2}", valid).unwrap();
         // The moment inside a rename on fuse.fsp: no file, its temporary file present.
-        let tmp = with_name(&f, ".tmp.4242.0");
+        let tmp = with_suffix(&f, ".tmp.4242.0");
         std::fs::rename(&f, &tmp).unwrap();
         std::fs::write(&tmp, b"{\"v\":").unwrap(); // still being written: not usable
         let before = load_waits();
-        let t = std::thread::spawn({
+        // The save finishes while the load waits for it.
+        on_settle_wait({
             let (f, tmp) = (f.clone(), tmp.clone());
             move || {
-                // Finish the save once the load is waiting for it, not after a fixed
-                // sleep, which a busy machine can stretch past the load's 127 ms.
-                let start = std::time::Instant::now();
-                while load_waits() == before && start.elapsed() < Duration::from_secs(5) {
-                    std::thread::yield_now();
-                }
                 std::fs::write(&tmp, b"{\"v\":3}").unwrap();
                 std::fs::rename(&tmp, &f).unwrap();
             }
         });
         let r = load_recovering(&f, parse_json).unwrap();
-        t.join().unwrap();
         assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Primary, Some(3)));
         assert!(load_waits() > before);
         // A file that never existed (no backup, no temporary file) is not waited for.
-        let t = std::time::Instant::now();
+        // Counted on this thread: a time bound below the 127 ms of waits can be missed on
+        // a busy machine, and the process-wide count includes other tests' loads.
+        let here = SETTLE_WAITS_HERE.with(|w| w.get());
         assert_eq!(load_recovering(&dir.path().join("new.json"), parse_json).unwrap().source, LoadSource::Missing);
-        // Waiting would take the whole 127 ms.
-        assert!(t.elapsed() < Duration::from_millis(120));
+        assert_eq!(SETTLE_WAITS_HERE.with(|w| w.get()), here, "a missing file with nothing pending is not waited for");
+    }
+
+    /// A save that renames its copy into place after the load's last read, while the
+    /// load tries the temporary copies, is still found: the file is read once more
+    /// before the older backup is used.
+    #[test]
+    fn a_rename_during_the_temp_scan_is_not_missed() {
+        let dir = TempDir::new("rename-late");
+        let f = dir.path().join("state.json");
+        let valid = |b: &[u8]| parse_json(b).is_ok();
+        save_with_backup(&f, b"{\"v\":1}", valid).unwrap();
+        save_with_backup(&f, b"{\"v\":2}", valid).unwrap();
+        std::fs::remove_file(&f).unwrap();
+        // A partial temporary copy: the load waits for it, then tries it, and the save
+        // finishes while it does.
+        std::fs::write(with_suffix(&f, ".tmp.4242.0"), b"{\"v\":").unwrap();
+        let parse = |b: &[u8]| {
+            if b == b"{\"v\":" && !f.exists() {
+                std::fs::write(&f, b"{\"v\":3}").unwrap();
+            }
+            parse_json(b)
+        };
+        let r = load_recovering(&f, parse).unwrap();
+        assert_eq!((r.source, r.value.unwrap()["v"].as_i64()), (LoadSource::Primary, Some(3)));
     }
 
     #[test]

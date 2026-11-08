@@ -28,17 +28,19 @@
 //!
 //! The app opens it on every screen: on [`is_trigger`] it pushes
 //! [`crate::router::Route::QuickLight`] ([`ControlCenterScreen`], route kind and screen
-//! name `quicklight`). The older [`QuickLight`] widget (two sliders) stays for the
-//! settings page; its actions go to [`apply`].
+//! name `quicklight`). [`QuickLight`] reads the two light sliders for the panel and the
+//! settings page; their actions go to [`apply`].
 
-use super::advanced;
+use super::{advanced, current_settings, edit_settings};
 use super::popup::{self, Anchor, PopupCatcher, SettingsPopup};
-use crate::router::{AppCtx, Route, Services, Transition};
+use crate::screens::common::paint_cx;
+use crate::router::{AppCtx, Route, Transition};
 use ink_device::clock::DateTime;
 use ink_device::light::{AmberMode, AmberSchedule, AmberScheduler, DayTime};
-use ink_device::{Clock, Light, Point, Rect, RefreshClass, Rotation, Size};
+use ink_device::{Clock, Light, NetStatus, Rect, RefreshClass, Rotation, Size};
 use ink_store::prefs::{label, CONTROL_BUTTONS};
 use ink_text::Style;
+use ink_ui::controls::paint_round_button;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
 use ink_ui::{
     Damage, Direction, EventResult, Gesture, Icon, Label, PaintCx, Segmented, Slider, TouchKind, UiEvent, Widget,
@@ -104,7 +106,7 @@ pub fn apply(action: &str, light: &mut dyn Light) -> Option<String> {
     })
 }
 
-/// The panel.
+/// The light sliders of the device.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuickLight {
     /// Brightness slider; `None` when the device has no frontlight.
@@ -114,7 +116,7 @@ pub struct QuickLight {
 }
 
 impl QuickLight {
-    /// A panel showing the light's current levels.
+    /// Sliders at the light's current levels.
     pub fn read(light: &dyn Light) -> Self {
         let slider = |label: &str, range: (u32, u32), v: ink_device::Result<u32>, action: &str| {
             v.ok().map(|v| Slider::new(label, range.0 as f32, range.1 as f32, 1.0, v as f32, action))
@@ -122,89 +124,6 @@ impl QuickLight {
         QuickLight {
             brightness: slider("Brightness", light.brightness_range(), light.brightness(), BRIGHTNESS),
             warmth: slider("Warmth", light.warmth_range(), light.warmth(), WARMTH),
-        }
-    }
-
-    /// Same as [`QuickLight::read`] for the services of a screen context.
-    pub fn from_services(s: &Services) -> Self {
-        QuickLight::read(&*s.light)
-    }
-
-    /// Where the panel goes on a screen of `size`: the top of the screen.
-    pub fn frame(size: Size) -> Rect {
-        Rect::new(0, 0, size.w, 640.min(size.h))
-    }
-
-    /// (title, brightness, warmth, done button) inside the panel `b`.
-    pub fn parts(b: Rect) -> (Rect, Rect, Rect, Rect) {
-        let x = b.x + 48;
-        let w = b.w.saturating_sub(96);
-        let title = Rect::new(x, b.y + 24, w, 80);
-        let bright = Rect::new(x, b.y + 110, w, 200);
-        let warm = Rect::new(x, b.y + 320, w, 200);
-        let done = Rect::new(b.right() - 48 - 260, b.bottom() - 110, 260, 90);
-        (title, bright, warm, done)
-    }
-}
-
-impl Widget for QuickLight {
-    fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
-        let (fg, bg) = (cx.theme.fg, cx.theme.bg);
-        fill_round_rect(cx.canvas, b, 0.0, bg);
-        // The bottom edge separates the panel from the page under it.
-        let edge = Rect::new(b.x, b.bottom() - 6, b.w, 6);
-        fill_round_rect(cx.canvas, edge, 0.0, fg);
-        let (title, bright, warm, done) = QuickLight::parts(b);
-        let px = cx.theme.font_px;
-        cx.text_left(title, "Light", px * 1.1, Style::Bold, fg);
-        match &mut self.brightness {
-            Some(s) => s.paint(cx, bright),
-            None => cx.text_left(bright, "Frontlight not available", px, Style::Regular, cx.theme.muted),
-        }
-        match &mut self.warmth {
-            Some(s) => s.paint(cx, warm),
-            None => cx.text_left(warm, "Warm light not available", px, Style::Regular, cx.theme.muted),
-        }
-        stroke_round_rect(cx.canvas, done, cx.theme.radius, cx.theme.border_px as f32, fg);
-        cx.text_centered(done, "Done", px, Style::Regular, fg);
-    }
-
-    fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        let (_, bright, warm, done) = QuickLight::parts(b);
-        let pos: Option<Point> = match ev {
-            UiEvent::Gesture(g) => ink_ui::widget::gesture_pos(g),
-            UiEvent::Touch(t) => Some(t.pos),
-            _ => None,
-        };
-        if let (UiEvent::Gesture(Gesture::Tap { .. }), Some(p)) = (ev, pos) {
-            if done.contains(p) {
-                return EventResult::Action(CLOSE.into());
-            }
-        }
-        // Touch moves and lifts go to the slider that took the touch-down, wherever they are.
-        let touch_follow = matches!(ev, UiEvent::Touch(t) if t.kind != ink_ui::TouchKind::Down);
-        for (slider, r) in [(&mut self.brightness, bright), (&mut self.warmth, warm)] {
-            let Some(s) = slider else { continue };
-            if touch_follow || pos.is_some_and(|p| r.contains(p)) {
-                match s.event(ev, r) {
-                    EventResult::Ignored => {}
-                    other => return other,
-                }
-            }
-        }
-        // The panel is modal: everything else on it is consumed.
-        match ev {
-            UiEvent::Gesture(_) | UiEvent::Touch(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
-        }
-    }
-
-    fn refresh_class(&self) -> RefreshClass {
-        let dragging = [&self.brightness, &self.warmth].iter().any(|s| s.as_ref().is_some_and(|s| s.refresh_class() == RefreshClass::Du));
-        if dragging {
-            RefreshClass::Du
-        } else {
-            RefreshClass::Gl16
         }
     }
 }
@@ -269,17 +188,21 @@ pub enum AutoMode {
 }
 
 impl AutoMode {
-    /// Index in the panel's choice (Off, Sunset, Custom).
-    pub fn index(self) -> usize {
-        self as usize
-    }
-
-    /// From the panel's choice.
+    /// From the panel's choice (Off, Sunset, Custom).
     pub fn from_index(i: usize) -> AutoMode {
         match i {
             1 => AutoMode::Sunset,
             2 => AutoMode::Custom,
             _ => AutoMode::Off,
+        }
+    }
+
+    /// The status line after choosing this mode.
+    fn status(self) -> &'static str {
+        match self {
+            AutoMode::Off => "Auto warmth off",
+            AutoMode::Sunset => "Auto warmth: sunset to sunrise",
+            AutoMode::Custom => "Auto warmth: your hours",
         }
     }
 }
@@ -626,8 +549,6 @@ pub fn picker_area(l: &Layout) -> Rect {
 pub enum Glyph {
     /// An icon of the set.
     Icon(Icon),
-    /// Airplane seen from above.
-    Airplane,
     /// Circle half black, half white (night mode).
     Contrast,
     /// Filled sun (warmth).
@@ -643,32 +564,6 @@ impl Glyph {
         let p = |x: f32, y: f32| (ox + x * s, oy + y * s);
         match self {
             Glyph::Icon(i) => cx.icon(i, r, side, value),
-            Glyph::Airplane => {
-                let pts: Vec<(f32, f32)> = [
-                    (12.0, 1.5),
-                    (13.6, 3.5),
-                    (13.6, 9.0),
-                    (22.5, 14.0),
-                    (22.5, 16.2),
-                    (13.6, 13.6),
-                    (13.6, 18.6),
-                    (16.5, 20.6),
-                    (16.5, 22.5),
-                    (12.0, 21.2),
-                    (7.5, 22.5),
-                    (7.5, 20.6),
-                    (10.4, 18.6),
-                    (10.4, 13.6),
-                    (1.5, 16.2),
-                    (1.5, 14.0),
-                    (10.4, 9.0),
-                    (10.4, 3.5),
-                ]
-                .iter()
-                .map(|&(x, y)| p(x, y))
-                .collect();
-                Path::new().polygon(&pts).fill(cx.canvas, value);
-            }
             Glyph::Contrast => {
                 let (cx0, cy0) = p(12.0, 12.0);
                 let rad = 9.5 * s;
@@ -818,10 +713,8 @@ impl Widget for Detail {
                     let x0 = if i == 0 { b.x } else { b.x + (b.w / 2) as i32 };
                     cx.text_left(Rect::new(x0, b.y, 104, b.h), cap, t.label.px, Style::Regular, t.fg);
                     cx.text_centered(times[i], &v.to_string(), t.body.px, Style::Bold, t.fg);
-                    for (r, icon) in [(btns[2 * i], Icon::Minus), (btns[2 * i + 1], Icon::Plus)] {
-                        stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, t.border_px as f32, t.fg);
-                        cx.icon(icon, r, r.w / 2, t.fg);
-                    }
+                    paint_round_button(cx, btns[2 * i], Icon::Minus);
+                    paint_round_button(cx, btns[2 * i + 1], Icon::Plus);
                 }
             }
         }
@@ -947,36 +840,6 @@ impl Widget for Tile {
             None
         } else {
             Some(Vec::new())
-        }
-    }
-}
-
-/// The layer under the panel: a tap below the panel closes it ([`CLOSE`]). Every other
-/// touch and gesture is ignored, so a touch on an empty part of the panel marks nothing
-/// dirty (a `Scrim` would repaint and refresh the whole screen with GL16 on every touch).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Backdrop {
-    /// The panel; taps inside it do not close.
-    pub panel: Rect,
-}
-
-impl Widget for Backdrop {
-    fn paint(&mut self, _cx: &mut PaintCx, _b: Rect) {}
-
-    fn opaque(&self) -> bool {
-        false
-    }
-
-    /// It draws nothing: being added (full screen) must not refresh the whole screen,
-    /// which would make the opening a screen-change flash.
-    fn adds_damage(&self) -> bool {
-        false
-    }
-
-    fn event(&mut self, ev: &UiEvent, _b: Rect) -> EventResult {
-        match ev {
-            UiEvent::Gesture(Gesture::Tap { pos }) if !self.panel.contains(*pos) => EventResult::Action(CLOSE.into()),
-            _ => EventResult::Ignored,
         }
     }
 }
@@ -1114,9 +977,6 @@ const SLOW_TICK: Duration = Duration::from_secs(30);
 /// server's address after USB networking goes off).
 const PLUGIN_POLL: Duration = Duration::from_secs(2);
 
-/// The old name of [`ControlCenterScreen`].
-pub type QuickLightScreen = ControlCenterScreen;
-
 fn on_off(on: bool) -> &'static str {
     if on {
         "On"
@@ -1128,12 +988,9 @@ fn on_off(on: bool) -> &'static str {
 impl ControlCenterScreen {
     /// The tile of button `name` (a name of [`CONTROL_BUTTONS`]) with its current state.
     fn make_tile(name: &str, cx: &mut AppCtx) -> Tile {
-        let settings = cx.settings_update.as_ref().unwrap_or(cx.settings);
+        let settings = current_settings(cx);
         let rot = crate::app::settings_rotation(settings);
-        let bars_on = match crate::screens::reader::reader_bars_hidden() {
-            Some(hidden) => !hidden && (settings.status_bars.top.enabled || settings.status_bars.bottom.enabled),
-            None => settings.status_bars.top.enabled || settings.status_bars.bottom.enabled,
-        };
+        let bars_on = (settings.status_bars.top.enabled || settings.status_bars.bottom.enabled) && crate::screens::reader::reader_bars_hidden() != Some(true);
         let a = format!("{TILE}:{name}");
         let caption = label(CONTROL_BUTTONS, name);
         let toggle = |glyph: Glyph, on: bool| Tile::new(glyph, caption, on_off(on), Some(on), a.clone());
@@ -1152,13 +1009,15 @@ impl ControlCenterScreen {
                 t
             }
             "wifi" => {
-                let wifi = cx.services.wifi.state().ok();
+                let wifi = cx.services.wifi.status().ok();
                 let airplane = cx.services.wifi.airplane_mode().ok();
-                let wifi_on = wifi.as_ref().is_some_and(|w| w.enabled) && airplane != Some(true);
+                let wifi_on = wifi.as_ref().is_some_and(NetStatus::radio_on) && airplane != Some(true);
                 let state = match &wifi {
                     None => "Not available".to_string(),
-                    Some(w) if wifi_on => w.essid.clone().unwrap_or_else(|| "On".into()),
-                    Some(_) => "Off".into(),
+                    Some(_) if !wifi_on => "Off".into(),
+                    Some(NetStatus::Connected { essid, .. }) => essid.clone(),
+                    Some(NetStatus::Connecting { .. }) => "Connecting…".into(),
+                    Some(_) => "Not connected".into(),
                 };
                 Tile::new(Glyph::Icon(Icon::Wifi), caption, state, Some(wifi_on), a)
             }
@@ -1205,10 +1064,10 @@ impl ControlCenterScreen {
 
     fn build(&mut self, cx: &mut AppCtx) {
         let size = cx.screen.size();
-        let names = buttons(cx.settings_update.as_ref().unwrap_or(cx.settings), cx.plugins);
+        let names = buttons(current_settings(cx), cx.plugins);
         let lay = layout(size, names.len());
         let mut tree = WidgetTree::new();
-        tree.add(None, Box::new(Backdrop { panel: lay.panel }), Rect::from_size(size));
+        tree.add(None, Box::new(PopupCatcher { modal: false, ..PopupCatcher::new(lay.panel, CLOSE) }), Rect::from_size(size));
         // Only the edge strip: a removed picker repaints its own rect, not the whole panel
         // (the panel is cleared by `invalidate` on enter and resize).
         let rule = cx.theme.rule_px;
@@ -1216,7 +1075,7 @@ impl ControlCenterScreen {
         let now = cx.services.clock.local_now();
         self.minute = Some((now.hour, now.minute));
         let header = tree.add(None, Box::new(Header::read(&now, &*cx.services.battery)), lay.header);
-        let q = QuickLight::from_services(&cx.services);
+        let q = QuickLight::read(&*cx.services.light);
         let mut slider = |s: Option<Slider>, icon: Rect, r: Rect, glyph: Glyph, missing: &str| match s {
             Some(s) => {
                 tree.add(None, Box::new(GlyphView(glyph)), icon);
@@ -1234,7 +1093,7 @@ impl ControlCenterScreen {
         let detail = Self::detail(cx);
         let choice = tree.add(
             None,
-            Box::new(Segmented::new(&["Off", "Sunset", "Custom"], AUTO).with_selected(detail.mode.index())),
+            Box::new(Segmented::new(&["Off", "Sunset", "Custom"], AUTO).with_selected(detail.mode as usize)),
             lay.auto_choice,
         );
         let detail = tree.add(None, Box::new(detail), lay.detail);
@@ -1281,12 +1140,6 @@ impl ControlCenterScreen {
         }
     }
 
-    /// Shows the warmth the device has now (after auto warmth changed it).
-    fn refresh_warmth(&mut self, cx: &mut AppCtx) {
-        let Ok(v) = cx.services.light.warmth() else { return };
-        self.show_warmth(v);
-    }
-
     /// Shows the device state of the background read (only the changed tiles and
     /// sliders repaint).
     fn apply_state_read(&mut self, cx: &mut AppCtx) {
@@ -1324,7 +1177,7 @@ impl ControlCenterScreen {
         let Some(ids) = self.ids else { return };
         let d = Self::detail(cx);
         if let Some(s) = self.tree.get_mut::<Segmented>(ids.choice) {
-            s.selected = d.mode.index();
+            s.selected = d.mode as usize;
         }
         if let Some(w) = self.tree.get_mut::<Detail>(ids.detail) {
             *w = d;
@@ -1346,6 +1199,11 @@ impl ControlCenterScreen {
         if let Some(w) = w {
             self.show_warmth(w);
         }
+    }
+
+    fn set_auto_mode(&mut self, cx: &mut AppCtx, mode: AutoMode) {
+        self.change_auto(cx, |w| w.mode = mode);
+        self.set_status(mode.status());
     }
 
     /// Writes the light while slider `id` is dragged (see [`should_write`]); only the
@@ -1370,13 +1228,6 @@ impl ControlCenterScreen {
         self.live = Some((id, v, now));
     }
 
-    /// Changes the settings with `f` (stored and saved by the app after this event).
-    fn edit(cx: &mut AppCtx, f: impl FnOnce(&mut ink_store::Settings)) {
-        let mut s = cx.settings_update.take().unwrap_or_else(|| cx.settings.clone());
-        f(&mut s);
-        *cx.settings_update = Some(s);
-    }
-
     /// Saves the screen as a PNG in `<root>/screenshots/` and returns its path.
     fn screenshot(cx: &mut AppCtx) -> anyhow::Result<std::path::PathBuf> {
         let t0 = Instant::now();
@@ -1394,7 +1245,7 @@ impl ControlCenterScreen {
     /// Shows `text` in the status line at once (before a call that blocks).
     fn say_now(&mut self, text: &str, cx: &mut AppCtx) {
         self.set_status(text);
-        for d in self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme }) {
+        for d in self.tree.paint(&mut paint_cx(cx)) {
             if let Err(e) = cx.show(d.rect, d.class) {
                 log::warn!("control center: show: {e}");
             }
@@ -1446,7 +1297,7 @@ impl ControlCenterScreen {
             self.tree.remove(p.catcher);
         }
         let close = popup.close_action.clone();
-        let catcher = self.tree.add(None, Box::new(PopupCatcher { popup: r, action: close }), Rect::from_size(cx.screen.size()));
+        let catcher = self.tree.add(None, Box::new(PopupCatcher::new(r, close)), Rect::from_size(cx.screen.size()));
         let n = popup.list.rows.len();
         let id = self.tree.add(None, Box::new(popup), r);
         log::info!("control center: popup {name} with {n} rows at {r:?}");
@@ -1609,9 +1460,23 @@ impl ControlCenterScreen {
             return;
         }
         if let Some(hint) = &tile.needs_wifi {
-            if !cx.services.wifi.state().is_ok_and(|w| w.enabled) {
-                self.set_status(hint.clone());
-                return;
+            match cx.services.wifi.status() {
+                Ok(NetStatus::Connected { .. }) => {}
+                // Not connected yet: the plugin's request would only fail.
+                Ok(NetStatus::Connecting { .. }) => {
+                    self.set_status("Wi-Fi is still connecting");
+                    return;
+                }
+                Ok(NetStatus::NoNetwork) => {
+                    self.set_status("Wi-Fi is not connected");
+                    return;
+                }
+                Ok(NetStatus::Off) => {
+                    self.set_status(hint.clone());
+                    return;
+                }
+                // A backend that cannot tell: let the plugin try.
+                Err(_) => {}
             }
         }
         if cx.plugins.trigger(plugin, id, None) {
@@ -1626,16 +1491,16 @@ impl ControlCenterScreen {
         log::info!("control center: button {name}");
         match name {
             "wifi" => {
-                let on = cx.services.wifi.state().is_ok_and(|w| w.enabled) && cx.services.wifi.airplane_mode().ok() != Some(true);
+                let on = cx.services.wifi.status().is_ok_and(|w| w.radio_on()) && cx.services.wifi.airplane_mode().ok() != Some(true);
                 match cx.services.wifi.set_enabled(!on) {
-                    Ok(()) => self.set_status(if on { "Wi-Fi off" } else { "Wi-Fi on" }),
+                    Ok(()) => self.set_status(if on { "Wi-Fi off" } else { "Turning Wi-Fi on…" }),
                     Err(e) => self.set_status(format!("Wi-Fi: {e}")),
                 }
                 self.refresh_tiles(cx);
             }
             "night_mode" => {
                 let on = !cx.screen.night_mode();
-                Self::edit(cx, |s| s.device.night_mode = on);
+                edit_settings(cx, |s| s.device.night_mode = on);
                 match cx.screen.set_night_mode(on) {
                     Ok(()) => self.set_status(if on { "Night mode on" } else { "Night mode off" }),
                     Err(e) => self.set_status(format!("Night mode: {e}")),
@@ -1649,9 +1514,7 @@ impl ControlCenterScreen {
                     self.set_status("Auto warmth: no warm light on this device");
                 } else {
                     let on = with_auto_warmth(&mut *cx.services.light, |w, _| w.mode != AutoMode::Off);
-                    let mode = if on { AutoMode::Off } else { AutoMode::Sunset };
-                    self.change_auto(cx, |w| w.mode = mode);
-                    self.set_status(if on { "Auto warmth off" } else { "Auto warmth: sunset to sunrise" });
+                    self.set_auto_mode(cx, if on { AutoMode::Off } else { AutoMode::Sunset });
                     self.refresh_tiles(cx);
                 }
             }
@@ -1668,9 +1531,9 @@ impl ControlCenterScreen {
                 self.refresh_tiles(cx);
             }
             "status_bars" => {
-                let s = cx.settings_update.as_ref().unwrap_or(cx.settings);
+                let s = current_settings(cx);
                 let on = !(s.status_bars.top.enabled || s.status_bars.bottom.enabled);
-                Self::edit(cx, |s| {
+                edit_settings(cx, |s| {
                     s.status_bars.top.enabled = on;
                     s.status_bars.bottom.enabled = on;
                 });
@@ -1684,15 +1547,15 @@ impl ControlCenterScreen {
             other if ink_plugin::registry::parse_saved_id(other).is_some() => self.plugin_tile(other, cx),
             "rotate" => {
                 // Upright to the chosen angle, any other angle back upright (advanced::rotate_tap).
-                let s = cx.settings_update.as_ref().unwrap_or(cx.settings);
+                let s = current_settings(cx);
                 let (now, deg) = (s.device.rotation, s.ui.rotate_degrees());
                 let to = advanced::rotate_tap(now, deg);
                 if to == now % 4 {
                     self.set_status("Rotate angle is 0°: hold Rotate to choose one");
                     return Ok(Transition::None);
                 }
-                Self::edit(cx, |s| s.device.rotation = to);
-                log::info!("control center: rotate to {:?} (angle {deg})", crate::app::settings_rotation(cx.settings_update.as_ref().unwrap_or(cx.settings)));
+                edit_settings(cx, |s| s.device.rotation = to);
+                log::info!("control center: rotate to {:?} (angle {deg})", crate::app::settings_rotation(current_settings(cx)));
                 // The app turns the screen after this event; on_resize lays the panel out.
             }
             "sleep" => {
@@ -1793,6 +1656,14 @@ impl crate::router::AppScreen for ControlCenterScreen {
         }
         match ev {
             UiEvent::Quit => return Ok(Transition::Exit),
+            // The Wi-Fi tile shows what the network does now.
+            UiEvent::Power(ink_device::PowerEvent::Network(ink_device::NetEvent::Status(_))) => {
+                // Not under an open picker (the tile would draw over it).
+                if self.picker.is_none() {
+                    self.refresh_tiles_where(cx, |n| n == "wifi");
+                }
+                return Ok(Transition::None);
+            }
             UiEvent::Key(k) if k.pressed && matches!(k.key, ink_device::Key::Power | ink_device::Key::Back) => {
                 return Ok(Transition::Pop)
             }
@@ -1831,7 +1702,10 @@ impl crate::router::AppScreen for ControlCenterScreen {
                 // The warmth on the 30 s timer, not on every plugin tile poll.
                 if self.slow_tick.is_none_or(|t| t.elapsed() + PLUGIN_POLL > SLOW_TICK) {
                     self.slow_tick = Some(Instant::now());
-                    self.refresh_warmth(cx);
+                    // The warmth the device has now (auto warmth may have changed it).
+                    if let Ok(v) = cx.services.light.warmth() {
+                        self.show_warmth(v);
+                    }
                 }
                 return Ok(Transition::None);
             }
@@ -1874,13 +1748,7 @@ impl crate::router::AppScreen for ControlCenterScreen {
             advanced::PICK => return Ok(self.pick(arg, cx)),
             popup::MENU_ROW => self.plugin_pick(&a, cx),
             AUTO => {
-                let mode = AutoMode::from_index(arg.parse().unwrap_or(0));
-                self.change_auto(cx, |w| w.mode = mode);
-                self.set_status(match mode {
-                    AutoMode::Off => "Auto warmth off",
-                    AutoMode::Sunset => "Auto warmth: sunset to sunrise",
-                    AutoMode::Custom => "Auto warmth: your hours",
-                });
+                self.set_auto_mode(cx, AutoMode::from_index(arg.parse().unwrap_or(0)));
             }
             FROM | TO => {
                 let d: i32 = arg.parse().unwrap_or(0);
@@ -1903,7 +1771,7 @@ impl crate::router::AppScreen for ControlCenterScreen {
         if let Some(name) = self.picker.as_ref().filter(|p| matches!(p.rows, PickerRows::Plugin { .. })).map(|p| p.name.clone()) {
             self.take_plugin_menus(&name, cx);
         }
-        let damage = self.tree.paint(&mut PaintCx { canvas: cx.canvas, fonts: cx.fonts, theme: cx.theme });
+        let damage = self.tree.paint(&mut paint_cx(cx));
         if std::mem::take(&mut self.flash_all) {
             return Ok(vec![Damage { rect: cx.canvas.bounds(), class: RefreshClass::Gc16 }]);
         }
@@ -1928,6 +1796,7 @@ impl crate::router::AppScreen for ControlCenterScreen {
 mod tests {
     use super::*;
     use crate::screens::settings::fakes::Fake;
+    use ink_device::Point;
 
     #[test]
     fn trigger_needs_a_swipe_down_from_the_top_edge() {
@@ -2201,8 +2070,12 @@ mod tests {
         s.ui.control_buttons = ["wifi", "plugin:drift:d"].map(String::from).to_vec();
         let tile = layout(Size::new(1272, 1696), 2).tiles[1];
         let (x, y) = (tile.x + 40, tile.y + tile.h as i32 / 2);
+        // The fake light never finishes its state read, so the first tile poll comes
+        // STATE_WAIT (4 s, plus up to one 150 ms poll) and PLUGIN_POLL (2 s) after the
+        // panel opens. 6000 ms of script sleep left no margin: the script counts only time
+        // spent sleeping, and one late wake-up on a busy machine put the poll after `quit`.
         let (mut device, probe) =
-            headless::open(HeadlessOptions { script: parse(&format!("{OPEN}sleep 6000\nquit\n")).unwrap(), out_dir: None, ..Default::default() });
+            headless::open(HeadlessOptions { script: parse(&format!("{OPEN}sleep 7000\nquit\n")).unwrap(), out_dir: None, ..Default::default() });
         let _fake = crate::screens::settings::fakes::install(&mut device);
         let root = std::env::temp_dir().join(format!("ink-cc-drift-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2211,7 +2084,9 @@ mod tests {
         app.plugins = crate::plugin_entries::test_plugin::Drift::host();
         app.run(crate::router::Route::Demo).unwrap();
         // `late` is an "on" state: the tile is filled. (The first seconds after opening
-        // poll for the device state read; the tile poll follows it.)
+        // poll for the device state read, which the fakes never finish: the first tile
+        // poll comes STATE_WAIT + PLUGIN_POLL, just over 6 s, after opening, so the
+        // script sleeps 7 s.)
         assert!(probe.panel().get(x, y).is_some_and(|v| v < 0x40), "the tile shows the state from after the panel opened");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2429,9 +2304,16 @@ mod tests {
     #[test]
     fn long_press_on_a_tile_opens_the_picker_before_the_lift() {
         for (name, x, y) in [("rotate", 1095, 852), ("wifi", 789, 852)] {
-            let none = run_cc(&format!("hold-{name}-none"), &format!("{OPEN}sleep 300\n")).probe.panel();
-            let held = run_cc(&format!("hold-{name}-held"), &format!("{OPEN}down {x} {y}\nsleep 900\n")).probe.panel();
-            let lifted = run_cc(&format!("hold-{name}-lifted"), &format!("{OPEN}down {x} {y}\nsleep 900\nup {x} {y}\nsleep 400\n")).probe.panel();
+            // Real-time scripts that mostly sleep: the three independent runs go at once.
+            let runs = [
+                (format!("hold-{name}-none"), format!("{OPEN}sleep 300\n")),
+                (format!("hold-{name}-held"), format!("{OPEN}down {x} {y}\nsleep 900\n")),
+                (format!("hold-{name}-lifted"), format!("{OPEN}down {x} {y}\nsleep 900\nup {x} {y}\nsleep 400\n")),
+            ];
+            let [none, held, lifted]: [ink_device::Canvas; 3] = std::thread::scope(|s| {
+                let handles: Vec<_> = runs.iter().map(|(n, script)| s.spawn(move || run_cc(n, script).probe.panel())).collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>().try_into().unwrap()
+            });
             let differing = none.pixels.iter().zip(&held.pixels).filter(|(a, b)| a != b).count();
             assert!(differing > 20_000, "{name}: the picker is not on the panel before the lift ({differing} pixels differ)");
             assert!(held.pixels == lifted.pixels, "{name}: the lift changed the panel");

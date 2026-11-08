@@ -429,11 +429,10 @@ impl<'a> HostCtx<'a> {
 
     fn check_url(&self, url: &str) -> Result<()> {
         self.need(Permission::Network)?;
-        let m = crate::PluginManifest { hosts: self.hosts.to_vec(), ..crate::PluginManifest::new("x", "0", &[]) };
         if crate::manifest::url_host(url).is_none() {
             return Err(PluginError::Failed(format!("not an http(s) URL: {url}")));
         }
-        if !m.allows_url(url) {
+        if !crate::manifest::hosts_allow(self.hosts, url) {
             return Err(PluginError::Permission(format!("network host of {url} is not in hosts of plugin.toml")));
         }
         Ok(())

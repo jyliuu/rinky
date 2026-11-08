@@ -1,8 +1,6 @@
 //! Line breaking.
 //!
 //! - [`break_opportunities`]: UAX #14 break positions in a string (`unicode-linebreak`).
-//! - [`greedy`]: fills lines with items of known width, as the prototype layout does
-//!   (always at least one item per line).
 //! - The box/glue/penalty model ([`Item`]) of Knuth and Plass with two breakers on the
 //!   same input: [`knuth_plass`] (total fit: the least "demerits" over the whole
 //!   paragraph, so lines are evenly loose and hyphens are rare) and [`greedy_items`]
@@ -39,38 +37,6 @@ pub fn break_opportunities(text: &str) -> Vec<(usize, Break)> {
             (i, kind)
         })
         .collect()
-}
-
-/// A line produced by [`greedy`]: items `start..end` and their total width with the
-/// natural spaces between them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LineSpan {
-    /// First item.
-    pub start: usize,
-    /// One past the last item.
-    pub end: usize,
-    /// Sum of item widths plus `space` between items.
-    pub width: f32,
-}
-
-/// Greedy line filling: `widths[i]` is the width of item i, `space` the gap between
-/// items, `first_width` the available width of the first line (indent applied) and
-/// `width` of the others.
-pub fn greedy(widths: &[f32], space: f32, first_width: f32, width: f32) -> Vec<LineSpan> {
-    let mut lines = Vec::new();
-    let mut i = 0;
-    while i < widths.len() {
-        let avail = if lines.is_empty() { first_width } else { width };
-        let mut end = i + 1;
-        let mut used = widths[i];
-        while end < widths.len() && used + space + widths[end] <= avail {
-            used += space + widths[end];
-            end += 1;
-        }
-        lines.push(LineSpan { start: i, end, width: used });
-        i = end;
-    }
-    lines
 }
 
 /// A penalty at or below this forces a break.
@@ -130,10 +96,12 @@ impl Item {
         Item::Penalty { width: 0.0, penalty: FORCED, flagged: false }
     }
 
-    fn width(&self) -> f32 {
+    /// (width, stretch, shrink) the item adds to a line it is inside of.
+    fn dims(&self) -> (f32, f32, f32) {
         match *self {
-            Item::Box { width } | Item::Glue { width, .. } => width,
-            Item::Penalty { .. } => 0.0,
+            Item::Box { width } => (width, 0.0, 0.0),
+            Item::Glue { width, stretch, shrink } => (width, stretch, shrink),
+            Item::Penalty { .. } => (0.0, 0.0, 0.0),
         }
     }
 }
@@ -216,11 +184,7 @@ impl Sums {
         let n = items.len();
         let (mut w, mut y, mut z) = (vec![0.0; n + 1], vec![0.0; n + 1], vec![0.0; n + 1]);
         for (i, it) in items.iter().enumerate() {
-            let (dw, dy, dz) = match *it {
-                Item::Box { width } => (width, 0.0, 0.0),
-                Item::Glue { width, stretch, shrink } => (width, stretch, shrink),
-                Item::Penalty { .. } => (0.0, 0.0, 0.0),
-            };
+            let (dw, dy, dz) = it.dims();
             w[i + 1] = w[i] + dw;
             y[i + 1] = y[i] + dy;
             z[i + 1] = z[i] + dz;
@@ -231,10 +195,7 @@ impl Sums {
     /// Totals at the start of the line after a break at `b`: glue and penalties right
     /// after the break are dropped.
     fn after_break(&self, items: &[Item], b: usize) -> (f32, f32, f32) {
-        let mut k = b;
-        if matches!(items.get(b), Some(Item::Penalty { .. })) || matches!(items.get(b), Some(Item::Glue { .. })) {
-            k = b + 1;
-        }
+        let mut k = b + usize::from(matches!(items.get(b), Some(Item::Penalty { .. } | Item::Glue { .. })));
         while k < items.len() {
             match items[k] {
                 Item::Box { .. } => break,
@@ -506,12 +467,13 @@ pub fn wrap(
         };
         let mut first = 0;
         for br in breaks {
-            let boxes: Vec<&Range<usize>> = spans[first..br.position.min(n)].iter().flatten().collect();
-            if let (Some(a), Some(z)) = (boxes.first(), boxes.last()) {
+            let mut boxes = spans[first..br.position.min(n)].iter().flatten();
+            if let Some(a) = boxes.next() {
+                let z = boxes.next_back().unwrap_or(a);
                 let w: f32 = items[first..br.position]
                     .iter()
                     .skip_while(|i| !matches!(i, Item::Box { .. }))
-                    .map(Item::width)
+                    .map(|i| i.dims().0)
                     .sum::<f32>()
                     + if br.hyphen { hyphen_w } else { 0.0 };
                 lines.push(TextLine { range: a.start..z.end, width: w, hyphen: br.hyphen });
@@ -531,17 +493,6 @@ mod tests {
     fn opportunities() {
         let b = break_opportunities("two words\nnext");
         assert_eq!(b, vec![(4, Break::Allowed), (10, Break::Mandatory), (14, Break::Mandatory)]);
-    }
-
-    #[test]
-    fn greedy_fills_and_never_returns_empty_lines() {
-        let lines = greedy(&[30.0, 30.0, 30.0, 200.0, 10.0], 5.0, 70.0, 100.0);
-        assert_eq!(
-            lines.iter().map(|l| (l.start, l.end)).collect::<Vec<_>>(),
-            vec![(0, 2), (2, 3), (3, 4), (4, 5)]
-        );
-        assert_eq!(lines[0].width, 65.0);
-        assert!(greedy(&[], 5.0, 10.0, 10.0).is_empty());
     }
 
     /// Monospace measure: 10 px per char.
@@ -565,7 +516,7 @@ mod tests {
         let mut out = Vec::new();
         let mut first = 0;
         for b in breaks {
-            let w: f32 = items[first..b.position].iter().skip_while(|i| !matches!(i, Item::Box { .. })).map(Item::width).sum();
+            let w: f32 = items[first..b.position].iter().skip_while(|i| !matches!(i, Item::Box { .. })).map(|i| i.dims().0).sum();
             out.push(w + if b.hyphen { 10.0 } else { 0.0 });
             first = b.position + 1;
         }

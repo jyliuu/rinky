@@ -143,13 +143,12 @@ impl Request {
 
     /// First header named `name` (case-insensitive).
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        find_header(&self.headers, name)
     }
 
     /// `Authorization: Basic ...` (OPDS servers such as Calibre-Web).
     pub fn basic_auth(self, user: &str, password: &str) -> Self {
-        let token = base64(format!("{user}:{password}").as_bytes());
-        self.set_header("Authorization", &format!("Basic {token}"))
+        self.set_header("Authorization", &basic_auth_value(user, password))
     }
 
     /// Sets the head phase timeout ([`Request::timeout`]).
@@ -189,11 +188,7 @@ pub struct Response {
     pub url: String,
 }
 
-impl std::fmt::Debug for Response {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Response").field("status", &self.status).field("url", &self.url).field("headers", &self.headers).finish_non_exhaustive()
-    }
-}
+debug_fields!([] Response, "Response", |s| "status": s.status, "url": s.url, "headers": s.headers);
 
 impl Response {
     /// A response (for fakes in tests); header names are lowercased.
@@ -204,12 +199,20 @@ impl Response {
 
     /// First header named `name` (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        find_header(&self.headers, name)
     }
 
     /// `Content-Length`, when present and valid.
     pub fn content_length(&self) -> Option<u64> {
         self.header("content-length").and_then(|v| v.trim().parse().ok())
+    }
+
+    /// The buffer size to start with for reading the whole body under `limit`: the stated
+    /// `Content-Length` when it is within the limit, else 0. Growing a buffer by doubling
+    /// holds the old and the new copy at each step (up to 3x the body at the peak); a
+    /// lying length costs at most one 16 MiB reservation.
+    pub fn capacity_for(&self, limit: usize) -> usize {
+        self.content_length().filter(|&n| n <= limit as u64).map_or(0, |n| n.min(16 << 20) as usize)
     }
 
     /// The MIME type without parameters, lowercase (`application/atom+xml`).
@@ -219,7 +222,7 @@ impl Response {
 
     /// Reads the whole body (at most `limit` bytes; `usize::MAX` means no practical limit).
     pub fn bytes(mut self, limit: usize) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.capacity_for(limit));
         // One byte more than the limit tells "exactly at the limit" from "too large".
         (&mut self.body).take((limit as u64).saturating_add(1)).read_to_end(&mut out).map_err(NetError::from_read)?;
         if out.len() > limit {
@@ -230,7 +233,8 @@ impl Response {
 
     /// Reads the body as UTF-8 text (lossy), at most `limit` bytes.
     pub fn text(self, limit: usize) -> Result<String> {
-        Ok(String::from_utf8_lossy(&self.bytes(limit)?).into_owned())
+        // A valid body becomes the string without a copy.
+        Ok(String::from_utf8(self.bytes(limit)?).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
     }
 
     /// Reads and parses a JSON body (at most `limit` bytes).
@@ -251,13 +255,28 @@ impl Response {
             return Ok(self);
         }
         let status = self.status;
-        let text = self.text(4096).unwrap_or_default();
-        let message = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v.get("message").or(v.get("error")).and_then(|m| m.as_str()).map(str::to_string))
-            .unwrap_or_else(|| text.trim().chars().take(200).collect());
-        Err(if status == 401 { NetError::Unauthorized(message) } else { NetError::Server { status, message } })
+        Err(status_error(status, &self.text(4096).unwrap_or_default()))
     }
+}
+
+/// The error for an answer with a failing `status` and body `text`: the message is the
+/// body's JSON `message` (or `error`) field, else the start of the body; 401 becomes
+/// [`NetError::Unauthorized`].
+pub fn status_error(status: u16, text: &str) -> NetError {
+    let message = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("message").or(v.get("error")).and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_else(|| text.trim().chars().take(200).collect());
+    if status == 401 {
+        NetError::Unauthorized(message)
+    } else {
+        NetError::Server { status, message }
+    }
+}
+
+/// First header named `name` (case-insensitive).
+fn find_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
 }
 
 /// Sends requests.
@@ -266,23 +285,17 @@ pub trait HttpClient {
     fn send(&self, req: Request) -> Result<Response>;
 }
 
-impl<T: HttpClient + ?Sized> HttpClient for &T {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
+/// References and smart pointers to a client are clients.
+macro_rules! forward_client {
+    ($($ptr:ty),+) => {$(
+        impl<T: HttpClient + ?Sized> HttpClient for $ptr {
+            fn send(&self, req: Request) -> Result<Response> {
+                (**self).send(req)
+            }
+        }
+    )+};
 }
-
-impl<T: HttpClient + ?Sized> HttpClient for Box<T> {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
-}
-
-impl<T: HttpClient + ?Sized> HttpClient for Arc<T> {
-    fn send(&self, req: Request) -> Result<Response> {
-        (**self).send(req)
-    }
-}
+forward_client!(&T, Box<T>, Arc<T>);
 
 /// Which certificate authorities a [`UreqClient`] trusts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -441,45 +454,30 @@ impl UreqClient {
 
 /// Maps a ureq error to [`NetError`].
 pub fn map_ureq(e: ureq::Error) -> NetError {
-    match e {
-        ureq::Error::Timeout(_) => NetError::Timeout,
-        ureq::Error::Tls(m) => NetError::Tls(m.to_string()),
-        ureq::Error::Pem(p) => NetError::Tls(format!("pem: {p}")),
-        ureq::Error::Rustls(r) => NetError::Tls(r.to_string()),
-        ureq::Error::Io(io) => {
-            let msg = io.to_string();
-            if io.kind() == std::io::ErrorKind::TimedOut || io.kind() == std::io::ErrorKind::WouldBlock {
-                NetError::Timeout
-            } else if is_tls_message(&msg) {
-                NetError::Tls(msg)
-            } else {
-                NetError::Http(format!("io: {msg}"))
-            }
-        }
-        other => {
-            let msg = other.to_string();
-            if is_tls_message(&msg) {
-                NetError::Tls(msg)
-            } else {
-                NetError::Http(msg)
-            }
-        }
-    }
-}
-
-fn is_tls_message(msg: &str) -> bool {
+    use std::io::ErrorKind::{TimedOut, WouldBlock};
+    // Other errors are TLS failures when their text says so (ureq wraps some of them).
+    let (msg, http_prefix) = match e {
+        ureq::Error::Timeout(_) => return NetError::Timeout,
+        ureq::Error::Tls(m) => return NetError::Tls(m.to_string()),
+        ureq::Error::Pem(p) => return NetError::Tls(format!("pem: {p}")),
+        ureq::Error::Rustls(r) => return NetError::Tls(r.to_string()),
+        ureq::Error::Io(io) if matches!(io.kind(), TimedOut | WouldBlock) => return NetError::Timeout,
+        ureq::Error::Io(io) => (io.to_string(), "io: "),
+        other => (other.to_string(), ""),
+    };
     let m = msg.to_ascii_lowercase();
-    m.contains("certificate") || m.contains("unknownissuer") || m.contains("handshake") || m.contains("tls")
-}
-
-fn is_redirect(status: u16) -> bool {
-    matches!(status, 301 | 302 | 303 | 307 | 308)
+    if ["certificate", "unknownissuer", "handshake", "tls"].iter().any(|w| m.contains(w)) {
+        NetError::Tls(msg)
+    } else {
+        NetError::Http(format!("{http_prefix}{msg}"))
+    }
 }
 
 /// Header names that carry credentials; dropped when a redirect changes the origin.
 pub fn is_sensitive_header(name: &str) -> bool {
+    // `auth` covers Authorization and Proxy-Authorization.
     let n = name.to_ascii_lowercase();
-    n == "authorization" || n == "proxy-authorization" || n == "cookie" || n.contains("auth") || n.contains("key") || n.contains("token") || n.contains("secret")
+    n == "cookie" || ["auth", "key", "token", "secret"].iter().any(|w| n.contains(w))
 }
 
 /// Applies one redirect to `req` (RFC 9110 section 15.4 plus browser practice): resolves
@@ -512,7 +510,7 @@ impl HttpClient for UreqClient {
                 return Err(NetError::Http(format!("https only: refusing {}", req.url)));
             }
             let resp = self.send_once(&req)?;
-            if req.max_redirects == 0 || !is_redirect(resp.status) {
+            if req.max_redirects == 0 || !matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
                 return Ok(resp);
             }
             let Some(location) = resp.header("location").map(str::to_string) else {
@@ -528,6 +526,11 @@ impl HttpClient for UreqClient {
             apply_redirect(&mut req, status, &location);
         }
     }
+}
+
+/// The `Authorization` value for HTTP Basic auth: `Basic base64(user:password)`.
+pub fn basic_auth_value(user: &str, password: &str) -> String {
+    format!("Basic {}", base64(format!("{user}:{password}").as_bytes()))
 }
 
 /// Standard base64 with padding.
@@ -612,6 +615,7 @@ mod tests {
         let resp = c.send(Request::get(s.url("/files/10"))).unwrap();
         assert_eq!(resp.content_length(), Some(10));
         assert_eq!(resp.header("ETag"), Some("\"f10\""));
+        assert_eq!((resp.capacity_for(100), resp.capacity_for(4)), (10, 0), "a stated length sizes the buffer only within the limit");
         assert!(matches!(resp.bytes(4), Err(NetError::TooLarge(4))));
         let resp = c.send(Request::head(s.url("/files/10"))).unwrap();
         assert_eq!(resp.content_length(), Some(10));

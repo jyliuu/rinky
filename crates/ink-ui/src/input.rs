@@ -4,7 +4,7 @@
 use crate::draw::{fill_round_rect, stroke_round_rect};
 use crate::gesture::Gesture;
 use crate::keyboard::KeyAction;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
 use ink_device::{Canvas, Rect, RefreshClass};
 use ink_text::Style;
@@ -76,27 +76,24 @@ impl TextInput {
         self.cursor += s.len();
     }
 
+    /// Start of the grapheme before the cursor.
+    fn prev_grapheme(&self) -> Option<usize> {
+        self.text[..self.cursor].grapheme_indices(true).next_back().map(|(i, _)| i)
+    }
+
     /// Deletes the grapheme before the cursor.
     pub fn backspace(&mut self) -> bool {
-        match self.text[..self.cursor].grapheme_indices(true).next_back() {
-            Some((i, _)) => {
-                self.text.replace_range(i..self.cursor, "");
-                self.cursor = i;
-                true
-            }
-            None => false,
-        }
+        let Some(i) = self.prev_grapheme() else { return false };
+        self.text.replace_range(i..self.cursor, "");
+        self.cursor = i;
+        true
     }
 
     /// Moves the cursor one grapheme left.
     pub fn left(&mut self) -> bool {
-        match self.text[..self.cursor].grapheme_indices(true).next_back() {
-            Some((i, _)) => {
-                self.cursor = i;
-                true
-            }
-            None => false,
-        }
+        let Some(i) = self.prev_grapheme() else { return false };
+        self.cursor = i;
+        true
     }
 
     /// Moves the cursor one grapheme right.
@@ -198,8 +195,7 @@ impl Widget for TextInput {
                 self.focused = true;
                 EventResult::Action(format!("focus:{}", self.action))
             }
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
     }
 

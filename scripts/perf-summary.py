@@ -13,6 +13,9 @@ Values per case (milliseconds):
   relayout after Done             frame after the `close` that follows aa-size
   first turns after relayout      first 3 page turns after it
   library *                       `perf library` lines
+
+Exits with status 1 (after the table) when a reader log lacks one of the reader steps:
+a tap of scripts/perf/reader.txt that no longer hits its button.
 """
 import re
 import statistics
@@ -24,6 +27,16 @@ OUT = Path(sys.argv[1])
 vals = defaultdict(list)
 
 FRAME = re.compile(r"(?:frame time|slow frame): (\d+) ms on screen (\w+)")
+# Cases every run of scripts/perf/reader.txt must produce.
+READER_STEPS = [
+    "menu open (first)",
+    "goto open",
+    "aa open",
+    "font size + (Aa sheet)",
+    "relayout after Done",
+    "page turn",
+    "page turn after relayout (first 3)",
+]
 
 
 def reader_log(text):
@@ -65,8 +78,13 @@ def reader_log(text):
                     vals["page turn: render page + bars (no panel)"].append(float(d.group(1)))
 
 
+missing = []
 for f in sorted(OUT.glob("reader-*/log.txt")):
+    before = {k: len(vals.get(k, [])) for k in READER_STEPS}
     reader_log(f.read_text(errors="replace"))
+    lacks = [k for k in READER_STEPS if len(vals.get(k, [])) == before[k]]
+    if lacks:
+        missing.append(f"{f}: no {', '.join(repr(k) for k in lacks)}")
 for f in sorted(OUT.glob("open-*/log.txt")):
     case = f.parent.name.rsplit("-", 1)[0]  # open-<book>-<nocache|cached>-<i>
     for m in re.finditer(r"open: '.*?' (?:reader|tap)->page ([\d.]+) ms", f.read_text(errors="replace")):
@@ -92,3 +110,9 @@ print(f"{'case':48} {'median':>8} {'min':>8} {'max':>8} {'n':>4}")
 for k in sorted(vals):
     v = vals[k]
     print(f"{k:48} {statistics.median(v):8.1f} {min(v):8.1f} {max(v):8.1f} {len(v):4}")
+if missing:
+    print("perf-summary: reader steps missing; does each tap of scripts/perf/reader.txt", file=sys.stderr)
+    print("still hit its button? (compare with the log's 'reader button' lines)", file=sys.stderr)
+    for m in missing:
+        print(f"  {m}", file=sys.stderr)
+    sys.exit(1)

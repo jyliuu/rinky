@@ -41,9 +41,11 @@ pub const USAGE: &str = "usage:
                                             reader's position wins; KOReader's files are only read)
   rinky plugins [list|enable NAME|disable NAME]
                                             plugins in $RINKY_HOME/plugins; on/off at next start
-  rinky export-highlights [--all | BOOK]
-                                            highlights, notes and bookmarks as Markdown in
-                                            $RINKY_HOME/exports/<title>.md; BOOK: file or title
+  rinky export-highlights [--format markdown|clippings|json] [--all | BOOK]
+                                            highlights, notes and bookmarks in $RINKY_HOME/exports:
+                                            <title>.md (default), Kindle's My Clippings.txt
+                                            layout (<title>.txt; --all: My Clippings.txt) or
+                                            <title>.json; BOOK: file or title
   rinky perf library DIR HOME           time the library's first scan of DIR (metadata, covers)
                                             into an empty HOME, then a second open
   rinky version
@@ -83,12 +85,6 @@ pub fn splash(lines: &[&str]) -> anyhow::Result<()> {
     ink_device::font::draw_lines_centered(&mut canvas, 6, 0, lines);
     fb.update_all(&canvas, RefreshClass::Gc16)?;
     Ok(())
-}
-
-/// The panic hook's on-screen note (`crash_log`: the crash log's file name).
-#[cfg(target_os = "linux")]
-fn show_crash_note(crash_log: &str) {
-    let _ = splash(&["rinky crashed - details in crash log", crash_log]);
 }
 
 /// Settings and paths from `RINKY_HOME` (default `/mnt/us/rinky`).
@@ -142,28 +138,26 @@ fn parse_sim_args(args: &[String]) -> anyhow::Result<(Vec<String>, SimArgs)> {
     let mut s = SimArgs::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        let mut val = |name: &str| it.next().cloned().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
         match a.as_str() {
             "--ghost" => s.ghost = true,
             "--headless" => s.headless = true,
             "--frames" => s.frames = true,
             "--kindle" => s.kindle = true,
             "--scale" => {
-                let v = val("--scale")?;
-                let f: f32 = v.parse().map_err(|e| anyhow::anyhow!("--scale {v}: {e}"))?;
+                let (v, f): (_, f32) = parsed_value(&mut it, "--scale")?;
                 anyhow::ensure!(f.is_finite() && f > 0.0 && f <= 8.0, "--scale {v}: must be a number in (0, 8]");
                 s.scale = Some(f);
             }
             "--panel" => {
-                let v = val("--panel")?;
+                let v = option_value(&mut it, "--panel")?;
                 let (w, h) = v.split_once('x').ok_or_else(|| anyhow::anyhow!("--panel {v}: expected WxH"))?;
                 let (w, h): (u32, u32) = (w.parse()?, h.parse()?);
                 anyhow::ensure!((200..=4000).contains(&w) && (200..=4000).contains(&h), "--panel {v}: out of range");
                 s.panel = Some(ink_device::Size::new(w, h));
             }
-            "--script" => s.script = Some(PathBuf::from(val("--script")?)),
-            "--shots" => s.shots = Some(PathBuf::from(val("--shots")?)),
-            "--out" => s.out = Some(PathBuf::from(val("--out")?)),
+            "--script" => s.script = Some(PathBuf::from(option_value(&mut it, "--script")?)),
+            "--shots" => s.shots = Some(PathBuf::from(option_value(&mut it, "--shots")?)),
+            "--out" => s.out = Some(PathBuf::from(option_value(&mut it, "--out")?)),
             other if other.starts_with("--") => anyhow::bail!("unknown option {other}"),
             other => rest.push(other.to_string()),
         }
@@ -176,6 +170,17 @@ fn option_value<'a>(it: &mut impl Iterator<Item = &'a String>, name: &str) -> an
     it.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"))
 }
 
+/// The value after option `name` and what it parses to; an error naming the option and
+/// the value when it is missing or does not parse.
+fn parsed_value<'a, T: std::str::FromStr>(it: &mut impl Iterator<Item = &'a String>, name: &str) -> anyhow::Result<(&'a String, T)>
+where
+    T::Err: std::fmt::Display,
+{
+    let v = option_value(it, name)?;
+    let parsed = v.parse().map_err(|e| anyhow::anyhow!("{name} {v}: {e}"))?;
+    Ok((v, parsed))
+}
+
 fn script_steps(path: &Option<PathBuf>) -> anyhow::Result<Option<Vec<ink_device::script::Step>>> {
     match path {
         Some(p) => {
@@ -186,13 +191,9 @@ fn script_steps(path: &Option<PathBuf>) -> anyhow::Result<Option<Vec<ink_device:
     }
 }
 
-fn open_device() -> anyhow::Result<ink_device::Device> {
-    open_device_with(true)
-}
-
-/// `device_sleep`: the device layer handles the power key, cover and inactivity
-/// (screensaver + suspend); `false` delivers `Key::Power` to the caller (spike).
-fn open_device_with(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
+/// The e-reader. `device_sleep`: the device layer handles the power key, cover and
+/// inactivity (screensaver + suspend); `false` delivers `Key::Power` to the caller (spike).
+fn open_device(device_sleep: bool) -> anyhow::Result<ink_device::Device> {
     #[cfg(target_os = "linux")]
     {
         let mut opts = ink_device::ereader::ReaderOptions::default();
@@ -220,7 +221,7 @@ impl ink_device::services::Battery for SimBattery {
 
 fn open_sim_device(s: &SimArgs) -> anyhow::Result<ink_device::Device> {
     if s.kindle {
-        return open_device();
+        return open_device(true);
     }
     let mut device = open_host_device(s)?;
     device.battery = Box::new(SimBattery);
@@ -262,8 +263,7 @@ pub fn render_pngs(book: &Path, out: &Path, count: usize) -> anyhow::Result<Vec<
 
 /// [`render_pngs`] with the reading settings of `settings` (`render BOOK OUT PAGES --settings FILE`).
 pub fn render_pngs_with(book: &Path, out: &Path, count: usize, settings: &Settings) -> anyhow::Result<Vec<PathBuf>> {
-    let settings = settings.clone();
-    let mut doc = crate::screens::reader::open_book(&providers(), &settings, book, 1272, 1696)?;
+    let mut doc = crate::screens::reader::open_book(&providers(), settings, book, 1272, 1696)?;
     std::fs::create_dir_all(out).with_context(|| format!("OUTDIR {}", out.display()))?;
     let mut canvas = Canvas::new(1272, 1696);
     let mut fonts = Fonts::load();
@@ -347,7 +347,10 @@ pub fn main(args: Vec<String>) -> i32 {
         ink_device::trace::spawn_exit_signal_thread(crate::logging::on_exit_signal);
         #[cfg(target_os = "linux")]
         if matches!(cmd, Some("run" | "library")) {
-            crate::logging::set_crash_screen(show_crash_note);
+            // The panic hook's on-screen note, with the crash log's file name.
+            crate::logging::set_crash_screen(|crash_log| {
+                let _ = splash(&["rinky crashed - details in crash log", crash_log]);
+            });
         }
     }
     let code = match run(&args) {
@@ -374,10 +377,34 @@ pub fn main(args: Vec<String>) -> i32 {
     code
 }
 
-/// Settings level, startup report: the common start of the app commands.
-fn app_start(device: &ink_device::Device, settings: &Settings, paths: &Paths) {
-    crate::logging::apply_settings(settings);
-    crate::logging::startup_report(device, settings, paths);
+/// Runs the app on `device` from `route`, after the settings' log level and the startup
+/// report.
+fn run_app(device: ink_device::Device, settings: Settings, paths: Paths, route: Route) -> anyhow::Result<i32> {
+    crate::logging::apply_settings(&settings);
+    crate::logging::startup_report(&device, &settings, &paths);
+    App::new(device, settings, paths).run(route)?;
+    Ok(0)
+}
+
+/// The scratch home of `sim` and `demo`, also where their crash logs go.
+fn sim_paths() -> Paths {
+    let paths = Paths { root: std::env::temp_dir().join("rinky-sim") };
+    crate::logging::set_home(&paths.root);
+    paths
+}
+
+/// Runs `$body` (returning `anyhow::Result<()>`) on the e-reader and exits 0; elsewhere
+/// fails with "`$cmd` needs the e-reader $what".
+macro_rules! on_ereader {
+    ($cmd:literal, $what:literal, $body:block) => {{
+        #[cfg(target_os = "linux")]
+        {
+            let r: anyhow::Result<()> = $body;
+            r.map(|()| 0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!(concat!("`", $cmd, "` needs the e-reader ", $what))
+    }};
 }
 
 /// The book files under `p` (a file, or a directory searched recursively; `.sdr`
@@ -487,43 +514,27 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
             render_pngs_with(Path::new(&rest[0]), Path::new(&rest[1]), count, &settings)?;
             Ok(0)
         }
-        Some("run") if !rest.is_empty() => {
+        Some(cmd @ ("run" | "library")) if cmd == "library" || !rest.is_empty() => {
+            let route = if cmd == "run" { Route::Reader(PathBuf::from(&rest[0])) } else { Route::Library };
             let (settings, paths) = load_settings();
-            let device = open_device()?;
-            app_start(&device, &settings, &paths);
-            App::new(device, settings, paths).run(Route::Reader(PathBuf::from(&rest[0])))?;
-            Ok(0)
-        }
-        Some("library") => {
-            let (settings, paths) = load_settings();
-            let device = open_device()?;
-            app_start(&device, &settings, &paths);
-            App::new(device, settings, paths).run(Route::Library)?;
-            Ok(0)
+            run_app(open_device(true)?, settings, paths, route)
         }
         Some("sim") => {
             let (rest, s) = parse_sim_args(rest)?;
             let Some(book) = rest.first() else { anyhow::bail!("sim needs a BOOK\n{USAGE}") };
             let device = open_sim_device(&s)?;
-            let paths = Paths { root: std::env::temp_dir().join("rinky-sim") };
+            let paths = sim_paths();
             // A folder opens the library screen on it (library agent, b-library.md).
-            crate::logging::set_home(&paths.root);
             if Path::new(book).is_dir() {
                 let settings = sim_library_settings(&paths, Path::new(book));
-                app_start(&device, &settings, &paths);
-                App::new(device, settings, paths).run(Route::Library)?;
-                return Ok(0);
+                return run_app(device, settings, paths, Route::Library);
             }
-            app_start(&device, &Settings::default(), &paths);
-            App::new(device, Settings::default(), paths).run(Route::Reader(PathBuf::from(book)))?;
-            Ok(0)
+            run_app(device, Settings::default(), paths, Route::Reader(PathBuf::from(book)))
         }
         Some("demo") => {
             let (_, s) = parse_sim_args(rest)?;
             let device = open_sim_device(&s)?;
-            let paths = Paths { root: std::env::temp_dir().join("rinky-sim") };
-            crate::logging::set_home(&paths.root);
-            App::new(device, Settings::default(), paths).run(Route::Demo)?;
+            App::new(device, Settings::default(), sim_paths()).run(Route::Demo)?;
             Ok(0)
         }
         Some("selftest") => {
@@ -553,63 +564,34 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
         Some("splash") => {
             let lines: Vec<&str> = rest.iter().map(String::as_str).collect();
             anyhow::ensure!(!lines.is_empty(), "splash needs TEXT");
-            #[cfg(target_os = "linux")]
-            {
-                splash(&lines)?;
-                Ok(0)
-            }
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`splash` needs the e-reader framebuffer")
+            on_ereader!("splash", "framebuffer", { splash(&lines) })
         }
-        Some("refresh") => {
-            #[cfg(target_os = "linux")]
-            {
-                use ink_device::Screen;
-                ink_device::ereader::open_screen()?.refresh_all()?;
-                Ok(0)
-            }
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`refresh` needs the e-reader framebuffer")
-        }
-        Some("inject") if rest.first().map(String::as_str) == Some("power") => {
-            #[cfg(target_os = "linux")]
-            {
-                use ink_device::ereader::input::{inject_key, list_devices, power_key_device};
-                let devs = list_devices();
-                let key = power_key_device(&devs).ok_or_else(|| anyhow::anyhow!("no power key device"))?;
-                let dev = inject_key(key, ink_device::evdev::KEY_POWER)?;
-                println!("injected KEY_POWER press+release into {dev}");
-                Ok(0)
-            }
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`inject` needs the e-reader input devices")
-        }
-        Some("screensaver") if !rest.is_empty() => {
-            #[cfg(target_os = "linux")]
-            {
-                use ink_device::{RefreshClass, Screen};
-                let img = Canvas::load_png(Path::new(&rest[0]))?;
-                let mut fb = ink_device::ereader::open_screen()?;
-                let size = fb.size();
-                let mut canvas = Canvas::new(size.w as usize, size.h as usize);
-                let (x, y) = ((size.w as i32 - img.width as i32) / 2, (size.h as i32 - img.height as i32) / 2);
-                canvas.blit(&img, x, y);
-                fb.update_all(&canvas, RefreshClass::Gc16)?;
-                println!("screensaver {}x{} shown", img.width, img.height);
-                Ok(0)
-            }
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`screensaver` needs the e-reader framebuffer")
-        }
-        Some("evdump") => {
-            #[cfg(target_os = "linux")]
-            {
-                evdump(evdump_deadline(std::time::Instant::now(), rest.first())?)?;
-                Ok(0)
-            }
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("`evdump` needs the e-reader input devices")
-        }
+        Some("refresh") => on_ereader!("refresh", "framebuffer", {
+            use ink_device::Screen;
+            ink_device::ereader::open_screen()?.refresh_all()?;
+            Ok(())
+        }),
+        Some("inject") if rest.first().map(String::as_str) == Some("power") => on_ereader!("inject", "input devices", {
+            use ink_device::ereader::input::{inject_key, list_devices, power_key_device};
+            let devs = list_devices();
+            let key = power_key_device(&devs).ok_or_else(|| anyhow::anyhow!("no power key device"))?;
+            let dev = inject_key(key, ink_device::evdev::KEY_POWER)?;
+            println!("injected KEY_POWER press+release into {dev}");
+            Ok(())
+        }),
+        Some("screensaver") if !rest.is_empty() => on_ereader!("screensaver", "framebuffer", {
+            use ink_device::{RefreshClass, Screen};
+            let img = Canvas::load_png(Path::new(&rest[0]))?;
+            let mut fb = ink_device::ereader::open_screen()?;
+            let size = fb.size();
+            let mut canvas = Canvas::new(size.w as usize, size.h as usize);
+            let (x, y) = ((size.w as i32 - img.width as i32) / 2, (size.h as i32 - img.height as i32) / 2);
+            canvas.blit(&img, x, y);
+            fb.update_all(&canvas, RefreshClass::Gc16)?;
+            println!("screensaver {}x{} shown", img.width, img.height);
+            Ok(())
+        }),
+        Some("evdump") => on_ereader!("evdump", "input devices", { evdump(evdump_deadline(std::time::Instant::now(), rest.first())?) }),
         Some("spike-suspend") => {
             let mut image = None;
             let mut limit = None;
@@ -618,19 +600,12 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--image" => image = Some(PathBuf::from(option_value(&mut it, "--image")?)),
-                    "--seconds" => {
-                        let v = option_value(&mut it, "--seconds")?;
-                        let secs: u64 = v.parse().map_err(|e| anyhow::anyhow!("--seconds {v}: {e}"))?;
-                        limit = Some(std::time::Duration::from_secs(secs));
-                    }
-                    "--suspend" => {
-                        let v = option_value(&mut it, "--suspend")?;
-                        suspend = Some(v.parse().map_err(|e| anyhow::anyhow!("--suspend {v}: {e}"))?);
-                    }
+                    "--seconds" => limit = Some(std::time::Duration::from_secs(parsed_value(&mut it, "--seconds")?.1)),
+                    "--suspend" => suspend = Some(parsed_value(&mut it, "--suspend")?.1),
                     other => anyhow::bail!("unknown spike-suspend option {other}"),
                 }
             }
-            crate::spike::run(open_device_with(false)?, image.as_deref(), limit, suspend)?;
+            crate::spike::run(open_device(false)?, image.as_deref(), limit, suspend)?;
             Ok(0)
         }
         Some("koreader-sync") => koreader_sync(rest),
@@ -770,6 +745,6 @@ mod tests {
     fn usage_and_unknown_commands() {
         assert_eq!(run(&["rinky".into()]).unwrap(), 2);
         assert_eq!(run(&["rinky".into(), "version".into()]).unwrap(), 0);
-        assert!(USAGE.contains("export-highlights [--all | BOOK]"));
+        assert!(USAGE.contains("export-highlights [--format markdown|clippings|json] [--all | BOOK]"));
     }
 }

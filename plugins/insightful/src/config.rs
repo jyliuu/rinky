@@ -356,9 +356,7 @@ return {
 
     #[test]
     fn migrates_once() {
-        let dir = std::env::temp_dir().join(format!("insightful-cfg-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ink_plugin::testing::TempDir::new("insightful-cfg");
         let (toml_path, lua_path) = (dir.join("data/insightful.toml"), dir.join("configuration.lua"));
         assert_eq!(load_or_migrate(&toml_path, &lua_path).unwrap().1, Origin::Default);
         std::fs::write(&lua_path, FAKE).unwrap();
@@ -369,6 +367,5 @@ return {
         let (c2, o2) = load_or_migrate(&toml_path, &lua_path).unwrap();
         assert_eq!((o2, c2), (Origin::Toml, c), "the Lua file is read only once");
         assert_eq!(std::fs::read_to_string(&lua_path).unwrap(), "return { provider = 'openai' }", "the Lua file is unchanged");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

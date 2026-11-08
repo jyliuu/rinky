@@ -16,7 +16,7 @@
 //! ([`Row::choice`]), links to sub-pages ([`Row::nav`]), actions ([`Row::item`]),
 //! ordered items ([`Trail::Order`]) and sliders ([`Row::slider`]).
 
-use ink_device::{Canvas, Point, Rect, RefreshClass};
+use ink_device::{Point, Rect, RefreshClass};
 use ink_text::Style;
 use ink_ui::draw::{stroke_round_rect, Path};
 use ink_ui::theme::space;
@@ -369,15 +369,14 @@ impl SettingsList {
         self.visible(b).into_iter().find(|(k, _)| *k == i).map(|(_, r)| r)
     }
 
+    /// The visible row under `p` that passes `pick`, with its rectangle.
+    fn row_at(&self, b: Rect, p: Point, pick: impl Fn(&Row) -> bool) -> Option<(usize, Rect)> {
+        b.contains(p).then(|| self.visible(b))?.into_iter().find(|(i, r)| r.contains(p) && pick(&self.rows[*i]))
+    }
+
     /// The visible slider row under `p` and its slider's rectangle.
     fn slider_at(&self, b: Rect, p: Point) -> Option<(usize, Rect)> {
-        if !b.contains(p) {
-            return None;
-        }
-        self.visible(b)
-            .into_iter()
-            .find(|(i, r)| r.contains(p) && self.rows[*i].kind == Kind::Slider)
-            .map(|(i, r)| (i, SettingsList::slider_rect(r)))
+        self.row_at(b, p, |r| r.kind == Kind::Slider).map(|(i, r)| (i, SettingsList::slider_rect(r)))
     }
 
     /// A touch for a slider row: the down that starts a drag on its track and every
@@ -385,7 +384,7 @@ impl SettingsList {
     /// it is dragged; the lift reports the slider's `action:<value>`.
     fn slider_touch(&mut self, ev: &UiEvent, t: &ink_ui::Touch, b: Rect) -> Option<EventResult> {
         if let Some(i) = self.dragging {
-            let r = self.visible(b).into_iter().find(|(k, _)| *k == i).map(|(_, r)| SettingsList::slider_rect(r));
+            let r = self.shown_rect(b, i).map(SettingsList::slider_rect);
             if matches!(t.kind, TouchKind::Up | TouchKind::Cancel) {
                 self.dragging = None;
             }
@@ -419,10 +418,7 @@ impl SettingsList {
     }
 
     fn item_at(&self, b: Rect, p: Point) -> Option<usize> {
-        if !b.contains(p) {
-            return None;
-        }
-        self.visible(b).into_iter().find(|(i, r)| r.contains(p) && self.rows[*i].tappable()).map(|(i, _)| i)
+        self.row_at(b, p, Row::tappable).map(|(i, _)| i)
     }
 
     /// The shared scroll bar for the list in `b`, in pixels: the whole content, the
@@ -491,41 +487,33 @@ impl SettingsList {
             cx.canvas.fill_rect(x, r.y, r.right() - margin - x, 1, fg);
         }
         let mut right = r.right() - margin;
+        // A square `side` px wide at the right end, centred in the row.
+        let square = |right: i32, side: i32| Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+        if let (Trail::Toggle(on) | Trail::Order { on, .. }, false) = (row.trail, pressed) {
+            // The ink-ui switch, painted into the right end of the row.
+            Toggle::new("", on, "").paint(cx, Rect::new(right - SWITCH_W, r.y, (SWITCH_W + 8) as u32, r.h));
+        }
         match row.trail {
             Trail::None => {}
             Trail::Chevron => {
-                let side = 40;
-                let cr = Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+                let cr = square(right, 40);
                 Icon::Forward.draw(cx.canvas, cr, muted);
                 right = cr.x - space(2);
             }
-            Trail::Toggle(on) => {
-                if !pressed {
-                    // The ink-ui switch, painted into the right end of the row.
-                    let sr = Rect::new(right - SWITCH_W, r.y, (SWITCH_W + 8) as u32, r.h);
-                    Toggle::new("", on, "").paint(cx, sr);
-                }
-                right -= SWITCH_W + space(3);
-            }
+            Trail::Toggle(_) => right -= SWITCH_W + space(3),
             Trail::Check(on) => {
-                let side = 48;
-                let cr = Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+                let cr = square(right, 48);
                 if on {
                     Icon::Check.draw(cx.canvas, cr, fg);
                 }
                 right = cr.x - space(3);
             }
             Trail::Icon(icon) => {
-                let side = 48;
-                let cr = Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+                let cr = square(right, 48);
                 icon.draw(cx.canvas, cr, fg);
                 right = cr.x - space(3);
             }
-            Trail::Order { on, up, down } => {
-                if !pressed {
-                    let sr = Rect::new(right - SWITCH_W, r.y, (SWITCH_W + 8) as u32, r.h);
-                    Toggle::new("", on, "").paint(cx, sr);
-                }
+            Trail::Order { up, down, .. } => {
                 let (ur, dr) = order_buttons(r);
                 for (b, icon, active) in [(ur, Icon::Up, up), (dr, Icon::Down, down)] {
                     // An inactive arrow: a thin outline only (no gray).
@@ -539,8 +527,7 @@ impl SettingsList {
             }
         }
         if row.lock {
-            let side = 44;
-            let lr = Rect::new(right - side, r.y + (r.h as i32 - side) / 2, side as u32, side as u32);
+            let lr = square(right, 44);
             paint_lock(cx, lr, fg);
             right = lr.x - space(2);
         }
@@ -631,20 +618,15 @@ impl Widget for SettingsList {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         let started = std::time::Instant::now();
         self.scroll = self.scroll.clamp(0, self.max_scroll(b));
+        // Only whole rows are painted (see `visible`): icons and switches ignore the text
+        // clip, and a cut row would draw them outside `b` and every update rect.
         let rows = self.visible(b);
-        // Icons, switches and chevrons ignore the text clip: a row cut by the top or
-        // bottom edge would draw them over the app bar or the status line, outside every
-        // update rect (the ghost book icon and second switch in the 2026-11-01 photo).
-        // Keep the canvas outside `b` as it was.
-        let reach = rows.iter().fold(b, |u, (_, r)| u.union(r)).intersect(&cx.canvas.bounds());
-        let kept = KeptStrips::save(cx.canvas, b, reach);
         for (k, (i, r)) in rows.iter().enumerate() {
             let row = &self.rows[*i];
             // A divider above an item that follows another item of the same section.
             let divider = k > 0 && row.kind == Kind::Item && self.rows[rows[k - 1].0].kind == Kind::Item;
             SettingsList::paint_row(cx, *r, row, self.pressed == Some(*i), divider);
         }
-        kept.restore(cx.canvas);
         if let Some((track, _)) = self.scrollbar(b) {
             // The shared bar in black and white only (its DU look): a list jump is one
             // DU update, which shows no gray track.
@@ -696,26 +678,19 @@ impl Widget for SettingsList {
                 if let Some(i) = self.item_at(b, *pos) {
                     self.changed.extend(self.pressed.take());
                     self.changed.push(i);
-                    let (up, down) = order_buttons(self.visible(b).into_iter().find(|(k, _)| *k == i).map_or(b, |(_, r)| r));
+                    let (up, down) = order_buttons(self.shown_rect(b, i).unwrap_or(b));
                     let row = &mut self.rows[i];
                     return EventResult::Action(match &mut row.trail {
-                        Trail::Toggle(on) => {
-                            *on = !*on;
-                            format!("{}:{}", row.action, if *on { "on" } else { "off" })
-                        }
-                        Trail::Order { up: can_up, .. } if up.contains(*pos) => {
-                            if !*can_up {
+                        // An arrow reports its direction, an inactive one nothing.
+                        Trail::Order { up: can_up, down: can_down, .. } if up.contains(*pos) || down.contains(*pos) => {
+                            let (dir, can) = if up.contains(*pos) { ("up", *can_up) } else { ("down", *can_down) };
+                            if !can {
                                 return EventResult::Handled;
                             }
-                            format!("{}:up", row.action)
+                            format!("{}:{dir}", row.action)
                         }
-                        Trail::Order { down: can_down, .. } if down.contains(*pos) => {
-                            if !*can_down {
-                                return EventResult::Handled;
-                            }
-                            format!("{}:down", row.action)
-                        }
-                        Trail::Order { on, .. } => {
+                        // A switch (an ordered item's too, outside its arrows) flips.
+                        Trail::Toggle(on) | Trail::Order { on, .. } => {
                             *on = !*on;
                             format!("{}:{}", row.action, if *on { "on" } else { "off" })
                         }
@@ -767,34 +742,6 @@ impl Widget for SettingsList {
         }
         let rows = self.visible(b);
         Some(rows.into_iter().filter(|(i, _)| changed.contains(i)).map(|(_, r)| r.intersect(&b)).collect())
-    }
-}
-
-/// Full-width canvas rows above and below a widget's rect `b`, as far as `reach` goes:
-/// saved before painting rows that may stick out of `b`, put back after.
-struct KeptStrips {
-    above: (i32, Vec<u8>),
-    below: (i32, Vec<u8>),
-}
-
-impl KeptStrips {
-    fn save(canvas: &Canvas, b: Rect, reach: Rect) -> Self {
-        let w = canvas.width;
-        let rows = |y0: i32, y1: i32| -> (i32, Vec<u8>) {
-            if y1 <= y0 {
-                return (y0, Vec::new());
-            }
-            (y0, canvas.pixels[y0 as usize * w..y1 as usize * w].to_vec())
-        };
-        KeptStrips { above: rows(reach.y, b.y.min(reach.bottom())), below: rows(b.bottom().max(reach.y), reach.bottom()) }
-    }
-
-    fn restore(self, canvas: &mut Canvas) {
-        let w = canvas.width;
-        for (y, px) in [self.above, self.below] {
-            let i = y as usize * w;
-            canvas.pixels[i..i + px.len()].copy_from_slice(&px);
-        }
     }
 }
 

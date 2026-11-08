@@ -1,55 +1,23 @@
 //! Plugin tests with a fake book, an in-memory UI queue and a dictionary written to a
 //! temporary rinky home.
 
-use std::path::PathBuf;
 
-use ink_doc::{Metadata, Position, Selection, TocEntry};
 use ink_plugin::serde_json::json;
-use ink_plugin::{DocumentAccess, HostCtx, MemoryStorage, Plugin, PluginStorage, Registrar, Registry, Result, UiQueue, UiRequest};
+use ink_plugin::testing::{selection, FakeBook, TempDir};
+use ink_plugin::{DocumentAccess, HostCtx, MemoryStorage, Plugin, PluginStorage, Registrar, Registry, UiQueue, UiRequest};
 use ink_store::vocab::VocabDb;
 
 use super::*;
 
-struct Book {
-    selection: Option<Selection>,
-}
-
-impl DocumentAccess for Book {
-    fn metadata(&self) -> Metadata {
-        Metadata { title: "Romeo and Juliet".into(), ..Metadata::default() }
-    }
-    fn book_id(&self) -> Option<String> {
-        Some("0123456789abcdef0123456789abcdef".into())
-    }
-    fn toc(&self) -> Vec<TocEntry> {
-        Vec::new()
-    }
-    fn search(&mut self, _q: &str, _l: usize) -> Result<Vec<ink_doc::SearchHit>> {
-        Ok(Vec::new())
-    }
-    fn read_around(&mut self, _p: &Position, _c: usize) -> Result<String> {
-        Ok("Two households, both alike\n in dignity,".into())
-    }
-    fn links(&mut self, _p: &Position) -> Result<Vec<ink_doc::Link>> {
-        Ok(Vec::new())
-    }
-    fn current_position(&self) -> Result<Position> {
-        Ok("/body/DocFragment[3]/body/p[1]/text().0".parse().unwrap())
-    }
-    fn selection(&self) -> Option<Selection> {
-        self.selection.clone()
-    }
-}
-
-fn sel(text: &str) -> Selection {
-    let p: Position = "/body/DocFragment[3]/body/p[1]/text().4".parse().unwrap();
-    Selection { start: p.clone(), end: p, text: text.into(), page: 0, rects: vec![] }
+/// A book in which `selected` is selected.
+fn reading(selected: Option<&str>) -> FakeBook {
+    let id = Some("0123456789abcdef0123456789abcdef".into());
+    FakeBook { id, selection: selected.map(selection), text: "Two households, both alike\n in dignity,".into(), ..FakeBook::titled("Romeo and Juliet") }
 }
 
 /// A home with `dict/sample/` and the plugin data folder; returns (home, storage).
-fn home(tag: &str, with_dict: bool) -> (PathBuf, MemoryStorage) {
-    let h = std::env::temp_dir().join(format!("ink-dictionary-plugin-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&h);
+fn home(tag: &str, with_dict: bool) -> (TempDir, MemoryStorage) {
+    let h = TempDir::new(&format!("dictionary-{tag}"));
     if with_dict {
         ink_dict::writer::write(&h.join("dict/sample"), &ink_dict::writer::sample_english()).unwrap();
     }
@@ -58,7 +26,7 @@ fn home(tag: &str, with_dict: bool) -> (PathBuf, MemoryStorage) {
     (h, MemoryStorage { dir: data, ..MemoryStorage::default() })
 }
 
-fn run(p: &mut DictionaryPlugin, st: &mut MemoryStorage, book: Option<&mut Book>, f: impl FnOnce(&mut DictionaryPlugin, &mut HostCtx)) -> Vec<UiRequest> {
+fn run(p: &mut DictionaryPlugin, st: &mut MemoryStorage, book: Option<&mut FakeBook>, f: impl FnOnce(&mut DictionaryPlugin, &mut HostCtx)) -> Vec<UiRequest> {
     let mut ui = UiQueue::default();
     let perms = p.manifest().permissions.clone();
     let mut cx = HostCtx::new(&mut ui, st, &perms).with_doc(book.map(|b| b as &mut dyn DocumentAccess));
@@ -68,7 +36,7 @@ fn run(p: &mut DictionaryPlugin, st: &mut MemoryStorage, book: Option<&mut Book>
 
 #[test]
 fn registers_the_selection_action() {
-    let mut p = DictionaryPlugin::new();
+    let mut p = DictionaryPlugin::default();
     let mut reg = Registry::default();
     p.on_load(&mut Registrar { plugin: NAME, registry: &mut reg }).unwrap();
     assert!(reg.selection_actions.iter().any(|a| a.id == ACTION_LOOKUP && a.label == "Look up"));
@@ -78,8 +46,8 @@ fn registers_the_selection_action() {
 #[test]
 fn lookup_popup_full_view_and_record() {
     let (h, mut st) = home("popup", true);
-    let mut p = DictionaryPlugin::new();
-    let mut book = Book { selection: Some(sel("“Households,”")) };
+    let mut p = DictionaryPlugin::default();
+    let mut book = reading(Some("“Households,”"));
     let reqs = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     let UiRequest::Dialog { id, title, body, buttons } = &reqs[0] else { panic!("{reqs:?}") };
     assert_eq!(title, "household");
@@ -122,14 +90,14 @@ fn lookup_popup_full_view_and_record() {
 #[test]
 fn inflected_list_entry_and_not_found() {
     let (h, mut st) = home("forms", true);
-    let mut p = DictionaryPlugin::new();
-    let mut book = Book { selection: Some(sel("mutinies")) };
+    let mut p = DictionaryPlugin::default();
+    let mut book = reading(Some("mutinies"));
     let reqs = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     assert!(matches!(&reqs[0], UiRequest::Dialog { title, .. } if title == "mutiny"), "{reqs:?}");
     run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_ui_result(cx, 1, "add").unwrap());
     let md = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_ui_result(cx, 1, "full").unwrap());
     assert!(matches!(&md[0], UiRequest::TextViewer { markdown, .. } if markdown.ends_with("*Looked up “mutinies” as “mutiny”.*\n")), "{md:?}");
-    let mut book = Book { selection: Some(sel("dignity")) };
+    let mut book = reading(Some("dignity"));
     run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_ui_result(cx, 1, "add").unwrap());
     let md = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_ui_result(cx, 1, "full").unwrap());
@@ -137,7 +105,7 @@ fn inflected_list_entry_and_not_found() {
     // The dictionary's own formatting: its numbered senses, its head line once.
     assert!(markdown.contains("**dignity** *noun*\n\n1. the state or quality of being worthy"), "{markdown}");
     assert_eq!(markdown.matches("**dignity**").count(), 1, "{markdown}");
-    let mut book = Book { selection: Some(sel("xyzzy")) };
+    let mut book = reading(Some("xyzzy"));
     let reqs = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     let UiRequest::Dialog { body, buttons, .. } = &reqs[0] else { panic!("{reqs:?}") };
     assert_eq!(body, "No definition found for “xyzzy”.\n— Searched 1 dictionary");
@@ -160,13 +128,13 @@ fn inflected_list_entry_and_not_found() {
 #[test]
 fn no_dictionaries_no_selection_settings() {
     let (h, mut st) = home("empty", false);
-    let mut p = DictionaryPlugin::new();
-    let mut book = Book { selection: Some(sel("word")) };
+    let mut p = DictionaryPlugin::default();
+    let mut book = reading(Some("word"));
     let reqs = run(&mut p, &mut st, Some(&mut book), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     let UiRequest::Dialog { body, .. } = &reqs[0] else { panic!("{reqs:?}") };
     assert!(body.contains("No dictionaries found") && body.contains(&h.join("dict").display().to_string()), "{body}");
 
-    let mut none = Book { selection: None };
+    let mut none = reading(None);
     let reqs = run(&mut p, &mut st, Some(&mut none), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     assert!(matches!(&reqs[0], UiRequest::Toast { .. }));
 
@@ -184,7 +152,7 @@ fn no_dictionaries_no_selection_settings() {
 #[test]
 fn typed_word_action() {
     let (h, mut st) = home("typed", true);
-    let mut p = DictionaryPlugin::new();
+    let mut p = DictionaryPlugin::default();
     let reqs = run(&mut p, &mut st, None, |p, cx| p.on_action(cx, ACTION_TYPE).unwrap());
     let UiRequest::TextInput { id, .. } = &reqs[0] else { panic!("{reqs:?}") };
     let id = *id;
@@ -208,8 +176,6 @@ fn popup_cut_and_markdown_escape() {
     let e = parse_entry(&noad);
     assert_eq!((e.pron.as_deref(), e.pos.as_deref(), e.sense.as_str()), (Some("ˈmjuːtɪni"), Some("noun (plural mutinies)"), "an open rebellion"));
     assert_eq!(popup_body(&noad, 0), "_/ˈmjuːtɪni/ · noun (plural mutinies)_\nan open rebellion\n— D");
-    assert_eq!(md_escape("a*b_[c]"), "a\\*b\\_\\[c\\]");
-    assert_eq!(md_escape("1. first"), "1\\. first");
     assert_eq!(root_of(std::path::Path::new("/x/home/plugins/dictionary/data")), std::path::PathBuf::from("/x/home"));
     assert_eq!(root_of(std::path::Path::new("/tmp/other")), std::path::PathBuf::from("/mnt/us/rinky"));
 }
@@ -260,7 +226,7 @@ fn settings_page_turns_dictionaries_off_and_orders_them() {
     ink_dict::writer::write(&h.join("dict/a"), &spec("a", "Alpha", "from alpha")).unwrap();
     ink_dict::writer::write(&h.join("dict/b"), &spec("b", "Beta", "from beta")).unwrap();
     let mut reg = Registry::default();
-    let mut p = DictionaryPlugin::new();
+    let mut p = DictionaryPlugin::default();
     p.on_load(&mut Registrar { plugin: NAME, registry: &mut reg }).unwrap();
     assert!(reg.settings_pages.iter().any(|s| s.id == SETTINGS_PAGE && s.title == "Dictionaries"));
     let menu = |ui: &[UiRequest]| -> Vec<(String, String)> {
@@ -296,7 +262,7 @@ fn settings_page_turns_dictionaries_off_and_orders_them() {
     assert_eq!(st.get(KEY_ORDER), Some(json!(["b", "a"])));
     assert_eq!(st.get(KEY_OFF), Some(json!(["a"])));
     // A new plugin (restart) keeps both choices; the lookup uses only Beta.
-    let mut p2 = DictionaryPlugin::new();
+    let mut p2 = DictionaryPlugin::default();
     let ui = run(&mut p2, &mut st, None, |p, cx| p.lookup(cx, "word", None).unwrap());
     let Some(UiRequest::Dialog { body, .. }) = ui.last() else { panic!("{ui:?}") };
     assert!(body.contains("from beta") && !body.contains("from alpha") && !body.contains("more"), "{body}");
@@ -315,7 +281,7 @@ fn swipes_page_the_card_through_the_dictionaries_with_a_hit() {
     ink_dict::writer::write(&h.join("dict/a"), &spec("a", "Alpha", "from alpha")).unwrap();
     ink_dict::writer::write(&h.join("dict/b"), &spec("b", "Beta", "from beta")).unwrap();
     ink_dict::writer::write(&h.join("dict/c"), &spec("c", "Gamma", "from gamma")).unwrap();
-    let mut p = DictionaryPlugin::new();
+    let mut p = DictionaryPlugin::default();
     let card = |ui: &[UiRequest]| -> (u32, String) {
         match ui.last() {
             Some(UiRequest::Dialog { id, body, buttons, .. }) => {
@@ -343,9 +309,11 @@ fn swipes_page_the_card_through_the_dictionaries_with_a_hit() {
     let two = LookupResult { hits: vec![hit("A", "first"), hit("A", "again"), hit("B", "second")], ..one.clone() };
     assert_eq!(popup_page(&two, 0).unwrap().1, "first\n— 1/2 · A · +1 more");
     assert_eq!(popup_page(&two, 3).unwrap().1, "second\n— 2/2 · B");
-    let (_, mut st1) = home("paged-card-one", true);
-    let mut p1 = DictionaryPlugin::new();
-    let mut book = Book { selection: Some(sel("household")) };
+    let (_home, mut st1) = home("paged-card-one", true);
+    let mut p1 = DictionaryPlugin::default();
+    let mut book = reading(Some("household"));
     run(&mut p1, &mut st1, Some(&mut book), |p, cx| p.on_action(cx, ACTION_LOOKUP).unwrap());
     assert!(run(&mut p1, &mut st1, Some(&mut book), |p, cx| p.on_ui_result(cx, 1, "next").unwrap()).is_empty());
+    // The lookup is recorded before the folder goes.
+    p1.wait_recorded();
 }

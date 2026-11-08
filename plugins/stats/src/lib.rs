@@ -48,24 +48,13 @@ pub fn statistics_path_for_data_dir(dir: &Path) -> PathBuf {
     }
 }
 
-/// The vocabulary database for a plugin data directory: `<root>/vocabulary.sqlite3`,
-/// or `dir/vocabulary.sqlite3` when the root cannot be found.
-pub fn vocabulary_path_for_data_dir(dir: &Path) -> PathBuf {
-    match root_from_data_dir(dir) {
-        Some(root) => vocabulary_path(&ink_store::Paths { root }),
-        None => dir.join(VOCABULARY_FILE),
-    }
-}
-
 /// `<root>/vocabulary.sqlite3`.
 pub fn vocabulary_path(paths: &ink_store::Paths) -> PathBuf {
     paths.root.join(VOCABULARY_FILE)
 }
 
 /// Seconds since the Unix epoch now.
-pub fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
+pub use ink_store::now_secs as unix_now;
 
 #[cfg(test)]
 mod tests {
@@ -76,7 +65,6 @@ mod tests {
         let d = Path::new("/mnt/us/rinky/plugins/stats/data");
         assert_eq!(root_from_data_dir(d), Some(PathBuf::from("/mnt/us/rinky")));
         assert_eq!(statistics_path_for_data_dir(d), PathBuf::from("/mnt/us/rinky/statistics.sqlite3"));
-        assert_eq!(vocabulary_path_for_data_dir(d), PathBuf::from("/mnt/us/rinky/vocabulary.sqlite3"));
         let tmp = Path::new("/tmp/rinky-plugins/stats/data");
         assert_eq!(root_from_data_dir(tmp), None);
         assert_eq!(statistics_path_for_data_dir(tmp), tmp.join("statistics.sqlite3"));

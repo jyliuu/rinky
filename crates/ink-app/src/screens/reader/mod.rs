@@ -1,6 +1,6 @@
-//! Reader screen (owner from wave B: the `reader` agent).
+//! Reader screen.
 //!
-//! Phase 0 behaviour is the prototype's `run` loop:
+//! The page loop:
 //! - the saved page with a GC16 flash (no "Opening" screen in between: the screen below
 //!   stays until the page is ready);
 //! - taps, swipes, pinches and the other gestures run the actions of the user's gesture
@@ -12,10 +12,10 @@
 //!
 //! Page Next/Prev keys (host simulator) turn pages too. powerd events are logged.
 //!
-//! Phase 3 (wave B `reader`) adds overlays over the page ([`overlay`]): a tap in the
-//! middle of the page (or the top band, or the Menu key) opens the menu ([`menu`]): top
-//! bar with back, title, clock, battery and the tools; bottom bar with chapter, page,
-//! percent and a page slider. The page is kept in a buffer so closing an overlay puts it
+//! Overlays sit over the page ([`overlay`]): a tap in the middle of the page (or the
+//! top band, or the Menu key) opens the menu ([`menu`]): top bar with back, title,
+//! clock, battery and the tools; bottom bar with chapter, page, percent and a page
+//! slider. The page is kept in a buffer so closing an overlay puts it
 //! back without rendering it again.
 //!
 //! A book that cannot be opened (missing file, DRM, KFX, broken file) shows "Cannot open
@@ -24,6 +24,7 @@
 
 pub mod aa;
 pub mod actions;
+pub mod end;
 pub mod footer;
 pub mod goto;
 pub mod light_gestures;
@@ -36,7 +37,7 @@ pub mod selection;
 mod tests;
 
 use crate::router::{AppCtx, AppScreen, Route, ScreenRegistry, Transition};
-use ink_device::{Canvas, Key, Point, Rect, RefreshClass, Size};
+use ink_device::{Canvas, Key, NetEvent, Point, PowerEvent, Rect, RefreshClass, Size};
 use ink_doc::{Document, LayoutSettings, Link, LinkTarget, Position, SearchHit, Selection, TocEntry};
 use ink_store::sidecar::{BookSettings, Bookmark, Highlight};
 use ink_store::BookState;
@@ -124,20 +125,41 @@ fn publish_bars(hidden: Option<bool>) {
     READER_BARS.with(|c| c.set(hidden));
 }
 
+/// A highlight made this session as it was drawn on one page: kept for documents that
+/// cannot map a saved range back to rectangles (`range_rects` empty: fixed layouts).
+struct SessionMark {
+    /// Layout key ([`LayoutSettings::cache_key`]) the rectangles are for.
+    layout: String,
+    page: usize,
+    rects: Vec<Rect>,
+    /// Start of the saved highlight.
+    start: Position,
+}
+
+impl SessionMark {
+    /// True when the mark is drawn on `page` of layout `layout`.
+    fn on(&self, layout: &str, page: usize) -> bool {
+        self.page == page && self.layout == layout
+    }
+}
+
 /// Draws the highlights on `page` (drawn on `canvas`): saved ones mapped to it in the
 /// current layout, and this session's that the document could not map (fixed layouts).
-fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, saved: &[(Position, Position)], session: &[(String, usize, Vec<Rect>, String)]) {
-    let key = doc.layout().cache_key();
-    let mut drawn: Vec<String> = Vec::new();
+fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, saved: &[(Position, Position)], session: &[SessionMark]) {
+    let mut drawn: Vec<&Position> = Vec::new();
     for (start, end) in saved {
         let rects = doc.range_rects(page, start, end);
         if !rects.is_empty() {
             selection::lighten(canvas, &rects);
-            drawn.push(start.to_string());
+            drawn.push(start);
         }
     }
-    for (_, _, rects, _) in session.iter().filter(|(k, p, _, st)| *k == key && *p == page && !drawn.contains(st)) {
-        selection::lighten(canvas, rects);
+    if session.is_empty() {
+        return;
+    }
+    let key = doc.layout().cache_key();
+    for m in session.iter().filter(|m| m.on(&key, page) && !drawn.contains(&&m.start)) {
+        selection::lighten(canvas, &m.rects);
     }
 }
 
@@ -183,39 +205,19 @@ pub fn open_book(
     w: u32,
     h: u32,
 ) -> anyhow::Result<Box<dyn Document>> {
-    let t = Instant::now();
-    let mut doc = ink_doc::open_with(providers, path)?;
-    let t_parse = t.elapsed();
-    doc.set_layout(&layout_for(settings, w, h))?;
-    log::info!(
-        "'{}': {} pages (parse {:?}, layout {:?})",
-        doc.metadata().title,
-        doc.page_count().pages,
-        t_parse,
-        t.elapsed() - t_parse
-    );
-    if doc.page_count().pages == 0 {
-        anyhow::bail!("book produced no pages");
-    }
+    let mut doc = open_traced(providers, path, &layout_for(settings, w, h), None, None, None, &mut crate::perf::OpenTrace::start())?;
+    doc.set_read_ahead(true);
     Ok(doc)
 }
 
 /// Opens `path` with the first matching provider, enables the page-map cache in
-/// `cache` (when given, keyed by the book's partial MD5) and lays it out with `layout`.
-pub fn open_with_layout(
-    providers: &[&dyn ink_doc::Provider],
-    path: &Path,
-    layout: &LayoutSettings,
-    cache: Option<&Path>,
-) -> anyhow::Result<Box<dyn Document>> {
-    let mut trace = crate::perf::OpenTrace::start();
-    open_traced(providers, path, layout, cache, None, None, &mut trace)
-}
-
-/// [`open_with_layout`] with the steps recorded in `trace`: provider open (zip,
-/// container, spine), page-map cache id, layout of the first page. `md5` is the book's
+/// `cache` (when given, keyed by the book's partial MD5) and lays it out with `layout`,
+/// with the steps recorded in `trace`: provider open (zip, container, spine), page-map
+/// cache id, layout of the first page. `md5` is the book's
 /// partial MD5 when the caller has it already; `at` is the position to open at (laid
-/// out first, see [`Document::open_at`]).
+/// out first, see [`Document::open_at`]). The document comes back with its read-ahead
+/// off ([`Document::set_read_ahead`]): the first page does not wait for the pages after
+/// it; turn it on once that page is shown.
 pub fn open_traced(
     providers: &[&dyn ink_doc::Provider],
     path: &Path,
@@ -241,6 +243,7 @@ pub fn open_traced(
     trace.step("page cache id");
     doc.set_layout(layout)?;
     trace.step_with_engine("set_layout");
+    doc.set_read_ahead(false);
     let count = doc.page_count();
     log::info!(
         "'{}': {}{} pages (parse {:?}, layout {:?})",
@@ -299,36 +302,6 @@ pub fn wrap_text(fonts: &mut Fonts, text: &str, px: f32, max_w: f32, max_lines: 
     lines
 }
 
-/// Where a tap on the page lands (no overlay open).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Zone {
-    /// Previous page (left third).
-    Prev,
-    /// Next page (right third, and the middle third above and below the menu zone).
-    Next,
-    /// Open the menu (middle of the page, or the top band).
-    Menu,
-}
-
-/// The tap zone of `pos` on a `w` x `h` screen.
-///
-/// - top band (top tenth), the whole width: menu (no hidden exit corner);
-/// - middle third across and middle three fifths down: menu;
-/// - otherwise left third: previous page, the rest: next page.
-pub fn zone(pos: Point, w: i32, h: i32) -> Zone {
-    if pos.y < h / 10 {
-        return Zone::Menu;
-    }
-    if pos.x >= w / 3 && pos.x < w * 2 / 3 && pos.y >= h / 5 && pos.y < h * 4 / 5 {
-        return Zone::Menu;
-    }
-    if pos.x < w / 3 {
-        Zone::Prev
-    } else {
-        Zone::Next
-    }
-}
-
 /// Reading progress 0..=1 of `page`: Kindle locations when the format has them (stable
 /// while pagination runs), else the page fraction.
 pub fn progress(doc: &dyn Document, page: usize) -> f32 {
@@ -373,17 +346,61 @@ pub fn current_chapter(doc: &dyn Document, toc: &[TocEntry], page: usize) -> Opt
     best
 }
 
-/// Page of a bookmark in the current layout.
-fn mark_page(doc: &dyn Document, b: &Bookmark) -> Option<usize> {
-    match b.position.parse::<Position>().ok().and_then(|p| doc.page_of_known(&p)) {
-        Some(p) => Some(p),
-        None => b.page.map(|p| p as usize),
+/// A bookmark with its position parsed once: whether a page is marked is asked for
+/// every page drawn (the dog-ear, the status bar's bookmark).
+#[derive(Clone, Debug)]
+struct Mark {
+    bookmark: Bookmark,
+    at: Option<Position>,
+}
+
+impl Mark {
+    fn new(bookmark: Bookmark) -> Self {
+        let at = bookmark.position.parse().ok();
+        Mark { bookmark, at }
     }
+
+    /// Page in the current layout; else the page saved with it (fixed layouts).
+    fn page(&self, doc: &dyn Document) -> Option<usize> {
+        self.at.as_ref().and_then(|p| doc.page_of_known(p)).or(self.bookmark.page.map(|p| p as usize))
+    }
+}
+
+/// True when one of `marks` is on `page`.
+fn page_marked(marks: &[Mark], doc: &dyn Document, page: usize) -> bool {
+    marks.iter().any(|m| m.page(doc) == Some(page))
 }
 
 /// (start, end) of saved highlights whose positions parse.
 fn saved_ranges(hl: &[Highlight]) -> Vec<(Position, Position)> {
     hl.iter().filter_map(|h| Some((h.start.parse::<Position>().ok()?, h.end.parse::<Position>().ok()?))).collect()
+}
+
+/// Now as `YYYY-MM-DD HH:MM:SS` local time: when a bookmark or highlight was made.
+fn timestamp() -> String {
+    let t = ink_device::clock::TimeZone::local().at(std::time::SystemTime::now()).format();
+    t.get(..19).map_or_else(|| t.clone(), str::to_string)
+}
+
+/// `page` for a fixed-layout book (its marks keep the page: positions there are pages),
+/// `None` for a reflowable one.
+fn fixed_page(doc: &dyn Document, page: usize) -> Option<u32> {
+    (doc.kind() == ink_doc::DocKind::Fixed).then_some(page as u32)
+}
+
+/// Copies the pixels of `r` from `src` to `dst` (two canvases of one size; `r` inside
+/// them): the page buffer and the screen canvas.
+fn copy_rect(dst: &mut Canvas, src: &Canvas, r: Rect) {
+    let (w, n) = (dst.width, r.w as usize);
+    for y in r.y..r.bottom() {
+        let i = y as usize * w + r.x as usize;
+        dst.pixels[i..i + n].copy_from_slice(&src.pixels[i..i + n]);
+    }
+}
+
+/// True when `p` is within `slop` pixels of `r` (targets widened for fingers).
+fn near(r: &Rect, p: Point, slop: i32) -> bool {
+    Rect::new(r.x - slop, r.y - slop, r.w + 2 * slop as u32, r.h + 2 * slop as u32).contains(p)
 }
 
 /// Side of the bookmark mark in the top-right corner of a bookmarked page.
@@ -561,7 +578,7 @@ pub struct ReaderScreen {
     /// An edge slide (brightness or warmth follows the finger) in progress.
     slide: Option<light_gestures::Slide>,
     /// The book's bookmarks (loaded on open, saved on every change).
-    marks: Vec<Bookmark>,
+    marks: Vec<Mark>,
     /// Bookmarks in the order the Go to panel lists them.
     listed_marks: Vec<Bookmark>,
     /// The book's own reading settings (Aa panel), over the global ones.
@@ -616,10 +633,9 @@ pub struct ReaderScreen {
     sel_shown: Vec<Rect>,
     /// The selection changed and must be drawn.
     sel_dirty: bool,
-    /// Highlights made in this session: (layout key, page, rectangles, start). Drawn
-    /// only when the document cannot map the saved range (`range_rects` empty: fixed
-    /// layouts).
-    session_hl: Vec<(String, usize, Vec<Rect>, String)>,
+    /// Highlights made in this session, per page drawn. Drawn only when the document
+    /// cannot map the saved range (`range_rects` empty: fixed layouts).
+    session_hl: Vec<SessionMark>,
     /// Saved highlight ranges of the book (start, end), drawn with `range_rects`.
     saved_hl: Vec<(Position, Position)>,
     /// The selection is a saved highlight that was tapped: its card offers "Remove
@@ -663,6 +679,24 @@ pub struct ReaderScreen {
     /// class is `Change::Jump` (REAGL; GC16 per the user's "full refresh every N pages"),
     /// not a flash of its own.
     jumped: bool,
+    /// What the end card shows while it is open ([`end`]).
+    end: Option<end::EndInfo>,
+    /// The way the last page turn went (+1 next, -1 previous): the page expected next.
+    turn_dir: i64,
+    /// When the page after the one shown is drawn ahead ([`ReaderScreen::prefetch_next`]):
+    /// set when a page is drawn and moved on by every input, so it comes once no input
+    /// came for [`PREFETCH_IDLE`]. Waits while a finger is down or an overlay is open.
+    prefetch_at: Option<Instant>,
+    /// A finger is on the panel (a touch went down and has not lifted yet).
+    touching: bool,
+    /// A zoom step asks for a preview: the next paint shows the page shown before,
+    /// scaled ([`Document::render_zoom_preview`]), instead of waiting for the render.
+    zoom_preview: bool,
+    /// The page shown is a zoom preview: the sharp page is drawn once no input came for
+    /// [`ZOOM_SETTLE`] (no finger down, no overlay).
+    sharp_at: Option<Instant>,
+    /// The page number of the zoom preview on screen, until the sharp page replaced it.
+    preview_shown: Option<usize>,
 }
 
 /// The sidecar gets the position once the page has rested this long. Page turns do no
@@ -671,6 +705,14 @@ pub struct ReaderScreen {
 pub const POSITION_SAVE_IDLE: Duration = Duration::from_secs(2);
 /// While pages keep turning, the position is still saved this often.
 pub const POSITION_SAVE_MAX: Duration = Duration::from_secs(10);
+/// A page drawn and no input for this long: the document draws the next page ahead
+/// (PDF and CBZ pages take most of a second on the Kindle). Short against reading a
+/// page, long enough that a quick second tap is read first.
+pub const PREFETCH_IDLE: Duration = Duration::from_millis(250);
+/// A zoom preview on screen, the fingers lifted and no input for this long: the sharp
+/// page is drawn. Short, as a comic page takes only a few hundred ms to draw on the
+/// Kindle; a second pinch that starts in time scales the preview again first.
+pub const ZOOM_SETTLE: Duration = Duration::from_millis(150);
 
 impl ReaderScreen {
     /// A reader for `path` (opened in `on_enter`).
@@ -733,6 +775,13 @@ impl ReaderScreen {
             position_unsaved: None,
             turned: false,
             jumped: false,
+            end: None,
+            turn_dir: 1,
+            prefetch_at: None,
+            touching: false,
+            zoom_preview: false,
+            sharp_at: None,
+            preview_shown: None,
         }
     }
 
@@ -770,18 +819,31 @@ impl ReaderScreen {
         ink_ui::message::draw_message(cx.canvas, cx.fonts, &refs);
     }
 
+    /// The book reads right to left (a fixed-layout book with Aa › View › Right to left):
+    /// page-turn gestures and the turn wave go the other way.
+    fn reads_right_to_left(&self) -> bool {
+        self.doc.as_deref().and_then(|d| d.fixed_view()).is_some_and(|v| v.rtl)
+    }
+
     fn turn(&mut self, step: i64, cx: &mut AppCtx) {
         let Some(doc) = self.doc.as_ref() else { return };
         let total = doc.page_count().pages as i64;
         let next = (self.page as i64 + step).clamp(0, (total - 1).max(0)) as usize;
+        // Past the last page: the end card (title, finished, rating, what next).
+        if step > 0 && next == self.page && self.overlay.is_none() && self.bridge.is_none() && self.at_book_end() {
+            self.open_end(cx);
+            return;
+        }
         self.bridge = None;
         if next != self.page {
             self.page = next;
             self.rerender = true;
             self.turned = true;
+            self.turn_dir = step.signum();
             self.dirty = Some(cx.refresh.page_turn());
-            // No right-to-left books yet: a next page sweeps left.
-            self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, false));
+            // A next page sweeps left, right in a right-to-left book.
+            let rtl = self.reads_right_to_left();
+            self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, rtl));
         }
     }
 
@@ -825,32 +887,66 @@ impl ReaderScreen {
         self.rerender = true;
         self.turned = false;
         // The class is picked when the page is shown (paint_screen: Change::Jump).
-        self.dirty = Some(self.dirty.map_or(RefreshClass::Reagl, |d| d.max(RefreshClass::Reagl)));
+        self.raise_dirty(RefreshClass::Reagl);
         self.jumped = true;
         self.turn_wave = None;
+    }
+
+    /// The screen must be shown again with at least `class`.
+    fn raise_dirty(&mut self, class: RefreshClass) {
+        self.dirty = Some(self.dirty.map_or(class, |d| d.max(class)));
+    }
+
+    /// A highlight or bookmark changed: the page is drawn again and only the pixels that
+    /// changed are refreshed (`mark_change`).
+    fn marks_changed(&mut self) {
+        self.rerender = true;
+        self.mark_change = true;
+    }
+
+    /// The pages moved (relayout, zoom): page numbers kept for the TOC, the links and
+    /// the search hits are wrong now.
+    fn forget_page_numbers(&mut self) {
+        self.toc = None;
+        self.links = None;
+        for h in self.hits.iter_mut().flatten() {
+            h.page = None;
+        }
     }
 
     fn save_position(&self) {
         let Some(doc) = self.doc.as_ref() else { return };
         let Ok(pos) = doc.position_of_page(self.page) else { return };
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        state.position = Some(pos.to_string());
         let percent = saved_percent(doc.as_ref(), self.page);
-        state.percent = Some(percent);
         // The chapter title for the Home tab's hero card (library/home.rs). Only when the
         // TOC is already loaded (the footer loads it); saving never reads the TOC itself.
-        if let Some(toc) = self.toc.as_deref() {
-            match current_chapter(doc.as_ref(), toc, self.page).map(|i| toc[i].title.trim().to_string()).filter(|t| !t.is_empty()) {
-                Some(t) => {
+        let chapter = self.toc.as_deref().map(|toc| current_chapter(doc.as_ref(), toc, self.page).map(|i| toc[i].title.trim().to_string()).filter(|t| !t.is_empty()));
+        self.update_sidecar("position", |state| {
+            state.position = Some(pos.to_string());
+            state.percent = Some(percent);
+            match chapter {
+                Some(Some(t)) => {
                     state.extra.insert("chapter".into(), t.into());
                 }
-                None => {
+                Some(None) => {
                     state.extra.remove("chapter");
                 }
+                None => {}
             }
-        }
-        if let Err(e) = state.save(&self.path) {
-            log::warn!("cannot save position: {e}");
+        });
+    }
+
+    /// Loads the book's sidecar, changes it with `change` and writes it back. A failed
+    /// write is logged ("cannot save `what`"); returns true when the write succeeded.
+    fn update_sidecar(&self, what: &str, change: impl FnOnce(&mut BookState)) -> bool {
+        let mut state = BookState::load(&self.path).unwrap_or_default();
+        change(&mut state);
+        match state.save(&self.path) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("cannot save {what}: {e}");
+                false
+            }
         }
     }
 
@@ -871,6 +967,42 @@ impl ReaderScreen {
         self.position_unsaved.map(|(first, last)| (last + POSITION_SAVE_IDLE).min(first + POSITION_SAVE_MAX))
     }
 
+    /// When the page after the one shown is drawn ahead: not while a finger is down (a
+    /// hold or a drag would stall behind the render) or an overlay is open (its taps
+    /// would); the timer comes back once both are gone.
+    fn prefetch_due(&self) -> Option<Instant> {
+        self.prefetch_at.filter(|_| !self.touching && self.overlay.is_none())
+    }
+
+    /// When the sharp page replaces a zoom preview: like [`ReaderScreen::prefetch_due`],
+    /// not while a finger is down or an overlay is open. The search hit bar leaves the
+    /// page in use (a pinch under it zooms), so it does not hold the sharp page back.
+    fn sharp_due(&self) -> Option<Instant> {
+        let page_free = self.overlay.as_ref().is_none_or(|o| o.kind == overlay::OverlayKind::Hits);
+        self.sharp_at.filter(|_| !self.touching && page_free)
+    }
+
+    /// Draws the page after the one shown, in the direction of the last turn, into the
+    /// document's page cache (bounded by the document: 16 MiB of screens for MuPDF), so
+    /// the next turn shows it at once. The target comes from the page shown now: a turn
+    /// made since the timer was set moved the timer on, so a stale page is never drawn.
+    /// Not while a selection is dragged or a half-page bridge is shown.
+    fn prefetch_next(&mut self) {
+        self.prefetch_at = None;
+        if self.selecting.is_some() || self.bridge.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.as_deref_mut() else { return };
+        let Some(next) = self.page.checked_add_signed(self.turn_dir as isize) else { return };
+        if next >= doc.page_count().pages {
+            return;
+        }
+        let t = Instant::now();
+        if doc.prefetch_page(next) {
+            log::debug!("reader: page {} prefetched in {:.2} ms", next + 1, t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
     /// Writes the reading position to the sidecar if it changed since the last write.
     fn flush_position(&mut self) {
         if self.position_unsaved.take().is_none() {
@@ -881,27 +1013,29 @@ impl ReaderScreen {
         log::debug!("reader: position page {} saved in {} ms", self.page + 1, t.elapsed().as_millis());
     }
 
-    fn toc(&mut self) -> &[TocEntry] {
+    /// Reads the table of contents into `self.toc` unless it is there (it is dropped
+    /// when page numbers change). Callers borrow `self.toc` and `self.doc` side by side.
+    fn load_toc(&mut self) {
         if self.toc.is_none() {
             self.toc = Some(self.doc.as_ref().map(|d| d.toc()).unwrap_or_default());
         }
-        self.toc.as_deref().unwrap_or_default()
     }
 
     /// What the menu bars show for the current page.
     fn menu_info(&mut self) -> MenuInfo {
         let page = self.page;
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return MenuInfo::default() };
         let count = doc.page_count();
-        let chapter = current_chapter(doc, &toc, page).map(|i| toc[i].title.clone());
-        let bookmarked = self.marks.iter().any(|b| mark_page(doc, b) == Some(page));
+        let chapter = current_chapter(doc, toc, page).map(|i| toc[i].title.clone());
+        let bookmarked = page_marked(&self.marks, doc, page);
         MenuInfo {
             title: doc.metadata().title.clone(),
             page,
             pages: count.pages,
             complete: count.complete,
-            estimate: if count.complete { None } else { doc.page_estimate().filter(|&e| e > count.pages) },
+            estimate: footer::estimate(doc),
             // The footer's fraction, so the menu and the status bar show the same percent.
             percent: footer::bar_progress(doc, page),
             chapter,
@@ -911,13 +1045,14 @@ impl ReaderScreen {
 
     fn goto_info(&mut self, tab: usize) -> goto::GotoInfo {
         let page = self.page;
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return goto::GotoInfo::default() };
         let rows = toc
             .iter()
             .map(|e| goto::TocRow { title: e.title.clone(), level: e.level, page: e.page.or_else(|| doc.page_of_known(&e.position)) })
             .collect();
-        let mut marks: Vec<(Option<usize>, Bookmark)> = self.marks.iter().map(|b| (mark_page(doc, b), b.clone())).collect();
+        let mut marks: Vec<(Option<usize>, Bookmark)> = self.marks.iter().map(|m| (m.page(doc), m.bookmark.clone())).collect();
         marks.sort_by_key(|(p, _)| p.unwrap_or(usize::MAX));
         let bookmarks = marks
             .iter()
@@ -928,41 +1063,39 @@ impl ReaderScreen {
             })
             .collect();
         self.listed_marks = marks.into_iter().map(|(_, b)| b).collect();
-        goto::GotoInfo { tab, toc: rows, current: current_chapter(doc, &toc, page), bookmarks, percent: footer::bar_progress(doc, page) }
+        goto::GotoInfo { tab, toc: rows, current: current_chapter(doc, toc, page), bookmarks, percent: footer::bar_progress(doc, page) }
     }
 
     /// Adds a bookmark on the current page, or removes the ones on it. Returns true when
     /// the page is bookmarked afterwards.
     fn mark_page_toggle(&mut self) -> bool {
         let page = self.page;
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return false };
         let n = self.marks.len();
-        self.marks.retain(|b| mark_page(doc, b) != Some(page));
+        self.marks.retain(|m| m.page(doc) != Some(page));
         let marked = if self.marks.len() == n {
             let Ok(pos) = doc.position_of_page(page) else { return false };
-            let chapter = current_chapter(doc, &toc, page).map(|i| toc[i].title.clone());
-            let created = ink_device::clock::TimeZone::local().at(std::time::SystemTime::now()).format();
-            let fixed = doc.kind() == ink_doc::DocKind::Fixed;
-            self.marks.push(Bookmark {
-                position: pos.to_string(),
-                label: format!("Page {}", page + 1),
-                created: created.get(..19).unwrap_or(&created).to_string(),
-                chapter,
-                page: fixed.then_some(page as u32),
-                note: None,
-            });
+            let chapter = current_chapter(doc, toc, page).map(|i| toc[i].title.clone());
+            // Parsed back from its text, as when the book is opened again.
+            self.marks.push(Mark::new(Bookmark { position: pos.to_string(), label: format!("Page {}", page + 1), created: timestamp(), chapter, page: fixed_page(doc, page), note: None }));
             true
         } else {
             false
         };
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        state.bookmarks = self.marks.clone();
-        if let Err(e) = state.save(&self.path) {
-            log::warn!("cannot save bookmarks: {e}");
-        }
+        self.update_sidecar("bookmarks", |state| state.bookmarks = self.marks.iter().map(|m| m.bookmark.clone()).collect());
         log::info!("reader bookmark page {}: {}", page + 1, if marked { "added" } else { "removed" });
         marked
+    }
+
+    /// A row of the Go to panel was tapped: the panel closes and the reader goes to the
+    /// row's place `pos` (nothing when the row is gone).
+    fn go_to_row(&mut self, pos: Option<Position>) {
+        if let Some(pos) = pos {
+            self.close_overlay();
+            self.go_to_position(&pos);
+        }
     }
 
     /// Goes to `pos` (a TOC entry, bookmark or search hit), remembering the way back.
@@ -983,11 +1116,7 @@ impl ReaderScreen {
             self.links = Some((page, links));
         }
         let (_, links) = self.links.as_ref()?;
-        const SLOP: i32 = 18;
-        links
-            .iter()
-            .find(|l| l.rect.is_some_and(|r| Rect::new(r.x - SLOP, r.y - SLOP, r.w + 2 * SLOP as u32, r.h + 2 * SLOP as u32).contains(pos)))
-            .cloned()
+        links.iter().find(|l| l.rect.is_some_and(|r| near(&r, pos, 18))).cloned()
     }
 
     /// Follows a tapped link: a footnote opens a popup, another internal link jumps
@@ -997,8 +1126,7 @@ impl ReaderScreen {
         let size = cx.screen.size();
         let anchor = link.rect.unwrap_or_default();
         let popup = |title: String, text: String, spans: Vec<(String, Style)>, buttons: Vec<(String, String)>| {
-            let mut o = Overlay::new(overlay::OverlayKind::Popup);
-            o.tree.add(None, Box::new(overlay::PageScrim { action: "close".into() }), Rect::from_size(size));
+            let mut o = Overlay::over_page(overlay::OverlayKind::Popup, size, "close");
             // Height from the text length (about 17 px per character at the popup's
             // 34 px text), between 320 px and 60 % of the screen.
             let pw = (size.w - 48).min(1100);
@@ -1117,30 +1245,26 @@ impl ReaderScreen {
             None => return,
         };
         let page = pages.first().map_or(self.page, |(p, _)| *p);
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let (Some(doc), Some(sel)) = (self.doc.as_deref(), self.sel.as_ref()) else { return };
-        let created = ink_device::clock::TimeZone::local().at(std::time::SystemTime::now()).format();
-        let fixed = doc.kind() == ink_doc::DocKind::Fixed;
         let h = Highlight {
             start: sel.start.to_string(),
             end: sel.end.to_string(),
             text: sel.text.clone(),
             style: "lighten".into(),
-            chapter: current_chapter(doc, &toc, page).map(|i| toc[i].title.clone()),
-            created: created.get(..19).unwrap_or(&created).to_string(),
-            page: fixed.then_some(page as u32),
+            chapter: current_chapter(doc, toc, page).map(|i| toc[i].title.clone()),
+            created: timestamp(),
+            page: fixed_page(doc, page),
             note: note.filter(|n| !n.trim().is_empty()),
             ..Highlight::default()
         };
         let h_note = h.note.as_ref().map_or(0, |n| n.chars().count());
         let key = doc.layout().cache_key();
-        self.session_hl.extend(pages.iter().map(|(p, rects)| (key.clone(), *p, rects.clone(), h.start.clone())));
+        self.session_hl.extend(pages.iter().map(|(p, rects)| SessionMark { layout: key.clone(), page: *p, rects: rects.clone(), start: sel.start.clone() }));
         self.saved_hl.push((sel.start.clone(), sel.end.clone()));
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        state.add_highlight(h);
-        match state.save(&self.path) {
-            Ok(()) => log::info!("reader highlight on page {} ({} pages): {} chars, note {}", page + 1, pages.len(), sel.text.chars().count(), h_note),
-            Err(e) => log::warn!("cannot save highlight: {e}"),
+        if self.update_sidecar("highlight", |state| state.add_highlight(h)) {
+            log::info!("reader highlight on page {} ({} pages): {} chars, note {}", page + 1, pages.len(), sel.text.chars().count(), h_note);
         }
     }
 
@@ -1148,8 +1272,7 @@ impl ReaderScreen {
     /// document that cannot map a saved range (fixed layouts) has the rectangles kept
     /// for the highlights made this session.
     fn highlight_at(&mut self, pos: Point) -> Option<(Position, Position, Vec<Rect>)> {
-        const NEAR: i32 = 8;
-        let near = |rects: &[Rect]| rects.iter().any(|r| Rect::new(r.x - NEAR, r.y - NEAR, r.w + 2 * NEAR as u32, r.h + 2 * NEAR as u32).contains(pos));
+        let near = |rects: &[Rect]| rects.iter().any(|r| near(r, pos, 8));
         let page = self.page;
         let doc = self.doc.as_deref_mut()?;
         let mapped = self.saved_hl.iter().rev().find_map(|(start, end)| {
@@ -1159,21 +1282,21 @@ impl ReaderScreen {
         if mapped.is_some() {
             return mapped;
         }
+        if self.session_hl.is_empty() {
+            return None;
+        }
         let key = doc.layout().cache_key();
-        let (.., rects, st) = self.session_hl.iter().rev().find(|(k, p, rects, _)| *k == key && *p == page && near(rects))?;
-        let (start, end) = self.saved_hl.iter().find(|(s, _)| s.to_string() == *st)?;
-        Some((start.clone(), end.clone(), rects.clone()))
+        let m = self.session_hl.iter().rev().find(|m| m.on(&key, page) && near(&m.rects))?;
+        let (start, end) = self.saved_hl.iter().find(|(s, _)| *s == m.start)?;
+        Some((start.clone(), end.clone(), m.rects.clone()))
     }
 
     /// Selects the saved highlight `start`..`end` (drawn at `rects` on the shown page)
     /// and opens its card, as after selecting the text by hand: plugins read it as the
     /// selection, and the card offers "Remove highlight".
     fn open_highlight(&mut self, start: Position, end: Position, rects: Vec<Rect>, cx: &mut AppCtx) {
-        let text = BookState::load(&self.path)
-            .ok()
-            .and_then(|st| st.highlights.into_iter().find(|h| h.start == start.to_string() && h.end == end.to_string()))
-            .map(|h| h.text)
-            .unwrap_or_default();
+        let (s, e) = (start.to_string(), end.to_string());
+        let text = BookState::load(&self.path).ok().and_then(|st| st.highlights.into_iter().find(|h| h.start == s && h.end == e)).map(|h| h.text).unwrap_or_default();
         log::info!("reader: tap on a highlight on page {} ({} chars)", self.page + 1, text.chars().count());
         let sel = Selection { start, end, text, page: self.page, rects: rects.clone() };
         if let Some(d) = self.doc.as_deref_mut() {
@@ -1189,20 +1312,11 @@ impl ReaderScreen {
     /// Removes the saved highlight `start`..`end` from the page and the book's sidecar.
     fn remove_highlight(&mut self, start: &Position, end: &Position) {
         self.saved_hl.retain(|(s, e)| !(s == start && e == end));
-        let key = start.to_string();
-        self.session_hl.retain(|(.., st)| *st != key);
-        let mut state = BookState::load(&self.path).unwrap_or_default();
-        let removed = state.remove_highlight(&key, &end.to_string());
-        match state.save(&self.path) {
-            Ok(()) => log::info!("reader: highlight removed ({})", if removed { "from the sidecar" } else { "not in the sidecar" }),
-            Err(e) => log::warn!("cannot save after removing a highlight: {e}"),
+        self.session_hl.retain(|m| m.start != *start);
+        let mut removed = false;
+        if self.update_sidecar("the removed highlight", |state| removed = state.remove_highlight(&start.to_string(), &end.to_string())) {
+            log::info!("reader: highlight removed ({})", if removed { "from the sidecar" } else { "not in the sidecar" });
         }
-    }
-
-    /// True when a long press on a word selects it (`gestures.long_press` is
-    /// `dictionary` or `select`).
-    fn long_press_selects(cx: &AppCtx) -> bool {
-        matches!(cx.settings.gestures.action("long_press"), "dictionary" | "select")
     }
 
     /// Selection by touch, by whole words: the first hold on text selects the word under
@@ -1210,7 +1324,7 @@ impl ReaderScreen {
     /// characters); the lift opens the selection card, or, when the finger stayed on the
     /// one word and `gestures.long_press` is `dictionary`, looks the word up at once
     /// with the dictionary plugin's selection action. Returns true when the event was
-    /// used.
+    /// used. Called only when a long press selects ([`actions::long_press_selects`]).
     fn select_touch(&mut self, t: &ink_ui::Touch, cx: &mut AppCtx) -> bool {
         use ink_ui::TouchKind;
         if t.slot != 0 {
@@ -1218,14 +1332,12 @@ impl ReaderScreen {
         }
         let page = self.page;
         match (t.kind, self.selecting) {
-            (TouchKind::Hold, None) if self.sel.is_none() && Self::long_press_selects(cx) => {
+            (TouchKind::Hold, None) if self.sel.is_none() => {
                 let Some(doc) = self.doc.as_deref_mut() else { return false };
                 // A hold away from any text (blank space, margins) is not a selection.
-                const NEAR: i32 = 30;
-                let near = |r: &Rect| Rect::new(r.x - NEAR, r.y - NEAR, r.w + 2 * NEAR as u32, r.h + 2 * NEAR as u32).contains(t.pos);
                 let t0 = Instant::now();
                 match selection::word_hit(doc, page, t.pos) {
-                    Some(w) if w.sel.rects.iter().any(near) => {
+                    Some(w) if w.sel.rects.iter().any(|r| near(r, t.pos, 30)) => {
                         log::info!(
                             "reader: long press at {},{} selects {:?} on page {} ({} ms)",
                             t.pos.x,
@@ -1238,8 +1350,7 @@ impl ReaderScreen {
                         self.sel_end = selection::bounds(&w.sel.rects).map(|r| (r, t.pos));
                         self.sel_anchor_page = page;
                         self.sel_pages = vec![(page, w.sel.rects.clone())];
-                        self.sel_edge = None;
-                        self.sel_edge_lock = false;
+                        self.leave_edge();
                         self.sel_text_box = None;
                         self.sel = Some(w.sel.clone());
                         self.sel_word = Some(w);
@@ -1269,8 +1380,7 @@ impl ReaderScreen {
                     self.sel_edge_turn(cx);
                     return true;
                 }
-                self.sel_edge = None;
-                self.sel_edge_lock = false;
+                self.leave_edge();
                 if self.sel_end.is_some_and(|(r, q)| r.contains(p) || ((q.x - p.x).abs() < 24 && (q.y - p.y).abs() < 24)) {
                     return true;
                 }
@@ -1296,10 +1406,7 @@ impl ReaderScreen {
                 true
             }
             (TouchKind::Up, Some(_)) => {
-                self.selecting = None;
-                self.sel_end = None;
-                self.sel_edge = None;
-                self.sel_edge_lock = false;
+                self.end_drag();
                 self.swallow_gestures = true;
                 let Some(sel) = self.sel.clone() else {
                     self.end_bridge();
@@ -1314,14 +1421,13 @@ impl ReaderScreen {
                 };
                 log::info!("reader selection {pages}: {:?} ({})", note_excerpt(&sel.text, 60), if one_word { "one word" } else { "extended" });
                 cx.plugins.selection(doc, &sel);
-                let lookup = cx.plugins.selection_actions().iter().find(|a| a.id == "lookup").map(|a| (a.plugin.clone(), a.id.clone()));
                 // One word with long_press = dictionary: the lookup runs at once and its
                 // card becomes a sibling of the selection card in one overlay (a tap on
                 // the page closes both).
                 let mut card = None;
                 if one_word && cx.settings.gestures.action("long_press") == "dictionary" {
-                    match (lookup, self.doc.as_deref_mut()) {
-                        (Some((plugin, id)), Some(doc)) => {
+                    match cx.plugins.selection_actions().iter().find(|a| a.id == "lookup").map(|a| (a.plugin.clone(), a.id.clone())) {
+                        Some((plugin, id)) => {
                             log::info!("reader: long press looks up {:?} with {plugin}", sel.text);
                             cx.plugins.trigger(&plugin, &id, Some(doc));
                             match cx.plugins.take_card_dialog(&plugin) {
@@ -1329,7 +1435,7 @@ impl ReaderScreen {
                                 None => log::info!("reader: {plugin} answered the lookup without a card; it shows in the plugin layer"),
                             }
                         }
-                        _ => log::info!("reader: no dictionary lookup action; selection card only"),
+                        None => log::info!("reader: no dictionary lookup action; selection card only"),
                     }
                 }
                 let o = self.selection_overlay(&sel, card, None, cx);
@@ -1337,16 +1443,27 @@ impl ReaderScreen {
                 true
             }
             (TouchKind::Cancel, Some(_)) => {
-                self.selecting = None;
-                self.sel_end = None;
-                self.sel_edge = None;
-                self.sel_edge_lock = false;
+                self.end_drag();
                 self.close_overlay();
                 self.sel_dirty = true;
                 true
             }
             _ => false,
         }
+    }
+
+    /// The dragged end left the page-turn zones: no turn pending, and the next rest in a
+    /// zone may turn again.
+    fn leave_edge(&mut self) {
+        self.sel_edge = None;
+        self.sel_edge_lock = false;
+    }
+
+    /// The finger that dragged the selection lifted (or the touch was cancelled).
+    fn end_drag(&mut self) {
+        self.selecting = None;
+        self.sel_end = None;
+        self.leave_edge();
     }
 
     /// Extends the selection from the word it started on to `end` on the page shown
@@ -1485,7 +1602,8 @@ impl ReaderScreen {
     /// The chapter title of each hit's page (empty when unknown). The TOC pages are
     /// looked up once, not once per hit.
     fn hit_chapters(&mut self, rows: &[search::HitRow]) -> Vec<String> {
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let Some(doc) = self.doc.as_deref() else { return Vec::new() };
         let starts: Vec<(usize, &str)> = toc.iter().filter_map(|e| Some((e.page.or_else(|| doc.page_of(&e.position).ok())?, e.title.trim()))).collect();
         rows.iter()
@@ -1553,8 +1671,7 @@ impl ReaderScreen {
         log::info!("reader: note saved ({} chars)", note.chars().count());
         self.add_highlight(Some(note));
         self.close_overlay();
-        self.rerender = true;
-        self.mark_change = true;
+        self.marks_changed();
     }
 
     /// Feeds the keys typed on the search (or note) keyboard into the field.
@@ -1731,16 +1848,17 @@ impl ReaderScreen {
         let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
         let size = cx.screen.size();
         let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
-        if &layout != doc.layout() {
+        // A fixed-layout book's view options (Aa › View) changed.
+        let view = doc.fixed_view().map(|v| aa::fixed_view(v, &self.book_settings)).filter(|v| Some(*v) != doc.fixed_view());
+        if &layout != doc.layout() || view.is_some() {
             doc.set_current_page(self.page);
+            if let Some(v) = view {
+                log::info!("reader: fixed-layout view {v:?}");
+                doc.set_fixed_view(&v)?;
+            }
             doc.set_layout(&layout)?;
             self.page = doc.current_page();
-            // Page numbers known for the old layout are wrong now.
-            self.toc = None;
-            self.links = None;
-            for h in self.hits.iter_mut().flatten() {
-                h.page = None;
-            }
+            self.forget_page_numbers();
             self.rerender = true;
             self.dirty = Some(class);
             self.turned = true;
@@ -1756,14 +1874,15 @@ impl ReaderScreen {
         if stale {
             self.toc = None;
         }
-        let toc = self.toc().to_vec();
+        self.load_toc();
+        let toc = self.toc.as_deref().unwrap_or_default();
         let doc = self.doc.as_deref()?;
         if stale {
-            self.chapter_map = Some(footer::ChapterMap::build(doc, &toc));
+            self.chapter_map = Some(footer::ChapterMap::build(doc, toc));
         }
         let map = self.chapter_map.as_ref()?;
         self.counting_shown = !doc.page_count().complete;
-        Some(footer::info(doc, &toc, map, self.page, self.speed))
+        Some(footer::info(doc, toc, map, self.page, self.speed))
     }
 
     /// Closes the overlay; the page comes back from its buffer with one full update.
@@ -1790,6 +1909,7 @@ impl ReaderScreen {
         if let Some(d) = self.dict_card.take() {
             self.dict_cancel.push(d);
         }
+        self.end = None;
         if let Some(o) = self.overlay.take() {
             self.swallow_gestures = true;
             if full {
@@ -1807,61 +1927,56 @@ impl ReaderScreen {
         if let Some(t) = self.menu_action(a, cx)? {
             return Ok(t);
         }
-        match a {
+        // `name:argument` (`toc:3`, `pct:42.5`, `pcard:next`), or a plain name.
+        let (name, arg) = a.split_once(':').unwrap_or((a, ""));
+        let index = arg.parse::<usize>().ok();
+        match name {
             "close" => self.close_overlay(),
+            _ if name.starts_with("end-") => {
+                if let Some(t) = self.end_action(name, arg, cx) {
+                    return Ok(t);
+                }
+            }
             actions::EXIT_CONFIRMED => return Ok(Transition::Exit),
             "back" => return Ok(Transition::Pop),
-            _ if a.starts_with("page:") => {
-                if let Ok(n) = a[5..].parse::<usize>() {
+            "page" => {
+                if let Some(n) = index {
                     self.close_overlay();
                     self.navigate_to_page(n.saturating_sub(1));
                 }
             }
-            "goto" => {
-                let info = self.goto_info(0);
-                self.open_overlay(goto::build(&info, cx.screen.size()), cx);
+            "toc" => {
+                self.load_toc();
+                let pos = index.and_then(|i| self.toc.as_deref()?.get(i).map(|e| e.position.clone()));
+                self.go_to_row(pos);
             }
-            _ if a.starts_with("gtab:") => {
-                let info = self.goto_info(a[5..].parse().unwrap_or(0));
-                self.open_overlay(goto::build(&info, cx.screen.size()), cx);
+            "bm" => {
+                let pos = index.and_then(|i| self.listed_marks.get(i)).and_then(|b| b.position.parse::<Position>().ok());
+                self.go_to_row(pos);
             }
-            _ if a.starts_with("toc:") => {
-                let pos = a[4..].parse::<usize>().ok().and_then(|i| self.toc().get(i).map(|e| e.position.clone()));
-                if let Some(pos) = pos {
-                    self.close_overlay();
-                    self.go_to_position(&pos);
-                }
-            }
-            _ if a.starts_with("bm:") => {
-                let pos = a[3..].parse::<usize>().ok().and_then(|i| self.listed_marks.get(i)).and_then(|b| b.position.parse::<Position>().ok());
-                if let Some(pos) = pos {
-                    self.close_overlay();
-                    self.go_to_position(&pos);
-                }
-            }
-            _ if a.starts_with("pct:") => {
-                if let (Ok(n), Some(doc)) = (a[4..].parse::<f32>(), self.doc.as_deref_mut()) {
+            "pct" => {
+                if let (Ok(n), Some(doc)) = (arg.parse::<f32>(), self.doc.as_deref_mut()) {
                     let page = percent_page(doc, n);
                     self.close_overlay();
                     self.navigate_to_page(page);
                 }
             }
             // aa: the Aa sheet and its actions (reader/aa.rs).
-            _ if a == "aa" || a.starts_with("aa-") => {
+            _ if name == "aa" || name.starts_with("aa-") => {
                 if let Some(t) = self.aa_action(a, cx)? {
                     return Ok(t);
                 }
             }
             "search" | "hits-list" => self.open_search_page(false, cx),
             "keyboard" => self.search_keys(cx),
-            "focus:query" => {
+            "focus" if arg == "query" => {
                 if !self.overlay.as_ref().is_some_and(|o| o.ids.contains_key("keyboard")) {
                     self.open_search_page(true, cx);
                 }
             }
             "search-go" => self.run_search(cx),
-            _ if a.starts_with("hit:") => {
-                if let Ok(i) = a[4..].parse::<usize>() {
+            "hit" => {
+                if let Some(i) = index {
                     self.show_hit(i, cx);
                 }
             }
@@ -1872,10 +1987,9 @@ impl ReaderScreen {
                     self.show_hit(i, cx);
                 }
             }
-            _ if a.starts_with("plugin-menu:") || a.starts_with("plugin-sel:") => {
-                let sel = a.starts_with("plugin-sel:");
-                let i: usize = a.rsplit(':').next().and_then(|n| n.parse().ok()).unwrap_or(usize::MAX);
-                let entry = if sel {
+            "plugin-menu" | "plugin-sel" => {
+                let i = index.unwrap_or(usize::MAX);
+                let entry = if name == "plugin-sel" {
                     cx.plugins.selection_actions().get(i).map(|x| (x.plugin.clone(), x.id.clone()))
                 } else {
                     plugin_menu(cx.plugins).get(i).map(|x| (x.plugin.clone(), x.id.clone()))
@@ -1892,16 +2006,14 @@ impl ReaderScreen {
             "sel-highlight" => {
                 self.add_highlight(None);
                 self.close_overlay();
-                self.rerender = true;
-                self.mark_change = true;
+                self.marks_changed();
             }
             "sel-unhighlight" => {
                 if let Some(sel) = self.sel.clone() {
                     self.remove_highlight(&sel.start, &sel.end);
                 }
                 self.close_overlay();
-                self.rerender = true;
-                self.mark_change = true;
+                self.marks_changed();
             }
             _ if a.starts_with(PCARD) => self.plugin_card_action(&a[PCARD.len()..], cx),
             "sel-note" => {
@@ -1912,7 +2024,7 @@ impl ReaderScreen {
                 }
             }
             "note-save" => self.save_note(),
-            "focus:note" => {}
+            "focus" => {}
             "sel-search" => {
                 let text = self.sel.as_ref().map(|s| s.text.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
                 self.close_overlay();
@@ -1929,13 +2041,9 @@ impl ReaderScreen {
                 self.mark_page_toggle();
                 self.close_overlay();
                 // The page shows (or loses) its dog-ear.
-                self.rerender = true;
-                self.mark_change = true;
+                self.marks_changed();
             }
-            _ => {
-                log::info!("reader: '{a}' is not available yet");
-                let _ = cx;
-            }
+            _ => log::info!("reader: '{a}' is not available yet"),
         }
         Ok(Transition::None)
     }
@@ -1949,6 +2057,8 @@ impl ReaderScreen {
             UiEvent::Key(k) if k.pressed => match k.key {
                 Key::Power => return Ok(Transition::Exit),
                 Key::Back | Key::Menu => self.close_overlay(),
+                // The end card: the previous-page key goes back to the last page.
+                Key::PagePrev if o.kind == overlay::OverlayKind::End => self.close_overlay(),
                 _ if page_below => return self.handle_reading(ev, cx),
                 _ => {}
             },
@@ -2011,9 +2121,8 @@ impl ReaderScreen {
     /// page (dog-ear). Returns true when the page is bookmarked afterwards.
     pub fn toggle_bookmark(&mut self) -> bool {
         let marked = self.mark_page_toggle();
-        self.rerender = true;
-        self.mark_change = true;
-        self.dirty = Some(self.dirty.map_or(RefreshClass::Gl16, |c| c.max(RefreshClass::Gl16)));
+        self.marks_changed();
+        self.raise_dirty(RefreshClass::Gl16);
         marked
     }
 
@@ -2057,7 +2166,7 @@ impl ReaderScreen {
         publish_bars(Some(self.status_bars_hidden));
         log::info!("reader: status bars {}", if self.status_bars_hidden { "hidden" } else { "shown" });
         self.rerender = true;
-        self.dirty = Some(self.dirty.map_or(RefreshClass::Gl16, |c| c.max(RefreshClass::Gl16)));
+        self.raise_dirty(RefreshClass::Gl16);
     }
 
     /// Zooms a fixed-layout page in (`steps` > 0) or out ([`Document::zoom_step`]): the
@@ -2073,13 +2182,12 @@ impl ReaderScreen {
         };
         self.page = doc.current_page();
         log::info!("reader: zoom {steps:+} -> x{zoom}, now screen {}", self.page + 1);
-        self.toc = None;
-        self.links = None;
+        self.forget_page_numbers();
         self.session_hl.clear();
-        for h in self.hits.iter_mut().flatten() {
-            h.page = None;
-        }
         self.rerender = true;
+        // The zoomed page is a new page for plugins and the position, preview or not.
+        self.zoom_preview = true;
+        self.preview_shown = None;
         self.dirty = Some(RefreshClass::Gl16);
         true
     }
@@ -2161,8 +2269,14 @@ impl AppScreen for ReaderScreen {
         }
         let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
         // The font faces of the first page are parsed on another core while the book is
-        // read (MD5, zip, spine, TOC); the first layout takes them parsed.
-        ink_html::fonts::prewarm_faces(layout.font_family.as_deref());
+        // read (MD5, zip, spine, TOC); the first layout takes them parsed. PDF, CBZ and
+        // XPS pages are drawn by MuPDF and use none of them.
+        let fixed = ink_doc::Provider::extensions(&ink_mupdf::MupdfProvider)
+            .iter()
+            .any(|e| self.path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e)));
+        if !fixed {
+            ink_html::fonts::prewarm_faces(layout.font_family.as_deref());
+        }
         let cache = cx.paths.cache().join("pagemaps");
         // One partial MD5 for the page-map cache, the reading speed and the plugins.
         let md5 = ink_store::partial_md5(&self.path).ok();
@@ -2170,7 +2284,20 @@ impl AppScreen for ReaderScreen {
         let saved_pos = saved.as_deref().and_then(|s| s.parse::<Position>().ok());
         trace.step("state+md5");
         let doc = match open_traced(cx.providers, &self.path, &layout, Some(&cache), md5.as_deref(), saved_pos.as_ref(), &mut trace) {
-            Ok(doc) => doc,
+            Ok(mut doc) => {
+                // A fixed-layout book's own view (Aa › View) over the document's defaults.
+                if let Some(base) = doc.fixed_view() {
+                    let view = aa::fixed_view(base, &self.book_settings);
+                    if view != base {
+                        log::info!("reader: fixed-layout view of this book {view:?}");
+                        if let Err(e) = doc.set_fixed_view(&view) {
+                            log::warn!("reader: fixed-layout view: {e}");
+                        }
+                        trace.step("fixed-layout view");
+                    }
+                }
+                doc
+            }
             Err(e) => {
                 // The message stays on screen until the user taps: the reader does not
                 // end the app (or leave the library) on its own.
@@ -2181,7 +2308,7 @@ impl AppScreen for ReaderScreen {
                 return Ok(());
             }
         };
-        self.marks = state.as_ref().map(|s| s.bookmarks.clone()).unwrap_or_default();
+        self.marks = state.as_ref().map(|s| s.bookmarks.iter().cloned().map(Mark::new).collect()).unwrap_or_default();
         self.saved_hl = state.as_ref().map(|s| saved_ranges(&s.highlights)).unwrap_or_default();
         self.page = saved_pos.as_ref().and_then(|p| doc.page_of(p).ok()).unwrap_or(0);
         log::info!("saved position {:?} -> page {}", saved, self.page + 1);
@@ -2224,10 +2351,41 @@ impl AppScreen for ReaderScreen {
                 _ => Transition::None,
             });
         }
+        // A Wi-Fi status change: the bars show it at once (their minute tick, now), when
+        // the icon they show changes (not for a signal change: nothing to draw).
+        if let UiEvent::Power(PowerEvent::Network(NetEvent::Status(st))) = ev {
+            let shown = self.bars.device.as_ref().and_then(|d| d.wifi.as_ref()).map(footer::wifi_icon);
+            if footer::uses_widget(&cx.settings.status_bars, "wifi") && self.bars.next_tick.is_some() && shown != Some(footer::wifi_icon(st)) {
+                self.bars.next_tick = Some(Instant::now());
+            }
+            return Ok(Transition::None);
+        }
         // The position goes to the sidecar once the page rested, or before the device
         // sleeps (power events).
-        if matches!(ev, UiEvent::Power(_)) || self.position_due().is_some_and(|d| Instant::now() >= d) {
+        let network = matches!(ev, UiEvent::Power(PowerEvent::Network(_)));
+        if (matches!(ev, UiEvent::Power(_)) && !network) || self.position_due().is_some_and(|d| Instant::now() >= d) {
             self.flush_position();
+        }
+        // The page drawn ahead waits for the loop to go idle: input moves it on.
+        match ev {
+            UiEvent::Touch(t) => {
+                self.touching = !matches!(t.kind, ink_ui::TouchKind::Up | ink_ui::TouchKind::Cancel);
+                self.prefetch_at = self.prefetch_at.map(|_| Instant::now() + PREFETCH_IDLE);
+            }
+            UiEvent::Gesture(_) | UiEvent::Key(_) => self.prefetch_at = self.prefetch_at.map(|_| Instant::now() + PREFETCH_IDLE),
+            UiEvent::Timer(_) if self.prefetch_due().is_some_and(|d| Instant::now() >= d) => self.prefetch_next(),
+            _ => {}
+        }
+        // A zoom preview on screen: input moves the sharp page on, the timer draws it.
+        match ev {
+            UiEvent::Touch(_) | UiEvent::Gesture(_) | UiEvent::Key(_) => {
+                self.sharp_at = self.sharp_at.map(|_| Instant::now() + ZOOM_SETTLE);
+            }
+            UiEvent::Timer(_) if self.sharp_due().is_some_and(|d| Instant::now() >= d) => {
+                self.sharp_at = None;
+                self.raise_dirty(RefreshClass::Gl16);
+            }
+            _ => {}
         }
         // Plugin dialogs, menus, viewers and keyboards got the event first in the app
         // loop (plugin_host::hooks::app_handle).
@@ -2243,9 +2401,11 @@ impl AppScreen for ReaderScreen {
             t
         };
         // A screen pushed over the reader (settings, statistics, light) gets the timer
-        // and power events: write the position now.
+        // and power events: write the position now. It also gets the lift of a finger
+        // that went down here.
         if matches!(t, Ok(Transition::Push(_))) {
             self.flush_position();
+            self.touching = false;
         }
         t
     }
@@ -2280,7 +2440,14 @@ impl AppScreen for ReaderScreen {
         let edge = self.sel_edge.filter(|_| !self.sel_edge_lock && self.selecting.is_some()).map(|(_, since)| selection::EDGE_DWELL.saturating_sub(since.elapsed()));
         // Bars drawn while pagination counts: look again for the end of the count.
         let counting = (self.counting_shown && !self.status_bars_hidden && self.overlay.is_none()).then_some(COUNTING_POLL);
-        self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout()).into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting).min() // aa: debounce; statusbar: minute tick; position save; selection edge; page count
+        // The next page drawn ahead once the shown one rested.
+        let prefetch = self.prefetch_due().map(|d| d.saturating_duration_since(Instant::now()));
+        // The sharp page after a zoom preview.
+        let sharp = self.sharp_due().map(|d| d.saturating_duration_since(Instant::now()));
+        let expiry = self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout());
+        // aa: debounce; statusbar: minute tick; position save; selection edge; page count; prefetch; zoom
+        let timers = expiry.into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting);
+        timers.chain(prefetch).chain(sharp).min()
     }
 }
 
@@ -2342,21 +2509,8 @@ impl ReaderScreen {
                 _ => {}
             },
             UiEvent::Gesture(g) => match *g {
-                Gesture::Tap { pos } if self.pill_shown() && back_rect(size).contains(pos) => {
-                    self.go_back_from_link();
-                }
-                // A tap on a saved highlight: its selection card (Remove highlight, Note,
-                // Insightful, ...).
-                Gesture::Tap { pos } if self.highlight_at(pos).is_some() => {
-                    if let Some((start, end, rects)) = self.highlight_at(pos) {
-                        self.open_highlight(start, end, rects, cx);
-                    }
-                }
-                Gesture::Tap { pos } if self.link_at(pos).is_some() => {
-                    if let Some(link) = self.link_at(pos) {
-                        self.follow_link(link, cx);
-                    }
-                }
+                // The Back pill, a saved highlight or a link under the finger.
+                Gesture::Tap { pos } if self.tap_target(pos, cx) => {}
                 // The hold already selected a word (TouchKind::Hold, just before): the long
                 // press that comes with it while the finger is down is that selection.
                 Gesture::LongPress { .. } if self.sel.is_some() => {}
@@ -2375,6 +2529,23 @@ impl ReaderScreen {
             _ => {}
         }
         Ok(Transition::None)
+    }
+
+    /// A tap on something on the page: the "Back to p. N" pill returns, a saved
+    /// highlight opens its selection card (Remove highlight, Note, Insightful, ...), a
+    /// link is followed. False when the tap is on none of them (it goes to the gesture
+    /// map). Each target is looked up once per tap.
+    fn tap_target(&mut self, pos: Point, cx: &mut AppCtx) -> bool {
+        if self.pill_shown() && back_rect(cx.screen.size()).contains(pos) {
+            self.go_back_from_link();
+        } else if let Some((start, end, rects)) = self.highlight_at(pos) {
+            self.open_highlight(start, end, rects, cx);
+        } else if let Some(link) = self.link_at(pos) {
+            self.follow_link(link, cx);
+        } else {
+            return false;
+        }
+        true
     }
 
     /// Edge slides ([`light_gestures`]): a vertical drag from the left or right edge
@@ -2432,7 +2603,7 @@ impl ReaderScreen {
             let rows = if self.status_bars_hidden {
                 Some(Vec::new())
             } else if self.overlay.is_none() && !self.rerender && self.error.is_none() {
-                self.redraw_bar_text(cx, &status)
+                self.redraw_bars(cx, &status, footer::Part::Text)
             } else {
                 None
             };
@@ -2451,7 +2622,7 @@ impl ReaderScreen {
             // Full-screen panels leave ghosts: REAGL now, and ghost debt makes a later
             // page turn flash sooner (instead of a GC16 flash on every close).
             let c = cx.refresh.class_for(Change::FullOverlayClose);
-            self.dirty = Some(self.dirty.map_or(c, |d| d.max(c)));
+            self.raise_dirty(c);
         }
         if self.dirty.is_none() && self.overlay.is_none() && !self.rerender && self.error.is_none() && self.counting_done() {
             // Pagination finished after the bars were drawn (a font size change): only
@@ -2499,7 +2670,9 @@ impl ReaderScreen {
                 if let Some(doc) = self.doc.as_deref_mut() {
                     let t_plugins = Instant::now();
                     doc.set_current_page(self.page);
-                    if !self.plugins_pending {
+                    // The sharp page after its zoom preview is no new page for plugins.
+                    let sharpened = self.preview_shown == Some(self.page);
+                    if !self.plugins_pending && !sharpened {
                         cx.plugins.page_change(doc, self.page);
                     }
                     plugins_ms = t_plugins.elapsed().as_millis() as u64;
@@ -2522,6 +2695,7 @@ impl ReaderScreen {
                 _ => false,
             };
             let mut save = false;
+            let mut preview = false;
             if !restored {
                 let t_draw = Instant::now();
                 match self.bridge {
@@ -2537,7 +2711,13 @@ impl ReaderScreen {
                         b.compose(&upper, &lower, cx.canvas);
                     }
                     None => {
-                        doc.render_page(self.page, cx.canvas)?;
+                        // Right after a zoom step: the page shown before, scaled, now; the
+                        // sharp page once the gesture settled (`sharp_at`).
+                        let asked = std::mem::take(&mut self.zoom_preview);
+                        preview = asked && doc.render_zoom_preview(self.page, cx.canvas);
+                        if !preview {
+                            doc.render_page(self.page, cx.canvas)?;
+                        }
                         draw_highlights(doc, self.page, cx.canvas, &self.saved_hl, &self.session_hl);
                     }
                 }
@@ -2557,20 +2737,37 @@ impl ReaderScreen {
                         }
                     }
                 }
-                if self.marks.iter().any(|b| mark_page(doc, b) == Some(self.page)) {
+                if page_marked(&self.marks, doc, self.page) {
                     draw_dog_ear(cx.canvas);
                 }
                 if self.back_pill && self.back.last().is_some_and(|r| r.link) {
                     let to = self.back.last().and_then(|r| doc.page_of(&r.position).ok());
                     draw_back(cx.canvas, cx.fonts, cx.theme, to);
                 }
-                log::debug!("reader: page {} drawn in {:.2} ms (plugins {plugins_ms} ms before)", self.page + 1, t_draw.elapsed().as_secs_f64() * 1000.0);
+                let ms = t_draw.elapsed().as_secs_f64() * 1000.0;
+                let what = if preview { "zoom preview" } else { "drawn" };
+                log::debug!("reader: page {} {what} in {ms:.2} ms (plugins {plugins_ms} ms before)", self.page + 1);
                 match &mut self.page_buf {
                     Some(buf) if buf.size() == cx.canvas.size() => buf.pixels.copy_from_slice(&cx.canvas.pixels),
                     buf => *buf = Some(cx.canvas.clone()),
                 }
-                self.rerender = false;
-                save = true;
+                // The sharp page after its preview: the position was noted already.
+                save = self.preview_shown != Some(self.page);
+                if preview {
+                    // Drawn again sharp later: the page stays to be rendered, and the
+                    // page ahead waits for the sharp one.
+                    self.sharp_at = Some(Instant::now() + ZOOM_SETTLE);
+                    self.preview_shown = Some(self.page);
+                    self.prefetch_at = None;
+                } else {
+                    self.rerender = false;
+                    self.sharp_at = None;
+                    self.preview_shown = None;
+                    // Only fixed-layout documents draw a page ahead; a reflowable page
+                    // turn arms no timer (no wake 250 ms after every turn).
+                    let ahead = self.doc.as_deref().is_some_and(|d| d.fixed_view().is_some());
+                    self.prefetch_at = ahead.then(|| Instant::now() + PREFETCH_IDLE);
+                }
                 if let Some(t) = self.open_trace.as_mut() {
                     t.step("decorations+plugins");
                 }
@@ -2605,7 +2802,8 @@ impl ReaderScreen {
                 log::debug!("reader: page {} shown in 1 update ({class:?}, wave {wave:?})", self.page + 1);
             }
             self.finish_open_trace();
-            if std::mem::take(&mut self.plugins_pending) {
+            let first = std::mem::take(&mut self.plugins_pending);
+            if first {
                 if let Some(doc) = self.doc.as_deref_mut() {
                     let t = Instant::now();
                     cx.plugins.book_open(doc, &self.path);
@@ -2621,6 +2819,14 @@ impl ReaderScreen {
                     self.flush_position();
                 }
             }
+            if first {
+                // The pages after this one: the next count (a page turn, the counting
+                // poll) lays them out or waits for the background pagination, not the
+                // frame that shows the first page.
+                if let Some(doc) = self.doc.as_deref_mut() {
+                    doc.set_read_ahead(true);
+                }
+            }
             return Ok(shown);
         }
         if std::mem::take(&mut self.sel_dirty) {
@@ -2631,11 +2837,7 @@ impl ReaderScreen {
             if let (Some(area), Some(buf)) = (selection::bounds(&all), self.page_buf.as_ref()) {
                 let area = area.intersect(&cx.canvas.bounds());
                 if buf.size() == cx.canvas.size() && !area.is_empty() {
-                    let w = cx.canvas.width;
-                    for y in area.y..area.bottom() {
-                        let i = y as usize * w + area.x as usize;
-                        cx.canvas.pixels[i..i + area.w as usize].copy_from_slice(&buf.pixels[i..i + area.w as usize]);
-                    }
+                    copy_rect(cx.canvas, buf, area);
                     selection::invert(cx.canvas, &new);
                     cx.screen.update(cx.canvas, area, RefreshClass::Du)?;
                 }
@@ -2684,13 +2886,9 @@ impl ReaderScreen {
         let class = if self.overlay.is_some() { RefreshClass::Gl16 } else { cx.refresh.class_for(Change::OverlayClose) };
         let Some(buf) = self.page_buf.as_ref() else { return Vec::new() };
         let bounds = cx.canvas.bounds();
-        let w = cx.canvas.width;
         let mut out = Vec::new();
         for r in rects.iter().map(|r| r.intersect(&bounds)).filter(|r| !r.is_empty()) {
-            for y in r.y..r.bottom() {
-                let i = y as usize * w + r.x as usize;
-                cx.canvas.pixels[i..i + r.w as usize].copy_from_slice(&buf.pixels[i..i + r.w as usize]);
-            }
+            copy_rect(cx.canvas, buf, r);
             out.push(Damage { rect: r, class });
         }
         log::debug!("reader: overlay rects restored from the page buffer: {}", crate::app::describe_updates(&out));

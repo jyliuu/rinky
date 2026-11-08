@@ -47,6 +47,16 @@ pub enum Entry {
 }
 
 impl Entry {
+    /// A lipc integer property.
+    pub fn lipc_int(publisher: &str, prop: &str, value: i64) -> Entry {
+        Entry::LipcInt { publisher: publisher.into(), prop: prop.into(), value }
+    }
+
+    /// A framebuffer setting.
+    pub fn fb(key: &str, value: i64) -> Entry {
+        Entry::Fb { key: key.into(), value }
+    }
+
     fn key(&self) -> String {
         match self {
             Entry::LipcInt { publisher, prop, .. } | Entry::LipcStr { publisher, prop, .. } => {
@@ -144,10 +154,10 @@ mod tests {
         let d = crate::sysfs::test_dir("journal");
         let j = Journal::at(d.join("run/restore"));
         assert!(j.entries().is_empty());
-        let dm = |v| Entry::LipcInt { publisher: "com.lab126.volumd".into(), prop: "disableMounting".into(), value: v };
+        let dm = |v| Entry::lipc_int("com.lab126.volumd", "disableMounting", v);
         j.record(dm(0)).unwrap();
         j.record(dm(1)).unwrap(); // later changes keep the first (original) value
-        j.record(Entry::Fb { key: "grayscale".into(), value: 1 }).unwrap();
+        j.record(Entry::fb("grayscale", 1)).unwrap();
         j.record(Entry::LipcStr { publisher: "p".into(), prop: "s".into(), value: "x".into() }).unwrap();
         assert_eq!(
             std::fs::read_to_string(j.path()).unwrap(),
@@ -156,7 +166,7 @@ mod tests {
         assert_eq!(j.entries()[0], dm(0));
         j.forget(&dm(5)).unwrap();
         assert_eq!(j.entries().len(), 2);
-        j.forget(&Entry::Fb { key: "grayscale".into(), value: 0 }).unwrap();
+        j.forget(&Entry::fb("grayscale", 0)).unwrap();
         j.forget(&Entry::LipcStr { publisher: "p".into(), prop: "s".into(), value: String::new() }).unwrap();
         assert!(!j.path().exists());
         j.forget(&dm(0)).unwrap();

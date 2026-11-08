@@ -1,8 +1,8 @@
 # Installing rinky
 
-rinky runs on Kindle and Kobo e-readers. It is one program, but each kind of e-reader
-gets its own package, and you prepare the e-reader differently. This page covers
-every device. Once rinky runs, the [user guide](user-guide.md) explains how to use it.
+rinky runs on Kindle and Kobo e-readers. Each kind gets its own package and needs a
+different preparation: a jailbreak and KUAL on a Kindle, NickelMenu on a Kobo. Once
+rinky runs, the [user guide](user-guide.md) explains how to use it.
 
 1. [Which device, which package](#1-which-device-which-package)
 2. [Kindle](#2-kindle)
@@ -30,8 +30,8 @@ on a Kindle and *More > Settings > Device information* on a Kobo.
 | Tolino Shine Color, Vision Color | untested | SSH only | `rinky-<version>-kobo.tar.gz` |
 | Kindle Paperwhite 1 and 2, Kindle 7th, 8th and 10th gen; Kobo Glo HD, Aura ONE, Aura H2O², older Kobos; Kobo Elipsa, Sage | not supported | | |
 
-Not supported means: the screen has too few pixels for rinky's layout (it is made for
-300 ppi), or the device drives its display in a way rinky does not know yet.
+A model is not supported when its screen has too few pixels for rinky's layout, which
+is made for 300 ppi, or when it drives its display in a way rinky does not know yet.
 
 What differs between models once rinky runs:
 
@@ -94,6 +94,15 @@ rm -rf /mnt/us/.rinky-pkg /mnt/us/rinky-<version>-kindlehf.tar.gz
 
 This also adds a **rinky** entry to the Kindle library (when the drive has a
 `documents` folder), so you can start rinky without KUAL.
+
+The installer (`rinky/install.sh`, in both packages) checks the package files against
+their checksums first. It refuses to run while rinky runs, and one install or update
+runs at a time (*"another install or update is running"*). It installs all files or
+none: each file is first copied next to the old one, and the old files are replaced
+only when every copy worked. If the e-reader is full it stops with *"cannot write ...
+(no space left?); nothing was changed"* and the installed version stays as it was, so
+it needs room for one more copy of the package. Installing over an older version keeps
+your settings, notes and plugins.
 
 ### Start
 
@@ -193,10 +202,10 @@ check the package themselves.
 
 ## 6. Update
 
-In rinky, *Settings > Update* checks the releases page and installs a newer version
-over Wi-Fi: on a Kindle the Kindle package, on a Kobo the Kobo package. Settings,
-notes and reading positions are kept, and rinky restarts into the new version. It needs
-about 30 MB of free space. Installing a newer package by hand as above works too.
+In rinky, *Settings > Update* installs a newer version over Wi-Fi and restarts into
+it, keeping your settings, notes and reading positions. It needs about 30 MB of free
+space. Installing a newer package by hand as above works too; the
+[user guide](user-guide.md#9-update) has the other ways.
 
 ## 7. Uninstall
 
@@ -204,7 +213,7 @@ Exit rinky first.
 
 - **Kindle:** in KUAL choose *rinky > Uninstall rinky*, or over SSH
   `sh /mnt/us/rinky/uninstall.sh` (add `--keep-data` to keep settings and notes). The
-  [user guide](user-guide.md#8-uninstall) lists exactly what it removes.
+  [user guide](user-guide.md#10-uninstall) lists exactly what it removes.
 - **Kobo:** connect it by USB and delete the folder `.adds/rinky` and the file
   `.adds/nm/rinky`. Leave the rest of `.adds` if you use NickelMenu for anything else.
 

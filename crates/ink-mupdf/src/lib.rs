@@ -31,7 +31,7 @@
 //! | `INK_MUPDF_LIB_DIR` | build | link prebuilt `libmupdf.a` + `libmupdf-third.a` from here |
 //! | `INK_MUPDF_JOBS` | build | `make -j` (default: cargo's job count) |
 //! | `RINKY_FIXED` | run | default [`FixedOptions`], e.g. `fit=width,crop=1,gamma=1.5` |
-//! | `INK_MUPDF_STORE_MB` | run | MuPDF store cap (fonts, images), default 48 |
+//! | `INK_MUPDF_STORE_MB` | run | MuPDF store cap (fonts, images), default 1/16 of memory, 24-48 |
 //! | `INK_MUPDF_CACHE_MB` | run | rendered-screen cache cap, default 16 |
 //! | `INK_MUPDF_WARNINGS` | run | print MuPDF errors and warnings to stderr |
 
@@ -51,30 +51,10 @@ pub use geom::{FRect, Matrix};
 pub use text::PageText;
 
 use ink_device::Canvas;
+pub use ink_doc::{Fit, FixedView, Spreads};
+
 use ink_doc::{Document, Provider, Result};
 use std::path::Path;
-
-/// Fit modes for fixed-layout pages.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Fit {
-    /// Whole page on screen.
-    #[default]
-    Page,
-    /// Page width fills the screen; the page continues on the next screens.
-    Width,
-}
-
-/// Two pages side by side.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Spreads {
-    /// For CBZ files when the screen is landscape.
-    #[default]
-    Auto,
-    /// Always (fit page, zoom 1, one column only).
-    Always,
-    /// Never.
-    Never,
-}
 
 /// Rendering options for fixed-layout pages (the target size comes from `LayoutSettings`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,16 +151,42 @@ impl FixedOptions {
         Ok(o.normalized())
     }
 
+    /// The reader-facing part of these options (the one mapping between the two, with
+    /// [`FixedOptions::with_view`]).
+    pub fn view(&self) -> FixedView {
+        FixedView {
+            fit: self.fit,
+            crop_margins: self.crop_margins,
+            columns: self.columns,
+            contrast: self.contrast,
+            spreads: self.spreads,
+            rtl: self.rtl,
+        }
+    }
+
+    /// These options with the reader-facing part replaced by `view` (zoom, gamma,
+    /// rotation and the lone cover stay), normalized.
+    pub fn with_view(self, view: &FixedView) -> Self {
+        FixedOptions {
+            fit: view.fit,
+            crop_margins: view.crop_margins,
+            columns: view.columns,
+            contrast: view.contrast,
+            spreads: view.spreads,
+            rtl: view.rtl,
+            ..self
+        }
+        .normalized()
+    }
+
     /// Options from `RINKY_FIXED` (defaults when unset or invalid; an invalid value is
     /// logged).
     pub fn from_env() -> Self {
-        match std::env::var("RINKY_FIXED") {
-            Ok(s) => FixedOptions::parse(&s).unwrap_or_else(|e| {
-                log::warn!("RINKY_FIXED: {e}");
-                FixedOptions::default()
-            }),
-            Err(_) => FixedOptions::default(),
-        }
+        let Ok(s) = std::env::var("RINKY_FIXED") else { return FixedOptions::default() };
+        FixedOptions::parse(&s).unwrap_or_else(|e| {
+            log::warn!("RINKY_FIXED: {e}");
+            FixedOptions::default()
+        })
     }
 }
 
@@ -257,5 +263,18 @@ mod tests {
         let c = FixedOptions { zoom: 100.0, columns: 9, rotate: 100, gamma: f32::NAN, ..Default::default() }.normalized();
         assert_eq!((c.zoom, c.columns, c.rotate, c.gamma), (8.0, 4, 90, 1.0));
         assert_eq!(FixedOptions { rotate: 300, ..Default::default() }.normalized().rotate, 270);
+    }
+
+    #[test]
+    fn view_maps_both_ways_and_keeps_the_rest() {
+        assert_eq!(FixedOptions::default().view(), FixedView::default());
+        let base = FixedOptions::parse("zoom=1.5,gamma=2,rotate=90,cover=0").unwrap();
+        let v = FixedView { fit: Fit::Width, crop_margins: true, columns: 2, contrast: 1.6, spreads: Spreads::Never, rtl: true };
+        let o = base.with_view(&v);
+        assert_eq!(o.view(), v);
+        assert_eq!((o.zoom, o.gamma, o.rotate, o.cover_alone), (1.5, 2.0, 90, false), "the engine's own options stay");
+        // Out of range values are clamped like any option.
+        let wild = base.with_view(&FixedView { columns: 9, contrast: f32::NAN, ..v });
+        assert_eq!((wild.columns, wild.contrast), (4, 1.0));
     }
 }

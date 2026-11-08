@@ -19,7 +19,7 @@
 //! - DRM: any other encryption (Adobe ADEPT, Apple FairPlay, Readium LCP, ...) is refused
 //!   with a message; metadata stays readable.
 
-use crate::book::{Book, BookInfo, Cover, Identifier, PageTarget, Target, TocNode};
+use crate::book::{Book, BookDocument, BookInfo, Cover, Identifier, PageTarget, Target, TocNode};
 use crate::util::{read_limited, sha1, sniff_media_type, MAX_COVER, MAX_ENTRY};
 use crate::xml::{self, collapse_ws, Element};
 use crate::Format;
@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use zip::ZipArchive;
 
 /// Font obfuscation key for one resource.
@@ -44,17 +45,12 @@ pub enum Obfuscation {
 impl Obfuscation {
     /// Undoes (or applies; XOR is symmetric) the obfuscation in place.
     pub fn apply(&self, data: &mut [u8]) {
-        match self {
-            Obfuscation::Idpf(key) => {
-                for (i, b) in data.iter_mut().take(1040).enumerate() {
-                    *b ^= key[i % 20];
-                }
-            }
-            Obfuscation::Adobe(key) => {
-                for (i, b) in data.iter_mut().take(1024).enumerate() {
-                    *b ^= key[i % 16];
-                }
-            }
+        let (key, len): (&[u8], usize) = match self {
+            Obfuscation::Idpf(key) => (key, 1040),
+            Obfuscation::Adobe(key) => (key, 1024),
+        };
+        for (b, k) in data.iter_mut().take(len).zip(key.iter().cycle()) {
+            *b ^= k;
         }
     }
 }
@@ -112,6 +108,51 @@ impl<R: Read + Seek> ZipLoader<R> {
         read_limited(entry, size, limit).map_err(|e| DocError::Format(format!("{path}: {e}")))
     }
 
+    /// The size `path` declares in the archive's central directory (uncompressed).
+    fn stored_size(&self, path: &str) -> Option<usize> {
+        let name = self.entry_name(path)?;
+        let zip = self.zip.borrow();
+        let size = zip.by_index_data(zip.index_for_name(&name)?).ok()?.size();
+        usize::try_from(size).ok()
+    }
+
+    /// The bytes of entry `path` up to the end of the first `needle` (ASCII, matched
+    /// ignoring case), inflating no more than that; `None` when the first `max` bytes
+    /// do not have it, or the entry is neither stored nor deflated. `inflate` (raw
+    /// deflate) is reset and reused: reading many heads allocates no inflater each.
+    fn read_until_ci(&self, path: &str, needle: &[u8], max: usize, inflate: &mut flate2::Decompress) -> Option<Vec<u8>> {
+        let name = self.entry_name(path)?;
+        let mut zip = self.zip.borrow_mut();
+        let index = zip.index_for_name(&name)?;
+        let mut raw = zip.by_index_raw(index).ok()?;
+        let deflated = match raw.compression() {
+            _ if raw.encrypted() => return None,
+            zip::CompressionMethod::Stored => false,
+            zip::CompressionMethod::Deflated => true,
+            _ => return None,
+        };
+        inflate.reset(false);
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            // At the end (n == 0) the inflater gives what it still holds.
+            let n = raw.read(&mut chunk).ok()?;
+            let from = buf.len().saturating_sub(needle.len() - 1);
+            if deflated {
+                inflate_into(inflate, &chunk[..n], &mut buf)?;
+            } else {
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            if let Some(p) = buf[from..].windows(needle.len()).position(|w| w.eq_ignore_ascii_case(needle)) {
+                buf.truncate(from + p + needle.len());
+                return Some(buf);
+            }
+            if n == 0 || buf.len() > max {
+                return None;
+            }
+        }
+    }
+
     /// Entry bytes (deobfuscated), at most `limit`.
     pub fn read_max(&self, path: &str, limit: u64) -> Result<Vec<u8>> {
         let mut bytes = self.read_raw_max(path, limit)?;
@@ -119,6 +160,22 @@ impl<R: Read + Seek> ZipLoader<R> {
             key.apply(&mut bytes);
         }
         Ok(bytes)
+    }
+}
+
+/// Inflates all of `input` onto `out`, and whatever output the inflater still holds.
+fn inflate_into(inflate: &mut flate2::Decompress, input: &[u8], out: &mut Vec<u8>) -> Option<()> {
+    let mut used = 0;
+    loop {
+        out.reserve(4096);
+        let (was_in, was_out) = (inflate.total_in(), inflate.total_out());
+        let status = inflate.decompress_vec(&input[used..], out, flate2::FlushDecompress::None).ok()?;
+        used += (inflate.total_in() - was_in) as usize;
+        let stuck = inflate.total_in() == was_in && inflate.total_out() == was_out;
+        let drained = used == input.len() && out.len() < out.capacity();
+        if status == flate2::Status::StreamEnd || stuck || drained {
+            return Some(());
+        }
     }
 }
 
@@ -200,10 +257,7 @@ pub struct Package {
 
 impl Package {
     fn dir(&self) -> &str {
-        match self.opf_path.rfind('/') {
-            Some(i) => &self.opf_path[..i + 1],
-            None => "",
-        }
+        dir_of(&self.opf_path)
     }
 
     /// Full zip path of manifest item `id`.
@@ -214,13 +268,6 @@ impl Package {
     /// The manifest item with `id`.
     pub fn item(&self, id: &str) -> Option<&ManifestItem> {
         self.items.iter().find(|i| i.id == id)
-    }
-
-    fn resolve_paths(&mut self) {
-        let dir = self.dir().to_string();
-        for it in &mut self.items {
-            it.path = resolve_href(&dir, &it.href);
-        }
     }
 
     /// Zip path of the cover image, by EPUB 3 property, `<meta name="cover">` or a
@@ -270,21 +317,10 @@ fn chapter_text(bytes: Vec<u8>) -> String {
     text
 }
 
-fn strip_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => {
-                in_tag = true;
-                out.push(' ');
-            }
-            '>' if in_tag => in_tag = false,
-            c if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    let decoded = out.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&");
+/// Plain text of a description written as escaped HTML (`&lt;p&gt;...`, which the XML
+/// parser has unescaped once): tags dropped, the common entities decoded.
+fn description_text(s: &str) -> String {
+    let decoded = xml::strip_tags(s).replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&");
     collapse_ws(&decoded)
 }
 
@@ -307,10 +343,11 @@ fn scheme_of(value: &str, declared: Option<String>) -> Option<String> {
     None
 }
 
-/// Parses an OPF document.
-pub fn parse_opf(xml_text: &str) -> Result<Package> {
+/// Parses an OPF document found at `opf_path` in the archive.
+pub fn parse_opf(xml_text: &str, opf_path: &str) -> Result<Package> {
     let root = xml::parse(xml_text).map_err(|e| DocError::Format(format!("OPF: {e}")))?;
-    let mut p = Package { version: root.attr("version").unwrap_or("").to_string(), ..Default::default() };
+    let version = root.attr("version").unwrap_or("").to_string();
+    let mut p = Package { opf_path: opf_path.into(), version, ..Default::default() };
     let unique_id = root.attr("unique-identifier").map(str::to_string);
     let empty = Element::default();
     let meta = root.child("metadata").unwrap_or(&empty);
@@ -354,7 +391,7 @@ pub fn parse_opf(xml_text: &str) -> Result<Package> {
     p.metadata.authors = authors.into_iter().filter(|a| !a.is_empty()).collect();
     p.metadata.language = get("language").first().map(|l| l.text_collapsed()).filter(|l| !l.is_empty());
     p.metadata.publisher = get("publisher").first().map(|l| l.text_collapsed()).filter(|l| !l.is_empty());
-    p.metadata.description = get("description").first().map(|d| strip_tags(&d.text())).filter(|d| !d.is_empty());
+    p.metadata.description = get("description").first().map(|d| description_text(&d.text())).filter(|d| !d.is_empty());
     p.date = get("date").first().map(|d| d.text_collapsed()).filter(|d| !d.is_empty());
     p.subjects = get("subject").iter().map(|s| s.text_collapsed()).filter(|s| !s.is_empty()).collect();
     for id in get("identifier") {
@@ -389,7 +426,7 @@ pub fn parse_opf(xml_text: &str) -> Result<Package> {
                 p.items.push(ManifestItem {
                     id: id.to_string(),
                     href: href.to_string(),
-                    path: String::new(),
+                    path: resolve_href(dir_of(opf_path), href),
                     media_type: it.attr("media-type").unwrap_or("").to_string(),
                     properties: it.attr("properties").unwrap_or("").split_whitespace().map(str::to_string).collect(),
                 });
@@ -412,7 +449,6 @@ pub fn parse_opf(xml_text: &str) -> Result<Package> {
             }
         }
     }
-    p.resolve_paths();
     p.metadata.cover = p.cover_image();
     Ok(p)
 }
@@ -430,11 +466,7 @@ pub fn read_package<R: Read + Seek>(loader: &ZipLoader<R>) -> Result<Package> {
         .and_then(|r| r.attr("full-path"))
         .map(|p| percent_decode(p).trim_start_matches('/').to_string())
         .ok_or_else(|| DocError::Format("container.xml has no rootfile".into()))?;
-    let mut p = parse_opf(&xml::decode_xml_bytes(&loader.read_raw(&opf_path)?))?;
-    p.opf_path = opf_path;
-    p.resolve_paths();
-    p.metadata.cover = p.cover_image();
-    Ok(p)
+    parse_opf(&xml::decode_xml_bytes(&loader.read_raw(&opf_path)?), &opf_path)
 }
 
 /// One `EncryptedData` entry of `META-INF/encryption.xml`.
@@ -642,13 +674,10 @@ pub fn parse_nav(xhtml: &str, nav_path: &str, spine: &HashMap<String, usize>) ->
 /// The cover image path: [`Package::cover_image`], else the first image of the guide's
 /// cover page (or of the first spine item when it is named like a cover).
 pub fn find_cover<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> Option<String> {
-    if let Some(c) = pkg.items.iter().find(|i| i.has("cover-image")) {
-        return Some(c.path.clone());
-    }
-    if let Some(c) = &pkg.cover_meta {
-        if pkg.item(c).is_some_and(|i| i.is_image()) || pkg.items.iter().any(|i| i.href == *c && i.is_image()) {
-            return pkg.cover_image();
-        }
+    // The manifest's own answer when it names an image (property or `<meta name="cover">`).
+    let names_image = |c: &String| pkg.item(c).is_some_and(|i| i.is_image()) || pkg.items.iter().any(|i| i.href == *c && i.is_image());
+    if pkg.items.iter().any(|i| i.has("cover-image")) || pkg.cover_meta.as_ref().is_some_and(names_image) {
+        return pkg.cover_image();
     }
     let page = pkg
         .guide
@@ -659,17 +688,12 @@ pub fn find_cover<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> Optio
             let first = pkg.item_path(pkg.spine.first()?)?;
             first.to_ascii_lowercase().contains("cover").then_some(first)
         });
-    if let Some(page) = page {
-        if let Ok(bytes) = loader.read_raw(&page) {
-            if let Ok(root) = xml::parse(&chapter_text(bytes)) {
-                let src = root.find("img").and_then(|i| i.attr("src")).or_else(|| root.find("image").and_then(|i| i.attr("href")));
-                if let Some(src) = src {
-                    return Some(resolve_href(dir_of(&page), src));
-                }
-            }
-        }
-    }
-    pkg.cover_image()
+    let first_image = |page: String| {
+        let root = xml::parse(&chapter_text(loader.read_raw(&page).ok()?)).ok()?;
+        let src = root.find("img").and_then(|i| i.attr("src")).or_else(|| root.find("image").and_then(|i| i.attr("href")))?;
+        Some(resolve_href(dir_of(&page), src))
+    };
+    page.and_then(first_image).or_else(|| pkg.cover_image())
 }
 
 fn open_archive(path: &Path) -> Result<ZipLoader<File>> {
@@ -703,8 +727,9 @@ fn cover_of<R: Read + Seek>(loader: &ZipLoader<R>, info: &BookInfo, pkg: &Packag
     Some(Cover { path, media_type, bytes })
 }
 
-fn prepare(path: &Path) -> Result<(ZipLoader<File>, Package, Option<String>)> {
-    let mut loader = open_archive(path)?;
+/// Package, DRM status and font keys of `path` (`zip`: its archive, when already open).
+fn prepare(path: &Path, zip: Option<ZipArchive<File>>) -> Result<(ZipLoader<File>, Package, Option<String>)> {
+    let mut loader = zip.map(ZipLoader::new).map_or_else(|| open_archive(path), Ok)?;
     let encrypted = loader.read_raw("META-INF/encryption.xml").map(|b| parse_encryption(&xml::decode_xml_bytes(&b))).unwrap_or_default();
     let pkg = read_package(&loader)?;
     let drm = drm_scheme(&loader, &encrypted);
@@ -713,8 +738,8 @@ fn prepare(path: &Path) -> Result<(ZipLoader<File>, Package, Option<String>)> {
 }
 
 /// Metadata, identifiers, cover and DRM status, without reading chapters.
-pub fn read_info(path: &Path) -> Result<BookInfo> {
-    let (loader, pkg, drm) = prepare(path)?;
+pub fn read_info(path: &Path, zip: Option<ZipArchive<File>>) -> Result<BookInfo> {
+    let (loader, pkg, drm) = prepare(path, zip)?;
     let mut info = info_of(&loader, &pkg, drm);
     info.cover = cover_of(&loader, &info, &pkg);
     Ok(info)
@@ -751,27 +776,202 @@ pub fn read_toc<R: Read + Seek>(loader: &ZipLoader<R>, pkg: &Package) -> (Vec<To
     (toc, pages)
 }
 
-/// [`load`] plus the engine's navigation (TOC and page list hrefs) for [`open`].
-fn load_parts(path: &Path) -> Result<(Book, ink_html::Navigation)> {
+/// Opens an EPUB file with the book's own TOC and page list, as [`load`] and
+/// [`Book::into_document`] do, except that the spine items are read when the engine
+/// first needs them: the first page reads its own item (and the heads of the others,
+/// for their stylesheets), the background paginator the rest. DRM is refused.
+pub fn open_book(path: &Path, zip: Option<ZipArchive<File>>) -> Result<BookDocument> {
     use ink_doc::timing::step;
     let t = std::time::Instant::now();
-    let (loader, pkg, drm) = prepare(path)?;
+    let (loader, pkg, drm) = prepare(path, zip)?;
     let t = step("zip+opf", t);
     if let Some(scheme) = drm {
         return Err(DocError::Unsupported(drm_message(&scheme)));
     }
     let mut info = info_of(&loader, &pkg, None);
     info.cover = None;
-    let paths: Vec<String> = pkg.spine.iter().map(|idref| pkg.item_path(idref).unwrap_or_default()).collect();
-    let chapters = read_spine(path, &loader, paths);
+    let (toc, page_list) = read_toc(&loader, &pkg);
+    let t = step("toc+nav read", t);
+    let paths = spine_paths(&pkg);
+    let spine = Arc::new(LazySpine::new(path, loader, &paths));
+    let files = Box::new(SpineFiles(spine.clone()));
+    // Image sizes through the same handles on the paginator threads: nothing has to
+    // scan every spine item for images first.
+    let images: Arc<dyn ResourceLoader + Send + Sync> = Arc::new(SpineFiles(spine.clone()));
+    let doc = HtmlDocument::new_lazy(info.metadata.clone(), paths, spine, files, Some(images))?;
+    step("styles+fonts", t);
+    Ok(BookDocument::new(doc, info, toc, page_list))
+}
+
+/// The path of every spine item (empty for an idref the manifest does not have).
+fn spine_paths(pkg: &Package) -> Vec<String> {
+    pkg.spine.iter().map(|idref| pkg.item_path(idref).unwrap_or_default()).collect()
+}
+
+/// The longest head [`LazySpine::read_head`] reads looking for `<body`.
+const MAX_HEAD: usize = 256 * 1024;
+
+/// Spine items of an EPUB read on demand, from any thread. Each reader takes an open
+/// handle on the file from a pool (opening another when all are in use), so the
+/// background paginator and the first page do not wait for each other.
+struct LazySpine {
+    file: std::path::PathBuf,
+    /// [`file_id`] of `file` when the book was opened: another handle is opened only on
+    /// that same file (`None`: no other handle).
+    id: Option<FileId>,
+    obfuscated: HashMap<String, Obfuscation>,
+    /// Path of each spine item (empty: not in the manifest).
+    paths: Vec<String>,
+    /// Stored (uncompressed) size of each spine item: 0 when it cannot be read.
+    sizes: Vec<usize>,
+    /// Open handles nobody is using; there is always at least one handle.
+    handles: Mutex<Vec<ZipLoader<File>>>,
+    /// Signalled when a handle comes back to `handles`.
+    returned: std::sync::Condvar,
+    /// The inflater [`ZipLoader::read_until_ci`] reuses for every head.
+    inflate: Mutex<flate2::Decompress>,
+}
+
+impl LazySpine {
+    /// The spine items at `paths` of `file`, whose archive `loader` has open.
+    fn new(file: &Path, loader: ZipLoader<File>, paths: &[String]) -> Self {
+        let sizes = paths.iter().map(|p| if p.is_empty() { 0 } else { loader.stored_size(p).unwrap_or(0) }).collect();
+        let obfuscated = loader.obfuscated.clone();
+        let (handles, inflate) = (Mutex::new(vec![loader]), Mutex::new(flate2::Decompress::new(false)));
+        let returned = std::sync::Condvar::new();
+        let id = std::fs::metadata(file).ok().map(|m| file_id(&m));
+        LazySpine { file: file.to_path_buf(), id, obfuscated, paths: paths.to_vec(), sizes, handles, returned, inflate }
+    }
+
+    /// Another handle on the file, refused when the file at its path is not the one the
+    /// book was opened from any more (replaced or written over while the book is open):
+    /// its spine items would not match the rest of the book.
+    fn reopen(&self) -> Result<ZipLoader<File>> {
+        let file = File::open(&self.file)?;
+        if self.id.is_none() || self.id != Some(file_id(&file.metadata()?)) {
+            return Err(DocError::Format("changed since the book was opened".into()));
+        }
+        let zip = ZipArchive::new(file).map_err(|e| DocError::Format(format!("not a zip: {e}")))?;
+        let mut l = ZipLoader::new(zip);
+        l.obfuscated = self.obfuscated.clone();
+        Ok(l)
+    }
+
+    /// Runs `f` with a handle on the file: an idle one, else a newly opened one, else
+    /// (the file cannot be opened again, e.g. no file descriptors left, or it changed)
+    /// the next one another thread gives back. A spine item is never read as empty for want of a
+    /// handle: it would stay empty.
+    fn with_handle<T>(&self, f: impl FnOnce(&ZipLoader<File>) -> T) -> T {
+        /// Gives the handle back when dropped, also when `f` panics.
+        struct Lent<'a>(&'a LazySpine, Option<ZipLoader<File>>);
+        impl Drop for Lent<'_> {
+            fn drop(&mut self) {
+                if let Some(l) = self.1.take() {
+                    self.0.handles.lock().unwrap_or_else(|e| e.into_inner()).push(l);
+                    self.0.returned.notify_one();
+                }
+            }
+        }
+        let lent = Lent(self, Some(self.take_handle()));
+        f(lent.1.as_ref().expect("lent handle"))
+    }
+
+    fn take_handle(&self) -> ZipLoader<File> {
+        if let Some(l) = self.handles.lock().unwrap_or_else(|e| e.into_inner()).pop() {
+            return l;
+        }
+        match self.reopen() {
+            Ok(l) => return l,
+            Err(e) => log::warn!("epub: another handle on {}: {e}", self.file.display()),
+        }
+        let mut idle = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(l) = idle.pop() {
+                return l;
+            }
+            idle = self.returned.wait(idle).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// Size and modification time of a file: what tells it apart from a file written in
+/// its place. (Not the inode: the Kindle's FUSE user store need not keep it.)
+type FileId = (u64, Option<std::time::SystemTime>);
+
+fn file_id(m: &std::fs::Metadata) -> FileId {
+    (m.len(), m.modified().ok())
+}
+
+impl ink_html::book::SpineSource for LazySpine {
+    fn read(&self, i: usize) -> String {
+        let path = &self.paths[i];
+        if path.is_empty() {
+            return String::new();
+        }
+        self.with_handle(|l| l.read(path).map(chapter_text).unwrap_or_default())
+    }
+
+    /// The bytes up to the first `<body` (any case), decoded as [`chapter_text`] decodes
+    /// the whole item: only for UTF-8, where a prefix that ends at an ASCII byte decodes
+    /// to a prefix of the whole text. (An item nested deeper than the XML limit is
+    /// rewritten whole by [`chapter_text`]; its own head has the same stylesheets.)
+    fn read_head(&self, i: usize) -> Option<String> {
+        let path = &self.paths[i];
+        if path.is_empty() || self.obfuscated.contains_key(path) || self.sizes[i] as u64 > MAX_ENTRY {
+            return None;
+        }
+        let mut inflate = self.inflate.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = self.with_handle(|l| l.read_until_ci(path, b"<body", MAX_HEAD, &mut inflate))?;
+        let utf16 = bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]);
+        let declared = xml::declared_encoding(&bytes).and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()));
+        if utf16 || declared.is_some_and(|e| e != encoding_rs::UTF_8) {
+            return None;
+        }
+        Some(text_of(bytes))
+    }
+
+    fn len_hint(&self, i: usize) -> Option<usize> {
+        Some(self.sizes[i])
+    }
+}
+
+/// The book's resources (images, stylesheets, fonts) through the handles of a
+/// [`LazySpine`].
+struct SpineFiles(Arc<LazySpine>);
+
+impl ResourceLoader for SpineFiles {
+    fn read(&self, path: &str) -> Result<Vec<u8>> {
+        self.0.with_handle(|l| l.read(path))
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.0.with_handle(|l| l.exists(path))
+    }
+}
+
+/// [`load`], plus the engine's navigation (TOC and page list hrefs) for [`open`] when
+/// `with_nav` is set.
+fn load_parts(path: &Path, zip: Option<ZipArchive<File>>, with_nav: bool) -> Result<(Book, Option<ink_html::Navigation>)> {
+    use ink_doc::timing::step;
+    let t = std::time::Instant::now();
+    let (loader, pkg, drm) = prepare(path, zip)?;
+    let t = step("zip+opf", t);
+    if let Some(scheme) = drm {
+        return Err(DocError::Unsupported(drm_message(&scheme)));
+    }
+    let mut info = info_of(&loader, &pkg, None);
+    info.cover = None;
+    let chapters = read_spine(path, &loader, spine_paths(&pkg));
     if chapters.iter().all(|c| c.html.is_empty()) {
         return Err(DocError::Format("no readable chapters in spine".into()));
     }
     let t = step("spine read", t);
     let (toc, page_list) = read_toc(&loader, &pkg);
     // TOC and page list for the engine itself (NCX / EPUB 3 nav parsed by ink-html,
-    // api-request html.md): `open` hands it to HtmlDocument::set_navigation.
-    let nav = loader.read(&pkg.opf_path).map(|b| ink_html::nav::from_opf(&text_of(b), &pkg.opf_path, &loader)).unwrap_or_default();
+    // api-request html.md): `open` hands it to HtmlDocument::set_navigation. The book's
+    // own TOC above is what `load` callers use, so they skip this second parse.
+    let nav = with_nav
+        .then(|| loader.read(&pkg.opf_path).map(|b| ink_html::nav::from_opf(&text_of(b), &pkg.opf_path, &loader)).unwrap_or_default());
     step("toc+nav read", t);
     Ok((Book { info, chapters, toc, page_list, resources: Box::new(loader) }, nav))
 }
@@ -839,17 +1039,17 @@ fn read_spine(file: &Path, loader: &ZipLoader<File>, paths: Vec<String>) -> Vec<
     paths.into_iter().zip(html).map(|(path, html)| HtmlChapter { path, html }).collect()
 }
 
-/// Converts an EPUB file. DRM-protected books are refused.
-pub fn load(path: &Path) -> Result<Book> {
-    Ok(load_parts(path)?.0)
+/// Converts an EPUB file (`zip`: its archive, when already open). DRM is refused.
+pub fn load(path: &Path, zip: Option<ZipArchive<File>>) -> Result<Book> {
+    Ok(load_parts(path, zip, false)?.0)
 }
 
 /// Opens an EPUB file as the plain engine document, with the engine's own TOC and page
 /// list (crengine xpointers resolved by ink-html).
-pub fn open(path: &Path) -> Result<HtmlDocument> {
-    let (book, nav) = load_parts(path)?;
+pub fn open(path: &Path, zip: Option<ZipArchive<File>>) -> Result<HtmlDocument> {
+    let (book, nav) = load_parts(path, zip, true)?;
     let mut doc = book.into_html_document()?;
-    doc.set_navigation(nav);
+    doc.set_navigation(nav.unwrap_or_default());
     Ok(doc)
 }
 
@@ -864,15 +1064,13 @@ mod tests {
             <meta name="cover" content="img"/></metadata>
             <manifest><item id="c1" href="Text/c%201.xhtml"/><item id="img" href="../cover.jpg" media-type="image/jpeg"/></manifest>
             <spine><itemref idref="c1"/><itemref idref="missing"/></spine></package>"#;
-        let mut p = parse_opf(opf).unwrap();
-        p.opf_path = "OEBPS/content.opf".into();
+        let p = parse_opf(opf, "OEBPS/content.opf").unwrap();
         assert_eq!(p.metadata.title, "Romeo and Juliet");
         assert_eq!(p.metadata.authors, vec!["William Shakespeare".to_string()]);
         assert_eq!(p.metadata.language.as_deref(), Some("en"));
         assert_eq!(p.spine, vec!["c1", "missing"]);
         assert_eq!(p.item_path("c1").as_deref(), Some("OEBPS/Text/c 1.xhtml"));
         assert_eq!(p.item_path("missing"), None);
-        p.resolve_paths();
         assert_eq!(p.cover_image().as_deref(), Some("cover.jpg"));
     }
 
@@ -893,9 +1091,7 @@ mod tests {
             <meta refines="#s1" property="collection-type">series</meta><meta refines="#s1" property="group-position">3</meta>
             </metadata><manifest><item id="cv" href="img/c.png" media-type="image/png" properties="cover-image"/>
             <item id="f" href="fonts/a.otf" media-type="application/vnd.ms-opentype"/></manifest><spine/></package>"##;
-        let mut p = parse_opf(opf).unwrap();
-        p.opf_path = "OPS/package.opf".into();
-        p.resolve_paths();
+        let p = parse_opf(opf, "OPS/package.opf").unwrap();
         assert_eq!(p.metadata.title, "Main Title");
         assert_eq!(p.metadata.authors, vec!["Ann Author", "Second Author"]);
         assert_eq!(p.metadata.identifier.as_deref(), Some("urn:uuid:12345678-1234-1234-1234-123456789abc"));
@@ -913,7 +1109,7 @@ mod tests {
     #[test]
     fn calibre_series_and_ncx_nav() {
         let opf = r#"<package version="2.0"><metadata><meta name="calibre:series" content="Foo"/><meta name="calibre:series_index" content="2.5"/></metadata></package>"#;
-        assert_eq!(parse_opf(opf).unwrap().metadata.series, Some(("Foo".into(), 2.5)));
+        assert_eq!(parse_opf(opf, "content.opf").unwrap().metadata.series, Some(("Foo".into(), 2.5)));
         let spine: HashMap<String, usize> = [("OEBPS/a.xhtml".to_string(), 0), ("OEBPS/b c.xhtml".to_string(), 1)].into();
         let ncx = r#"<ncx><navMap><navPoint><navLabel><text>One</text></navLabel><content src="a.xhtml"/>
             <navPoint><navLabel><text>One.1</text></navLabel><content src="b%20c.xhtml#s1"/></navPoint></navPoint>
@@ -964,14 +1160,194 @@ mod tests {
         assert!(drm_message("Adobe ADEPT").contains("DRM"));
     }
 
+    /// Writes an EPUB with `chapters` (path under `OEBPS/`, XHTML) and `files` (path
+    /// under `OEBPS/`, bytes) to `dir/name`. Entries named `stored*` are not compressed.
+    fn write_epub(dir: &Path, name: &str, chapters: &[(&str, String)], files: &[(&str, &[u8])]) -> std::path::PathBuf {
+        use std::io::Write;
+        std::fs::create_dir_all(dir).unwrap();
+        let f = dir.join(name);
+        let mut z = zip::ZipWriter::new(File::create(&f).unwrap());
+        let mut add = |path: &str, bytes: &[u8]| {
+            let stored = path.rsplit('/').next().is_some_and(|n| n.starts_with("stored"));
+            let method = if stored { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
+            z.start_file(path, zip::write::SimpleFileOptions::default().compression_method(method)).unwrap();
+            z.write_all(bytes).unwrap();
+        };
+        add("mimetype", b"application/epub+zip");
+        let container = r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#;
+        add("META-INF/container.xml", container.as_bytes());
+        let item = |(i, (p, _)): (usize, &(&str, String))| format!(r#"<item id="c{i}" href="{p}" media-type="application/xhtml+xml"/>"#);
+        let items: String = chapters.iter().enumerate().map(item).collect();
+        let spine: String = (0..chapters.len()).map(|i| format!(r#"<itemref idref="c{i}"/>"#)).collect();
+        let opf = format!(
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>T</dc:title></metadata><manifest>{items}</manifest><spine>{spine}</spine></package>"#
+        );
+        add("OEBPS/content.opf", opf.as_bytes());
+        for (p, html) in chapters {
+            add(&format!("OEBPS/{p}"), html.as_bytes());
+        }
+        for (p, bytes) in files {
+            add(&format!("OEBPS/{p}"), bytes);
+        }
+        z.finish().unwrap();
+        f
+    }
+
+    /// Page positions, Kindle locations, TOC and page labels of `doc` once paginated.
+    fn summary(doc: &mut BookDocument) -> Vec<String> {
+        use ink_doc::Document;
+        doc.set_layout(&ink_doc::LayoutSettings::for_screen(600, 800)).unwrap();
+        assert!(doc.wait_paginated(std::time::Duration::from_secs(120)));
+        let mut out = Vec::new();
+        for i in 0..doc.page_count().pages {
+            let p = doc.position_of_page(i).unwrap();
+            out.push(format!("page {i} {p} {:?}", doc.location(&p)));
+        }
+        out.extend(doc.toc().iter().map(|e| format!("toc {} {} {} {:?}", e.level, e.title, e.position, e.page)));
+        out.extend(doc.page_labels().iter().map(|(l, p)| format!("label {l} {p}")));
+        let book = doc.html().book();
+        let mut sheets: Vec<&String> = book.sheets.keys().collect();
+        sheets.sort();
+        out.push(format!("sheets {sheets:?} faces {} fonts {}", book.font_faces.len(), book.fonts.len()));
+        out
+    }
+
+    #[test]
+    fn lazy_open_matches_the_eager_open() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        for name in ["juliet.epub", "synthetic.epub", "formats/epub2-ncx.epub", "formats/epub3-nav.epub"] {
+            let path = root.join(name);
+            let mut lazy = open_book(&path, None).unwrap();
+            // Opening reads the first spine item with content and only the heads of the others
+            // (a missing item is "read" as empty).
+            let chapters = &lazy.html().book().chapters;
+            let first = chapters.iter().position(|c| !c.html().trim().is_empty()).unwrap();
+            assert!(chapters.iter().skip(first + 1).all(|c| !c.is_read() || c.html().is_empty()), "{name}: read before needed");
+            let mut eager = load(&path, None).unwrap().into_document().unwrap();
+            assert_eq!(summary(&mut lazy), summary(&mut eager), "{name}");
+        }
+    }
+
+    #[test]
+    fn spine_heads_are_prefixes_of_the_items() {
+        use ink_html::book::SpineSource;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        for name in ["juliet.epub", "synthetic.epub", "formats/epub2-ncx.epub", "formats/epub3-nav.epub"] {
+            let path = root.join(name);
+            let (loader, pkg, _) = prepare(&path, None).unwrap();
+            let paths = spine_paths(&pkg);
+            let spine = LazySpine::new(&path, loader, &paths);
+            for i in 0..paths.len() {
+                let whole = spine.read(i);
+                assert_eq!(spine.len_hint(i), Some(whole.len()), "{name} {i}");
+                if whole.is_empty() {
+                    continue; // not in the archive
+                }
+                let head = spine.read_head(i).unwrap_or_else(|| panic!("{name} {i}: no head"));
+                assert!(whole.starts_with(&head) && head.to_ascii_lowercase().ends_with("<body"), "{name} {i}: {head}");
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_heads_give_the_same_stylesheets() {
+        let dir = std::env::temp_dir().join(format!("ink-epub-heads-{}", std::process::id()));
+        let head = r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="a.css"/><style>@import "b.css"; @font-face { font-family: F; src: url(f.ttf) }</style></head>"#;
+        // Nested deeper than the XML limit: the whole item is rewritten, its head read as is.
+        let deep = format!("{}<body>{}x{}</body></html>", head.replace("a.css", "e.css"), "<div>".repeat(300), "</div>".repeat(300));
+        // A <style> that no </style> closes: the prefix is not enough.
+        let open_style = format!("{head}<style>@import \"c.css\";<BODY><p>x</p></BODY></html>");
+        let latin1 = r#"<?xml version="1.0" encoding="iso-8859-1"?><html><head><link rel="stylesheet" href="d.css"/></head><body><p>caf"#;
+        // Heads longer than one read: deflated and stored.
+        let metas: String = (0..400).map(|i| format!(r#"<meta name="m{i}" content="{}"/>"#, i * 7919 % 1000)).collect();
+        let long = format!("{}<body><p>Long</p></body></html>", head.replace("<head>", &format!("<head>{metas}")).replace("a.css", "g.css"));
+        let chapters = [
+            ("one.xhtml", format!("{head}<body><p>One</p></body></html>")),
+            ("deep.xhtml", deep),
+            ("open.xhtml", open_style),
+            ("latin1.xhtml", format!("{latin1}\u{e9}</p></body></html>")),
+            ("long.xhtml", long.clone()),
+            ("stored.xhtml", long.replace("g.css", "h.css")),
+        ];
+        let css: &[u8] = b"p { margin: 0 }";
+        let files = [("a.css", css), ("b.css", css), ("c.css", css), ("d.css", css), ("e.css", css), ("g.css", css), ("h.css", css), ("f.ttf", b"FONT")];
+        let path = write_epub(&dir, "heads.epub", &chapters, &files);
+        {
+            use ink_html::book::SpineSource;
+            let (loader, pkg, _) = prepare(&path, None).unwrap();
+            let spine = LazySpine::new(&path, loader, &spine_paths(&pkg));
+            // The deep item is rewritten whole, so its raw head is not a prefix of it; the
+            // latin1 one is read whole.
+            let heads = [Some(true), Some(false), Some(true), None, Some(true), Some(true)];
+            for (i, want) in heads.into_iter().enumerate() {
+                let head = spine.read_head(i);
+                assert_eq!(head.as_ref().map(|h| spine.read(i).starts_with(h.as_str())), want, "item {i}");
+            }
+        }
+        let mut lazy = open_book(&path, None).unwrap();
+        let mut eager = load(&path, None).unwrap().into_document().unwrap();
+        let (l, e) = (summary(&mut lazy), summary(&mut eager));
+        assert_eq!(l, e);
+        assert!(l.last().unwrap().contains(r#"["OEBPS/a.css", "OEBPS/b.css", "OEBPS/c.css", "OEBPS/d.css", "OEBPS/e.css", "OEBPS/g.css", "OEBPS/h.css"]"#), "{l:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reader_without_a_handle_waits_for_one() {
+        use ink_html::book::SpineSource;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/juliet.epub");
+        let (loader, pkg, _) = prepare(&path, None).unwrap();
+        let paths = spine_paths(&pkg);
+        // A path that cannot be opened: the pool has only the handle it was given.
+        let spine = LazySpine::new(Path::new("/nonexistent/juliet.epub"), loader, &paths);
+        let want = spine.read(1);
+        assert!(!want.is_empty());
+        std::thread::scope(|s| {
+            let reader = spine.with_handle(|_| {
+                let h = s.spawn(|| spine.read(1));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                assert!(!h.is_finished(), "read without a handle");
+                h
+            });
+            assert_eq!(reader.join().unwrap(), want);
+        });
+    }
+
+    #[test]
+    fn a_replaced_file_is_not_read_for_spine_items() {
+        use ink_html::book::SpineSource;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        let dir = std::env::temp_dir().join(format!("ink-epub-replaced-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("book.epub");
+        std::fs::copy(root.join("juliet.epub"), &path).unwrap();
+        let (loader, pkg, _) = prepare(&path, None).unwrap();
+        let spine = LazySpine::new(&path, loader, &spine_paths(&pkg));
+        let want = spine.read(1);
+        assert!(!want.is_empty());
+        // Another book written in its place while this one is open.
+        std::fs::copy(root.join("synthetic.epub"), dir.join("new.epub")).unwrap();
+        std::fs::rename(dir.join("new.epub"), &path).unwrap();
+        std::thread::scope(|s| {
+            let reader = spine.with_handle(|_| {
+                let h = s.spawn(|| spine.read(1));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                assert!(!h.is_finished(), "read from the replaced file");
+                h
+            });
+            assert_eq!(reader.join().unwrap(), want);
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn not_a_zip_is_a_format_error() {
         let dir = std::env::temp_dir().join(format!("ink-epub-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("bad.epub");
         std::fs::write(&f, b"definitely not a zip").unwrap();
-        assert!(matches!(open(&f), Err(DocError::Format(_))));
-        assert!(matches!(open(&dir.join("missing.epub")), Err(DocError::Io(_))));
+        assert!(matches!(open(&f, None), Err(DocError::Format(_))));
+        assert!(matches!(open(&dir.join("missing.epub"), None), Err(DocError::Io(_))));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

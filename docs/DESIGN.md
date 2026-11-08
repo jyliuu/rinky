@@ -2,17 +2,15 @@
 
 The look of every screen comes from `crates/ink-ui`: the tokens in `theme.rs` and the
 widgets built on them. This file lists the tokens, says when to use each widget, and
-lists the e-ink rules every screen must keep. Screen agents restyle their screens with
-these pieces; they do not invent new grays, sizes or line widths.
+lists the e-ink rules every screen must keep. Build screens from these pieces rather
+than new grays, sizes or line widths.
 
-![Design tab of the widget gallery, day](design/gallery-design-day.png)
-![The same tab in night mode](design/gallery-design-night.png)
-
-The pictures are the "Design" tab of the widget gallery (`rinky demo`, tab 6),
-rendered headless at 1272 x 1696 and scaled to 40 %:
+The widget gallery shows one of each widget: `rinky demo` on the host, the "Design"
+tab (the sixth) for the design-system widgets, and its moon button for night mode. To
+render every tab to PNG at 1272 x 1696:
 
 ```sh
-rinky demo --headless --script crates/ink-app/src/screens/demo/gallery.txt --out DIR
+cargo run -p ink-app -- demo --headless --script crates/ink-app/src/screens/demo/gallery.txt --out DIR
 ```
 
 ## Screen and units
@@ -42,10 +40,15 @@ Only these five values. Pictures (covers, book pages) keep their own grays.
 
 ### Type scale (`TextRole { px, style }`)
 
-The only face is Noto Serif (regular, bold, italic). Bold carries emphasis; size steps
-are large enough to tell apart on the panel.
+The UI font is the built-in Noto Sans unless the user picks another family in
+Settings › Fonts › Interface font (Noto Serif, or an installed family with bold and
+italic faces; `crates/ink-app/src/fonts.rs`). The UI fonts draw the bold style with
+the regular face, so titles are light and size steps carry the hierarchy; they are
+large enough to tell apart on the panel. Text whose emphasis carries meaning, such as
+a dictionary entry, gets the family's real bold and italic faces
+(`fonts::emphasis_fonts`).
 
-| Role | Size | Weight | Use |
+| Role | Size | Style | Use |
 | --- | --- | --- | --- |
 | `title` | 56 | bold | title of a top-level screen (app bar without back) |
 | `heading` | 46 | bold | sub-screen titles (app bar with back), dialog and sheet titles, card titles |
@@ -53,7 +56,8 @@ are large enough to tell apart on the panel.
 | `label` | 36 | regular | button and segment captions (bold when filled or selected) |
 | `caption` (= `small_px`) | 28 | regular | secondary lines, details, status, nav bar captions, progress labels |
 
-`font_px` and `small_px` stay as they were, so code that uses them keeps its look.
+`body` and `caption` have the same sizes as the older `font_px` and `small_px` fields,
+which code still reads.
 
 ### Spacing
 
@@ -100,8 +104,7 @@ Pills in three kinds:
   buttons in bars.
 - `.disabled()`: gray caption, `subtle` outline. `inverted = true` still means filled.
 - Pressed: inverted, DU. `paint_button(cx, rect, label, icon, kind, enabled, pressed)`
-  draws the same face for screens that draw directly (replaces
-  `library::view::button`).
+  draws the same face for screens that draw directly.
 - Dialogs make the last of several buttons filled; popups keep all buttons outlined
   (their tools have equal weight).
 
@@ -182,7 +185,7 @@ subtitle, wrapped body, thin progress along the bottom; a tap reports its action
 
 Toggle: on = black track with a white knob holding a check mark; off = `light` track
 with a black outline and a black knob. Slider: 12 px track, black fill, white knob with a
-black ring (black while dragging, DU), round minus/plus buttons. Geometry unchanged.
+black ring (black while dragging, DU), round minus/plus buttons.
 
 ### Overlays: `Dialog`, `Popup`, `Menu`, `BottomSheet`, `Toast`, `Scrim`
 
@@ -217,7 +220,7 @@ drawn by hand for one setting:
 
 ### Icons: `Icon`, `IconView`
 
-42 vector icons on a 24-unit grid with 2-unit round-ended strokes, drawn at any size
+45 vector icons on a 24-unit grid with 2-unit round-ended strokes, drawn at any size
 (`Icon::draw`, `PaintCx::icon`): navigation (Back, Forward, Up, Down, Close, Menu, More),
 reading (Book, Library, Toc, Bookmark, Font, Search, Chat), views (Grid, ListView, Sort,
 Filter, Folder), status (Light, Night, Wifi, Battery, Clock, Sync, Download, Chart),
@@ -305,10 +308,10 @@ to a new page is REAGL. Tests: `popups_open_and_close_with_a_partial_gl16_of_the
 
 Do not add animation settings. The panel has no A2 class in `ink_device::RefreshClass`.
 
-## Screens and ownership
+## Screens that draw directly
 
-`crates/ink-ui` is owned by the design system; screens are owned by their agents
-(`docs/ARCHITECTURE.md`, "Ownership map"). Screens that paint directly should move to
-`AppBar`, `NavBar`, `paint_button`, `ProgressBar`, `Card`/`paint_cover` and the palette
-tokens instead of their own `button`/`progress_bar` helpers and hard-coded 1-2 px gray
-lines.
+The library, the statistics screens and the reader's status bars paint into the canvas
+themselves instead of building a widget tree. They use the same pieces through their
+paint functions: `AppBar` and `NavBar` painted into a rectangle, `paint_button`,
+`ProgressBar`, `Card` and `paint_cover`, and the palette tokens. A screen that needs a
+new look adds it to `crates/ink-ui` and the gallery first, so every screen can use it.

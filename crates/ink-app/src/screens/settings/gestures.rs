@@ -138,7 +138,7 @@ pub fn dispatch(a: &str, cx: &mut AppCtx) -> Option<(Option<String>, String)> {
     if !a.starts_with("gest") && !a.starts_with("gset:") {
         return None;
     }
-    let mut s = cx.settings_update.as_ref().unwrap_or(cx.settings).clone();
+    let mut s = super::current_settings(cx).clone();
     let plugins = crate::plugin_entries::gesture_choices(cx.plugins);
     Some(match action(a, &mut s, &plugins)? {
         Step::Open(p) => (p, String::new()),

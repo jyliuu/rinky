@@ -133,11 +133,7 @@ pub struct TestServer {
     pub state: Arc<State>,
 }
 
-impl std::fmt::Debug for TestServer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TestServer").field("addr", &self.addr).field("tls", &self.tls).finish_non_exhaustive()
-    }
-}
+debug_fields!([] TestServer, "TestServer", |s| "addr": s.addr, "tls": s.tls);
 
 impl TestServer {
     /// Plain HTTP on `127.0.0.1` with a free port.
@@ -167,12 +163,12 @@ impl TestServer {
                 let _ = std::thread::Builder::new().name("testserver-conn".into()).spawn(move || {
                     let _ = tcp.set_read_timeout(Some(Duration::from_secs(20)));
                     let _ = tcp.set_nodelay(true);
-                    let conn = match tls_cfg {
+                    let conn: Conn = match tls_cfg {
                         Some(cfg) => match rustls::ServerConnection::new(cfg) {
-                            Ok(c) => Conn::Tls(Box::new(rustls::StreamOwned::new(c, tcp))),
+                            Ok(c) => Box::new(rustls::StreamOwned::new(c, tcp)),
                             Err(_) => return,
                         },
-                        None => Conn::Plain(tcp),
+                        None => Box::new(tcp),
                     };
                     handle_connection(conn, &state);
                 });
@@ -216,19 +212,17 @@ impl Drop for TestServer {
     }
 }
 
-fn server_tls_config() -> io::Result<Arc<rustls::ServerConfig>> {
+/// The rustls server configuration with the TEST-ONLY certificate (for raw servers in
+/// tests that play misbehaving HTTPS peers).
+pub fn server_tls_config() -> io::Result<Arc<rustls::ServerConfig>> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
-    let mut certs = Vec::new();
-    for item in ureq::tls::parse_pem(SERVER_CERT_PEM) {
-        if let ureq::tls::PemItem::Certificate(c) = item.map_err(|e| bad(e.to_string()))? {
-            certs.push(CertificateDer::from(c.der().to_vec()));
-        }
-    }
-    let mut key = None;
-    for item in ureq::tls::parse_pem(SERVER_KEY_PEM) {
-        if let ureq::tls::PemItem::PrivateKey(k) = item.map_err(|e| bad(e.to_string()))? {
-            key = Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(k.der().to_vec())));
+    let (mut certs, mut key) = (Vec::new(), None);
+    for item in ureq::tls::parse_pem(SERVER_CERT_PEM).chain(ureq::tls::parse_pem(SERVER_KEY_PEM)) {
+        match item.map_err(|e| bad(e.to_string()))? {
+            ureq::tls::PemItem::Certificate(c) => certs.push(CertificateDer::from(c.der().to_vec())),
+            ureq::tls::PemItem::PrivateKey(k) => key = Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(k.der().to_vec()))),
+            _ => {}
         }
     }
     let key = key.ok_or_else(|| bad("no key in test-server.key.pem".into()))?;
@@ -241,45 +235,33 @@ fn server_tls_config() -> io::Result<Arc<rustls::ServerConfig>> {
     Ok(Arc::new(cfg))
 }
 
-enum Conn {
-    Plain(TcpStream),
-    Tls(Box<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>),
-}
-
-impl Read for Conn {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Conn::Plain(s) => s.read(buf),
-            Conn::Tls(s) => s.read(buf),
-        }
+/// A client connection: plain TCP, or TLS over TCP.
+trait Stream: Read + Write + Send {
+    /// True for TLS (absolute URLs in answers use `https`).
+    fn tls(&self) -> bool {
+        false
     }
-}
 
-impl Write for Conn {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Conn::Plain(s) => s.write(buf),
-            Conn::Tls(s) => s.write(buf),
-        }
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Conn::Plain(s) => s.flush(),
-            Conn::Tls(s) => s.flush(),
-        }
-    }
-}
-
-impl Conn {
     /// Ends the connection cleanly (TLS close_notify).
-    fn close(mut self) {
-        if let Conn::Tls(s) = &mut self {
-            s.conn.send_close_notify();
-            let _ = s.flush();
-        }
+    fn close(&mut self) {
         let _ = self.flush();
     }
 }
+
+impl Stream for TcpStream {}
+
+impl Stream for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    fn tls(&self) -> bool {
+        true
+    }
+
+    fn close(&mut self) {
+        self.conn.send_close_notify();
+        let _ = self.flush();
+    }
+}
+
+type Conn = Box<dyn Stream>;
 
 /// How a handler wants the connection to end.
 enum End {
@@ -334,31 +316,9 @@ fn handle_connection(conn: Conn, state: &State) {
     }
 }
 
-fn reason(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        201 => "Created",
-        202 => "Accepted",
-        206 => "Partial Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        303 => "See Other",
-        307 => "Temporary Redirect",
-        308 => "Permanent Redirect",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        402 => "Payment Required",
-        403 => "Forbidden",
-        404 => "Not Found",
-        406 => "Not Acceptable",
-        416 => "Range Not Satisfiable",
-        500 => "Internal Server Error",
-        _ => "Status",
-    }
-}
-
 fn head(w: &mut Conn, status: u16, headers: &[(&str, String)]) -> io::Result<()> {
-    let mut s = format!("HTTP/1.1 {status} {}\r\nConnection: close\r\n", reason(status));
+    let reason = ureq::http::StatusCode::from_u16(status).ok().and_then(|s| s.canonical_reason()).unwrap_or("Status");
+    let mut s = format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\n");
     for (k, v) in headers {
         s.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -400,7 +360,7 @@ pub fn file_bytes(size: usize) -> Vec<u8> {
 }
 
 fn host_base(req: &Recorded, w: &Conn) -> String {
-    let scheme = if matches!(w, Conn::Tls(_)) { "https" } else { "http" };
+    let scheme = if w.tls() { "https" } else { "http" };
     format!("{scheme}://{}", req.header("host").unwrap_or("127.0.0.1"))
 }
 
@@ -675,10 +635,6 @@ fn opds2_catalog(base: &str) -> String {
     .to_string()
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
 fn kosync_route(req: &Recorded, state: &State, w: &mut Conn, seg: &[&str]) -> io::Result<End> {
     let err = |code: u32, message: &str| serde_json::json!({ "code": code, "message": message });
     if req.header("accept") != Some(KOSYNC_ACCEPT) {
@@ -729,7 +685,7 @@ fn kosync_route(req: &Recorded, state: &State, w: &mut Conn, seg: &[&str]) -> io
             if !has_all {
                 return json(w, req, 403, &err(2003, "Invalid request"));
             }
-            let ts = now_secs();
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             let mut stored = body.clone();
             stored["timestamp"] = ts.into();
             state.progress.lock().unwrap().insert((user, doc.to_string()), stored);

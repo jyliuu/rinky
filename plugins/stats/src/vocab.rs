@@ -281,6 +281,7 @@ impl VocabDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ink_plugin::testing::TempDir;
 
     fn look(word: &str, title: &str) -> Lookup {
         Lookup { word: word.into(), title: Some(title.into()), prev_context: Some("Two households, both".into()), next_context: Some("in dignity".into()), ..Default::default() }
@@ -359,9 +360,7 @@ mod tests {
 
     #[test]
     fn damaged_file_is_set_aside_and_a_new_database_starts() {
-        let dir = std::env::temp_dir().join(format!("ink-stats-vocab-bad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("stats-vocab-bad");
         let p = dir.join("vocabulary.sqlite3");
         std::fs::write(&p, vec![0x41u8; 5000]).unwrap(); // not a database
         assert!(VocabDb::open(&p).is_err());
@@ -374,19 +373,17 @@ mod tests {
         drop(db);
         let (db, moved) = VocabDb::open_or_recover(&p).unwrap();
         assert!(moved.is_none() && db.count().unwrap() == 1, "a good file is left alone");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn file_database_reopens() {
-        let dir = std::env::temp_dir().join(format!("ink-stats-vocab-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let p = dir.join("vocabulary.sqlite3");
+        let dir = TempDir::new("stats-vocab");
+        // Opening makes the missing folder.
+        let p = dir.join("new/vocabulary.sqlite3");
         VocabDb::open(&p).unwrap().record_lookup(&look("alike", "R"), 1).unwrap();
         let db = VocabDb::open(&p).unwrap();
         assert_eq!(db.count().unwrap(), 1);
         let v: i64 = db.connection().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, SCHEMA_VERSION);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

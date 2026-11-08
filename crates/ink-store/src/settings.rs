@@ -94,39 +94,6 @@ pub enum FooterStyle {
     Full,
 }
 
-impl FooterStyle {
-    /// Every style, in the order a settings control lists them.
-    pub const ALL: [FooterStyle; 5] = [FooterStyle::None, FooterStyle::Pages, FooterStyle::Bar, FooterStyle::Chapters, FooterStyle::Full];
-
-    /// The stored name (`none`, `pages`, `bar`, `chapters`, `full`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FooterStyle::None => "none",
-            FooterStyle::Pages => "pages",
-            FooterStyle::Bar => "bar",
-            FooterStyle::Chapters => "chapters",
-            FooterStyle::Full => "full",
-        }
-    }
-
-    /// The style named `s`, if it is one.
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|f| f.as_str() == s)
-    }
-}
-
-impl From<String> for FooterStyle {
-    fn from(s: String) -> Self {
-        Self::parse(&s).unwrap_or_default()
-    }
-}
-
-impl From<FooterStyle> for String {
-    fn from(f: FooterStyle) -> Self {
-        f.as_str().to_string()
-    }
-}
-
 /// What the reader draws in the top margin. Stored like [`FooterStyle`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
@@ -140,36 +107,43 @@ pub enum HeaderStyle {
     Chapter,
 }
 
-impl HeaderStyle {
-    /// Every style, in the order a settings control lists them.
-    pub const ALL: [HeaderStyle; 3] = [HeaderStyle::None, HeaderStyle::Book, HeaderStyle::Chapter];
+/// The names of a style stored as a lowercase string: `ALL`, `as_str`, `parse`, and the
+/// `String` conversions serde uses (an unknown name reads as the default).
+macro_rules! named_style {
+    ($ty:ident { $($variant:ident = $name:literal),+ $(,)? }) => {
+        impl $ty {
+            /// Every style, in the order a settings control lists them.
+            pub const ALL: [$ty; [$($name),+].len()] = [$($ty::$variant),+];
 
-    /// The stored name (`none`, `book`, `chapter`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            HeaderStyle::None => "none",
-            HeaderStyle::Book => "book",
-            HeaderStyle::Chapter => "chapter",
+            /// The stored name.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $($ty::$variant => $name),+
+                }
+            }
+
+            /// The style named `s`, if it is one.
+            pub fn parse(s: &str) -> Option<Self> {
+                Self::ALL.into_iter().find(|f| f.as_str() == s)
+            }
         }
-    }
 
-    /// The style named `s`, if it is one.
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|f| f.as_str() == s)
-    }
+        impl From<String> for $ty {
+            fn from(s: String) -> Self {
+                Self::parse(&s).unwrap_or_default()
+            }
+        }
+
+        impl From<$ty> for String {
+            fn from(f: $ty) -> Self {
+                f.as_str().to_string()
+            }
+        }
+    };
 }
 
-impl From<String> for HeaderStyle {
-    fn from(s: String) -> Self {
-        Self::parse(&s).unwrap_or_default()
-    }
-}
-
-impl From<HeaderStyle> for String {
-    fn from(f: HeaderStyle) -> Self {
-        f.as_str().to_string()
-    }
-}
+named_style!(FooterStyle { None = "none", Pages = "pages", Bar = "bar", Chapters = "chapters", Full = "full" });
+named_style!(HeaderStyle { None = "none", Book = "book", Chapter = "chapter" });
 
 impl Default for ReaderSettings {
     fn default() -> Self {
@@ -212,11 +186,21 @@ pub struct DeviceSettings {
     /// Screensaver: `page` (current page), `cover`, `blank` or `image:PATH`, as
     /// `ink_device::screensaver::Screensaver::from_setting` reads it.
     pub screensaver: String,
+    /// Wi-Fi was on when rinky last ran (turned on, or connected, and not turned off
+    /// by the user since): Wi-Fi is turned on again at start-up and after a wake.
+    pub wifi_was_on: bool,
 }
 
 impl Default for DeviceSettings {
     fn default() -> Self {
-        DeviceSettings { touch: String::new(), night_mode: false, rotation: 0, sleep_minutes: 10, screensaver: DEFAULT_SCREENSAVER.into() }
+        DeviceSettings {
+            touch: String::new(),
+            night_mode: false,
+            rotation: 0,
+            sleep_minutes: 10,
+            screensaver: DEFAULT_SCREENSAVER.into(),
+            wifi_was_on: false,
+        }
     }
 }
 
@@ -228,6 +212,9 @@ pub struct Settings {
     pub library_dirs: Vec<PathBuf>,
     /// UI language (`en`, `da`).
     pub language: String,
+    /// File format of highlight exports: `markdown`, `clippings` (Kindle's
+    /// `My Clippings.txt`) or `json`; see [`Settings::export_format`].
+    pub export_format: String,
     /// Reading defaults.
     pub reader: ReaderSettings,
     /// Device options.
@@ -242,11 +229,19 @@ pub struct Settings {
     pub plugins: toml::Table,
 }
 
+impl Settings {
+    /// [`Settings::export_format`] as a format; an unknown name gives Markdown.
+    pub fn export_format(&self) -> crate::export::ExportFormat {
+        crate::export::ExportFormat::from_name(&self.export_format).unwrap_or_default()
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             library_dirs: ink_platform::current().default_library_dirs(),
             language: "en".into(),
+            export_format: crate::export::ExportFormat::default().name().into(),
             reader: ReaderSettings::default(),
             device: DeviceSettings::default(),
             ui: crate::prefs::UiSettings::default(),
@@ -270,27 +265,22 @@ pub const LEGACY_READER_TABLE: &str = "ui-reader";
 fn parse_settings(b: &[u8]) -> std::result::Result<Settings, String> {
     let text = std::str::from_utf8(b).map_err(|e| e.to_string())?;
     let table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
-    // `[status_bars]` defaults when absent, so its absence is only visible here.
-    let legacy = (!table.contains_key("status_bars")).then(|| {
-        let reader = table.get("reader").and_then(|r| r.as_table());
-        let key = |k: &str| reader.and_then(|r| r.get(k)).and_then(|v| v.as_str()).map(str::to_string);
-        (key("footer"), key("header"))
-    });
+    let reader = table.get("reader").and_then(|r| r.as_table());
+    let has = |k: &str| reader.is_some_and(|r| r.contains_key(k));
+    // `[status_bars]` defaults when absent, so its absence is only visible here: which
+    // of the old `footer` and `header` keys the file has.
+    let legacy = (!table.contains_key("status_bars")).then(|| (has("footer"), has("header")));
     // Same for the margin version; only the margin keys the file has are converted
     // (an absent key takes the new default, which needs no conversion).
-    let reader = table.get("reader").and_then(|r| r.as_table());
     let margin_version = reader.and_then(|r| r.get("margin_version")).and_then(|v| v.as_integer()).unwrap_or(1);
-    let old_margins = (margin_version < i64::from(MARGIN_VERSION)).then(|| {
-        let has = |k: &str| reader.is_some_and(|r| r.contains_key(k));
-        (has("margin_top"), has("margin_bottom"))
-    });
+    let old_margins = (margin_version < i64::from(MARGIN_VERSION)).then(|| (has("margin_top"), has("margin_bottom")));
     // `version` defaults to the current one when absent, so read the stored one here.
     let bars_version = table.get("status_bars").and_then(|t| t.get("version")).and_then(|v| v.as_integer()).unwrap_or(0);
     let mut s: Settings = table.try_into().map_err(|e: toml::de::Error| e.to_string())?;
     s.migrate();
     match legacy {
         Some((footer, header)) => {
-            s.migrate_status_bars(footer.is_some(), header.is_some());
+            s.migrate_status_bars(footer, header);
         }
         None if bars_version < i64::from(crate::prefs::STATUS_BARS_VERSION) => {
             s.repair_status_bars_v1();
@@ -347,27 +337,19 @@ impl Settings {
     /// older `slide`, `curl`, `fade`) becomes `on`. Returns true when something moved.
     pub fn migrate(&mut self) -> bool {
         let mut moved = false;
-        if let Some(table) = self.plugins.get_mut(LEGACY_UI_TABLE).and_then(|v| v.as_table_mut()) {
-            if let Some(old) = table.remove("screensaver") {
-                if let Some(v) = old.as_str().filter(|v| !v.is_empty()) {
-                    self.device.screensaver = v.to_string();
-                }
-                moved = true;
-                if table.is_empty() {
-                    self.plugins.remove(LEGACY_UI_TABLE);
-                }
+        type Field = fn(&mut Settings) -> &mut String;
+        let moves: [(&str, &str, Field); 2] =
+            [(LEGACY_UI_TABLE, "screensaver", |s| &mut s.device.screensaver), (LEGACY_READER_TABLE, "page_animation", |s| &mut s.reader.page_animation)];
+        for (table, key, field) in moves {
+            let Some(t) = self.plugins.get_mut(table).and_then(|v| v.as_table_mut()) else { continue };
+            let Some(old) = t.remove(key) else { continue };
+            if t.is_empty() {
+                self.plugins.remove(table);
             }
-        }
-        if let Some(table) = self.plugins.get_mut(LEGACY_READER_TABLE).and_then(|v| v.as_table_mut()) {
-            if let Some(old) = table.remove("page_animation") {
-                if let Some(v) = old.as_str().filter(|v| !v.is_empty()) {
-                    self.reader.page_animation = v.to_string();
-                }
-                moved = true;
-                if table.is_empty() {
-                    self.plugins.remove(LEGACY_READER_TABLE);
-                }
+            if let Some(v) = old.as_str().filter(|v| !v.is_empty()) {
+                *field(self) = v.to_string();
             }
+            moved = true;
         }
         let anim = self.reader.page_animation.as_str();
         if anim != "on" && anim != "off" {
@@ -466,11 +448,17 @@ impl Settings {
     }
 
     /// Stores `value` as the `[plugins.<name>]` table. TOML has no `null` and no integers
-    /// above `i64::MAX`; such values are refused with [`StoreError::Invalid`] (fields that
-    /// are `None` are left out).
+    /// above `i64::MAX`, and the TOML reader limits nesting; such values are refused with
+    /// [`StoreError::Invalid`] (fields that are `None` are left out), so `settings.toml`
+    /// always loads again.
     pub fn set_plugin_value<T: Serialize>(&mut self, name: &str, value: &T) -> Result<()> {
         crate::plugin::validate_name(name)?;
-        let v = toml::Value::try_from(value).map_err(|e| StoreError::Invalid(format!("plugins.{name}: {e}")))?;
+        let invalid = |e: &dyn std::fmt::Display| StoreError::Invalid(format!("plugins.{name}: {e}"));
+        let v = toml::Value::try_from(value).map_err(|e| invalid(&e))?;
+        // The table as `save` writes it must read back.
+        let probe = toml::Table::from_iter([("plugins".to_string(), toml::Value::Table(toml::Table::from_iter([(name.to_string(), v.clone())])))]);
+        let text = toml::to_string_pretty(&probe).map_err(|e| invalid(&e))?;
+        toml::from_str::<toml::Table>(&text).map_err(|e| invalid(&e))?;
         self.plugins.insert(name.to_string(), v);
         Ok(())
     }
@@ -518,6 +506,16 @@ mod tests {
         s.reader.publisher_styles = false;
         let out = toml::to_string_pretty(&s).unwrap();
         assert_eq!(parse_settings(out.as_bytes()).unwrap().reader, s.reader);
+    }
+
+    #[test]
+    fn export_format_defaults_to_markdown_and_round_trips() {
+        use crate::export::ExportFormat;
+        assert_eq!(parse_settings(b"").unwrap().export_format(), ExportFormat::Markdown);
+        assert_eq!(parse_settings(b"export_format = \"nonsense\"\n").unwrap().export_format(), ExportFormat::Markdown);
+        let s = Settings { export_format: "clippings".into(), ..Default::default() };
+        let out = toml::to_string_pretty(&s).unwrap();
+        assert_eq!(parse_settings(out.as_bytes()).unwrap().export_format(), ExportFormat::Clippings);
     }
 
     #[test]
@@ -618,6 +616,10 @@ mod tests {
         assert_eq!(s.plugin_table("kosync").unwrap()["port"].as_integer(), Some(443));
         assert!(s.set_plugin_value("../evil", &1).is_err());
         assert!(s.set_plugin_value("big", &serde_json::json!({ "n": u64::MAX })).is_err());
+        // Nested deeper than the TOML reader reads back: refused, nothing stored.
+        let deep = (0..100).fold(serde_json::json!(1), |v, _| serde_json::json!({ "k": v }));
+        assert!(matches!(s.set_plugin_value("deep", &deep), Err(StoreError::Invalid(_))));
+        assert!(s.plugin_table("deep").is_none());
         assert!(s.plugin_value::<u32>("kosync").is_err());
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file).unwrap(), s);

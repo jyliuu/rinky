@@ -149,7 +149,7 @@ pub fn run(opts: &SelftestOptions) -> u32 {
         Ok(format!("{}", ink_store::sidecar::sidecar_path(&book).display()))
     });
     // ink-store's own checks (partial MD5 vectors, sidecar recovery, library benchmark,
-    // settings, KOReader import, statistics); owner: the store agent.
+    // settings, KOReader import, statistics).
     for c in ink_store::selftest::run(&ink_store::selftest::SelftestOptions { scratch: tmp.join("store"), ..Default::default() }) {
         r.check(&c.name, || if c.ok { Ok(format!("{} (store: {} ms)", c.detail, c.millis)) } else { anyhow::bail!("{}", c.detail) });
     }

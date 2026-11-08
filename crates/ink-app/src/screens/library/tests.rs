@@ -109,6 +109,61 @@ fn queries_sort_filter_and_search() {
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
+/// Waits for the background folder scan and applies it; true when it changed the books.
+fn take_scan(lib: &mut Library) -> bool {
+    let t = std::time::Instant::now();
+    while lib.scanning() {
+        assert!(t.elapsed() < Duration::from_secs(60), "scan thread did not finish");
+        if lib.take_scan() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+/// With a saved index the books are there at once and the folders are read on a
+/// thread: files added and removed while rinky was off come in with `take_scan`.
+#[test]
+fn open_saved_shows_the_saved_books_and_applies_the_scan_later() {
+    let (dir, paths) = books("open-saved", &["juliet.epub", "formats/sample.fb2"]);
+    let mut lib = Library::open(&paths, std::slice::from_ref(&dir));
+    lib.extract_some(Duration::from_secs(60));
+    let saved = |lib: &Library| {
+        let mut v: Vec<PathBuf> = lib.index.books.iter().map(|b| b.path.clone()).collect();
+        v.sort();
+        v
+    };
+    let before = saved(&lib);
+    std::fs::remove_file(dir.join("sample.fb2")).unwrap();
+    std::fs::copy(testdata("synthetic.epub"), dir.join("synthetic.epub")).unwrap();
+    let mut lib = Library::open_saved(&paths, std::slice::from_ref(&dir));
+    assert_eq!(saved(&lib), before);
+    assert_eq!(lib.pending(), 0, "the saved books have their metadata");
+    assert!(take_scan(&mut lib), "a book added and one removed");
+    assert!(!lib.scanning());
+    assert_eq!(saved(&lib), vec![dir.join("juliet.epub"), dir.join("synthetic.epub")]);
+    assert_eq!(lib.pending(), 1, "the new book waits for its metadata");
+    assert_eq!(lib.index.get(&dir.join("juliet.epub")).unwrap().title, "Romeo and Juliet");
+    // Nothing changed since: the next start scan changes nothing.
+    lib.extract_some(Duration::from_secs(60));
+    let mut lib = Library::open_saved(&paths, std::slice::from_ref(&dir));
+    assert!(!take_scan(&mut lib));
+    assert_eq!(lib.index.books.len(), 2);
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+/// No saved books (a first start): the folders are scanned before the first screen,
+/// which would otherwise show an empty library.
+#[test]
+fn open_saved_without_saved_books_scans_at_once() {
+    let (dir, paths) = books("open-saved-first", &["juliet.epub"]);
+    let lib = Library::open_saved(&paths, std::slice::from_ref(&dir));
+    assert!(!lib.scanning());
+    assert_eq!((lib.index.books.len(), lib.pending()), (1, 1));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn delete_removes_the_book_and_our_files_but_not_koreader_files() {
     let (dir, paths) = books("delete", &["juliet.epub", "synthetic.epub"]);
@@ -262,11 +317,11 @@ impl Harness {
         h
     }
 
-    /// Lets the metadata thread finish: timer events, as the app loop sends them while
-    /// the screen has a timeout, until no book is left.
+    /// Lets the folder scan and the metadata thread finish: timer events, as the app
+    /// loop sends them while the screen has a timeout, until no book is left.
     fn settle_metadata(&mut self) {
         let t = std::time::Instant::now();
-        while self.screen.library().is_some_and(|l| l.pending() > 0) {
+        while self.screen.library().is_some_and(|l| l.pending() > 0 || l.scanning()) {
             assert!(t.elapsed() < Duration::from_secs(60), "metadata thread did not finish");
             std::thread::sleep(Duration::from_millis(5));
             self.event(UiEvent::Timer(0));
@@ -493,6 +548,31 @@ fn home_lists_books_then_shows_continue_reading_after_the_reader() {
 }
 
 #[test]
+fn a_book_the_reader_opened_next_counts_as_opened_back_in_the_library() {
+    let (dir, paths) = books("opened-next", &["juliet.epub", "formats/sample.fb2"]);
+    let mut h = Harness::new("opened-next", &dir, paths);
+    let (j, fb2) = (dir.join("juliet.epub"), dir.join("sample.fb2"));
+    h.tap(|x| *x == Hit::Book(j.clone()));
+    assert_eq!(h.pushed(), vec![Route::Reader(j.clone())]);
+    // Opened a while ago (the test runs within one second).
+    h.screen.lib.as_mut().unwrap().index.get_mut(&j).unwrap().last_opened = Some(1);
+    // The reader finished Juliet and went on to the FB2 from its end card; that book
+    // saved a position before the reader closed.
+    BookState { status: ReadingStatus::Complete, percent: Some(1.0), ..Default::default() }.save(&j).unwrap();
+    crate::screens::library::note_opened(&fb2);
+    BookState { position: Some("/body/DocFragment[2].0".into()), percent: Some(0.1), ..Default::default() }.save(&fb2).unwrap();
+    let p = providers();
+    h.screen.on_enter(&mut cx!(h, p)).unwrap();
+    let lib = h.screen.library().unwrap();
+    assert_eq!(lib.index.get(&j).unwrap().status, ReadingStatus::Complete);
+    let b = lib.index.get(&fb2).unwrap();
+    assert_eq!((b.status, b.percent), (ReadingStatus::Reading, Some(0.1)));
+    assert!(b.last_opened.is_some());
+    assert_eq!(lib.current().map(|b| b.path.clone()), Some(fb2), "the book read last is the current one");
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn home_empty_state_offers_a_rescan() {
     let (dir, paths) = books("home-empty", &[]);
     let h = Harness::new("home-empty", &dir, paths);
@@ -583,7 +663,7 @@ fn library_view_sort_filter_search_grid_and_pages() {
     assert_eq!(h.screen.view, View::Books);
     h.shot("01-list");
     let rows = h.screen.hits.iter().filter(|(_, x)| matches!(x, Hit::Book(_))).count();
-    assert_eq!(rows, h.screen.per_page(1272, 1696).min(9));
+    assert_eq!(rows, h.screen.per_page(1696).min(9));
     // Sort by title through the menu.
     h.tap(|x| *x == Hit::Sort);
     assert!(matches!(h.screen.overlay, Some(Overlay::Menu { .. })));
@@ -593,7 +673,7 @@ fn library_view_sort_filter_search_grid_and_pages() {
     let p = Point::new(rect.x + 100, rect.y + i * menu.row_h as i32 + 40);
     h.tap_at(p);
     assert_eq!(h.screen.query.sort, SortKey::Title);
-    let firsts: Vec<String> = h.screen.page_books(1272, 1696).0.iter().map(|b| b.title.to_lowercase()).collect();
+    let firsts: Vec<String> = h.screen.page_books(1696).0.iter().map(|b| b.title.to_lowercase()).collect();
     let mut s = firsts.clone();
     s.sort();
     assert_eq!(firsts, s);
@@ -604,7 +684,7 @@ fn library_view_sort_filter_search_grid_and_pages() {
     let p = Point::new(rect.x + 100, rect.y + i * menu.row_h as i32 + 40);
     h.tap_at(p);
     assert_eq!(h.screen.query.format.as_deref(), Some("fb2"));
-    assert!(h.screen.page_books(1272, 1696).0.iter().all(|b| b.format == "fb2"));
+    assert!(h.screen.page_books(1696).0.iter().all(|b| b.format == "fb2"));
     h.shot("03-filter-fb2");
     // Back to all; grid with pages.
     h.tap(|x| *x == Hit::Filter);
@@ -616,13 +696,13 @@ fn library_view_sort_filter_search_grid_and_pages() {
     assert_eq!(h.screen.mode, ViewMode::Grid);
     h.shot("04-grid");
     // Nine books fill one screen of covers: no scroll bar.
-    assert_eq!(h.screen.page_books(1272, 1696).0.len(), 9);
+    assert_eq!(h.screen.page_books(1696).0.len(), 9);
     assert!(h.screen.bar.is_none());
     // Search with the on-screen keyboard.
     h.tap(|x| *x == Hit::Search);
     h.type_text("alice");
     assert_eq!(h.screen.query.search, "alice");
-    let found = h.screen.page_books(1272, 1696).0;
+    let found = h.screen.page_books(1696).0;
     assert!(!found.is_empty() && found.iter().all(|b| b.title.to_lowercase().contains("alice")), "{found:?}");
     h.shot("06-search");
     // Done closes the keyboard and keeps the search.
@@ -700,7 +780,7 @@ fn collections_tab_opens_a_collection_and_renames_it() {
     h.shot("01-collections");
     h.tap(|x| *x == Hit::Collection("tests".into()));
     assert_eq!((h.screen.view.clone(), h.screen.query.collection.as_deref()), (View::Books, Some("tests")));
-    let shown = h.screen.page_books(1272, 1696).0;
+    let shown = h.screen.page_books(1696).0;
     assert_eq!(shown.len(), 1);
     h.shot("02-collection-books");
     h.tap(|x| *x == Hit::Back);
@@ -920,7 +1000,7 @@ fn status_chips_clear_search_badges_and_one_chip_row() {
     h.screen.lib.as_mut().unwrap().set_status(&j, ReadingStatus::Complete);
     h.tap(|x| *x == Hit::StatusFilter(3));
     assert_eq!(h.screen.query.status, StatusFilter::Finished);
-    let shown = h.screen.page_books(1272, 1696).0;
+    let shown = h.screen.page_books(1696).0;
     assert_eq!(shown.iter().map(|b| b.path.clone()).collect::<Vec<_>>(), vec![j.clone()]);
     h.shot("01-finished");
     assert_eq!(super::browse::book_state(&shown[0]), Err(super::browse::Badge::Finished));
@@ -930,10 +1010,10 @@ fn status_chips_clear_search_badges_and_one_chip_row() {
     h.screen.query.search = "zzz".into();
     h.screen.redraw();
     h.paint();
-    assert!(h.screen.page_books(1272, 1696).0.is_empty());
+    assert!(h.screen.page_books(1696).0.is_empty());
     h.tap(|x| *x == Hit::ClearSearch);
     assert_eq!(h.screen.query.search, "");
-    assert_eq!(h.screen.page_books(1272, 1696).0.len(), 3);
+    assert_eq!(h.screen.page_books(1696).0.len(), 3);
     // Grid: one book cell per book, the mode button in the app bar switches back.
     h.tap(|x| *x == Hit::ToggleMode);
     assert_eq!(h.screen.mode, ViewMode::Grid);
@@ -1198,7 +1278,7 @@ fn library_list_scrolls_a_screen_at_a_time_with_a_scroll_bar() {
     let mut h = Harness::new("scroll", &dir, paths);
     h.tap(|x| *x == Hit::Tab(1));
     assert_eq!((h.screen.view.clone(), h.screen.mode), (View::Books, ViewMode::List));
-    let per = h.screen.per_page(1272, 1696);
+    let per = h.screen.per_page(1696);
     assert!(per < 9, "the test needs two screens of rows ({per} per screen)");
     let g = h.screen.bar.expect("scroll bar with two screens");
     assert_eq!((g.bar.total, g.bar.first, g.bar.shown), (9, 0, per));
@@ -1219,7 +1299,7 @@ fn library_list_scrolls_a_screen_at_a_time_with_a_scroll_bar() {
     let n = h.probe.updates().len();
     h.swipe(true);
     h.assert_scrolled(n, 1);
-    assert_eq!(h.screen.page_books(1272, 1696).0.len(), 9 - per);
+    assert_eq!(h.screen.page_books(1696).0.len(), 9 - per);
     h.shot("02-second-screen");
     // At the end a swipe up does nothing (no refresh).
     let n = h.probe.updates().len();
@@ -1259,7 +1339,7 @@ fn library_list_scrolls_a_screen_at_a_time_with_a_scroll_bar() {
     h.assert_scrolled(n, 0);
     assert!(h.pushed().is_empty() && h.screen.overlay.is_none());
     // A tap on a row still opens its book.
-    let first = h.screen.page_books(1272, 1696).0[0].path.clone();
+    let first = h.screen.page_books(1696).0[0].path.clone();
     h.tap(|x| *x == Hit::Book(first.clone()));
     assert_eq!(h.pushed().last(), Some(&Route::Reader(first)));
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
@@ -1433,6 +1513,27 @@ impl ink_plugin::Plugin for Rescanner {
         cx.ui()?.rescan_library();
         Ok(())
     }
+}
+
+/// A library started again shows its saved books in the first frame; a book copied
+/// in while rinky was off is listed once the folder scan comes in on a timer tick.
+#[test]
+fn a_restarted_library_shows_saved_books_then_the_scanned_ones() {
+    let (dir, paths) = books("restart", &["juliet.epub"]);
+    let mut h = Harness::new("restart", &dir, paths);
+    std::fs::copy(testdata("synthetic.epub"), dir.join("synthetic.epub")).unwrap();
+    // The app started again: a new screen on the same home.
+    h.screen = LibraryScreen::new();
+    let p = providers();
+    h.screen.on_enter(&mut cx!(h, p)).unwrap();
+    h.paint();
+    let listed = |h: &Harness, f: &str| h.screen.hits.iter().any(|(_, x)| *x == Hit::Book(dir.join(f)));
+    assert!(listed(&h, "juliet.epub") && !listed(&h, "synthetic.epub"));
+    assert!(h.screen.timeout().is_some(), "the timer brings the scan");
+    h.settle_metadata();
+    assert!(listed(&h, "juliet.epub") && listed(&h, "synthetic.epub"));
+    assert_eq!(h.screen.timeout(), None);
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
 /// A plugin that adds a book while the library is shown gets it listed at the next

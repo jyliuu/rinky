@@ -4,6 +4,7 @@
 #   scripts/emu-slot.sh acquire NAME           take a free slot for instance NAME (prints the slot number)
 #   scripts/emu-slot.sh release NAME           give the slot of NAME back (refused while its QEMU runs)
 #   scripts/emu-slot.sh status                 list slots, owners, QEMU pids and ports
+#   scripts/emu-slot.sh paths                  print the emulator repo and the slot lock directory
 #   scripts/emu-slot.sh cleanup                remove stale locks (QEMU gone); never kills a process
 #   scripts/emu-slot.sh port NAME              print the SSH port of NAME's slot
 #   scripts/emu-slot.sh slotdir NAME           print NAME's slot directory (boot_s, fw_cycles, ...)
@@ -47,16 +48,31 @@
 # and then finds QEMU running. QEMU and `eink create` are started without fd 8.
 # The user's own instance pw12-5195-jb (ports 4022/4023) is refused everywhere.
 #
-# Environment: EMU (emulator repo), EMU_SLOTS (lock directory), EMU_TIME_SCALE (factor
+# Environment: EMU (emulator repo; default ../eink-emulator next to the main checkout,
+# also from a git worktree), EMU_SLOTS (lock directory; default
+# ../inkreader-wt/.emu-slots next to the main checkout), EMU_TIME_SCALE (factor
 # for every deadline on a slow host, default 1), EMU_BOOT_DEADLINE_S (900),
 # EMU_SLOT_GRACE_S (1200), EMU_QUIT_WAIT_S (30), EMU_UP_WAIT_S (how long an up/restart
 # waits for another up/restart of the same name; default boot deadline + 1200),
 # EMU_SLOT_PORT_BASE (4110; tests use another base).
 set -euo pipefail
 
-EMU=${EMU:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/eink-emulator}
-SLOTS=${EMU_SLOTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/inkreader-wt/.emu-slots}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# The main checkout, also when run from a git worktree (.claude/worktrees/NAME): the
+# emulator and the slot locks sit next to it, so every worktree shares them.
+main_checkout() {
+    local common
+    common=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { echo "$ROOT"; return; }
+    case $common in
+        */.git) dirname "$common" ;;
+        *) echo "$ROOT" ;;
+    esac
+}
+MAIN=$(main_checkout)
+EMU=${EMU:-$(cd "$MAIN/.." && pwd)/eink-emulator}
+# emu-input.py reads EMU too.
+export EMU
+SLOTS=${EMU_SLOTS:-$(cd "$MAIN/.." && pwd)/inkreader-wt/.emu-slots}
 NSLOTS=4
 PROTECTED=pw12-5195-jb
 FIRMWARE=5.19.5
@@ -562,7 +578,7 @@ cmd_wifi() {
   guest "$name" 'ifconfig wlan0 | grep "inet addr"; lipc-get-prop com.lab126.wifid cmState'
 }
 
-usage() { sed -n '2,53p' "$0"; exit 2; }
+usage() { sed -n '2,57p' "$0"; exit 2; }
 
 cmd=${1:-}
 shift || true
@@ -570,6 +586,7 @@ case "$cmd" in
   acquire) cmd_acquire "${1:-}" ;;
   release) cmd_release "${1:-}" ;;
   status) cmd_status ;;
+  paths) printf 'emulator %s\nslots %s\n' "$EMU" "$SLOTS" ;;
   cleanup) cmd_cleanup ;;
   port) n=$(need_slot "${1:-}"); ssh_port "$n" ;;
   slotdir) n=$(need_slot "${1:-}"); slot_dir "$n" ;;

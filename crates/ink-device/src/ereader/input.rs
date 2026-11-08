@@ -7,6 +7,7 @@
 //! (`/tmp/rinky/heartbeat`, a counter) moves while the app waits for input; a
 //! stuck app stops calling `next_event` and the heartbeat stops.
 
+use super::kindle::POWERD;
 use super::system;
 use super::Shared;
 use crate::battery::{self, LowBatteryMonitor};
@@ -21,6 +22,7 @@ use crate::input::{Input, InputEvent, Key, KeyEvent, PowerEvent, Timestamp, Touc
 use crate::journal::Entry;
 use crate::light::AmberScheduler;
 use crate::lipc::{EventHub, Lipc};
+use crate::netman::NetQueue;
 use crate::screen::RefreshClass;
 use crate::sleep::{Resume, SleepController, SleepPlatform, SleepState};
 use crate::sysfs::SysRoot;
@@ -33,6 +35,7 @@ use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 const EVIOCGRAB: u32 = 0x4004_4590;
@@ -372,6 +375,8 @@ pub struct ReaderInput {
     sys: SysRoot,
     opts: LoopOptions,
     hub: Option<(EventHub, OwnedFd)>,
+    /// The network worker's events and the pipe that wakes the poll for them.
+    net: Option<(Arc<NetQueue>, OwnedFd)>,
     uevent: Option<OwnedFd>,
     udc: Option<File>,
     queue: VecDeque<InputEvent>,
@@ -383,6 +388,9 @@ pub struct ReaderInput {
     amber: AmberScheduler,
     amber_next: Instant,
     amber_base: Option<u32>,
+    /// powerd's warmth schedule as last read. Only rinky changes it while the framework
+    /// is stopped, and it then sends [`Request::AmberChanged`], which clears this.
+    amber_schedule: Option<crate::light::AmberSchedule>,
     wifi_state: String,
     heartbeat: u64,
     heartbeat_at: Option<Instant>,
@@ -461,22 +469,14 @@ impl SleepPlatform for Plat<'_> {
             system::backlight_restore(self.sys, self.light_saved);
             self.light_saved.clear();
             let sh = self.shared.borrow();
-            let _ = sh.journal.forget(&Entry::LipcInt {
-                publisher: "com.lab126.powerd".into(),
-                prop: "flIntensity".into(),
-                value: 0,
-            });
+            let _ = sh.journal.forget(&Entry::lipc_int(POWERD, "flIntensity", 0));
         } else {
             // A crash while asleep must not leave the light off: the launcher re-sets
             // powerd's level, which makes powerd drive the LEDs again. (Kobo: Nickel
             // sets its own level when it starts.)
-            if let Some(v) = self.lipc.and_then(|l| l.get_int("com.lab126.powerd", "flIntensity").ok()) {
+            if let Some(v) = self.lipc.and_then(|l| l.get_int(POWERD, "flIntensity").ok()) {
                 let sh = self.shared.borrow();
-                let _ = sh.journal.record(Entry::LipcInt {
-                    publisher: "com.lab126.powerd".into(),
-                    prop: "flIntensity".into(),
-                    value: v,
-                });
+                let _ = sh.journal.record(Entry::lipc_int(POWERD, "flIntensity", v));
             }
             *self.light_saved = system::backlight_off(self.sys);
         }
@@ -496,7 +496,7 @@ impl SleepPlatform for Plat<'_> {
         let Some(lipc) = self.lipc else { return };
         // Best effort: with lab126_gui stopped powerd refuses (lipcPropErrInvalidState);
         // the deferral is kept by rinky's own controller either way.
-        if let Err(e) = lipc.set_int("com.lab126.powerd", "deferSuspend", d.as_secs() as i64) {
+        if let Err(e) = lipc.set_int(POWERD, "deferSuspend", d.as_secs() as i64) {
             log::info!("sleep: powerd deferSuspend {} not set ({e}); deferred by rinky only", d.as_secs());
         }
     }
@@ -545,6 +545,7 @@ impl ReaderInput {
             lipc: lipc.clone(),
             sys,
             hub: None,
+            net: None,
             uevent: open_uevent_socket(),
             udc: None,
             queue: VecDeque::new(),
@@ -556,6 +557,7 @@ impl ReaderInput {
             amber: AmberScheduler::default(),
             amber_next: now + AMBER_EVERY,
             amber_base: None,
+            amber_schedule: None,
             wifi_state: String::new(),
             heartbeat: 0,
             heartbeat_at: None,
@@ -625,12 +627,12 @@ impl ReaderInput {
     /// `preventScreenSaver` (journaled: the launcher puts the old value back).
     fn keep_powerd_out_of_screensaver(&mut self) {
         let Some(lipc) = &self.lipc else { return };
-        let old = lipc.get_int("com.lab126.powerd", "preventScreenSaver");
+        let old = lipc.get_int(POWERD, "preventScreenSaver");
         if let Ok(v) = old {
             let sh = self.shared.borrow();
-            let _ = sh.journal.record(Entry::LipcInt { publisher: "com.lab126.powerd".into(), prop: "preventScreenSaver".into(), value: v });
+            let _ = sh.journal.record(Entry::lipc_int(POWERD, "preventScreenSaver", v));
         }
-        match lipc.set_int("com.lab126.powerd", "preventScreenSaver", 1) {
+        match lipc.set_int(POWERD, "preventScreenSaver", 1) {
             Ok(()) => log::info!("sleep: powerd preventScreenSaver 1 (was {old:?})"),
             Err(e) => log::warn!("sleep: powerd preventScreenSaver not set: {e}"),
         }
@@ -641,28 +643,23 @@ impl ReaderInput {
         &self.touch
     }
 
-    /// Status of the lipc subscriptions.
-    pub fn hub_status(&mut self) -> Vec<crate::lipc::SubscriptionStatus> {
-        self.hub.as_mut().map(|(h, _)| h.status()).unwrap_or_default()
-    }
-
     fn read_cable(&self) -> UsbCable {
-        let udc = usb::read_udc(&self.sys).map(|(_, s)| s);
-        usb::cable_from(udc.as_deref(), battery::external_power(&self.sys), self.hal_plugged)
+        usb::read_cable(&self.sys, self.hal_plugged)
     }
 
-    fn plat(&mut self) -> (Option<&mut SleepController>, Plat<'_>) {
-        (
-            self.sleep.as_mut(),
-            Plat {
-                shared: &self.shared,
-                touch: &mut self.touch,
-                sys: &self.sys,
-                lipc: self.lipc.as_ref(),
-                suspend: self.opts.suspend,
-                light_saved: &mut self.light_saved,
-            },
-        )
+    /// Runs `f` on the sleep controller (when rinky owns sleep) with this platform's
+    /// hooks; returns the power events it produced.
+    fn drive_sleep(&mut self, f: impl FnOnce(&mut SleepController, &mut Plat<'_>) -> Vec<PowerEvent>) -> Vec<PowerEvent> {
+        let Some(c) = self.sleep.as_mut() else { return Vec::new() };
+        let mut p = Plat {
+            shared: &self.shared,
+            touch: &mut self.touch,
+            sys: &self.sys,
+            lipc: self.lipc.as_ref(),
+            suspend: self.opts.suspend,
+            light_saved: &mut self.light_saved,
+        };
+        f(c, &mut p)
     }
 
     fn push_power(&mut self, evs: Vec<PowerEvent>) {
@@ -708,8 +705,8 @@ impl ReaderInput {
                     self.queue.push_back(InputEvent::Power(e));
                 }
                 UsbAction::Cable(b) => self.queue.push_back(InputEvent::Usb(b)),
-                UsbAction::Journal(p, k, v) => {
-                    let _ = self.shared.borrow().journal.record(Entry::LipcInt { publisher: p, prop: k, value: v });
+                UsbAction::Journal(e) => {
+                    let _ = self.shared.borrow().journal.record(e);
                 }
                 UsbAction::Log(s) => say!("{s}"),
             }
@@ -753,10 +750,11 @@ impl ReaderInput {
             return;
         }
         let Some(lipc) = &self.lipc else { return };
-        let sched = match super::kindle::read_amber_schedule(lipc) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        // Five lipc processes: read once, not every minute.
+        if self.amber_schedule.is_none() {
+            self.amber_schedule = super::kindle::read_amber_schedule(lipc).ok();
+        }
+        let Some(sched) = &self.amber_schedule else { return };
         if !sched.enabled || sched.mode != crate::light::AmberMode::Manual {
             self.amber.reset();
             return;
@@ -766,15 +764,15 @@ impl ReaderInput {
         let base = match self.amber_base {
             Some(b) => b,
             None => {
-                let cur = lipc.get_int("com.lab126.powerd", "currentAmberLevel").unwrap_or(0).max(0) as u32;
+                let cur = lipc.get_int(POWERD, "currentAmberLevel").unwrap_or(0).max(0) as u32;
                 let b = if sched.in_window(t) { 0 } else { cur };
                 self.amber_base = Some(b);
                 b
             }
         };
-        if let Some(w) = self.amber.tick(&sched, t, base) {
+        if let Some(w) = self.amber.tick(sched, t, base) {
             say!("amber: schedule {}..{} level {} at {t}: warmth {w}", sched.start, sched.end, sched.level);
-            let _ = lipc.set_int("com.lab126.powerd", "currentAmberLevel", w as i64);
+            let _ = lipc.set_int(POWERD, "currentAmberLevel", w as i64);
         }
     }
 
@@ -783,15 +781,14 @@ impl ReaderInput {
         for r in reqs {
             match r {
                 Request::Sleep => {
-                    let (c, mut p) = self.plat();
-                    let evs = c.map(|c| c.sleep(crate::sleep::Trigger::App, now, &mut p)).unwrap_or_default();
+                    let evs = self.drive_sleep(|c, p| c.sleep(crate::sleep::Trigger::App, now, p));
                     self.push_power(evs);
                 }
                 Request::Defer(d) => {
-                    let (c, mut p) = self.plat();
-                    if let Some(c) = c {
-                        c.defer_suspend(d, now, &mut p);
-                    }
+                    self.drive_sleep(|c, p| {
+                        c.defer_suspend(d, now, p);
+                        Vec::new()
+                    });
                     self.push_power(Vec::new());
                 }
                 Request::AutoSleep(a) => {
@@ -814,6 +811,7 @@ impl ReaderInput {
                     }
                 }
                 Request::AmberChanged => {
+                    self.amber_schedule = None;
                     self.amber.reset();
                     self.amber_next = now;
                 }
@@ -888,8 +886,7 @@ impl ReaderInput {
         if self.sleep.is_some() {
             if pressed {
                 say!("power key pressed");
-                let (c, mut p) = self.plat();
-                let evs = c.map(|c| c.power_key(now, &mut p)).unwrap_or_default();
+                let evs = self.drive_sleep(|c, p| c.power_key(now, p));
                 self.push_power(evs);
             }
         } else {
@@ -930,8 +927,7 @@ impl ReaderInput {
             log::info!("cover: {what} not handled: the device layer does not own sleep");
             return;
         }
-        let (c, mut p) = self.plat();
-        let evs = c.map(|c| c.cover_from(closed, &source.to_string(), now, &mut p)).unwrap_or_default();
+        let evs = self.drive_sleep(|c, p| c.cover_from(closed, &source.to_string(), now, p));
         self.push_power(evs);
     }
 
@@ -947,7 +943,7 @@ impl ReaderInput {
             let name = e.event.name.clone();
             if matches!(e.publisher.as_str(), "com.lab126.hal" | "com.lab126.volumd" | "com.lab126.time") {
                 say!("{} lipc: {} {}", crate::clock::stamp(), e.publisher, e.event.line());
-            } else if e.publisher == "com.lab126.powerd" && !matches!(name.as_str(), "t1TimerReset" | "battLevelChanged") {
+            } else if e.publisher == POWERD && !matches!(name.as_str(), "t1TimerReset" | "battLevelChanged") {
                 // powerd's screensaver/suspend/cover events at info: they show whether
                 // powerd still runs its own flow while the framework is stopped.
                 log::info!("lipc event {} {}", e.publisher, e.event.line());
@@ -992,8 +988,7 @@ impl ReaderInput {
                         if publisher == "com.lab126.hal" && name == "powerButtonPressed" && self.power.is_none() =>
                     {
                         // No evdev power key: use the udev notification instead.
-                        let (c, mut p) = self.plat();
-                        let evs = c.map(|c| c.power_key(now, &mut p)).unwrap_or_default();
+                        let evs = self.drive_sleep(|c, p| c.power_key(now, p));
                         self.push_power(evs);
                     }
                     _ => {}
@@ -1035,8 +1030,7 @@ impl ReaderInput {
             hub.maintain();
         }
         if self.sleep.is_some() {
-            let (c, mut p) = self.plat();
-            let evs = c.map(|c| c.tick(now, &mut p)).unwrap_or_default();
+            let evs = self.drive_sleep(|c, p| c.tick(now, p));
             if evs.contains(&PowerEvent::Resuming) {
                 // Time passed in suspend: re-read everything that may have changed.
                 self.battery_next = Instant::now();
@@ -1058,6 +1052,60 @@ impl ReaderInput {
         if now >= self.amber_next {
             self.amber_check(now);
         }
+    }
+
+    /// Reads the touchscreen and delivers its frames (none while the screensaver or the
+    /// lock screen is up); re-seeds the decoder after `SYN_DROPPED`.
+    fn read_touch(&mut self, now: Instant) -> Result<()> {
+        let raw = match read_raw(&mut self.touch.file) {
+            Ok(r) => r,
+            Err(e) if e.raw_os_error() == Some(libc::ENODEV) => {
+                let _ = self.touch.regrab();
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let hidden = {
+            let sh = self.shared.borrow();
+            sh.asleep || sh.locked
+        };
+        for ev in raw {
+            if let Some(frame) = self.touch.decoder.feed(ev).filter(|_| !hidden) {
+                if let Some(s) = self.sleep.as_mut() {
+                    s.activity(now);
+                }
+                self.deliver_touch(frame);
+            }
+            if self.touch.decoder.take_resync() {
+                log::warn!("touch: SYN_DROPPED; re-seeding from the kernel");
+                self.touch.seed();
+                if let Some(f) = self.touch.decoder.flush_seeded(ev.time).filter(|_| !hidden) {
+                    self.deliver_touch(f);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The queue the network worker ([`crate::netman::spawn`]) sends its events to; they
+    /// come out of [`Input::next_event`] as [`PowerEvent::Network`].
+    pub fn net_queue(&mut self) -> Option<Arc<NetQueue>> {
+        if let Some((q, _)) = &self.net {
+            return Some(q.clone());
+        }
+        let (rd, wr) = make_pipe()?;
+        let q = NetQueue::new(move || {
+            let _ = (&wr).write_all(&[1]);
+        });
+        self.net = Some((q.clone(), rd));
+        Some(q)
+    }
+
+    /// Moves the network worker's events into the queue (and empties its pipe).
+    fn take_net_events(&mut self) {
+        let Some((q, rd)) = &self.net else { return };
+        drain_fd(rd.as_raw_fd());
+        self.queue.extend(q.take().into_iter().map(|e| InputEvent::Power(PowerEvent::Network(e))));
     }
 
     fn next_deadline(&self, caller: Option<Instant>, now: Instant) -> Instant {
@@ -1094,6 +1142,7 @@ impl Input for ReaderInput {
             self.requests(now);
             self.timers(now);
             self.heartbeat(now);
+            self.take_net_events();
             if let Some(ev) = self.queue.pop_front() {
                 return Ok(Some(ev));
             }
@@ -1102,19 +1151,24 @@ impl Input for ReaderInput {
                 crate::input::WaitStep::Poll(d) => d,
             };
             polled = true;
-            let mut fds = vec![libc::pollfd { fd: self.touch.file.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-            let mut add = |fd: i32, events: i16| {
-                fds.push(libc::pollfd { fd, events, revents: 0 });
-                fds.len() - 1
-            };
-            let power_idx = self.power.as_ref().map(|p| add(p.as_raw_fd(), libc::POLLIN));
-            let keys_idx = self.key_dev.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLIN));
-            let lipc_idx = self.hub.as_ref().map(|(_, rd)| add(rd.as_raw_fd(), libc::POLLIN));
-            let uevent_idx = self.uevent.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLIN));
-            let udc_idx = self.udc.as_ref().map(|f| add(f.as_raw_fd(), libc::POLLPRI | libc::POLLERR));
-            if let Some(fd) = stop_fd {
-                add(fd, libc::POLLIN);
-            }
+            // One fixed slot per source; poll(2) skips a negative fd (a missing source).
+            const TOUCH: usize = 0;
+            const POWER: usize = 1;
+            const KEYS: usize = 2;
+            const LIPC: usize = 3;
+            const UEVENT: usize = 4;
+            const UDC: usize = 5;
+            let raw = |fd: Option<i32>, events: i16| libc::pollfd { fd: fd.unwrap_or(-1), events, revents: 0 };
+            let mut fds = [
+                raw(Some(self.touch.file.as_raw_fd()), libc::POLLIN),
+                raw(self.power.as_ref().map(|f| f.as_raw_fd()), libc::POLLIN),
+                raw(self.key_dev.as_ref().map(|f| f.as_raw_fd()), libc::POLLIN),
+                raw(self.hub.as_ref().map(|(_, rd)| rd.as_raw_fd()), libc::POLLIN),
+                raw(self.uevent.as_ref().map(|f| f.as_raw_fd()), libc::POLLIN),
+                raw(self.udc.as_ref().map(|f| f.as_raw_fd()), libc::POLLPRI | libc::POLLERR),
+                raw(stop_fd, libc::POLLIN),
+                raw(self.net.as_ref().map(|(_, rd)| rd.as_raw_fd()), libc::POLLIN),
+            ];
             let ms = wait.as_millis().min(i32::MAX as u128) as i32;
             // SAFETY: fds is a valid array of pollfd.
             let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, ms) };
@@ -1130,83 +1184,39 @@ impl Input for ReaderInput {
                 self.cable_check(now);
                 continue;
             }
-            if let Some(i) = power_idx {
-                if fds[i].revents & libc::POLLIN != 0 {
-                    let evs = match self.power.as_mut() {
-                        Some(p) => read_raw(p)?,
-                        None => Vec::new(),
-                    };
-                    for ev in evs {
-                        if ev.ty == EV_KEY && ev.code == KEY_POWER {
-                            self.handle_power_key(ev, now);
-                        }
+            let ready = |slot: usize, events: i16| fds[slot].revents & events != 0;
+            if let Some(p) = self.power.as_mut().filter(|_| ready(POWER, libc::POLLIN)) {
+                for ev in read_raw(p)? {
+                    if ev.ty == EV_KEY && ev.code == KEY_POWER {
+                        self.handle_power_key(ev, now);
                     }
                 }
             }
-            if let Some(i) = keys_idx {
-                if fds[i].revents & libc::POLLIN != 0 {
-                    let evs = match self.key_dev.as_mut() {
-                        Some(f) => read_raw(f)?,
-                        None => Vec::new(),
-                    };
-                    for ev in evs {
-                        self.handle_page_key(ev, now);
-                    }
+            if let Some(f) = self.key_dev.as_mut().filter(|_| ready(KEYS, libc::POLLIN)) {
+                for ev in read_raw(f)? {
+                    self.handle_page_key(ev, now);
                 }
             }
-            if fds[0].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+            if ready(TOUCH, libc::POLLERR | libc::POLLHUP) {
                 log::warn!("touch device error; reopening");
                 let _ = self.touch.regrab();
-            } else if fds[0].revents & libc::POLLIN != 0 {
-                let raw = match read_raw(&mut self.touch.file) {
-                    Ok(r) => r,
-                    Err(e) if e.raw_os_error() == Some(libc::ENODEV) => {
-                        let _ = self.touch.regrab();
-                        Vec::new()
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                let (asleep, locked) = {
-                    let sh = self.shared.borrow();
-                    (sh.asleep, sh.locked)
-                };
-                for ev in raw {
-                    if let Some(frame) = self.touch.decoder.feed(ev) {
-                        if asleep || locked {
-                            continue; // the screensaver / lock screen takes no touches
-                        }
-                        if let Some(s) = self.sleep.as_mut() {
-                            s.activity(now);
-                        }
-                        self.deliver_touch(frame);
-                    }
-                    if self.touch.decoder.take_resync() {
-                        log::warn!("touch: SYN_DROPPED; re-seeding from the kernel");
-                        self.touch.seed();
-                        if let Some(f) = self.touch.decoder.flush_seeded(ev.time) {
-                            if !(asleep || locked) {
-                                self.deliver_touch(f);
-                            }
-                        }
-                    }
-                }
+            } else if ready(TOUCH, libc::POLLIN) {
+                self.read_touch(now)?;
             }
-            if lipc_idx.is_some_and(|i| fds[i].revents & libc::POLLIN != 0) {
+            if ready(LIPC, libc::POLLIN) {
                 self.handle_lipc(now);
             }
-            if uevent_idx.is_some_and(|i| fds[i].revents & libc::POLLIN != 0) {
+            if ready(UEVENT, libc::POLLIN) {
                 self.handle_uevents(now);
             }
-            if let Some(i) = udc_idx {
-                if fds[i].revents & (libc::POLLPRI | libc::POLLERR) != 0 {
-                    if let Some(f) = self.udc.as_mut() {
-                        let _ = f.rewind();
-                        let mut s = String::new();
-                        let _ = f.read_to_string(&mut s);
-                        log::debug!("udc state {}", s.trim());
-                    }
-                    self.cable_check(now);
+            if ready(UDC, libc::POLLPRI | libc::POLLERR) {
+                if let Some(f) = self.udc.as_mut() {
+                    let _ = f.rewind();
+                    let mut s = String::new();
+                    let _ = f.read_to_string(&mut s);
+                    log::debug!("udc state {}", s.trim());
                 }
+                self.cable_check(now);
             }
         }
     }
@@ -1226,11 +1236,7 @@ impl Drop for ReaderInput {
                     say!("{s}");
                 }
             }
-            let _ = self.shared.borrow().journal.forget(&Entry::LipcInt {
-                publisher: "com.lab126.volumd".into(),
-                prop: "disableMounting".into(),
-                value: 0,
-            });
+            let _ = self.shared.borrow().journal.forget(&Entry::lipc_int(VOLUMD, "disableMounting", 0));
         }
         if !self.light_saved.is_empty() {
             system::backlight_restore(&self.sys, &self.light_saved);

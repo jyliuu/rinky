@@ -11,10 +11,10 @@
 //! - TOC from the NCX index (tag 6 = position as fragment + offset).
 
 use super::header::{decode, MobiHeader};
-use super::mobi6::{ncx, nest};
+use super::mobi6::{ncx, nest, part_name};
 use super::{base32, index, Converted, Mobi, Resources};
 use crate::book::Target;
-use crate::util::be32;
+use crate::util::{be32, find_bytes as find};
 use crate::xhtml::{self, NoRewrite};
 use crate::xml;
 use ink_doc::{DocError, Result};
@@ -105,13 +105,6 @@ pub fn tables(m: &Mobi, h: &MobiHeader) -> (Vec<Skeleton>, Vec<Fragment>) {
         })
         .collect();
     (skels, frags)
-}
-
-fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || from > hay.len() || hay.len() < needle.len() {
-        return None;
-    }
-    (from..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
 fn rfind(hay: &[u8], b: u8) -> Option<usize> {
@@ -245,10 +238,6 @@ pub fn anchor_at(parts: &[Part], pos: usize) -> Option<(usize, Anchor)> {
     Some((pn, Anchor::Top))
 }
 
-fn part_name(i: usize) -> String {
-    format!("part{i:04}.xhtml")
-}
-
 /// Rewrites `kindle:` URIs in `s`.
 fn rewrite_uris(
     s: &str,
@@ -288,9 +277,9 @@ fn rewrite_uris(
 }
 
 /// Adds `id="aid-X"` to the tags carrying the linked aids.
-fn add_aid_ids(text: &str, aids: &HashSet<String>) -> String {
+fn add_aid_ids(text: String, aids: &HashSet<String>) -> String {
     if aids.is_empty() {
-        return text.to_string();
+        return text;
     }
     let mut out = String::with_capacity(text.len() + aids.len() * 16);
     let bytes = text.as_bytes();
@@ -343,24 +332,28 @@ pub fn convert(m: &Mobi, h: &MobiHeader, res: &Resources) -> Result<Converted> {
     if parts.is_empty() {
         return Err(DocError::Format("KF8: no files".into()));
     }
-    // Flow names from the references (the mime type tells CSS from SVG).
-    let all = parts.iter().map(|p| String::from_utf8_lossy(&p.text)).collect::<Vec<_>>().join("");
-    // The first `kindle:flow:XXXX` reference of each flow and its `mime=` (one scan; the
-    // flow count comes from the file).
-    let mut mimes: HashMap<&str, Option<&str>> = HashMap::new();
-    let mut at = 0;
-    while let Some(p) = all[at..].find("kindle:flow:").map(|p| at + p) {
-        at = p + "kindle:flow:".len();
-        if let Some(key) = all.get(at..at + 4) {
-            let uri = all[p..].split(['"', '\'', ')']).next().unwrap_or("");
-            mimes.entry(key).or_insert_with(|| uri.split("mime=").nth(1));
+    // Flow names from the references (the mime type tells CSS from SVG): the first
+    // `kindle:flow:XXXX` reference of each flow and its `mime=`, in one scan of the files
+    // (the flow count comes from the file).
+    const FLOW: &[u8] = b"kindle:flow:";
+    let mut mimes: HashMap<String, Option<String>> = HashMap::new();
+    for t in parts.iter().map(|p| &p.text) {
+        let mut at = 0;
+        while let Some(p) = find(t, FLOW, at) {
+            at = p + FLOW.len();
+            let Some(key) = t.get(at..at + 4).and_then(|k| std::str::from_utf8(k).ok()) else { continue };
+            if !mimes.contains_key(key) {
+                let end = t[p..].iter().position(|b| matches!(b, b'"' | b'\'' | b')')).map_or(t.len(), |e| p + e);
+                let uri = String::from_utf8_lossy(&t[p..end]);
+                mimes.insert(key.to_string(), uri.split("mime=").nth(1).map(str::to_string));
+            }
         }
     }
     let mut flow_names = HashMap::new();
     let mut files = HashMap::new();
     for (i, (s, e)) in fl.iter().enumerate().skip(1) {
         let data = text.get(*s..*e).unwrap_or(&[]);
-        let mime = mimes.get(to_base32(i, 4).as_str()).copied().flatten();
+        let mime = mimes.get(&to_base32(i, 4)).and_then(|m| m.as_deref());
         let name = format!("flows/flow{i:04}.{}", flow_extension(data, mime));
         flow_names.insert(i, name);
     }
@@ -410,7 +403,7 @@ pub fn convert(m: &Mobi, h: &MobiHeader, res: &Resources) -> Result<Converted> {
     let toc = nest(&entries, &targets);
     let mut chapters = Vec::with_capacity(parts.len());
     for (i, s) in pass1.into_iter().enumerate() {
-        let s = add_aid_ids(&s, &linked[i]);
+        let s = add_aid_ids(s, &linked[i]);
         let html = if xml::is_well_formed(&s) { s } else { xhtml::to_xhtml(&s, &mut NoRewrite) };
         chapters.push(HtmlChapter { path: part_name(i), html });
     }
@@ -494,7 +487,7 @@ mod tests {
         let out = rewrite_uris(s, &res, &flows, &mut |f, o| (f == 2 && o == 10).then(|| "part0001.xhtml#here".to_string()));
         assert_eq!(out, r#"<link href="flows/flow0001.css"/><img src="res/00033.png"/><a href="part0001.xhtml#here">x</a><a href="kindle:pos:fid:0009:off:0000000000">y</a>"#);
         let aids: HashSet<String> = ["7".to_string()].into();
-        assert_eq!(add_aid_ids("<p aid=\"7\">a</p><p id=\"k\" aid=\"7\">b</p>", &aids), "<p aid=\"7\" id=\"aid-7\">a</p><p id=\"k\" aid=\"7\">b</p>");
+        assert_eq!(add_aid_ids("<p aid=\"7\">a</p><p id=\"k\" aid=\"7\">b</p>".into(), &aids), "<p aid=\"7\" id=\"aid-7\">a</p><p id=\"k\" aid=\"7\">b</p>");
         assert_eq!(to_base32(33, 4), "0011");
         assert_eq!(tag_attr(b"<p class=\"x\" id='y'>", b"id"), Some("y".into()));
         assert_eq!(tag_attr(b"<p aid=\"y\">", b"id"), None);

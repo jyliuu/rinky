@@ -110,7 +110,36 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# Release (owner v3: perf): fat LTO and one codegen unit (whole-program
+# Hot dependencies optimised in debug builds: font parsing, rasterising and shaping,
+# PNG/JPEG decoding and inflate run on every rendered page and dominated the
+# debug-mode test time. Built once; our own crates stay at opt-level 0 for fast
+# rebuilds and full debugging.
+[profile.dev.package.ttf-parser]
+opt-level = 3
+[profile.dev.package.fontdue]
+opt-level = 3
+[profile.dev.package.rustybuzz]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.zlib-rs]
+opt-level = 3
+[profile.dev.package.adler2]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.tiny-skia]
+opt-level = 3
+
+# Release: fat LTO and one codegen unit (whole-program
 # inlining across crates); panic = "unwind" so the panic hook and backtraces work and a
 # panicking background thread (pagination) does not take the reader down with it.
 [profile.release]

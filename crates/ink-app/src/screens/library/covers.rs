@@ -5,6 +5,7 @@
 use ink_device::Canvas;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Thumbnail box in the cache (the image fits inside, aspect kept).
 pub const THUMB_W: u32 = 300;
@@ -17,7 +18,7 @@ pub fn from_bytes(bytes: &[u8]) -> Option<Canvas> {
     let (iw, ih) = ink_html::images::intrinsic_size(bytes)?;
     let s = (THUMB_W as f32 / iw as f32).min(THUMB_H as f32 / ih as f32);
     let (w, h) = (((iw as f32 * s).round() as u32).max(1), ((ih as f32 * s).round() as u32).max(1));
-    let img = ink_html::images::decode_scaled(bytes, w, h, None)?;
+    let img = ink_html::images::decode_thumbnail(bytes, w, h)?;
     let (w, h) = (img.width() as usize, img.height() as usize);
     let pixels = img.into_raw();
     (pixels.len() == w * h).then(|| Canvas::from_pixels(w, h, pixels))
@@ -29,7 +30,7 @@ pub fn save(img: &Canvas, path: &Path) -> Option<PathBuf> {
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    match img.save_png(path) {
+    match img.save_png_fast(path) {
         Ok(()) => Some(path.to_path_buf()),
         Err(e) => {
             log::warn!("library: cannot write cover {}: {e}", path.display());
@@ -39,10 +40,11 @@ pub fn save(img: &Canvas, path: &Path) -> Option<PathBuf> {
 }
 
 /// Scaled thumbnails for drawing, keyed by file and box size. Cleared when it grows
-/// past a few pages' worth.
+/// past a few pages' worth. Shared (`Arc`), so a [`ink_ui::Cover`] takes one without
+/// copying the pixels.
 #[derive(Default)]
 pub struct CoverCache {
-    scaled: HashMap<(PathBuf, u32, u32), Option<Canvas>>,
+    scaled: HashMap<(PathBuf, u32, u32), Option<Arc<Canvas>>>,
 }
 
 impl CoverCache {
@@ -50,22 +52,19 @@ impl CoverCache {
 
     /// The cover at `path` fitted into `w` x `h` (white margins), or `None` when it
     /// cannot be read.
-    pub fn get(&mut self, path: &Path, w: u32, h: u32) -> Option<&Canvas> {
+    pub fn get(&mut self, path: &Path, w: u32, h: u32) -> Option<&Arc<Canvas>> {
         let key = (path.to_path_buf(), w, h);
-        if !self.scaled.contains_key(&key) {
-            if self.scaled.len() >= Self::MAX {
-                self.scaled.clear();
-            }
-            let c = match Canvas::load_png(path) {
-                Ok(c) => Some(fit(&c, w, h)),
-                Err(e) => {
-                    log::info!("library: cover {}: {e}", path.display());
-                    None
-                }
-            };
-            self.scaled.insert(key.clone(), c);
+        if self.scaled.len() >= Self::MAX && !self.scaled.contains_key(&key) {
+            self.scaled.clear();
         }
-        self.scaled.get(&key).and_then(Option::as_ref)
+        let c = self.scaled.entry(key).or_insert_with(|| match Canvas::load_png(path) {
+            Ok(c) => Some(Arc::new(fit(&c, w, h))),
+            Err(e) => {
+                log::info!("library: cover {}: {e}", path.display());
+                None
+            }
+        });
+        c.as_ref()
     }
 
     /// Forgets everything (after covers were rewritten or deleted).

@@ -1,4 +1,4 @@
-//! Glue between the app and `ink-plugin` (owner: the `plugin` agent).
+//! Glue between the app and `ink-plugin`.
 //!
 //! [`PluginHost`] owns the [`PluginManager`] with the compiled-in Rust plugins and the
 //! Lua plugins found in `<RINKY_HOME>/plugins/<name>/` (`plugin.toml` + `main.lua`),
@@ -192,6 +192,7 @@ pub struct Notification {
 }
 
 /// What the stores need to open.
+#[derive(Default)]
 struct StoreCfg {
     paths: Option<Paths>,
     defaults: Map<String, Value>,
@@ -204,6 +205,7 @@ struct OpenBook {
 }
 
 /// The app's plugin host.
+#[derive(Default)]
 pub struct PluginHost {
     /// Loaded plugins and their registrations.
     pub manager: PluginManager,
@@ -248,6 +250,24 @@ fn library_dir_default(defaults: &mut Map<String, Value>, settings: &Settings) {
     if let Value::Object(m) = entry {
         m.entry("books_dir".to_string()).or_insert_with(|| Value::String(first.to_string_lossy().into_owned()));
     }
+}
+
+/// How many entries of each registry pass `of(plugin name)`, with the registry's plural
+/// name (as the start log says it) and its short name (as `rinky plugins list` has
+/// always printed it).
+fn registrations(r: &ink_plugin::registry::Registry, of: impl Fn(&str) -> bool) -> [(&'static str, &'static str, usize); 7] {
+    fn count<T>(entries: &[T], plugin: impl Fn(&T) -> &str, of: &impl Fn(&str) -> bool) -> usize {
+        entries.iter().filter(|e| of(plugin(e))).count()
+    }
+    [
+        ("menu items", "menu", count(&r.menu_items, |e| &e.plugin, &of)),
+        ("selection actions", "selection", count(&r.selection_actions, |e| &e.plugin, &of)),
+        ("gestures", "gesture", count(&r.gestures, |e| &e.plugin, &of)),
+        ("gesture-map actions", "action", count(&r.actions, |e| &e.plugin, &of)),
+        ("settings pages", "settings", count(&r.settings_pages, |e| &e.plugin, &of)),
+        ("library actions", "library", count(&r.library_actions, |e| &e.plugin, &of)),
+        ("status widgets", "status", count(&r.status_widgets, |e| &e.plugin, &of)),
+    ]
 }
 
 /// Runs `f` with the context of plugin `m`.
@@ -381,84 +401,37 @@ impl PluginHost {
             );
         }
         let r = &manager.registry;
+        let counts_text = |counts: [(&str, &str, usize); 7]| counts.map(|(k, _, c)| format!("{c} {k}")).join(", ");
         for info in manager.info().iter().filter(|i| i.enabled) {
             let n = &info.manifest.name;
-            log::info!(
-                "plugins: {n} registered {} menu items, {} selection actions, {} gestures, {} gesture-map actions, {} settings pages, {} library actions, {} status widgets",
-                r.menu_items.iter().filter(|e| &e.plugin == n).count(),
-                r.selection_actions.iter().filter(|e| &e.plugin == n).count(),
-                r.gestures.iter().filter(|e| &e.plugin == n).count(),
-                r.actions.iter().filter(|e| &e.plugin == n).count(),
-                r.settings_pages.iter().filter(|e| &e.plugin == n).count(),
-                r.library_actions.iter().filter(|e| &e.plugin == n).count(),
-                r.status_widgets.iter().filter(|e| &e.plugin == n).count(),
-            );
+            log::info!("plugins: {n} registered {}", counts_text(registrations(r, |p| p == n)));
         }
-        log::info!(
-            "plugins: registry: {} menu items, {} selection actions, {} gestures, {} gesture-map actions, {} settings pages, {} library actions, {} status widgets ({:?})",
-            r.menu_items.len(),
-            r.selection_actions.len(),
-            r.gestures.len(),
-            r.actions.len(),
-            r.settings_pages.len(),
-            r.library_actions.len(),
-            r.status_widgets.len(),
-            t.elapsed()
-        );
-        let mut host = PluginHost {
-            manager,
-            ui: PluginUi::default(),
-            cfg: StoreCfg { paths, defaults },
-            stores: HashMap::new(),
-            net: Net::default(),
-            book: None,
-            out: Vec::new(),
-            notifications: Vec::new(),
-            errors_seen: 0,
-            suspended: false,
-            exited: false,
-            last_defer: None,
-            pending_goto: None,
-            rescan_wanted: false,
-            last_tick: HashMap::new(),
-            claimed: None,
-            claimed_out: Vec::new(),
-            off,
-            overlay_painted: false,
-        };
+        log::info!("plugins: registry: {} ({:?})", counts_text(registrations(r, |_| true)), t.elapsed());
+        let mut host = PluginHost { manager, cfg: StoreCfg { paths, defaults }, off, ..PluginHost::default() };
         host.after_calls();
         host
-    }
-
-    /// Uses `client` for plugin network access instead of the default `ureq` client
-    /// (tests, mock servers).
-    pub fn set_http_client(&mut self, client: Arc<dyn HttpClient + Send + Sync>) {
-        self.net = Net { client: Some(client.clone()), worker: Some(NetWorker::new(client)) };
-    }
-
-    fn book_id(&self) -> Option<String> {
-        self.book.as_ref().and_then(|b| b.id.clone())
     }
 
     fn broadcast(&mut self, mut doc: Option<&mut dyn Document>, ev: Lifecycle) {
         // Network events that arrived meanwhile go first (screens that do not call
         // handle_event yet still deliver them on every page turn).
         self.poll(reborrow(&mut doc));
-        let book_id = self.book_id();
-        let book_path = self.book.as_ref().map(|b| b.path.clone());
-        let mut access = doc.map(|d| DocAccess { doc: d, book_id });
-        let PluginHost { manager, cfg, stores, net, out, .. } = self;
+        let PluginHost { manager, cfg, stores, net, out, book, .. } = self;
+        let mut access = doc.map(|d| DocAccess { doc: d, book_id: book.as_ref().and_then(|b| b.id.clone()) });
+        let book_path = book.as_ref().map(|b| b.path.as_path());
         let hook = ev.hook();
         let arg = match &ev {
             Lifecycle::PageChange(p) => format!("({})", p + 1),
             Lifecycle::Selection(s) => format!("({:?})", short(&s.text, 40)),
             _ => String::new(),
         };
+        let page_turn = matches!(ev, Lifecycle::PageChange(_));
         manager.broadcast(&ev, |m, f| {
             let t = Instant::now();
             let doc = access.as_mut().map(|a| a as &mut dyn DocumentAccess);
-            let r = with_cx(m, stores, cfg, book_path.as_deref(), net, doc, out, |cx| f(cx));
-            log::info!("plugins: {hook}{arg} -> {} ({:.1} ms)", m.name, t.elapsed().as_secs_f64() * 1000.0);
+            let r = with_cx(m, stores, cfg, book_path, net, doc, out, |cx| f(cx));
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            log::log!(hook_log_level(page_turn, ms), "plugins: {hook}{arg} -> {} ({ms:.1} ms)", m.name);
             r.ok();
         });
         self.after_calls();
@@ -470,15 +443,20 @@ impl PluginHost {
             log::warn!("plugins: {what}: no plugin {plugin}");
             return false;
         };
-        let book_id = self.book_id();
-        let book_path = book.map(Path::to_path_buf).or_else(|| self.book.as_ref().map(|b| b.path.clone()));
-        let mut access = doc.map(|d| DocAccess { doc: d, book_id });
-        let PluginHost { manager, cfg, stores, net, out, .. } = self;
         let t = Instant::now();
-        let r = with_cx(&m, stores, cfg, book_path.as_deref(), net, access.as_mut().map(|a| a as &mut dyn DocumentAccess), out, |cx| f(manager, cx));
+        let r = self.run_as(&m, doc, book, f);
         log::info!("plugins: {what} -> {plugin} ({:.1} ms){}", t.elapsed().as_secs_f64() * 1000.0, if r.is_ok() { "" } else { " failed" });
         self.after_calls();
         r.is_ok()
+    }
+
+    /// Runs `f` on the manager with the context of plugin `m`: `doc` as its document,
+    /// per-book storage for `book` (default: the open book).
+    fn run_as<R>(&mut self, m: &PluginManifest, doc: Option<&mut dyn Document>, book: Option<&Path>, f: impl FnOnce(&mut PluginManager, &mut HostCtx) -> R) -> R {
+        let PluginHost { manager, cfg, stores, net, out, book: open, .. } = self;
+        let mut access = doc.map(|d| DocAccess { doc: d, book_id: open.as_ref().and_then(|b| b.id.clone()) });
+        let book = book.or(open.as_ref().map(|b| b.path.as_path()));
+        with_cx(m, stores, cfg, book, net, access.as_mut().map(|a| a as &mut dyn DocumentAccess), out, |cx| f(manager, cx))
     }
 
     /// Sorts the requests of the last calls (status texts go to the registry,
@@ -486,45 +464,35 @@ impl PluginHost {
     /// errors into toasts and notifications.
     fn after_calls(&mut self) {
         for (plugin, req) in std::mem::take(&mut self.out) {
+            let what = describe_request(&req);
             match req {
-                UiRequest::Status { id, text } => {
-                    if self.manager.registry.set_status_text(&plugin, &id, &text) {
-                        log::info!("plugins: {plugin}: status {id} = {text:?}");
-                    } else {
-                        log::warn!("plugins: {plugin}: status widget {id:?} is not registered");
-                    }
+                UiRequest::Status { id, text } if !self.manager.registry.set_status_text(&plugin, &id, &text) => {
+                    log::warn!("plugins: {plugin}: status widget {id:?} is not registered");
+                    continue;
                 }
-                UiRequest::TileState { id, text } => {
-                    if self.manager.registry.set_tile_state(&plugin, &id, &text) {
-                        log::info!("plugins: {plugin}: tile {id} = {text:?}");
-                    } else {
-                        log::warn!("plugins: {plugin}: control tile {id:?} is not registered");
-                    }
+                UiRequest::TileState { id, text } if !self.manager.registry.set_tile_state(&plugin, &id, &text) => {
+                    log::warn!("plugins: {plugin}: control tile {id:?} is not registered");
+                    continue;
                 }
+                UiRequest::Status { .. } | UiRequest::TileState { .. } => {}
                 UiRequest::GoTo { position } => {
-                    log::info!("plugins: {plugin}: go to {position}");
                     if self.book.is_some() {
                         self.pending_goto = Some(position);
                     }
                 }
-                UiRequest::LibraryRescan => {
-                    log::info!("plugins: {plugin}: library rescan");
-                    self.rescan_wanted = true;
-                }
+                UiRequest::LibraryRescan => self.rescan_wanted = true,
                 UiRequest::Notification { text } => {
-                    log::info!("plugins: {plugin}: notification {text:?}");
                     self.notifications.push(Notification { plugin: plugin.clone(), text: text.clone(), read: false });
                     self.ui.push(&plugin, UiRequest::Notification { text });
                 }
                 req @ (UiRequest::Menu { .. } | UiRequest::MenuLabel { .. }) if self.claimed.as_deref() == Some(plugin.as_str()) => {
-                    log::info!("plugins: {plugin}: {} (shown by the screen)", describe_request(&req));
+                    log::info!("plugins: {plugin}: {what} (shown by the screen)");
                     self.claimed_out.push(req);
+                    continue;
                 }
-                other => {
-                    log::info!("plugins: {plugin}: {}", describe_request(&other));
-                    self.ui.push(&plugin, other);
-                }
+                other => self.ui.push(&plugin, other),
             }
+            log::info!("plugins: {plugin}: {what}");
         }
         let errors: Vec<(String, String)> = self.manager.errors[self.errors_seen..].to_vec();
         self.errors_seen = self.manager.errors.len();
@@ -534,9 +502,10 @@ impl PluginHost {
             self.notifications.push(Notification { plugin: plugin.clone(), text: text.clone(), read: false });
             self.ui.push(&plugin, UiRequest::Toast { text });
         }
-        // A disabled plugin's requests stop.
+        // A disabled plugin's requests stop. This runs after every call, page-turn
+        // broadcasts included, so the names are borrowed, not copied.
         if let Some(w) = self.net.worker.as_mut() {
-            for (name, _) in self.manager.list().iter().filter(|(_, e)| !*e) {
+            for name in self.manager.disabled() {
                 w.cancel_plugin(name);
             }
         }
@@ -818,16 +787,11 @@ impl PluginHost {
                 continue;
             }
             self.last_tick.insert(plugin.clone(), now);
-            let m = self.manager.manifest(&plugin).cloned();
-            let Some(m) = m else { continue };
+            let Some(m) = self.manager.manifest(&plugin).cloned() else { continue };
             // Not through `call`: a tick every 250 ms would flood the log.
-            let book_id = self.book_id();
-            let book_path = self.book.as_ref().map(|b| b.path.clone());
-            let mut access = reborrow(&mut doc).map(|d| DocAccess { doc: d, book_id });
-            let PluginHost { manager, cfg, stores, net, out, .. } = self;
-            let n = out.len();
-            let r = with_cx(&m, stores, cfg, book_path.as_deref(), net, access.as_mut().map(|a| a as &mut dyn DocumentAccess), out, |cx| manager.tick(&plugin, cx));
-            if r.is_err() || out.len() > n {
+            let n = self.out.len();
+            let r = self.run_as(&m, reborrow(&mut doc), None, |manager, cx| manager.tick(&plugin, cx));
+            if r.is_err() || self.out.len() > n {
                 log::info!("plugins: on_tick -> {plugin}{}", if r.is_ok() { "" } else { " failed" });
             }
             self.after_calls();
@@ -902,6 +866,20 @@ impl PluginHost {
 }
 
 // ---------------------------------------------------------------------------------------
+/// An `on_page_change` call slower than this (ms) is logged at info, a faster one at
+/// debug (each page turn calls every plugin).
+const PAGE_HOOK_INFO_MS: f64 = 5.0;
+
+/// Log level of a lifecycle call that took `ms`: every page turn calls every plugin, so
+/// only a slow `on_page_change` (`page_turn`) is worth an info line.
+fn hook_log_level(page_turn: bool, ms: f64) -> log::Level {
+    if page_turn && ms <= PAGE_HOOK_INFO_MS {
+        log::Level::Debug
+    } else {
+        log::Level::Info
+    }
+}
+
 // Turning plugins on and off, `rinky plugins`
 
 /// File under `paths.plugins()` with the names of the plugins the user turned off, one
@@ -951,16 +929,7 @@ pub fn plugin_list(host: &PluginHost) -> Vec<String> {
             } else {
                 "failed"
             };
-            let regs = [
-                ("menu", r.menu_items.iter().filter(|e| &e.plugin == n).count()),
-                ("selection", r.selection_actions.iter().filter(|e| &e.plugin == n).count()),
-                ("gesture", r.gestures.iter().filter(|e| &e.plugin == n).count()),
-                ("action", r.actions.iter().filter(|e| &e.plugin == n).count()),
-                ("settings", r.settings_pages.iter().filter(|e| &e.plugin == n).count()),
-                ("library", r.library_actions.iter().filter(|e| &e.plugin == n).count()),
-                ("status", r.status_widgets.iter().filter(|e| &e.plugin == n).count()),
-            ];
-            let regs: Vec<String> = regs.iter().filter(|(_, c)| *c > 0).map(|(k, c)| format!("{k} {c}")).collect();
+            let regs: Vec<String> = registrations(r, |p| p == n).iter().filter(|(_, _, c)| *c > 0).map(|(_, k, c)| format!("{k} {c}")).collect();
             let perms: Vec<&str> = i.manifest.permissions.iter().map(|p| p.name()).collect();
             format!(
                 "{n}\t{}\t{}\t{state}\terrors {}\t[{}]\t{}\t{}",
@@ -1012,11 +981,11 @@ pub fn cli(args: &[String], compiled: Vec<Box<dyn Plugin>>, settings: &Settings,
 /// Which registry a [`PluginEntry`] comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
-    /// A reader menu item ([`hooks::reader_menu`]).
+    /// A reader menu item ([`PluginHost::menu_items`]).
     ReaderMenu,
-    /// A selection popup action ([`hooks::selection_actions`]).
+    /// A selection popup action ([`PluginHost::selection_actions`]).
     Selection,
-    /// A library long-press action on a book ([`hooks::library_actions`]).
+    /// A library long-press action on a book ([`PluginHost::library_actions`]).
     Library,
     /// A plugin settings page ([`hooks::settings_pages`]).
     Settings,
@@ -1040,7 +1009,8 @@ pub struct PluginEntry {
 /// `screens/settings`) and for the app loop. Every function takes the screen's
 /// [`AppCtx`]; documents are passed as `&mut dyn Document`.
 ///
-/// Screens call the lifecycle and registry functions. Events, overlay painting, timers,
+/// Screens call the lifecycle methods on `cx.plugins` ([`PluginHost::book_open`],
+/// [`PluginHost::page_change`], ...) and these registry functions. Events, overlay painting, timers,
 /// network delivery and the power key are done by the app loop ([`hooks::app_handle`],
 /// [`hooks::app_paint`], [`hooks::app_timeout`]); a screen only implements
 /// `AppScreen::document` so plugins see its open book. Screens must not call
@@ -1048,65 +1018,14 @@ pub struct PluginEntry {
 pub mod hooks {
     use super::{EntryKind, PluginEntry, PluginHost};
     use crate::router::{AppCtx, AppScreen};
-    use ink_doc::{Document, Selection};
+    use ink_doc::Document;
     use ink_plugin::registry::StatusSlot;
-    use ink_device::{Canvas, Rect, RefreshClass, Rotation, Screen, Size};
+    use ink_device::{Canvas, Rect, RefreshClass};
     use ink_ui::{Damage, Gesture, PaintCx, UiEvent};
     use std::path::Path;
     use std::time::Duration;
 
-    // -- Lifecycle (reader) ---------------------------------------------------------------
-
-    /// The reader opened `path` and laid it out (in `on_enter`).
-    pub fn on_book_open(cx: &mut AppCtx, doc: &mut dyn Document, path: &Path) {
-        cx.plugins.book_open(doc, path);
-    }
-
-    /// The reader shows `page` (0-based), after `doc.set_current_page(page)`.
-    pub fn on_page_change(cx: &mut AppCtx, doc: &mut dyn Document, page: usize) {
-        cx.plugins.page_change(doc, page);
-    }
-
-    /// The user made a selection (before the popup opens; the popup lists
-    /// [`selection_actions`]).
-    pub fn on_selection(cx: &mut AppCtx, doc: &mut dyn Document, sel: &Selection) {
-        cx.plugins.selection(doc, sel);
-    }
-
-    /// The device goes to sleep. The app loop already calls this on
-    /// `PowerEvent::GoingToScreenSaver` (with `AppScreen::document`); a second call
-    /// before [`on_resume`] does nothing.
-    pub fn on_suspend(cx: &mut AppCtx, doc: Option<&mut dyn Document>) {
-        cx.plugins.suspend(doc);
-    }
-
-    /// The device woke up. The app loop already calls this on
-    /// `PowerEvent::OutOfScreenSaver`; a call without a preceding suspend does nothing.
-    pub fn on_resume(cx: &mut AppCtx, doc: Option<&mut dyn Document>) {
-        cx.plugins.resume(doc);
-    }
-
-    /// The reader closes the book (in `on_exit`).
-    pub fn on_close(cx: &mut AppCtx, doc: &mut dyn Document) {
-        cx.plugins.book_close(doc);
-    }
-
     // -- Registries -----------------------------------------------------------------------
-
-    /// Reader menu entries, in the plugins' order.
-    pub fn reader_menu(cx: &AppCtx) -> Vec<PluginEntry> {
-        entries(cx.plugins, EntryKind::ReaderMenu)
-    }
-
-    /// Selection popup entries.
-    pub fn selection_actions(cx: &AppCtx) -> Vec<PluginEntry> {
-        entries(cx.plugins, EntryKind::Selection)
-    }
-
-    /// Entries for a book's long-press menu in the library.
-    pub fn library_actions(cx: &AppCtx) -> Vec<PluginEntry> {
-        entries(cx.plugins, EntryKind::Library)
-    }
 
     /// Plugin settings pages (list them under "Plugins").
     pub fn settings_pages(cx: &AppCtx) -> Vec<PluginEntry> {
@@ -1161,11 +1080,6 @@ pub mod hooks {
         cx.plugins.status_line(slot)
     }
 
-    /// Unread plugin notifications (for a badge).
-    pub fn unread_notifications(cx: &AppCtx) -> usize {
-        cx.plugins.unread_notifications()
-    }
-
     // -- App loop -------------------------------------------------------------------------
 
     /// App loop, before `top.handle(ev)`: delivers network results, gives the event to an
@@ -1188,49 +1102,17 @@ pub mod hooks {
         }
     }
 
-    /// A [`Screen`] that records the rectangles shown through it.
-    struct Recorder<'a> {
-        inner: &'a mut dyn Screen,
+    /// Records the rectangles a screen shows through `cx.screen` while it paints.
+    #[derive(Default)]
+    struct Recorder {
         shown: Vec<Damage>,
         wave: Option<ink_device::Wave>,
     }
 
-    impl Screen for Recorder<'_> {
-        fn panel_size(&self) -> Size {
-            self.inner.panel_size()
-        }
-        fn rotation(&self) -> Rotation {
-            self.inner.rotation()
-        }
-        fn set_rotation(&mut self, rotation: Rotation) -> ink_device::Result<()> {
-            self.inner.set_rotation(rotation)
-        }
-        fn size(&self) -> Size {
-            self.inner.size()
-        }
-        fn night_mode(&self) -> bool {
-            self.inner.night_mode()
-        }
-        fn set_night_mode(&mut self, on: bool) -> ink_device::Result<()> {
-            self.inner.set_night_mode(on)
-        }
-        fn update(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass) -> ink_device::Result<()> {
+    impl crate::shown::Watch for Recorder {
+        fn sent(&mut self, _canvas: &Canvas, rect: Rect, class: RefreshClass, wave: Option<ink_device::Wave>) {
             self.shown.push(Damage { rect, class });
-            self.inner.update(canvas, rect, class)
-        }
-        fn update_wave(&mut self, canvas: &Canvas, rect: Rect, class: RefreshClass, wave: ink_device::Wave) -> ink_device::Result<()> {
-            self.shown.push(Damage { rect, class });
-            self.wave = Some(wave);
-            self.inner.update_wave(canvas, rect, class, wave)
-        }
-        fn frame_done(&mut self, canvas: &Canvas) {
-            self.inner.frame_done(canvas)
-        }
-        fn refresh_all(&mut self) -> ink_device::Result<()> {
-            self.inner.refresh_all()
-        }
-        fn screenshot(&self) -> ink_device::Result<Canvas> {
-            self.inner.screenshot()
+            self.wave = wave.or(self.wave);
         }
     }
 
@@ -1259,7 +1141,7 @@ pub mod hooks {
         cx.plugins.poll(top.document());
         apply_goto(top, cx);
         cx.plugins.overlay_painted = false;
-        let mut rec = Recorder { inner: &mut *cx.screen, shown: Vec::new(), wave: None };
+        let mut rec = crate::shown::Tap::new(&mut *cx.screen, Recorder::default());
         let mut damage = {
             let mut sub = AppCtx {
                 canvas: &mut *cx.canvas,
@@ -1278,17 +1160,16 @@ pub mod hooks {
         };
         // A screen that still paints the overlay itself (older docs) did it already;
         // composing again would save the overlay's own pixels as its background.
-        let (shown, wave) = (rec.shown, rec.wave);
-        if cx.plugins.overlay_painted {
-            return Ok(Frame { shown, damage, wave });
+        let Recorder { shown, wave } = rec.watch;
+        if !cx.plugins.overlay_painted {
+            let changed: Vec<Rect> = shown.iter().chain(damage.iter()).map(|d| d.rect).collect();
+            let over = cx.plugins.ui.compose(&mut PaintCx { canvas: &mut *cx.canvas, fonts: &mut *cx.fonts, theme: cx.theme }, &changed);
+            if !over.is_empty() {
+                damage.extend(over);
+                damage = ink_ui::refresh::merge(damage);
+            }
         }
-        let changed: Vec<Rect> = shown.iter().chain(damage.iter()).map(|d| d.rect).collect();
-        let over = cx.plugins.ui.compose(&mut PaintCx { canvas: &mut *cx.canvas, fonts: &mut *cx.fonts, theme: cx.theme }, &changed);
-        if over.is_empty() {
-            return Ok(Frame { shown, damage, wave });
-        }
-        damage.extend(over);
-        Ok(Frame { shown, damage: ink_ui::refresh::merge(damage), wave })
+        Ok(Frame { shown, damage, wave })
     }
 
     /// App loop, once per turn: while plugin network requests run, asks `power` to
@@ -1315,10 +1196,7 @@ pub mod hooks {
     /// App loop: how long to wait for input, the smaller of the screen's timeout and the
     /// plugins' (toasts expiring, network requests running).
     pub fn app_timeout(screen: Option<Duration>, host: &PluginHost) -> Option<Duration> {
-        match (screen, host.timeout()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        screen.into_iter().chain(host.timeout()).min()
     }
 }
 
@@ -1348,16 +1226,42 @@ fn describe_request(r: &UiRequest) -> String {
 mod card;
 pub use card::CardDialog;
 
+/// The largest `k` in `0..=n` for which `fits(k)` holds, for a `fits` that holds up to
+/// some `k` and fails above it (`0` when it fails everywhere). A bisection: about
+/// log2(n) calls, where trimming one character at a time made `n` calls.
+fn last_fitting(n: usize, mut fits: impl FnMut(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (0, n);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// Truncates `text` with `...` to fit `max` pixels.
 fn fit(cx: &mut PaintCx, text: &str, px: f32, style: Style, max: f32) -> String {
     if cx.fonts.text_width(style, text, px) <= max {
         return text.to_string();
     }
-    let mut s: String = text.to_string();
-    while !s.is_empty() && cx.fonts.text_width(style, &format!("{s}..."), px) > max {
-        s.pop();
-    }
-    format!("{}...", s.trim_end())
+    // Byte ends of the proper prefixes, by character count. None for empty text (it
+    // misses only a negative `max`): just the dots, as trimming gave.
+    let ends: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    let Some(n) = ends.len().checked_sub(1) else { return "...".to_string() };
+    let k = last_fitting(n, |k| cx.fonts.text_width(style, &format!("{}...", &text[..ends[k]]), px) <= max);
+    format!("{}...", text[..ends[k]].trim_end())
+}
+
+/// The longest end of `text` that fits `max` pixels (the end of typed text, before the
+/// cursor).
+fn fit_end<'a>(cx: &mut PaintCx, text: &'a str, px: f32, max: f32) -> &'a str {
+    let starts: Vec<usize> = text.char_indices().map(|(i, _)| i).chain([text.len()]).collect();
+    let n = starts.len() - 1;
+    let kept = last_fitting(n, |m| cx.fonts.text_width(Style::Regular, &text[starts[n - m]..], px) <= max);
+    &text[starts[n - kept]..]
 }
 
 /// A plugin menu: the settings popup ([`SettingsPopup`]) with the menu's items as
@@ -1487,6 +1391,19 @@ enum BoxKind {
     Row,
 }
 
+impl BoxKind {
+    /// The word after `:::` that starts each kind of block.
+    const WORDS: [(&str, BoxKind); 7] = [
+        ("", Self::Plain),
+        ("you", Self::You),
+        ("answer", Self::Answer),
+        ("action", Self::Action),
+        ("chips", Self::Chip),
+        ("card", Self::Card),
+        ("row", Self::Row),
+    ];
+}
+
 /// A `:::` block: kind, its two `|`-separated arguments, its Markdown.
 #[derive(Clone, Debug)]
 struct Seg {
@@ -1530,34 +1447,21 @@ fn split_directives(md: &str) -> Directives {
                 Some((a, b)) => (a.trim().to_string(), b.trim().to_string()),
                 None => (args.trim().to_string(), String::new()),
             };
-            let kind = match word {
-                "" => Some(BoxKind::Plain),
-                "you" => Some(BoxKind::You),
-                "answer" => Some(BoxKind::Answer),
-                "action" => Some(BoxKind::Action),
-                "chips" => Some(BoxKind::Chip),
-                "card" => Some(BoxKind::Card),
-                "row" => Some(BoxKind::Row),
-                "input" => {
-                    input = Some((a, b));
-                    continue;
-                }
-                "sheet" => {
-                    sheet = true;
-                    continue;
-                }
-                "back" => {
-                    back = Some(a);
-                    continue;
-                }
+            match word {
+                "input" => input = Some((a, b)),
+                "sheet" => sheet = true,
+                "back" => back = Some(a),
                 // Read by `PluginUi::push` and `MarkdownView::set_text`.
-                "top" | "emphasis" => continue,
-                _ => None,
-            };
-            if let Some(kind) = kind {
-                flush(std::mem::replace(&mut cur, (kind, a, b, String::new())), &mut segs);
-                continue;
+                "top" | "emphasis" => {}
+                _ => match BoxKind::WORDS.iter().find(|(w, _)| *w == word) {
+                    Some(&(_, kind)) => flush(std::mem::replace(&mut cur, (kind, a, b, String::new())), &mut segs),
+                    None => {
+                        cur.3.push_str(line);
+                        cur.3.push('\n');
+                    }
+                },
             }
+            continue;
         }
         cur.3.push_str(line);
         cur.3.push('\n');
@@ -1612,6 +1516,7 @@ pub(crate) fn icon_named(name: &str) -> Option<Icon> {
 /// a replacing request opens the new text at its first page (tabs; otherwise a view
 /// that was on its last page follows the end of the new text). `:::back LINK` adds a Back
 /// button to the app bar (left of the title) that reports LINK.
+#[derive(Default)]
 pub struct MarkdownView {
     /// Title (a second line is the app bar's subtitle).
     pub title: String,
@@ -1649,6 +1554,8 @@ pub struct MarkdownView {
     /// A chat view puts its `n`th `:::you` message at the top of the window at the next
     /// layout (a question was just sent: its answer streams in below it).
     anchor: Option<usize>,
+    /// Widths of the words laid out so far.
+    widths: WordWidths,
 }
 
 const FOOT_H: i32 = 80;
@@ -1685,12 +1592,69 @@ fn shift(lines: &mut [Line], dx: f32) {
     }
 }
 
+/// Shaped widths of the words a viewer laid out, kept across its layouts: streamed text
+/// lays the whole text out again on every update, mostly with the same words. Valid for
+/// one set of fonts ([`WordWidths::for_fonts`]).
+#[derive(Default)]
+struct WordWidths {
+    /// The UI family and emphasis the widths were measured with.
+    fonts: (String, bool),
+    /// (style, px bits) -> text -> width.
+    map: HashMap<(Style, u32), HashMap<String, f32>>,
+    entries: usize,
+}
+
+impl WordWidths {
+    /// Most widths kept; more start the cache again.
+    const MAX: usize = 20_000;
+
+    /// Forgets the widths when the fonts are not the ones they were measured with.
+    fn for_fonts(&mut self, family: String, emphasis: bool) {
+        if self.fonts != (family.clone(), emphasis) || self.entries > Self::MAX {
+            *self = WordWidths { fonts: (family, emphasis), ..WordWidths::default() };
+        }
+    }
+}
+
+/// A viewer layout in progress: the paint context and the word widths of the view.
+struct Lay<'a, 'c> {
+    cx: &'a mut PaintCx<'c>,
+    widths: &'a mut WordWidths,
+}
+
+impl<'c> std::ops::Deref for Lay<'_, 'c> {
+    type Target = PaintCx<'c>;
+    fn deref(&self) -> &PaintCx<'c> {
+        self.cx
+    }
+}
+
+impl std::ops::DerefMut for Lay<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.cx
+    }
+}
+
+impl Lay<'_, '_> {
+    /// The shaped width of `text` (a word, a run), measured once per view.
+    fn width(&mut self, style: Style, px: f32, text: &str) -> f32 {
+        let words = self.widths.map.entry((style, px.to_bits())).or_default();
+        if let Some(w) = words.get(text) {
+            return *w;
+        }
+        let w = self.cx.fonts.shaped_width(style, px, text);
+        words.insert(text.to_string(), w);
+        self.widths.entries += 1;
+        w
+    }
+}
+
 /// Right end of the widest line.
-fn extent(cx: &mut PaintCx, lines: &[Line]) -> f32 {
+fn extent(cx: &mut Lay, lines: &[Line]) -> f32 {
     let mut w: f32 = 0.0;
     for l in lines {
         for r in &l.runs {
-            w = w.max(r.x + cx.fonts.shaped_width(r.style, r.px, &r.text));
+            w = w.max(r.x + cx.width(r.style, r.px, &r.text));
         }
     }
     w
@@ -1730,7 +1694,7 @@ fn push_box(lines: &mut Vec<Line>, groups: &mut Vec<Group>, group: Group, body: 
 }
 
 /// Plain Markdown blocks laid out over `width`.
-fn layout_blocks(cx: &mut PaintCx, blocks: &[Block], base: f32, width: f32) -> Vec<Line> {
+fn layout_blocks(cx: &mut Lay, blocks: &[Block], base: f32, width: f32) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
     let gap = |lines: &mut Vec<Line>, h: f32| lines.push(gap_line(h));
     for block in blocks {
@@ -1781,11 +1745,11 @@ fn layout_blocks(cx: &mut PaintCx, blocks: &[Block], base: f32, width: f32) -> V
                 let mut longest = vec![0f32; ncol];
                 for (i, row) in rows.iter().enumerate() {
                     for (j, cell) in row.iter().enumerate() {
-                        let w: f32 = cell.iter().map(|sp| cx.fonts.shaped_width(span_style(sp, force(i)), base, &sp.text)).sum();
+                        let w: f32 = cell.iter().map(|sp| cx.width(span_style(sp, force(i)), base, &sp.text)).sum();
                         natural[j] = natural[j].max(w);
                         for sp in cell {
                             for word in sp.text.split(' ') {
-                                longest[j] = longest[j].max(cx.fonts.shaped_width(span_style(sp, force(i)), base, word));
+                                longest[j] = longest[j].max(cx.width(span_style(sp, force(i)), base, word));
                             }
                         }
                     }
@@ -1846,27 +1810,7 @@ fn layout_blocks(cx: &mut PaintCx, blocks: &[Block], base: f32, width: f32) -> V
 impl MarkdownView {
     /// A viewer for `markdown`.
     pub fn new(title: &str, markdown: &str) -> Self {
-        let mut v = MarkdownView {
-            title: title.into(),
-            blocks: Vec::new(),
-            segs: Vec::new(),
-            input: None,
-            sheet: false,
-            back: None,
-            emphasis: false,
-            page: 0,
-            pages: Vec::new(),
-            groups: Vec::new(),
-            laid_for: None,
-            links: Vec::new(),
-            follow_end: false,
-            dock: 0,
-            draft: None,
-            scroll: 0.0,
-            content_h: 0.0,
-            window_h: 0.0,
-            anchor: None,
-        };
+        let mut v = MarkdownView { title: title.into(), ..MarkdownView::default() };
         v.set_text(markdown);
         // A chat view opens at its newest message (`:::top`: at its start).
         v.follow_end = v.scrolls() && !markdown.lines().any(|l| l.trim() == ":::top");
@@ -1950,9 +1894,7 @@ impl MarkdownView {
 
     /// Where a tap closes the view: the Close button with `space(2)` of slack.
     fn close_rect(&self, b: Rect) -> Rect {
-        let r = self.bar().action_rects(Rect::new(b.x, b.y, b.w, APP_BAR_H)).first().copied().unwrap_or_default();
-        let s = ink_ui::theme::space(2);
-        Rect::new(r.x - s, r.y - s, r.w + 2 * s as u32, r.h + 2 * s as u32)
+        with_slack(self.bar().action_rects(Rect::new(b.x, b.y, b.w, APP_BAR_H)).first().copied().unwrap_or_default())
     }
 
     fn input_rect(b: Rect) -> Rect {
@@ -2059,6 +2001,12 @@ impl MarkdownView {
         }
     }
 
+    /// [`Self::turn`] for an event that is used up by it.
+    fn turn_handled(&mut self, step: i32) -> EventResult {
+        self.turn(step);
+        EventResult::Handled
+    }
+
     /// A thin scroll bar at the right edge of `win` (in the margin) when the content
     /// does not fit.
     fn paint_scroll_bar(&self, cx: &mut PaintCx, win: Rect) {
@@ -2085,10 +2033,13 @@ impl MarkdownView {
 
     fn layout(&mut self, cx: &mut PaintCx, b: Rect) {
         let emphasis = self.emphasis;
-        body_fonts(emphasis, cx, |cx| self.layout_text(cx, b));
+        let mut widths = std::mem::take(&mut self.widths);
+        widths.for_fonts(crate::fonts::ui_family(), emphasis);
+        body_fonts(emphasis, cx, |cx| self.layout_text(&mut Lay { cx, widths: &mut widths }, b));
+        self.widths = widths;
     }
 
-    fn layout_text(&mut self, cx: &mut PaintCx, b: Rect) {
+    fn layout_text(&mut self, cx: &mut Lay, b: Rect) {
         let t = cx.theme.clone();
         let base = t.font_px * 0.9;
         let cap = t.caption.px;
@@ -2101,17 +2052,7 @@ impl MarkdownView {
                 BoxKind::Plain => lines.extend(layout_blocks(cx, &seg.blocks, base, width)),
                 BoxKind::You => {
                     let inner = (width * 0.85 - 2.0 * PAD).max(100.0);
-                    let mut body = layout_blocks(cx, &seg.blocks, base, inner);
-                    trim_gaps(&mut body);
-                    if !seg.b.is_empty() {
-                        body.push(gap_line(base * 0.3));
-                        let mut foot = Vec::new();
-                        wrap_spans(cx, &[Span::plain(&seg.b)], cap, Some(Style::Regular), 0.0, inner, None, &mut foot);
-                        for l in &mut foot {
-                            l.runs.iter_mut().for_each(|r| r.muted = true);
-                        }
-                        body.extend(foot);
-                    }
+                    let mut body = text_and_caption(cx, seg, base, cap, inner);
                     let w = extent(cx, &body).min(inner) + 2.0 * PAD;
                     let x = width - w;
                     shift(&mut body, x + PAD);
@@ -2129,20 +2070,9 @@ impl MarkdownView {
                         body.push(Line { height: h, runs: vec![Run { x: ix, text: label, style: Style::Bold, px: cap, link: None, muted: false }], icon: Some((PAD, Icon::Chat)), ..Line::default() });
                         body.push(gap_line(base * 0.3));
                     }
-                    let mut text = layout_blocks(cx, &seg.blocks, base, inner);
-                    trim_gaps(&mut text);
+                    let mut text = text_and_caption(cx, seg, base, cap, inner);
                     shift(&mut text, PAD);
                     body.extend(text);
-                    if !seg.b.is_empty() {
-                        body.push(gap_line(base * 0.3));
-                        let mut foot = Vec::new();
-                        wrap_spans(cx, &[Span::plain(&seg.b)], cap, Some(Style::Regular), 0.0, inner, None, &mut foot);
-                        for l in &mut foot {
-                            l.runs.iter_mut().for_each(|r| r.muted = true);
-                        }
-                        shift(&mut foot, PAD);
-                        body.extend(foot);
-                    }
                     push_box(&mut lines, &mut groups, Group { kind: seg.kind, x: 0.0, w: width, link: None }, body, PAD * 0.6, PAD);
                     lines.push(gap_line(base * 0.6));
                 }
@@ -2185,13 +2115,7 @@ impl MarkdownView {
                 }
                 BoxKind::Card => {
                     let inner = width - 2.0 * PAD;
-                    let mut body = Vec::new();
-                    if !seg.b.is_empty() {
-                        wrap_spans(cx, &[Span::plain(&seg.b)], cap, Some(Style::Regular), 0.0, inner, None, &mut body);
-                        for l in &mut body {
-                            l.runs.iter_mut().for_each(|r| r.muted = true);
-                        }
-                    }
+                    let mut body = if seg.b.is_empty() { Vec::new() } else { caption_lines(cx, &seg.b, cap, inner) };
                     body.extend(layout_blocks(cx, &seg.blocks, base, inner));
                     trim_gaps(&mut body);
                     shift(&mut body, PAD);
@@ -2291,6 +2215,34 @@ impl MarkdownView {
     }
 }
 
+/// `seg`'s Markdown laid out `width` wide without the gaps at its end, then its second
+/// argument as a caption below it (`:::you` and `:::answer`).
+fn text_and_caption(cx: &mut Lay, seg: &Seg, base: f32, cap: f32, width: f32) -> Vec<Line> {
+    let mut body = layout_blocks(cx, &seg.blocks, base, width);
+    trim_gaps(&mut body);
+    if !seg.b.is_empty() {
+        body.push(gap_line(base * 0.3));
+        body.extend(caption_lines(cx, &seg.b, cap, width));
+    }
+    body
+}
+
+/// `text` as muted caption lines (`px`) wrapped to `width`.
+fn caption_lines(cx: &mut Lay, text: &str, px: f32, width: f32) -> Vec<Line> {
+    let mut lines = Vec::new();
+    wrap_spans(cx, &[Span::plain(text)], px, Some(Style::Regular), 0.0, width, None, &mut lines);
+    for r in lines.iter_mut().flat_map(|l| &mut l.runs) {
+        r.muted = true;
+    }
+    lines
+}
+
+/// `r` grown by `space(2)` on every side: where a tap still hits an app bar button.
+fn with_slack(r: Rect) -> Rect {
+    let s = ink_ui::theme::space(2);
+    Rect::new(r.x - s, r.y - s, r.w + 2 * s as u32, r.h + 2 * s as u32)
+}
+
 /// The face for a span (`force` overrides it: headings, table headers, quotes).
 fn span_style(s: &Span, force: Option<Style>) -> Style {
     match force {
@@ -2303,7 +2255,7 @@ fn span_style(s: &Span, force: Option<Style>) -> Style {
 
 /// Greedy line breaking of styled spans into `lines`.
 #[allow(clippy::too_many_arguments)]
-fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, indent: f32, width: f32, marker: Option<String>, lines: &mut Vec<Line>) {
+fn wrap_spans(cx: &mut Lay, spans: &[Span], px: f32, force: Option<Style>, indent: f32, width: f32, marker: Option<String>, lines: &mut Vec<Line>) {
     let style_of = |s: &Span| span_style(s, force);
     // Words with their style; a word may span several spans (no space between).
     let mut words: Vec<Vec<(String, Style, Option<String>)>> = vec![Vec::new()];
@@ -2322,16 +2274,18 @@ fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, i
     }
     words.retain(|w| !w.is_empty());
     let height = px * 1.4;
-    let space = cx.fonts.shaped_width(Style::Regular, px, " ");
+    let space = cx.width(Style::Regular, px, " ");
     let mut line = Line { height, ..Line::default() };
     if let Some(m) = marker {
-        let mw = cx.fonts.shaped_width(Style::Regular, px, &m);
+        let mw = cx.width(Style::Regular, px, &m);
         line.runs.push(Run { x: (indent - mw - 14.0).max(0.0), text: m, style: Style::Regular, px, link: None, muted: false });
     }
     let mut x = indent;
     let mut first = true;
     for word in words {
-        let ww: f32 = word.iter().map(|(t, st, _)| cx.fonts.shaped_width(*st, px, t)).sum();
+        // Each part is shaped once here; its width is reused below.
+        let widths: Vec<f32> = word.iter().map(|(t, st, _)| cx.width(*st, px, t)).collect();
+        let ww: f32 = widths.iter().sum();
         if !first && x + space + ww > width {
             lines.push(std::mem::replace(&mut line, Line { height, ..Line::default() }));
             x = indent;
@@ -2340,27 +2294,19 @@ fn wrap_spans(cx: &mut PaintCx, spans: &[Span], px: f32, force: Option<Style>, i
         if !first {
             x += space;
         }
-        for (t, st, link) in word {
-            // Hard-break words wider than the line.
-            let mut t = t;
-            while cx.fonts.shaped_width(st, px, &t) > width - indent && t.chars().count() > 1 {
-                let mut head = String::new();
-                for c in t.chars() {
-                    if cx.fonts.shaped_width(st, px, &format!("{head}{c}")) > width - x {
-                        break;
-                    }
-                    head.push(c);
-                }
-                if head.is_empty() {
-                    head = t.chars().next().map(String::from).unwrap_or_default();
-                }
-                let rest: String = t.chars().skip(head.chars().count()).collect();
-                line.runs.push(Run { x, text: head, style: st, px, link: link.clone(), muted: false });
+        for ((mut t, st, link), mut w) in word.into_iter().zip(widths) {
+            // Hard-break words wider than the line: the longest head that fits the rest
+            // of the line (at least one character) goes on it.
+            while w > width - indent && t.chars().count() > 1 {
+                let ends: Vec<usize> = t.char_indices().map(|(i, _)| i).chain([t.len()]).collect();
+                let k = last_fitting(ends.len() - 1, |k| cx.fonts.shaped_width(st, px, &t[..ends[k]]) <= width - x).max(1);
+                let rest = t.split_off(ends[k]);
+                line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false });
                 lines.push(std::mem::replace(&mut line, Line { height, ..Line::default() }));
                 x = indent;
                 t = rest;
+                w = cx.fonts.shaped_width(st, px, &t);
             }
-            let w = cx.fonts.shaped_width(st, px, &t);
             line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false });
             x += w;
         }
@@ -2377,10 +2323,10 @@ impl MarkdownView {
     fn paint_content(&mut self, cx: &mut PaintCx, x0: f32, top: f32, cw: f32) {
         let t = cx.theme.clone();
         let (fg, muted) = (t.fg, t.muted);
-        let page = self.pages.get(self.page).cloned().unwrap_or_default();
+        let page: &[Line] = self.pages.get(self.page).map_or(&[], |p| p);
         let mut boxes: Vec<(usize, f32, f32)> = Vec::new();
         let mut y = top;
-        for l in &page {
+        for l in page {
             if let Some(g) = l.group {
                 match boxes.last_mut() {
                     Some(bx) if bx.0 == g => bx.2 = y + l.height,
@@ -2420,7 +2366,8 @@ impl MarkdownView {
         }
         let mut y = top;
         let canvas_h = cx.canvas.height as f32;
-        for line in &page {
+        let mut links = Vec::new();
+        for line in page {
             // Lines outside the canvas (a scrolled chat view) are not drawn.
             if y + line.height < 0.0 || y > canvas_h {
                 y += line.height;
@@ -2454,12 +2401,13 @@ impl MarkdownView {
                 if let Some(url) = &r.link {
                     let w = cx.fonts.shaped_width(r.style, r.px, &r.text);
                     cx.canvas.fill_rect((x0 + r.x) as i32, (base + 6.0) as i32, w.ceil() as i32, 2, fg);
-                    self.links.push((Rect::new((x0 + r.x) as i32, y as i32, w.ceil() as u32, line.height.ceil() as u32), url.clone()));
+                    links.push((Rect::new((x0 + r.x) as i32, y as i32, w.ceil() as u32, line.height.ceil() as u32), url.clone()));
                 }
             }
             y += line.height;
         }
         // Inline links win over the box around them.
+        self.links.extend(links);
         self.links.extend(box_links);
     }
 }
@@ -2508,27 +2456,24 @@ impl Widget for MarkdownView {
             let emphasis = self.emphasis;
             body_fonts(emphasis, cx, |cx| self.paint_content(cx, x0, top, cw));
         }
-        // Footer: the input bar, or the page counter.
+        // Footer: the input bar (drawn by the docked keyboard panel while docked) with the
+        // page counter above it, or the page counter.
         let label = format!("{} / {}", self.page + 1, self.page_count());
         if self.sheet {
-        } else if self.dock > 0 {
-            // The docked panel draws the input bar; the page counter sits above it.
+        } else if self.dock > 0 || self.input.is_some() {
+            let bar_top = b.bottom() - if self.dock > 0 { self.dock as i32 } else { INPUT_H };
             if self.page_count() > 1 {
-                let band = Rect::new(b.x, b.bottom() - self.dock as i32 - COUNTER_H, b.w, COUNTER_H as u32);
+                let band = Rect::new(b.x, bar_top - COUNTER_H, b.w, COUNTER_H as u32);
                 cx.text_centered(band, &label, t.caption.px, Style::Regular, fg);
             }
-        } else if let Some((_, placeholder)) = &self.input {
-            let ib = Self::input_rect(b);
-            if self.page_count() > 1 {
-                let band = Rect::new(b.x, ib.y - COUNTER_H, b.w, COUNTER_H as u32);
-                cx.text_centered(band, &label, t.caption.px, Style::Regular, fg);
+            if let (0, Some((_, placeholder))) = (self.dock, &self.input) {
+                // An unsent draft shows instead of the placeholder.
+                let (text, color) = match self.draft.as_deref().filter(|d| !d.trim().is_empty()) {
+                    Some(d) => (d, fg),
+                    None => (placeholder.as_str(), muted),
+                };
+                paint_input_bar(cx, Self::input_rect(b), text, color, false);
             }
-            // An unsent draft shows instead of the placeholder.
-            let (text, color) = match self.draft.as_deref().filter(|d| !d.trim().is_empty()) {
-                Some(d) => (d, fg),
-                None => (placeholder.as_str(), muted),
-            };
-            paint_input_bar(cx, ib, text, color, false);
         } else {
             let foot = Rect::new(b.x, b.bottom() - FOOT_H, b.w, FOOT_H as u32);
             cx.text_centered(foot, &label, cx.theme.small_px, Style::Regular, fg);
@@ -2536,72 +2481,39 @@ impl Widget for MarkdownView {
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
-        let turn = |v: &mut Self, step: i32| v.turn(step);
+        let link_at = |pos: &Point| self.links.iter().find(|(r, _)| r.contains(*pos)).map(|(_, url)| url.clone());
         // A held link reports `hold:LINK` (a chat list deletes a chat that way).
         if let UiEvent::Gesture(Gesture::LongPress { pos, .. }) = ev {
-            return match self.links.iter().find(|(r, _)| r.contains(*pos)) {
-                Some((_, url)) => EventResult::Action(format!("hold:{url}")),
-                None => EventResult::Handled,
-            };
+            return link_at(pos).map_or(EventResult::Handled, |url| EventResult::Action(format!("hold:{url}")));
         }
         if self.sheet {
             return match ev {
-                UiEvent::Gesture(Gesture::Tap { pos }) => match self.links.iter().find(|(r, _)| r.contains(*pos)) {
-                    Some((_, url)) => EventResult::Action(url.clone()),
-                    None => EventResult::Handled,
-                },
+                UiEvent::Gesture(Gesture::Tap { pos }) => link_at(pos).map_or(EventResult::Handled, EventResult::Action),
                 UiEvent::Gesture(Gesture::Swipe { dir: Direction::Down, .. }) => EventResult::Action("closed".into()),
                 _ => EventResult::Handled,
             };
         }
         match ev {
             UiEvent::Gesture(Gesture::Tap { pos }) => {
-                if self.close_rect(b).contains(*pos) {
-                    return EventResult::Action("closed".into());
-                }
-                if let Some(link) = &self.back {
-                    let r = AppBar::back_rect(Rect::new(b.x, b.y, b.w, APP_BAR_H));
-                    let s = ink_ui::theme::space(2);
-                    if Rect::new(r.x - s, r.y - s, r.w + 2 * s as u32, r.h + 2 * s as u32).contains(*pos) {
-                        return EventResult::Action(link.clone());
-                    }
-                }
-                if let Some((link, _)) = &self.input {
-                    if Self::input_rect(b).contains(*pos) {
-                        return EventResult::Action(link.clone());
-                    }
-                }
-                if let Some((_, url)) = self.links.iter().find(|(r, _)| r.contains(*pos)) {
-                    return EventResult::Action(url.clone());
+                // The Close button, the Back button, the input bar, then the links.
+                let buttons = [
+                    Some((self.close_rect(b), "closed")),
+                    self.back.as_deref().map(|l| (with_slack(AppBar::back_rect(Rect::new(b.x, b.y, b.w, APP_BAR_H))), l)),
+                    self.input.as_ref().map(|(l, _)| (Self::input_rect(b), l.as_str())),
+                ];
+                let hit = buttons.into_iter().flatten().find(|(r, _)| r.contains(*pos)).map(|(_, a)| a.to_string());
+                if let Some(action) = hit.or_else(|| link_at(pos)) {
+                    return EventResult::Action(action);
                 }
                 if pos.y > b.y + APP_BAR_H as i32 {
-                    turn(self, if pos.x < b.x + b.w as i32 / 3 { -1 } else { 1 });
+                    self.turn(if pos.x < b.x + b.w as i32 / 3 { -1 } else { 1 });
                 }
                 EventResult::Handled
             }
-            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Left | Direction::Up, .. }) => {
-                turn(self, 1);
-                EventResult::Handled
-            }
-            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Down, .. }) => {
-                turn(self, -1);
-                EventResult::Handled
-            }
-            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Right, .. }) => {
-                turn(self, -1);
-                EventResult::Handled
-            }
-            UiEvent::Key(k) if k.pressed => match k.key {
-                ink_device::Key::PageNext => {
-                    turn(self, 1);
-                    EventResult::Handled
-                }
-                ink_device::Key::PagePrev => {
-                    turn(self, -1);
-                    EventResult::Handled
-                }
-                _ => EventResult::Handled,
-            },
+            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Left | Direction::Up, .. }) => self.turn_handled(1),
+            UiEvent::Gesture(Gesture::Swipe { dir: Direction::Down | Direction::Right, .. }) => self.turn_handled(-1),
+            UiEvent::Key(k) if k.pressed && k.key == ink_device::Key::PageNext => self.turn_handled(1),
+            UiEvent::Key(k) if k.pressed && k.key == ink_device::Key::PagePrev => self.turn_handled(-1),
             _ => EventResult::Handled,
         }
     }
@@ -2630,12 +2542,9 @@ fn paint_input_bar(cx: &mut PaintCx, bar: Rect, text: &str, color: u8, cursor: b
     let room = field.w as f32 - 80.0;
     let tr = Rect::new(field.x + 40, field.y, field.w.saturating_sub(80), field.h);
     if cursor {
-        let mut shown = text.to_string();
-        while !shown.is_empty() && cx.fonts.text_width(Style::Regular, &shown, px) > room - 8.0 {
-            shown.remove(0);
-        }
-        let w = cx.fonts.text_width(Style::Regular, &shown, px);
-        cx.text_left(tr, &shown, px, Style::Regular, color);
+        let shown = fit_end(cx, text, px, room - 8.0);
+        let w = cx.fonts.text_width(Style::Regular, shown, px);
+        cx.text_left(tr, shown, px, Style::Regular, color);
         cx.canvas.fill_rect(tr.x + w.ceil() as i32 + 2, field.y + 20, 3, field.h as i32 - 40, t.fg);
     } else {
         let shown = fit(cx, text, px, Style::Regular, room);
@@ -2710,11 +2619,6 @@ impl InputBox {
     pub fn docked_height() -> u32 {
         INPUT_H as u32 + Keyboard::preferred_height(4) + ink_ui::keyboard::BOTTOM_MARGIN
     }
-
-    /// Takes what changed since the last call: `None` for the whole panel.
-    fn take_damage(&mut self) -> Option<Vec<Rect>> {
-        self.damage.replace(Vec::new())
-    }
 }
 
 impl Widget for InputBox {
@@ -2742,14 +2646,11 @@ impl Widget for InputBox {
         cx.text_left(Rect::new(b.x + 32, b.y + 8, b.w - 64, 68), &prompt, heading.px, heading.style, fg);
         ink_ui::draw::stroke_round_rect(cx.canvas, field, cx.theme.radius, cx.theme.border_px as f32, fg);
         // Show the end of long text, with a cursor bar.
-        let mut shown = self.text.clone();
-        while !shown.is_empty() && cx.fonts.text_width(Style::Regular, &shown, px) > field.w as f32 - 40.0 {
-            shown.remove(0);
-        }
+        let shown = fit_end(cx, &self.text, px, field.w as f32 - 40.0);
         let (asc, desc) = cx.fonts.vmetrics(Style::Regular, px);
         let base = field.y as f32 + (field.h as f32 - (asc - desc)) / 2.0 + asc;
-        let w = cx.fonts.text_width(Style::Regular, &shown, px);
-        cx.draw_text(Style::Regular, px, (field.x + 16) as f32, base, &shown, fg);
+        let w = cx.fonts.text_width(Style::Regular, shown, px);
+        cx.draw_text(Style::Regular, px, (field.x + 16) as f32, base, shown, fg);
         cx.canvas.fill_rect(field.x + 18 + w as i32, field.y + 18, 3, field.h as i32 - 36, fg);
         paint_button(cx, cancel, "Cancel", None, ButtonKind::Outlined, true, false);
         paint_button(cx, ok, "OK", None, ButtonKind::Filled, true, false);
@@ -2831,11 +2732,13 @@ impl Kind {
         !matches!(self, Kind::Toast(_))
     }
 
-    /// Answer when the user backs out.
-    fn cancel_result(&self) -> &'static str {
+    /// Where a scrolling layer is (a viewer's page and scroll, a menu's scroll): a
+    /// change after an event means it is drawn again.
+    fn position(&self) -> (usize, i32) {
         match self {
-            Kind::Viewer(_) => "closed",
-            _ => "",
+            Kind::Viewer(v) => v.position(),
+            Kind::Menu(m) => (m.scroll() as usize, 0),
+            _ => (0, 0),
         }
     }
 
@@ -2866,6 +2769,32 @@ struct Layer {
     stream: bool,
     kind: Kind,
     expires: Option<Instant>,
+}
+
+impl Layer {
+    /// True when the whole layer is drawn and refreshed at the next paint already.
+    fn whole_pending(&self) -> bool {
+        self.dirty.is_some() && self.partial.is_none()
+    }
+
+    /// `class`, or the stronger class already pending.
+    fn at_least(&self, class: RefreshClass) -> RefreshClass {
+        self.dirty.map_or(class, |c| c.max(class))
+    }
+
+    /// Draws the whole layer again at the next paint and refreshes all of it with `class`.
+    fn redraw(&mut self, class: RefreshClass) {
+        self.dirty = Some(class);
+        self.partial = None;
+    }
+
+    /// Adds layer-local `rects` to what the next paint refreshes, unless all of the
+    /// layer is refreshed then anyway. The caller sets the class.
+    fn refresh_parts(&mut self, rects: impl IntoIterator<Item = Rect>) {
+        if !self.whole_pending() {
+            self.partial.get_or_insert_with(Vec::new).extend(rects);
+        }
+    }
 }
 
 /// Pixels of a closed layer waiting to be put back: rect, pixels, refresh class.
@@ -2920,6 +2849,12 @@ impl Default for PluginUi {
             keyboard_layouts: vec!["en".into()],
         }
     }
+}
+
+/// True for a request that opens a modal layer (not a toast, a notification or a
+/// status text).
+fn opens_modal(req: &UiRequest) -> bool {
+    !matches!(req, UiRequest::Toast { .. } | UiRequest::Notification { .. } | UiRequest::Status { .. })
 }
 
 /// `ev` with positions relative to `r`'s origin.
@@ -2981,9 +2916,8 @@ impl PluginUi {
                     // Only the changed lines are refreshed (paint: `stream`), so streamed
                     // text never flashes. A pending REAGL (the view docking or undocking
                     // the keyboard) stays.
-                    l.dirty = Some(l.dirty.map_or(RefreshClass::Gl16, |c| c.max(RefreshClass::Gl16)));
+                    l.redraw(l.at_least(RefreshClass::Gl16));
                     l.stream = true;
-                    l.partial = None;
                     return;
                 }
             }
@@ -3036,10 +2970,7 @@ impl PluginUi {
             let Kind::Menu(m) = &mut l.kind else { return };
             let local = Rect::new(0, 0, l.rect.w, l.rect.h);
             let Some(Some(rect)) = m.set_label(local, action, label) else { return };
-            let whole_pending = l.dirty.is_some() && l.partial.is_none();
-            if !whole_pending {
-                l.partial.get_or_insert_with(Vec::new).push(rect);
-            }
+            l.refresh_parts([rect]);
             l.dirty = l.dirty.or(Some(RefreshClass::Gl16));
             return;
         }
@@ -3070,8 +3001,7 @@ impl PluginUi {
     /// or the keyboard or a dialog over the plugin's own chat view (a viewer with an
     /// input bar, [`MarkdownView::stacks`]) when that viewer is the only modal layer.
     fn can_start(&self, plugin: &str, req: &UiRequest) -> bool {
-        let modal = !matches!(req, UiRequest::Toast { .. } | UiRequest::Notification { .. } | UiRequest::Status { .. });
-        if !modal || !self.modal_open() {
+        if !opens_modal(req) || !self.modal_open() {
             return true;
         }
         let mut modals = self.layers.iter().filter(|l| l.kind.modal());
@@ -3097,9 +3027,22 @@ impl PluginUi {
         // modal layer is open; it must not make the loop spin) or pixels wait to go back.
         let startable = self.pending.front().is_some_and(|(p, r)| self.can_start(p, r));
         let soon = (startable || !self.restore.is_empty()).then_some(Duration::ZERO);
-        match (next.map(|t| t.saturating_duration_since(now)), soon) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        next.map(|t| t.saturating_duration_since(now)).into_iter().chain(soon).min()
+    }
+
+    /// Closes the toasts whose time is up.
+    fn close_expired(&mut self) {
+        let now = Instant::now();
+        while let Some(i) = self.layers.iter().position(|l| l.expires.is_some_and(|t| t <= now)) {
+            self.close(i);
+        }
+    }
+
+    /// Puts the pixels of closed layers back on the canvas and adds their damage.
+    fn put_back(&mut self, canvas: &mut Canvas, damage: &mut Vec<Damage>) {
+        for (r, pixels, class) in self.restore.drain(..) {
+            canvas.blit(&pixels, r.x, r.y);
+            damage.push(Damage { rect: r, class });
         }
     }
 
@@ -3112,8 +3055,7 @@ impl PluginUi {
                 if let Kind::Viewer(view) = &mut v.kind {
                     view.set_dock(0);
                 }
-                v.dirty = Some(v.dirty.map_or(RefreshClass::Reagl, |c| c.max(RefreshClass::Reagl)));
-                v.partial = None;
+                v.redraw(v.at_least(RefreshClass::Reagl));
                 return l;
             }
         }
@@ -3128,8 +3070,7 @@ impl PluginUi {
         // Layers above it covered part of its pixels: they are drawn again.
         for above in self.layers.iter_mut().skip(i) {
             above.backing = None;
-            above.dirty = Some(RefreshClass::Gl16);
-            above.partial = None;
+            above.redraw(RefreshClass::Gl16);
         }
         l
     }
@@ -3143,11 +3084,7 @@ impl PluginUi {
     /// Handles `ev` for the overlay: `(used, answers)` where an answer is
     /// `(plugin, request id, result)`.
     pub fn handle(&mut self, ev: &UiEvent, screen: Size) -> (bool, Vec<(String, u32, String)>) {
-        let now = Instant::now();
-        // Expired toasts.
-        while let Some(i) = self.layers.iter().position(|l| l.expires.is_some_and(|t| t <= now)) {
-            self.close(i);
-        }
+        self.close_expired();
         // Per-contact touches go only to an open keyboard (it types on them); other
         // layers work on gestures.
         let keyboard_open = self.layers.last().is_some_and(|l| matches!(l.kind, Kind::Input(_)));
@@ -3180,11 +3117,9 @@ impl PluginUi {
                     view.event(&lev, vr);
                     if view.position() != before {
                         // Only the pages above the panel: the keyboard stays.
-                        let whole_pending = v.dirty.is_some() && v.partial.is_none();
-                        if !whole_pending {
-                            v.partial.get_or_insert_with(Vec::new).push(view.pages_rect(vr));
-                        }
-                        v.dirty = Some(v.dirty.map_or(RefreshClass::Reagl, |c| c.max(RefreshClass::Reagl)));
+                        let pages = view.pages_rect(vr);
+                        v.refresh_parts([pages]);
+                        v.dirty = Some(v.at_least(RefreshClass::Reagl));
                     }
                 }
             }
@@ -3194,7 +3129,7 @@ impl PluginUi {
         let back = matches!(ev, UiEvent::Key(k) if k.pressed && matches!(k.key, ink_device::Key::Back | ink_device::Key::Home));
         let outside = gesture_pos(ev).is_some_and(|p| !l.rect.contains(p));
         let result = if back {
-            Some(l.kind.cancel_result().to_string())
+            Some(if matches!(l.kind, Kind::Viewer(_)) { "closed" } else { "" }.to_string())
         } else if outside {
             // A tap outside a menu or a card cancels it; dialogs, viewers and the
             // keyboard stay.
@@ -3210,11 +3145,7 @@ impl PluginUi {
         } else {
             let lev = local(ev, l.rect);
             let lr = Rect::new(0, 0, l.rect.w, l.rect.h);
-            let before = match &l.kind {
-                Kind::Viewer(v) => v.position(),
-                Kind::Menu(m) => (m.scroll() as usize, 0),
-                _ => (0, 0),
-            };
+            let before = l.kind.position();
             match l.kind.widget().event(&lev, lr) {
                 EventResult::Action(a) => match a.as_str() {
                     "input:submit" => match &l.kind {
@@ -3225,19 +3156,19 @@ impl PluginUi {
                     "input:edit" | "input:keys" => {
                         // Gray-preserving GL16 on the changed key faces (and the field
                         // when the text changed), not the whole panel.
-                        let mut rects = match &mut l.kind {
-                            Kind::Input(i) => i.take_damage(),
+                        // `None`: the whole panel changed.
+                        let rects = match &mut l.kind {
+                            Kind::Input(i) => i.damage.replace(Vec::new()).map(|mut r| {
+                                if a == "input:edit" {
+                                    r.push(i.parts(lr).0);
+                                }
+                                r
+                            }),
                             _ => None,
                         };
-                        if a == "input:edit" {
-                            if let (Some(r), Kind::Input(i)) = (rects.as_mut(), &l.kind) {
-                                r.push(i.parts(lr).0);
-                            }
-                        }
-                        let whole_pending = l.dirty.is_some() && l.partial.is_none();
                         match rects {
-                            Some(r) if !whole_pending => l.partial.get_or_insert_with(Vec::new).extend(r),
-                            _ => l.partial = None,
+                            Some(r) => l.refresh_parts(r),
+                            None => l.partial = None,
                         }
                         l.dirty = Some(RefreshClass::Gl16);
                         None
@@ -3245,38 +3176,25 @@ impl PluginUi {
                     _ => Some(a),
                 },
                 _ => {
-                    let after = match &l.kind {
-                        Kind::Viewer(v) => v.position(),
-                        Kind::Menu(m) => (m.scroll() as usize, 0),
-                        _ => (0, 0),
-                    };
-                    if after != before {
+                    if l.kind.position() != before {
                         match &l.kind {
                             // A chat view scrolled: only the text below the app bar
                             // moves, REAGL like a page turn (no flash).
                             Kind::Viewer(v) if v.scrolls() => {
-                                let whole_pending = l.dirty.is_some() && l.partial.is_none();
-                                if !whole_pending {
-                                    l.partial.get_or_insert_with(Vec::new).push(v.pages_rect(lr));
-                                }
-                                l.dirty = Some(l.dirty.map_or(RefreshClass::Reagl, |c| c.max(RefreshClass::Reagl)));
+                                let pages = v.pages_rect(lr);
+                                l.refresh_parts([pages]);
+                                l.dirty = Some(l.at_least(RefreshClass::Reagl));
                             }
                             // A full-screen viewer page is text like a book page: REAGL,
                             // no flash (its GL16 would be promoted to a full-screen GC16).
-                            Kind::Viewer(v) if !v.sheet => {
-                                l.dirty = Some(RefreshClass::Reagl);
-                                l.partial = None;
-                            }
+                            Kind::Viewer(v) if !v.sheet => l.redraw(RefreshClass::Reagl),
                             // A menu's list jump is one DU of the layer (its rows are
                             // black and white, as on a settings page).
                             Kind::Menu(m) => {
-                                l.dirty = Some(m.refresh_class());
-                                l.partial = None;
+                                let class = m.refresh_class();
+                                l.redraw(class);
                             }
-                            _ => {
-                                l.dirty = Some(RefreshClass::Gl16);
-                                l.partial = None;
-                            }
+                            _ => l.redraw(RefreshClass::Gl16),
                         }
                     }
                     None
@@ -3344,13 +3262,10 @@ impl PluginUi {
                         let Kind::Viewer(view) = &mut v.kind else { unreachable!() };
                         let initial = if initial.is_empty() { view.draft.take().unwrap_or_default() } else { initial };
                         view.set_dock(ih);
-                        let vr = Rect::new(0, 0, v.rect.w, v.rect.h);
-                        match v.dirty {
-                            Some(_) if v.partial.is_none() => {}
-                            _ => {
-                                v.dirty = Some(v.dirty.map_or(RefreshClass::Reagl, |c| c.max(RefreshClass::Reagl)));
-                                v.partial = Some(vec![view.pages_rect(vr)]);
-                            }
+                        let pages = view.pages_rect(Rect::new(0, 0, v.rect.w, v.rect.h));
+                        if !v.whole_pending() {
+                            v.partial = Some(vec![pages]);
+                            v.dirty = Some(v.at_least(RefreshClass::Reagl));
                         }
                         (Some(id), Kind::Input(InputBox::docked(prompt, initial, &layouts)), Rect::new(0, (h - ih) as i32, w, ih), None)
                     }
@@ -3377,27 +3292,20 @@ impl PluginUi {
     pub fn paint(&mut self, cx: &mut PaintCx, below_redrawn: bool) -> Vec<Damage> {
         let screen = cx.canvas.size();
         let mut damage = Vec::new();
-        let now = Instant::now();
-        while let Some(i) = self.layers.iter().position(|l| l.expires.is_some_and(|t| t <= now)) {
-            self.close(i);
-        }
+        self.close_expired();
         if below_redrawn {
             // The pixels under every layer are new: drop the copies and the restores.
             self.restore.clear();
             for l in &mut self.layers {
                 l.backing = None;
-                l.dirty = l.dirty.or(Some(RefreshClass::Gl16));
-                l.partial = None;
+                l.redraw(l.dirty.unwrap_or(RefreshClass::Gl16));
                 l.stream = false;
             }
         }
-        for (r, pixels, class) in self.restore.drain(..) {
-            cx.canvas.blit(&pixels, r.x, r.y);
-            damage.push(Damage { rect: r, class });
-        }
+        self.put_back(cx.canvas, &mut damage);
         // Start waiting requests.
         while let Some((plugin, req)) = self.pending.front().cloned() {
-            let modal = !matches!(req, UiRequest::Toast { .. } | UiRequest::Notification { .. } | UiRequest::Status { .. });
+            let modal = opens_modal(&req);
             if !self.can_start(&plugin, &req) {
                 break;
             }
@@ -3423,13 +3331,9 @@ impl PluginUi {
             };
             // One toast at a time; a modal layer replaces a toast.
             while let Some(i) = self.layers.iter().rposition(|l| !l.kind.modal()) {
-                let l = self.close(i);
-                drop(l);
+                self.close(i);
             }
-            for (r, pixels, class) in self.restore.drain(..) {
-                cx.canvas.blit(&pixels, r.x, r.y);
-                damage.push(Damage { rect: r, class });
-            }
+            self.put_back(cx.canvas, &mut damage);
             self.open(plugin, req, screen, cx);
         }
         // Paint dirty layers bottom to top; a repainted layer forces the ones above that
@@ -3437,8 +3341,7 @@ impl PluginUi {
         let mut drawn: Vec<Rect> = Vec::new();
         for l in &mut self.layers {
             if l.dirty.is_none() && drawn.iter().any(|d| !d.intersect(&l.rect).is_empty()) {
-                l.dirty = Some(RefreshClass::Gl16);
-                l.partial = None;
+                l.redraw(RefreshClass::Gl16);
                 l.backing = None;
             }
             let Some(class) = l.dirty.take() else { continue };
@@ -3522,8 +3425,7 @@ impl PluginUi {
         for (i, l) in self.layers.iter_mut().enumerate() {
             let Some(b) = l.backing.as_mut() else { continue };
             if patch_backing(cx.canvas, l.rect, b, changed) {
-                l.dirty = l.dirty.or(Some(RefreshClass::Gl16));
-                l.partial = None;
+                l.redraw(l.dirty.unwrap_or(RefreshClass::Gl16));
                 l.stream = false;
                 first_dirty.get_or_insert(i);
             }
@@ -3537,8 +3439,7 @@ impl PluginUi {
                     let r = l.rect.intersect(&bounds);
                     cx.canvas.blit(&b, r.x, r.y);
                 }
-                l.dirty = l.dirty.or(Some(RefreshClass::Gl16));
-                l.partial = None;
+                l.redraw(l.dirty.unwrap_or(RefreshClass::Gl16));
             }
         }
         for (r, b, _) in &mut self.restore {
@@ -3635,6 +3536,15 @@ mod tests {
             let mut cx = PaintCx { canvas: &mut self.canvas, fonts: &mut self.fonts, theme: &self.theme };
             ui.paint(&mut cx, below)
         }
+    }
+
+    /// Fast page-turn calls log at debug; slow ones and every other hook at info.
+    #[test]
+    fn only_slow_page_turn_calls_log_at_info() {
+        assert_eq!(hook_log_level(true, 0.2), log::Level::Debug);
+        assert_eq!(hook_log_level(true, PAGE_HOOK_INFO_MS), log::Level::Debug);
+        assert_eq!(hook_log_level(true, 12.0), log::Level::Info);
+        assert_eq!(hook_log_level(false, 0.0), log::Level::Info);
     }
 
     /// A viewer shown twice before a paint (Insightful's Explain: the chat is shown, then
@@ -3787,9 +3697,13 @@ mod tests {
         ui.handle(&key(Key::PagePrev), screen());
         ui.handle(&key(Key::PageNext), screen());
         let (before, ..) = v(&ui);
+        // Five batches of five sentences: each push lays out the whole chat again (about
+        // 0.7 s in a debug build), and the answer still ends well below the window.
         let mut answer = String::from("The");
-        for i in 0..25 {
-            answer.push_str(&format!(" streamed words of batch {i}, more of them, and then some more words to fill a few lines of the answer card."));
+        for i in 0..5 {
+            for j in 0..5 {
+                answer.push_str(&format!(" streamed words of batch {i}.{j}, more of them, and then some more words to fill a few lines of the answer card."));
+            }
             ui.push("p", UiRequest::TextViewer { id: 1, title: "Chat".into(), markdown: chat(20, &answer) });
             s.ui(&mut ui, false);
             assert_eq!(v(&ui).0, before, "batch {i}");
@@ -4474,6 +4388,89 @@ mod tests {
         ui.handle(&tap(f.x + 60, f.bottom() - 70), screen());
         s.ui(&mut ui, false);
         assert_eq!(s.canvas.pixels, page5.pixels);
+    }
+
+    /// The bisecting `fit` and `fit_end` cut where trimming one character at a time did.
+    #[test]
+    fn fitting_cuts_where_trimming_one_character_at_a_time_did() {
+        let mut canvas = Canvas::new(8, 8);
+        let mut fonts = Fonts::load();
+        let theme = Theme::day();
+        let mut cx = PaintCx { canvas: &mut canvas, fonts: &mut fonts, theme: &theme };
+        let px = 40.0;
+        let slow_fit = |cx: &mut PaintCx, text: &str, max: f32| {
+            if cx.fonts.text_width(Style::Regular, text, px) <= max {
+                return text.to_string();
+            }
+            let mut s = text.to_string();
+            while !s.is_empty() && cx.fonts.text_width(Style::Regular, &format!("{s}..."), px) > max {
+                s.pop();
+            }
+            format!("{}...", s.trim_end())
+        };
+        let slow_end = |cx: &mut PaintCx, text: &str, max: f32| {
+            let mut s = text.to_string();
+            while !s.is_empty() && cx.fonts.text_width(Style::Regular, &s, px) > max {
+                s.remove(0);
+            }
+            s
+        };
+        for text in ["", "a", "Household words", "Ünïcödé — ✓ wide WWWW iiii", "word word word word word word word word"] {
+            for max in [-10.0, 0.0, 5.0, 30.0, 61.0, 150.0, 333.0, 1000.0] {
+                assert_eq!(fit(&mut cx, text, px, Style::Regular, max), slow_fit(&mut cx, text, max), "fit {text:?} {max}");
+                assert_eq!(fit_end(&mut cx, text, px, max), slow_end(&mut cx, text, max), "fit_end {text:?} {max}");
+            }
+        }
+    }
+
+    /// A word wider than the line starts a line of its own and is cut into pieces that
+    /// each fit their line.
+    #[test]
+    fn long_words_break_into_pieces_that_fit() {
+        let mut canvas = Canvas::new(8, 8);
+        let mut fonts = Fonts::load();
+        let theme = Theme::day();
+        let mut cx = PaintCx { canvas: &mut canvas, fonts: &mut fonts, theme: &theme };
+        let (px, width) = (40.0, 600.0);
+        let word = "https://example.org/a/very/long/link/that/does/not/fit/on/one/line/at/all";
+        let mut lines = Vec::new();
+        let mut widths = WordWidths::default();
+        wrap_spans(&mut Lay { cx: &mut cx, widths: &mut widths }, &[Span::plain(&format!("See {word} now"))], px, None, 0.0, width, None, &mut lines);
+        let runs: Vec<&Run> = lines.iter().flat_map(|l| &l.runs).collect();
+        let pieces: String = runs.iter().filter(|r| r.text != "See" && r.text != "now").map(|r| r.text.as_str()).collect();
+        assert_eq!(pieces, word);
+        assert!(lines.len() >= 3, "{lines:?}");
+        for r in &runs {
+            assert!(r.x + cx.fonts.shaped_width(r.style, px, &r.text) <= width, "{r:?}");
+        }
+        assert_eq!((lines[0].runs.len(), runs[1].x), (1, 0.0), "the word starts a new line");
+    }
+
+    /// A streamed update lays the viewer out again from the widths it measured; other
+    /// fonts start the widths again.
+    #[test]
+    fn viewer_word_widths_are_kept_across_layouts_of_one_font() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        let text = "Some words of an answer, and some more words of it.";
+        ui.push("ai", UiRequest::TextViewer { id: 3, title: "Chat".into(), markdown: text.into() });
+        s.ui(&mut ui, false);
+        let entries = |ui: &PluginUi| match &ui.layers[0].kind {
+            Kind::Viewer(v) => v.widths.entries,
+            _ => unreachable!(),
+        };
+        let first = entries(&ui);
+        assert!(first > 5, "{first}");
+        ui.push("ai", UiRequest::TextViewer { id: 3, title: "Chat".into(), markdown: format!("{text} words") });
+        s.ui(&mut ui, false);
+        assert_eq!(entries(&ui), first, "no word measured again");
+        let mut w = WordWidths::default();
+        w.for_fonts("A".into(), false);
+        w.entries = 3;
+        w.for_fonts("A".into(), false);
+        assert_eq!(w.entries, 3);
+        w.for_fonts("B".into(), false);
+        assert_eq!(w.entries, 0, "another family");
     }
 
     #[test]

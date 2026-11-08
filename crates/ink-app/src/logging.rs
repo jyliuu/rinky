@@ -1,4 +1,4 @@
-//! Logging, crash logs and exit reasons (owner: trace).
+//! Logging, crash logs and exit reasons.
 //!
 //! Every line looks like `[INFO 12:34:56.789 +1234 ink_app::app] text`: level, local
 //! wall-clock time, milliseconds since the process started
@@ -89,17 +89,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn level_index(l: LevelFilter) -> usize {
-    l as usize
-}
-
-fn index_level(i: usize) -> LevelFilter {
-    [LevelFilter::Off, LevelFilter::Error, LevelFilter::Warn, LevelFilter::Info, LevelFilter::Debug, LevelFilter::Trace]
-        .get(i)
-        .copied()
-        .unwrap_or(LevelFilter::Info)
-}
-
 /// Parses `debug`, `info`, ... or a `RUST_LOG`-style `a=debug,info` (the last plain
 /// level, else the last `target=level` level).
 pub fn parse_level(s: &str) -> Option<LevelFilter> {
@@ -143,7 +132,7 @@ pub fn set_settings_log_level(s: &mut Settings, level: &str) {
 
 /// The current maximum level.
 pub fn level() -> LevelFilter {
-    LOGGER.get().map_or(log::max_level(), |l| index_level(l.level.load(Ordering::Relaxed)))
+    LOGGER.get().map_or(log::max_level(), |l| LevelFilter::iter().nth(l.level.load(Ordering::Relaxed)).unwrap_or(LevelFilter::Info))
 }
 
 /// Changes the level now (the environment wins: with `RINKY_LOG`/`RUST_LOG` set,
@@ -153,7 +142,7 @@ pub fn set_level(l: LevelFilter) -> LevelFilter {
         return level();
     }
     if let Some(lg) = LOGGER.get() {
-        lg.level.store(level_index(l), Ordering::Relaxed);
+        lg.level.store(l as usize, Ordering::Relaxed);
     }
     log::set_max_level(l);
     l
@@ -239,6 +228,29 @@ impl Inner {
         let _ = writeln!(self.line, " +{} {target}] {args}", trace::uptime_ms());
     }
 
+    /// Formats one line, keeps it in the ring and writes it: to stderr at once, or into
+    /// the file buffer (written now when `flush` or when the buffer is full). True when
+    /// the line is the first one waiting in the buffer.
+    fn emit(&mut self, level: Level, target: &str, args: &std::fmt::Arguments, flush: bool) -> bool {
+        self.format(level, target, args);
+        self.push_ring();
+        match self.out {
+            // Not eprintln!: it panics (and with panic = "abort" kills rinky) when
+            // stderr cannot be written (read-only or full userstore log).
+            Output::Stderr => {
+                let _ = std::io::stderr().write_all(self.line.as_bytes());
+                false
+            }
+            Output::File { .. } => {
+                self.buf.extend_from_slice(self.line.as_bytes());
+                if flush || self.buf.len() >= BUF_LIMIT {
+                    self.flush();
+                }
+                self.buf.len() == self.line.len()
+            }
+        }
+    }
+
     fn push_ring(&mut self) {
         let text = self.line.trim_end();
         if self.ring.len() >= RING_LINES {
@@ -307,32 +319,15 @@ impl Inner {
 
 impl log::Log for Logger {
     fn enabled(&self, m: &log::Metadata) -> bool {
-        level_index(m.level().to_level_filter()) <= self.level.load(Ordering::Relaxed)
+        m.level() as usize <= self.level.load(Ordering::Relaxed)
     }
 
     fn log(&self, r: &log::Record) {
         if !self.enabled(r.metadata()) {
             return;
         }
-        let mut g = lock(&self.inner);
-        g.format(r.level(), r.target(), r.args());
-        g.push_ring();
-        let g = &mut *g;
-        match g.out {
-            // Not eprintln!: it panics (and with panic = "abort" kills rinky) when
-            // stderr cannot be written (read-only or full userstore log).
-            Output::Stderr => {
-                let _ = std::io::stderr().write_all(g.line.as_bytes());
-            }
-            Output::File { .. } => {
-                let was_empty = g.buf.is_empty();
-                g.buf.extend_from_slice(g.line.as_bytes());
-                if r.level() <= Level::Warn || g.buf.len() >= BUF_LIMIT {
-                    g.flush();
-                } else if was_empty {
-                    self.wake.notify_one();
-                }
-            }
+        if lock(&self.inner).emit(r.level(), r.target(), r.args(), r.level() <= Level::Warn) {
+            self.wake.notify_one();
         }
     }
 
@@ -375,7 +370,7 @@ pub fn init(target: LogTarget) {
     };
     let file = matches!(out, Output::File { .. });
     let logger = Logger {
-        level: AtomicUsize::new(level_index(level)),
+        level: AtomicUsize::new(level as usize),
         inner: Mutex::new(Inner { out, buf: Vec::with_capacity(BUF_LIMIT), line: String::with_capacity(256), ring: VecDeque::with_capacity(RING_LINES) }),
         wake: Condvar::new(),
     };
@@ -432,18 +427,7 @@ fn emergency(level: Level, text: &str) {
     };
     match got {
         Some(mut g) => {
-            g.format(level, "ink_app::logging", &format_args!("{text}"));
-            g.push_ring();
-            let g = &mut *g;
-            match g.out {
-                Output::Stderr => {
-                    let _ = std::io::stderr().write_all(g.line.as_bytes());
-                }
-                Output::File { .. } => {
-                    g.buf.extend_from_slice(g.line.as_bytes());
-                    g.flush();
-                }
-            }
+            g.emit(level, "ink_app::logging", &format_args!("{text}"), true);
         }
         None => {
             let _ = writeln!(std::io::stderr(), "[{level} rinky] {text}");
@@ -714,21 +698,10 @@ pub fn tail_text(text: &str, n: usize, cut: bool) -> Vec<String> {
 
 /// Crash logs (`crash-*.log`) in `dir`, newest first.
 pub fn crash_logs(dir: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("crash-") && n.ends_with(".log"))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let is_crash_log = |p: &PathBuf| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("crash-") && n.ends_with(".log"));
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(is_crash_log).collect();
     // The names hold the time, so name order is time order.
-    v.sort();
-    v.reverse();
+    v.sort_by(|a, b| b.cmp(a));
     v
 }
 

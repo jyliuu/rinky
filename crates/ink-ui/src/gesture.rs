@@ -293,6 +293,12 @@ fn mid(a: Point, b: Point) -> Point {
     Point::new((a.x + b.x) / 2, (a.y + b.y) / 2)
 }
 
+/// True when `a` and `b` are `k` pixels or more apart on either axis (the slop rule of
+/// taps, double taps, moves and two-finger taps).
+fn beyond(a: Point, b: Point, k: i32) -> bool {
+    (a.x - b.x).abs() >= k || (a.y - b.y).abs() >= k
+}
+
 /// Dominant direction of a movement `(dx, dy)` (horizontal on a tie).
 pub fn direction(dx: i32, dy: i32) -> Direction {
     if dx.abs() >= dy.abs() {
@@ -578,8 +584,6 @@ impl GestureRecognizer {
                         if let Some(corner) = self.corner(c.pos) {
                             out.push(UiEvent::Gesture(Gesture::CornerHold { corner, pos: c.pos }));
                         }
-                    }
-                    if c.holds == 0 {
                         // The long press fires now, while the finger is down: the screen
                         // can open its popup at once. The lift sends nothing more.
                         out.push(UiEvent::Gesture(Gesture::LongPress { pos: c.pos, held: at.since(c.down) }));
@@ -616,7 +620,7 @@ impl GestureRecognizer {
             self.cancel(i, t, out);
         }
         if let Some((pp, _)) = self.pending_tap {
-            if (pp.x - p.x).abs() >= self.double_tap_slop || (pp.y - p.y).abs() >= self.double_tap_slop {
+            if beyond(pp, p, self.double_tap_slop) {
                 self.pending_tap = None;
                 out.push(UiEvent::Gesture(Gesture::Tap { pos: pp }));
             }
@@ -654,10 +658,10 @@ impl GestureRecognizer {
         let (slop, step) = (self.tap_slop, self.move_step);
         let Some(c) = self.contacts.iter_mut().find(|c| c.slot == slot) else { return };
         c.pos = p;
-        if (p.x - c.start.x).abs() >= slop || (p.y - c.start.y).abs() >= slop {
+        if beyond(p, c.start, slop) {
             c.moved = true;
         }
-        if (p.x - c.reported.x).abs() >= step || (p.y - c.reported.y).abs() >= step {
+        if beyond(p, c.reported, step) {
             c.reported = p;
             let c = *c;
             // A move has no timestamp of its own; `held` is measured at the last frame.
@@ -677,7 +681,7 @@ impl GestureRecognizer {
             let Some(other) = self.contacts.iter_mut().find(|o| o.paired && !o.consumed) else { return };
             other.consumed = true;
             let o = *other;
-            let still = |x: &Contact| (x.pos.x - x.start.x).abs() < self.two_finger_slop && (x.pos.y - x.start.y).abs() < self.two_finger_slop;
+            let still = |x: &Contact| !beyond(x.pos, x.start, self.two_finger_slop);
             let short = t.since(c.down) < self.two_finger_duration && t.since(o.down) < self.two_finger_duration;
             let d = dist(c.pos, o.pos);
             let change = (d - pair.start_dist).abs();
@@ -687,10 +691,7 @@ impl GestureRecognizer {
             let travel = dist(m0, m1);
             let dir = direction(m1.x - m0.x, m1.y - m0.y);
             // Each finger moved at least the slop, in the midpoint's direction.
-            let along = |x: &Contact| {
-                let (dx, dy) = (x.pos.x - x.start.x, x.pos.y - x.start.y);
-                (dx.abs() >= self.two_finger_slop || dy.abs() >= self.two_finger_slop) && direction(dx, dy) == dir
-            };
+            let along = |x: &Contact| beyond(x.pos, x.start, self.two_finger_slop) && direction(x.pos.x - x.start.x, x.pos.y - x.start.y) == dir;
             let g = if short && still(&c) && still(&o) {
                 Some(Gesture::TwoFingerTap { pos: m1 })
             } else if change >= self.pinch_min as f32 && (ratio >= r || ratio <= 1.0 / r) && change > travel {
@@ -708,8 +709,7 @@ impl GestureRecognizer {
         if c.consumed || c.paired {
             return;
         }
-        let (dx, dy) = (p.x - c.start.x, p.y - c.start.y);
-        let still = dx.abs() < self.tap_slop && dy.abs() < self.tap_slop;
+        let still = !beyond(p, c.start, self.tap_slop);
         if c.holds > 0 && (c.moved || !still) {
             // Dragged after a hold fired (key alternates, text selection): the drag is
             // reported by the touch notifications only, never as a swipe.
@@ -727,13 +727,13 @@ impl GestureRecognizer {
                 self.tap(p, t, out);
             }
         } else {
-            let dir = direction(dx, dy);
+            let dir = direction(p.x - c.start.x, p.y - c.start.y);
             out.push(UiEvent::Gesture(Gesture::Swipe { from: c.start, to: p, dir }));
         }
     }
 
     fn tap(&mut self, p: Point, t: Timestamp, out: &mut Vec<UiEvent>) {
-        let near = |q: Point| (q.x - p.x).abs() < self.double_tap_slop && (q.y - p.y).abs() < self.double_tap_slop;
+        let near = |q: Point| !beyond(q, p, self.double_tap_slop);
         let soon = |at: Timestamp| t.since(at) < self.double_tap_interval;
         match self.double_tap {
             DoubleTapMode::Off => out.push(UiEvent::Gesture(Gesture::Tap { pos: p })),

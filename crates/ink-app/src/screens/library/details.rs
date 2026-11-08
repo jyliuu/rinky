@@ -2,16 +2,17 @@
 //! facts; under it Read / Continue as the filled button, the reading status as chips
 //! and the book's collections as chips.
 
-use super::browse::{badge_w, book_state, chip_w, paint_badge, paint_chip, percent_text, Badge};
+use super::browse::{authors_text, badge_w, book_state, chip_w, paint_badge, paint_chip, percent_text, Badge};
 use super::model::status_label;
-use super::view::{human_size, HEADER_H, MARGIN, TAB_H};
-use super::{Hit, LibraryScreen, STATUSES};
+use super::view::{HEADER_H, MARGIN, TAB_H};
+use super::{files, Hit, LibraryScreen, STATUSES};
 use ink_device::Rect;
 use ink_store::{BookEntry, ReadingStatus};
 use ink_text::Style;
 use ink_ui::draw::stroke_round_rect;
 use ink_ui::theme::space;
-use ink_ui::{paint_button, ButtonKind, Icon, PaintCx, ProgressBar, Widget};
+use crate::screens::common::pill;
+use ink_ui::{Icon, PaintCx, ProgressBar, Widget};
 use std::path::Path;
 
 /// Height of the details card.
@@ -48,8 +49,7 @@ impl LibraryScreen {
             p.text_left(Rect::new(tx, y, tw, lh as u32), l, t.heading.px, t.heading.style, t.fg);
             y += lh;
         }
-        let authors = if b.authors.is_empty() { "Unknown author".to_string() } else { b.authors.join(", ") };
-        p.text_left(Rect::new(tx, y + 4, tw, 56), &authors, t.body.px, Style::Regular, t.muted);
+        p.text_left(Rect::new(tx, y + 4, tw, 56), &authors_text(&b), t.body.px, Style::Regular, t.muted);
         y += 64;
         if let Some(s) = &b.series {
             let text = match b.series_index {
@@ -90,7 +90,7 @@ impl LibraryScreen {
             ProgressBar::new(value).with_label(percent_text(value)).with_caption(caption).paint(p, Rect::new(tx - 4, y, tw + 4, 96));
             y += 96 + space(2);
         }
-        let mut facts: Vec<String> = vec![format!("{} · {}", b.format.to_uppercase(), human_size(b.size))];
+        let mut facts: Vec<String> = vec![format!("{} · {}", b.format.to_uppercase(), files::size_text(b.size))];
         if let Some(n) = b.pages {
             facts.push(format!("{n} pages"));
         }
@@ -127,17 +127,17 @@ impl LibraryScreen {
         let n_side = if self.plugin_actions.is_empty() { 1 } else { 2 };
         let main_w = cw as i32 - n_side * (side + space(2));
         let read = Rect::new(MARGIN, y, main_w as u32, bh);
-        paint_button(p, read, read_label(&b), Some(Icon::Book), ButtonKind::Filled, true, false);
+        pill(p, read, read_label(&b), Some(Icon::Book), true);
         self.hits.push((read, Hit::Read(b.path.clone())));
         let mut x = read.right() + space(2);
         if !self.plugin_actions.is_empty() {
             let r = Rect::new(x, y, side as u32, bh);
-            paint_button(p, r, "Plugins", Some(Icon::More), ButtonKind::Outlined, true, false);
+            pill(p, r, "Plugins", Some(Icon::More), false);
             self.hits.push((r, Hit::PluginMenu(b.path.clone())));
             x = r.right() + space(2);
         }
         let del = Rect::new(x, y, side as u32, bh);
-        paint_button(p, del, "Delete", Some(Icon::Trash), ButtonKind::Outlined, true, false);
+        pill(p, del, "Delete", Some(Icon::Trash), false);
         self.hits.push((del, Hit::Delete(b.path.clone())));
         y += bh as i32 + space(4);
 
@@ -187,9 +187,4 @@ impl LibraryScreen {
             p.text_left(Rect::new(MARGIN, y + i as i32 * 40, cw, 40), l, t.caption.px * 0.9, Style::Regular, t.muted);
         }
     }
-}
-
-/// Status of index `i` in the details chips.
-pub fn status_at(i: usize) -> Option<ReadingStatus> {
-    STATUSES.get(i).copied()
 }
