@@ -158,8 +158,8 @@ fn open_copy(snap: &Snapshot) -> Result<Connection> {
     Ok(conn)
 }
 
-fn has_table(conn: &Connection, name: &str, kind: &str) -> Result<bool> {
-    Ok(conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = ?1 AND name = ?2", [kind, name], |r| r.get::<_, i64>(0))? > 0)
+fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [name], |r| r.get::<_, i64>(0))? > 0)
 }
 
 fn columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
@@ -217,7 +217,7 @@ pub fn read_statistics_db(db: &Path, scratch: Option<&Path>) -> Result<KoStatist
     let conn = open_copy(&snap)?;
     let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let mut out = KoStatistics { schema_version, ..Default::default() };
-    if !has_table(&conn, "book", "table")? {
+    if !has_table(&conn, "book")? {
         return Err(StoreError::Format(format!("{}: no `book` table, not a KOReader statistics database", db.display())));
     }
     let bc = columns(&conn, "book")?;
@@ -244,24 +244,21 @@ pub fn read_statistics_db(db: &Path, scratch: Option<&Path>) -> Result<KoStatist
         .collect::<std::result::Result<_, _>>()?;
     drop(st);
 
-    let sql = if has_table(&conn, "page_stat_data", "table")? {
-        let pc = columns(&conn, "page_stat_data")?;
-        format!(
-            "SELECT p.id_book, b.md5, p.page, p.start_time, p.duration, {} FROM page_stat_data p \
-             LEFT JOIN book b ON b.id = p.id_book ORDER BY p.start_time, p.id_book, p.page",
-            if pc.contains("total_pages") { "p.total_pages" } else { "b.pages" }
-        )
-    } else if has_table(&conn, "page_stat", "table")? {
-        // Before 2020-10: `page_stat(id_book, page, start_time, period)`.
-        let pc = columns(&conn, "page_stat")?;
-        let dur = if pc.contains("duration") { "p.duration" } else { "p.period" };
-        format!(
-            "SELECT p.id_book, b.md5, p.page, p.start_time, {dur}, b.pages FROM page_stat p \
-             LEFT JOIN book b ON b.id = p.id_book ORDER BY p.start_time, p.id_book, p.page"
-        )
+    // Before 2020-10: `page_stat(id_book, page, start_time, period)`, no page count.
+    let table = if has_table(&conn, "page_stat_data")? {
+        "page_stat_data"
+    } else if has_table(&conn, "page_stat")? {
+        "page_stat"
     } else {
         return Ok(out);
     };
+    let pc = columns(&conn, table)?;
+    let dur = if pc.contains("duration") { "p.duration" } else { "p.period" };
+    let total = if pc.contains("total_pages") { "p.total_pages" } else { "b.pages" };
+    let sql = format!(
+        "SELECT p.id_book, b.md5, p.page, p.start_time, {dur}, {total} FROM {table} p \
+         LEFT JOIN book b ON b.id = p.id_book ORDER BY p.start_time, p.id_book, p.page"
+    );
     let mut st = conn.prepare(&sql)?;
     out.pages = st
         .query_map([], |r| {
@@ -288,11 +285,11 @@ pub fn read_statistics(db: &Path) -> Result<Vec<KoPageStat>> {
 pub fn read_vocabulary(db: &Path, scratch: Option<&Path>) -> Result<Vec<KoVocabWord>> {
     let snap = snapshot(db, scratch)?;
     let conn = open_copy(&snap)?;
-    if !has_table(&conn, "vocabulary", "table")? {
+    if !has_table(&conn, "vocabulary")? {
         return Err(StoreError::Format(format!("{}: no `vocabulary` table, not a KOReader vocabulary database", db.display())));
     }
     let vc = columns(&conn, "vocabulary")?;
-    let title = if vc.contains("title_id") && has_table(&conn, "title", "table")? {
+    let title = if vc.contains("title_id") && has_table(&conn, "title")? {
         "(SELECT t.name FROM title t WHERE t.id = v.title_id)".to_string()
     } else {
         col(&vc, "v", "book_title")
