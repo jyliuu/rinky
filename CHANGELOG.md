@@ -30,6 +30,8 @@ All notable changes to rinky are listed here. The format is based on
 - Books finish counting their pages sooner after opening and after a font-size change,
   and rinky uses about 35 MB less memory while reading: each font is now read once and
   shared, where the page counter read it again for itself.
+- Counting a book's pages (after opening it for the first time or changing the font
+  size) takes about half the time, and a third of it on two-core Kindles and Kobos.
 - AZW3 books whose cover page is an SVG around one picture (Calibre's usual cover)
   open several times faster: the picture is decoded straight to its size on screen.
 - The library takes in new books about twice as fast: the cover thumbnail of each book
