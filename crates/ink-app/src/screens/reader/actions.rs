@@ -168,6 +168,18 @@ pub fn rtl_turn(g: &Gesture, size: Size, map: &GestureMap, action: &str) -> Opti
     Some(TURNS.into_iter().find(|t| mirror == Some(*t)).unwrap_or(other))
 }
 
+/// The turn of a long press on blank space at `x` on a screen `w` wide: back in the
+/// left third, forward elsewhere; mirrored when the book reads right to left (back in
+/// the right third), like the tap zones.
+fn long_press_turn(x: i32, w: u32, rtl: bool) -> i64 {
+    let x = if rtl { w as i32 - 1 - x } else { x };
+    if x < w as i32 / 3 {
+        -1
+    } else {
+        1
+    }
+}
+
 /// True when a long press on a word selects it (`long_press` is `dictionary` or
 /// `select`); otherwise a hold runs the mapped action and starts no selection.
 pub fn long_press_selects(settings: &Settings) -> bool {
@@ -252,7 +264,7 @@ impl ReaderScreen {
         // A long press that selected nothing (blank space): it turns the page by side,
         // as before the gesture map (the left side forward when right to left).
         if trigger == "long_press" && LONG_PRESS_ACTIONS.iter().any(|(n, _)| *n == action) {
-            self.turn(if (p.x < size.w as i32 / 3) != rtl { -1 } else { 1 }, cx);
+            self.turn(long_press_turn(p.x, size.w, rtl), cx);
             return Ok(Some(Transition::None));
         }
         self.run_action(&action, cx).map(Some)
@@ -417,6 +429,11 @@ mod tests {
         assert_eq!(rtl(tap(636, 848)), "menu");
         assert_eq!(rtl(tap(50, 50)), "bookmark");
         assert_eq!(rtl(tap(40, 1680)), "light_toggle");
+        // A long press on blank space turns by side, mirrored the same way: only the
+        // right third goes back, the middle goes forward.
+        let w = SIZE.w;
+        assert_eq!([100, 636, 1100].map(|x| long_press_turn(x, w, false)), [-1, 1, 1]);
+        assert_eq!([100, 636, 1100].map(|x| long_press_turn(x, w, true)), [1, 1, -1]);
     }
 
     #[test]
