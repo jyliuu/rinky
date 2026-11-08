@@ -111,17 +111,7 @@ pub struct Progress {
 impl Progress {
     /// The JSON body of a push: `percentage` rounded down to 4 decimals, no timestamp.
     pub fn push_body(&self) -> serde_json::Value {
-        let mut v = serde_json::json!({
-            "document": self.document,
-            "progress": self.progress,
-            "percentage": round_percentage(self.percentage),
-            "device": self.device,
-            "device_id": self.device_id,
-        });
-        if let Some(m) = &self.metadata {
-            v["metadata"] = serde_json::to_value(m).unwrap_or_default();
-        }
-        v
+        serde_json::to_value(Progress { percentage: round_percentage(self.percentage), timestamp: None, ..self.clone() }).unwrap_or_default()
     }
 
     /// Reads a pull answer leniently: `{}` (or no `percentage`) is `None`; numbers given as
