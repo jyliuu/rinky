@@ -35,7 +35,6 @@
 //! sheet again; the tab is remembered here).
 
 use super::footer;
-#[cfg(test)] use super::footer::Edge;
 use super::stored_layout;
 use super::overlay::{Overlay, OverlayKind};
 use super::ReaderScreen;
@@ -1284,6 +1283,7 @@ pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) 
 
 #[cfg(test)]
 mod tests {
+    use super::super::footer::Edge;
     use super::*;
 
     #[test]
