@@ -350,7 +350,7 @@ impl Keyboard {
     /// setting): unknown names are skipped, an empty list gives English; the first is
     /// the default and the globe key cycles them in order.
     pub fn with_language_list(langs: &[String]) -> Self {
-        let mut langs: Vec<String> = langs.iter().filter(|l| KeyboardLayout::letters(l).is_some()).cloned().collect();
+        let mut langs: Vec<String> = langs.iter().filter(|l| LETTERS.iter().any(|k| k.0 == l.as_str())).cloned().collect();
         if langs.is_empty() {
             langs.push("en".into());
         }
