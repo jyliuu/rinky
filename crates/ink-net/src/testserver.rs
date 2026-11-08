@@ -320,31 +320,9 @@ fn handle_connection(conn: Conn, state: &State) {
     }
 }
 
-fn reason(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        201 => "Created",
-        202 => "Accepted",
-        206 => "Partial Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        303 => "See Other",
-        307 => "Temporary Redirect",
-        308 => "Permanent Redirect",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        402 => "Payment Required",
-        403 => "Forbidden",
-        404 => "Not Found",
-        406 => "Not Acceptable",
-        416 => "Range Not Satisfiable",
-        500 => "Internal Server Error",
-        _ => "Status",
-    }
-}
-
 fn head(w: &mut Conn, status: u16, headers: &[(&str, String)]) -> io::Result<()> {
-    let mut s = format!("HTTP/1.1 {status} {}\r\nConnection: close\r\n", reason(status));
+    let reason = ureq::http::StatusCode::from_u16(status).ok().and_then(|s| s.canonical_reason()).unwrap_or("Status");
+    let mut s = format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\n");
     for (k, v) in headers {
         s.push_str(&format!("{k}: {v}\r\n"));
     }
