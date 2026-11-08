@@ -63,8 +63,6 @@ impl CheckResult {
     }
 }
 
-type Check<'a> = Box<dyn FnOnce() -> Result<String, String> + 'a>;
-
 fn ensure(cond: bool, msg: impl FnOnce() -> String) -> Result<(), String> {
     if cond {
         Ok(())
@@ -80,14 +78,7 @@ fn e2s(e: NetError) -> String {
 impl NetSelftest<'_> {
     /// Runs all checks; `on_result` sees each as it finishes (for live output).
     pub fn run(&self, mut on_result: impl FnMut(&CheckResult)) -> Vec<CheckResult> {
-        let mut out = Vec::new();
-        let mut push = |name: &str, f: Option<Check<'_>>, skip: Option<&str>| {
-            let t = Instant::now();
-            let outcome = f.map(|f| f());
-            let r = CheckResult { name: name.into(), outcome, skipped: skip.map(str::to_string), millis: t.elapsed().as_millis() };
-            on_result(&r);
-            out.push(r);
-        };
+        let mut r = Runner { out: Vec::new(), on_result: &mut on_result };
         let _ = std::fs::create_dir_all(&self.scratch);
         let http = UreqClient::new();
         let base = self.http_base.trim_end_matches('/').to_string();
@@ -95,11 +86,11 @@ impl NetSelftest<'_> {
 
         // Wi-Fi hook.
         match self.wifi {
-            Some(w) => push("net.wifi_hook", Some(Box::new(move || Ok(match w.check() {
+            Some(w) => r.check("net.wifi_hook", move || Ok(match w.check() {
                 Ok(()) => "online (wifid cmState CONNECTED)".to_string(),
                 Err(e) => format!("{e}"),
-            }))), None),
-            None => push("net.wifi_hook", None, Some("no Wi-Fi hook (pass --lipc on the Kindle)")),
+            })),
+            None => r.skip("net.wifi_hook", "no Wi-Fi hook (pass --lipc on the Kindle)"),
         }
 
         // HTTPS.
@@ -107,7 +98,7 @@ impl NetSelftest<'_> {
             (Some(hb), Some(pem)) => {
                 let hb = hb.trim_end_matches('/').to_string();
                 let hb2 = hb.clone();
-                push("net.https.verified", Some(Box::new(move || {
+                r.check("net.https.verified", move || {
                     let c = UreqClient::with_ca_pem(pem).map_err(e2s)?;
                     let resp = c.send(Request::get(format!("{hb}/redirect/2"))).map_err(e2s)?;
                     ensure(resp.status == 200, || format!("status {}", resp.status))?;
@@ -115,40 +106,40 @@ impl NetSelftest<'_> {
                     let body = resp.text(1000).map_err(e2s)?;
                     ensure(body == "redirect done", || format!("body {body:?}"))?;
                     Ok(format!("TLS with the test CA (rustls/ring), 2 redirects to {final_url}"))
-                })), None);
-                push("net.https.unknown_ca_refused", Some(Box::new(move || {
+                });
+                r.check("net.https.unknown_ca_refused", move || {
                     match UreqClient::new().send(Request::get(format!("{hb2}/echo")).timeout(Duration::from_secs(10))) {
                         Err(NetError::Tls(m)) => Ok(format!("webpki roots ({} anchors) refuse the test server: {}", crate::TlsRoots::WebPki.len(), m.chars().take(90).collect::<String>())),
                         Err(other) => Err(format!("expected a TLS error, got {other}")),
                         Ok(r) => Err(format!("expected a TLS error, got status {}", r.status)),
                     }
-                })), None);
+                });
             }
             _ => {
-                push("net.https.verified", None, Some("pass --net-tls URL and --ca PEM"));
-                push("net.https.unknown_ca_refused", None, Some("pass --net-tls URL and --ca PEM"));
+                r.skip("net.https.verified", "pass --net-tls URL and --ca PEM");
+                r.skip("net.https.unknown_ca_refused", "pass --net-tls URL and --ca PEM");
             }
         }
 
         // Plain HTTP: user agent, redirects, timeouts.
         let h = &http;
         let u = url("/echo");
-        push("net.http.user_agent", Some(Box::new(move || {
+        r.check("net.http.user_agent", move || {
             let v: serde_json::Value = h.send(Request::get(&u)).map_err(e2s)?.json(1 << 16).map_err(e2s)?;
             let uas: Vec<String> = v["headers"].as_array().into_iter().flatten().filter(|kv| kv[0] == "user-agent").map(|kv| kv[1].as_str().unwrap_or("").to_string()).collect();
             ensure(uas.len() == 1 && uas[0].starts_with("rinky/"), || format!("user-agent headers {uas:?}"))?;
             Ok(format!("server saw one User-Agent: {}", uas[0]))
-        })), None);
+        });
         let u = url("/redirect/3");
-        push("net.http.redirects", Some(Box::new(move || {
+        r.check("net.http.redirects", move || {
             let r = h.send(Request::get(&u)).map_err(e2s)?;
             ensure(r.status == 200 && r.url.ends_with("/redirect/0"), || format!("status {} url {}", r.status, r.url))?;
             let r = h.send(Request::get(&u).max_redirects(1));
             ensure(matches!(r, Err(NetError::Http(ref m)) if m.contains("too many redirects")), || format!("limit not enforced: {r:?}"))?;
             Ok("3 relative 302s followed; a limit of 1 is enforced".into())
-        })), None);
+        });
         let (u1, u2) = (url("/slow?ms=3000"), url("/stall?ms=3000"));
-        push("net.http.timeouts", Some(Box::new(move || {
+        r.check("net.http.timeouts", move || {
             let t = Instant::now();
             let r = h.send(Request::get(&u1).timeout(Duration::from_millis(700)));
             let head_ms = t.elapsed().as_millis();
@@ -159,20 +150,20 @@ impl NetSelftest<'_> {
             let read_ms = t.elapsed().as_millis();
             ensure(matches!(r, Err(NetError::Timeout)) && read_ms < 2500, || format!("read timeout: {r:?} after {read_ms} ms"))?;
             Ok(format!("head limit fired after {head_ms} ms, stalled body after {read_ms} ms"))
-        })), None);
+        });
 
         // SSE.
         let u = url("/sse");
-        push("net.sse.stream", Some(Box::new(move || {
+        r.check("net.sse.stream", move || {
             let resp = h.send(Request::get(&u)).map_err(e2s)?;
             let evs: Vec<_> = SseReader::new(resp.body).collect::<crate::Result<Vec<_>>>().map_err(e2s)?;
             let data: Vec<&str> = evs.iter().map(|e| e.data.as_str()).collect();
             ensure(data == ["one", "line1\nline2", "{\"text\":\"\u{f8}\"}", "[DONE]"], || format!("events {data:?}"))?;
             ensure(evs[1].event == "multi" && evs[1].id.as_deref() == Some("7") && evs[0].retry == Some(2500), || format!("fields {:?}", evs[1]))?;
             Ok("4 events from 9 chunks (BOM, CR|LF split, UTF-8 split, comment, retry, multi-line data)".into())
-        })), None);
+        });
         let u = url("/sse-reconnect");
-        push("net.sse.reconnect", Some(Box::new(move || {
+        r.check("net.sse.reconnect", move || {
             let mut es = EventSource::new(h, Request::get(&u));
             let mut got = Vec::new();
             es.run(|ev| {
@@ -186,14 +177,14 @@ impl NetSelftest<'_> {
             .map_err(e2s)?;
             ensure(got == ["1", "2", "3", "3"] && es.connections == 2, || format!("ids {got:?}, {} connections", es.connections))?;
             Ok("dropped after id 2, reconnected with Last-Event-ID: 2 after retry 50 ms".into())
-        })), None);
+        });
 
         // Downloads.
         let dir = self.scratch.clone();
         // A fresh query per run: the server breaks the first transfer of each URL once.
         let run_id = format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
         let u = url(&format!("/flaky/300000?run={run_id}"));
-        push("net.download.resume", Some(Box::new(move || {
+        r.check("net.download.resume", move || {
             let dest = dir.join("resume.bin");
             let _ = std::fs::remove_file(&dest);
             let want = sha256_hex(&file_bytes(300_000));
@@ -210,10 +201,10 @@ impl NetSelftest<'_> {
             ensure(on_disk == 300_000, || format!("{} has {on_disk} bytes after the rename", dest.display()))?;
             let _ = std::fs::remove_file(&dest);
             Ok(format!("broken at {have} bytes, resumed with Range, SHA-256 verified, renamed over an older file in {}", dir.display()))
-        })), None);
+        });
         let dir = self.scratch.clone();
         let u = url("/files/1000000");
-        push("net.download.cancel", Some(Box::new(move || {
+        r.check("net.download.cancel", move || {
             let dest = dir.join("cancel.bin");
             let _ = std::fs::remove_file(&dest);
             let dl = Download::new(&u, &dest);
@@ -239,20 +230,20 @@ impl NetSelftest<'_> {
             ensure(out.bytes == 1_000_000 && out.resumed_from == have, || format!("{out:?}"))?;
             let _ = std::fs::remove_file(&dest);
             Ok(format!("cancelled at {have} bytes after {events} progress events; .part kept and resumed"))
-        })), None);
+        });
         let dir = self.scratch.clone();
         let u = url("/files/5000");
-        push("net.download.checksum_mismatch", Some(Box::new(move || {
+        r.check("net.download.checksum_mismatch", move || {
             let dest = dir.join("bad.bin");
             let dl = Download::new(&u, &dest).checksum(Checksum::Sha256("0".repeat(64)));
             match dl.run(h, &mut Hooks::default()) {
                 Err(NetError::Checksum { actual, .. }) if !dest.exists() && !part_path(&dest).exists() => Ok(format!("refused: got {}...; nothing left on disk", &actual[..12])),
                 other => Err(format!("expected a checksum error, got {other:?}")),
             }
-        })), None);
+        });
         let dir = self.scratch.clone();
         let u = url("/files/400000");
-        push("net.download.locked", Some(Box::new(move || {
+        r.check("net.download.locked", move || {
             let dest = dir.join("twice.bin");
             let _ = std::fs::remove_file(&dest);
             let dl = Download::new(&u, &dest);
@@ -293,10 +284,10 @@ impl NetSelftest<'_> {
                 }
             };
             Ok(format!("double start: second run busy, dest is the book (400000 bytes); {flock}; in {}", dir.display()))
-        })), None);
+        });
         let (dir, https, pem) = (self.scratch.clone(), self.https_base.clone(), self.ca_pem.clone());
         let (u_full, u_cut) = (url("/unframed/50000"), url("/unframed/50000?cut=20000"));
-        push("net.download.unframed", Some(Box::new(move || {
+        r.check("net.download.unframed", move || {
             let want = file_bytes(50_000);
             let dest = dir.join("unframed.bin");
             let _ = std::fs::remove_file(&dest);
@@ -324,19 +315,19 @@ impl NetSelftest<'_> {
                 detail.push_str("; HTTPS cut without close_notify: refused");
             }
             Ok(detail)
-        })), None);
+        });
         let u = url("/files/1000");
-        push("net.download.offline_refused", Some(Box::new(move || {
+        r.check("net.download.offline_refused", move || {
             let offline = || crate::connectivity::wifi_rule(true, "PENDING");
             let mut hooks = Hooks { connectivity: Some(&offline), ..Default::default() };
             match Download::new(&u, std::env::temp_dir().join("never.bin")).run(h, &mut hooks) {
                 Err(NetError::Offline(m)) => Ok(format!("simulated cmState PENDING: {m}")),
                 other => Err(format!("expected Offline, got {other:?}")),
             }
-        })), None);
+        });
         let (wifi, keep, dir) = (self.wifi, self.keep_awake, self.scratch.clone());
         let u = url("/files/400000");
-        push("net.download.device_hooks", Some(Box::new(move || {
+        r.check("net.download.device_hooks", move || {
             let activity = NetActivity::new();
             let act2 = activity.clone();
             let mut busy_seen = false;
@@ -360,9 +351,9 @@ impl NetSelftest<'_> {
                 Err(NetError::Offline(m)) if wifi.is_some() => Ok(format!("{hooks_desc}: refused while offline ({m})")),
                 Err(e) => Err(format!("{hooks_desc}: {e}")),
             }
-        })), None);
+        });
         match self.keep_awake {
-            Some(k) => push("net.keep_awake", Some(Box::new(move || {
+            Some(k) => r.check("net.keep_awake", move || {
                 let activity = NetActivity::new();
                 let idle = activity.on_ready_to_suspend(k).map_err(e2s)?;
                 ensure(!idle, || "deferred while idle".into())?;
@@ -372,14 +363,14 @@ impl NetSelftest<'_> {
                     Err(NetError::Unsupported(m)) => Ok(format!("idle: no deferral; busy: hook reached powerd, nothing to defer now ({m})")),
                     Err(e) => Err(e.to_string()),
                 }
-            })), None),
-            None => push("net.keep_awake", None, Some("no keep-awake hook (pass --lipc on the Kindle)")),
+            }),
+            None => r.skip("net.keep_awake", "no keep-awake hook (pass --lipc on the Kindle)"),
         }
 
         // OPDS.
         let dir = self.scratch.clone();
-        let root = url("/opds/root.xml");
-        push("net.opds", Some(Box::new(move || {
+        let (root, opds2) = (url("/opds/root.xml"), url("/opds2/catalog.json"));
+        r.check("net.opds", move || {
             let c = OpdsClient::new(h);
             let feed = c.fetch(&root).map_err(e2s)?;
             ensure(feed.kind() == FeedKind::Navigation && feed.entries.len() == 2, || format!("root {feed:?}"))?;
@@ -399,14 +390,14 @@ impl NetSelftest<'_> {
             let listed: Vec<String> = std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
             ensure(listed.contains(&name), || format!("'{name}' not in the listing {listed:?}"))?;
             let _ = std::fs::remove_file(&out.path);
-            let f2 = c.fetch(&url_join(&root, "/opds2/catalog.json")).map_err(e2s)?;
+            let f2 = c.fetch(&opds2).map_err(e2s)?;
             ensure(f2.version == OpdsVersion::Json2 && f2.entries.len() == 3, || format!("opds2 {f2:?}"))?;
             Ok(format!("navigation -> 2 acquisition pages (4 books) -> OpenSearch 'moby dick' (2 hits) -> downloaded '{name}' ({size} bytes, SHA-256 ok, name listed back intact); OPDS 2 feed with {} entries", f2.entries.len()))
-        })), None);
+        });
 
         // KOSync.
         let server = url("/kosync");
-        push("net.kosync", Some(Box::new(move || {
+        r.check("net.kosync", move || {
             let user = format!("selftest{}", std::process::id());
             let c = KoSyncClient::new(h, KoSyncAccount::new(&server, &user, "selftest-password"));
             c.register().map_err(e2s)?;
@@ -428,16 +419,32 @@ impl NetSelftest<'_> {
             let bad = KoSyncClient::new(h, KoSyncAccount::new(&server, &user, "wrong"));
             ensure(matches!(bad.authorize(), Err(NetError::Unauthorized(_))), || "wrong password accepted".into())?;
             Ok(format!("register/auth/push/pull as {user}: {} at {}; wrong password -> 401", got.progress, got.percentage))
-        })), None);
+        });
         let _ = std::fs::remove_dir(&self.scratch);
-        out
+        r.out
     }
 }
 
-fn url_join(any_url_on_server: &str, path: &str) -> String {
-    match crate::url::origin(any_url_on_server) {
-        Some(_) => crate::url::resolve(any_url_on_server, path),
-        None => path.to_string(),
+/// Runs checks, collects their results and shows each as it finishes.
+struct Runner<'f> {
+    out: Vec<CheckResult>,
+    on_result: &'f mut dyn FnMut(&CheckResult),
+}
+
+impl Runner<'_> {
+    fn check(&mut self, name: &str, f: impl FnOnce() -> Result<String, String>) {
+        let t = Instant::now();
+        let outcome = Some(f());
+        self.record(CheckResult { name: name.into(), outcome, skipped: None, millis: t.elapsed().as_millis() });
+    }
+
+    fn skip(&mut self, name: &str, why: &str) {
+        self.record(CheckResult { name: name.into(), outcome: None, skipped: Some(why.into()), millis: 0 });
+    }
+
+    fn record(&mut self, r: CheckResult) {
+        (self.on_result)(&r);
+        self.out.push(r);
     }
 }
 

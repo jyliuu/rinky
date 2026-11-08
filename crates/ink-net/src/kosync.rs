@@ -225,17 +225,17 @@ impl<'a> KoSyncClient<'a> {
         let status = resp.status;
         let mime = resp.mime();
         let text = resp.text(1 << 20)?;
-        let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-        if ok.contains(&status) {
-            // A hotel or train Wi-Fi login page answers 200 to everything. A sync server
-            // never sends HTML; counting it as success would drop queued pushes.
-            if mime == "text/html" || text.trim_start().starts_with('<') {
-                return Err(NetError::Format(format!("status {status} with an HTML page, not a sync server answer (captive portal?)")));
-            }
-            return Ok(body);
+        // A hotel or train Wi-Fi login page answers 200 (or 401) to everything. A sync
+        // server never sends HTML: counting the page as success, or as the server
+        // refusing the account, would drop queued pushes.
+        let html = mime == "text/html" || text.trim_start().starts_with('<');
+        if html && (status == 401 || ok.contains(&status)) {
+            return Err(NetError::Format(format!("status {status} with an HTML page, not a sync server answer (captive portal?)")));
         }
-        let message = body.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| text.trim().chars().take(200).collect());
-        Err(if status == 401 { NetError::Unauthorized(message) } else { NetError::Server { status, message } })
+        if ok.contains(&status) {
+            return Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null));
+        }
+        Err(crate::http::status_error(status, &text))
     }
 
     /// Creates the account (`POST /users/create`). A taken name is
@@ -312,9 +312,8 @@ impl SyncQueue {
         let day = now / 86400;
         self.items.retain(|q| now.saturating_sub(q.queued_at) < QUEUE_MAX_AGE_S && !(q.progress.document == progress.document && q.queued_at / 86400 == day));
         self.items.push(QueuedProgress { progress, queued_at: now });
-        while self.items.len() > QUEUE_MAX {
-            self.items.remove(0);
-        }
+        let excess = self.items.len().saturating_sub(QUEUE_MAX);
+        self.items.drain(..excess);
     }
 
     /// Sends queued pushes in order until one fails; returns how many were sent. A 401
@@ -469,12 +468,8 @@ mod tests {
         assert!(matches!(bad.push(&p), Err(NetError::Unauthorized(_))));
         assert!(matches!(bad.pull(doc), Err(NetError::Unauthorized(_))));
         // The server root works too (no prefix).
-        let root = KoSyncClient::new(&http, account_at(&s.base(), "reader", "s3cret"));
+        let root = KoSyncClient::new(&http, KoSyncAccount::new(&s.base(), "reader", "s3cret"));
         root.authorize().unwrap();
-    }
-
-    fn account_at(server: &str, user: &str, pass: &str) -> KoSyncAccount {
-        KoSyncAccount::new(server, user, pass)
     }
 
     /// Answers every request with a captive-portal login page.

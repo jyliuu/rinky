@@ -217,11 +217,20 @@ pub struct PluginInfo {
     pub errors: u32,
 }
 
+/// One loaded plugin and its bookkeeping.
+struct Slot {
+    plugin: Box<dyn Plugin>,
+    /// A copy of the plugin's manifest (manifests never change after loading), so a
+    /// broadcast can hand it to the context builder while the plugin is borrowed
+    /// mutably, without cloning it on every page turn.
+    manifest: PluginManifest,
+    enabled: bool,
+    errors: u32,
+}
+
 /// Holds the plugins and the registry.
 pub struct PluginManager {
-    plugins: Vec<Box<dyn Plugin>>,
-    disabled: Vec<bool>,
-    error_counts: Vec<u32>,
+    slots: Vec<Slot>,
     /// Everything registered by enabled plugins.
     pub registry: Registry,
     /// `(plugin, error)` for every failed call (and every disabling), oldest first.
@@ -232,7 +241,7 @@ pub struct PluginManager {
 
 impl Default for PluginManager {
     fn default() -> Self {
-        PluginManager { plugins: Vec::new(), disabled: Vec::new(), error_counts: Vec::new(), registry: Registry::default(), errors: Vec::new(), max_errors: 5 }
+        PluginManager { slots: Vec::new(), registry: Registry::default(), errors: Vec::new(), max_errors: 5 }
     }
 }
 
@@ -247,23 +256,18 @@ impl PluginManager {
     /// refused (recorded in [`PluginManager::errors`]).
     pub fn load(&mut self, plugins: Vec<Box<dyn Plugin>>) {
         for mut p in plugins {
-            let name = p.manifest().name.clone();
-            if self.index(&name).is_some() {
-                self.errors.push((name.clone(), format!("a plugin named {name} is already loaded; this {} plugin is skipped", p.kind())));
-                continue;
-            }
-            let mut reg = Registrar { plugin: &name, registry: &mut self.registry };
+            let Some(manifest) = self.admit(p.as_ref()) else { continue };
+            let name = &manifest.name;
+            let mut reg = Registrar { plugin: name, registry: &mut self.registry };
             let ok = match p.on_load(&mut reg) {
                 Ok(()) => true,
                 Err(e) => {
                     self.errors.push((name.clone(), format!("on_load: {e}")));
-                    self.registry.remove_plugin(&name);
+                    self.registry.remove_plugin(name);
                     false
                 }
             };
-            self.plugins.push(p);
-            self.disabled.push(!ok);
-            self.error_counts.push(u32::from(!ok));
+            self.slots.push(Slot { plugin: p, manifest, enabled: ok, errors: u32::from(!ok) });
         }
     }
 
@@ -272,15 +276,22 @@ impl PluginManager {
     /// loaded is refused as in [`PluginManager::load`].
     pub fn load_disabled(&mut self, plugins: Vec<Box<dyn Plugin>>) {
         for p in plugins {
-            let name = p.manifest().name.clone();
-            if self.index(&name).is_some() {
-                self.errors.push((name.clone(), format!("a plugin named {name} is already loaded; this {} plugin is skipped", p.kind())));
-                continue;
+            if let Some(manifest) = self.admit(p.as_ref()) {
+                self.slots.push(Slot { plugin: p, manifest, enabled: false, errors: 0 });
             }
-            self.plugins.push(p);
-            self.disabled.push(true);
-            self.error_counts.push(0);
         }
+    }
+
+    /// The manifest of a plugin about to be added, or `None` (and an error) when a
+    /// plugin of that name is already loaded.
+    fn admit(&mut self, p: &dyn Plugin) -> Option<PluginManifest> {
+        let manifest = p.manifest().clone();
+        if self.index(&manifest.name).is_some() {
+            let name = manifest.name;
+            self.errors.push((name.clone(), format!("a plugin named {name} is already loaded; this {} plugin is skipped", p.kind())));
+            return None;
+        }
+        Some(manifest)
     }
 
     /// Records a plugin that could not even be built (bad manifest, Lua syntax error).
@@ -289,57 +300,53 @@ impl PluginManager {
     }
 
     fn index(&self, name: &str) -> Option<usize> {
-        self.plugins.iter().position(|p| p.manifest().name == name)
+        self.slots.iter().position(|s| s.manifest.name == name)
+    }
+
+    /// The slot of `name` when it is loaded and enabled.
+    fn enabled(&self, name: &str) -> Option<&Slot> {
+        self.slots.iter().find(|s| s.manifest.name == name && s.enabled)
     }
 
     /// Names of the loaded plugins and whether each is enabled.
     pub fn list(&self) -> Vec<(String, bool)> {
-        self.plugins.iter().zip(&self.disabled).map(|(p, d)| (p.manifest().name.clone(), !d)).collect()
+        self.slots.iter().map(|s| (s.manifest.name.clone(), s.enabled)).collect()
     }
 
     /// Details of every loaded plugin.
     pub fn info(&self) -> Vec<PluginInfo> {
-        (0..self.plugins.len())
-            .map(|i| PluginInfo {
-                manifest: self.plugins[i].manifest().clone(),
-                kind: self.plugins[i].kind(),
-                enabled: !self.disabled[i],
-                errors: self.error_counts[i],
-            })
-            .collect()
+        self.slots.iter().map(|s| PluginInfo { manifest: s.manifest.clone(), kind: s.plugin.kind(), enabled: s.enabled, errors: s.errors }).collect()
     }
 
     /// The manifest of `plugin`.
     pub fn manifest(&self, plugin: &str) -> Option<&PluginManifest> {
-        self.index(plugin).map(|i| self.plugins[i].manifest())
+        self.index(plugin).map(|i| &self.slots[i].manifest)
     }
 
     /// True when `plugin` is loaded and enabled.
     pub fn is_enabled(&self, plugin: &str) -> bool {
-        self.index(plugin).is_some_and(|i| !self.disabled[i])
+        self.enabled(plugin).is_some()
     }
 
     /// Disables `plugin` and removes its registrations; `reason` goes to the error list.
     pub fn disable(&mut self, plugin: &str, reason: &str) {
-        if let Some(i) = self.index(plugin) {
-            if !self.disabled[i] {
-                self.disabled[i] = true;
-                self.registry.remove_plugin(plugin);
-                self.errors.push((plugin.to_string(), format!("disabled: {reason}")));
-            }
+        if let Some(s) = self.slots.iter_mut().find(|s| s.manifest.name == plugin && s.enabled) {
+            s.enabled = false;
+            self.registry.remove_plugin(plugin);
+            self.errors.push((plugin.to_string(), format!("disabled: {reason}")));
         }
     }
 
     /// Records the outcome of a call of plugin `i`; disables it when needed.
     fn record(&mut self, i: usize, what: &str, r: &Result<()>, page_turn: bool) {
         let Err(e) = r else { return };
-        let name = self.plugins[i].manifest().name.clone();
-        self.error_counts[i] += 1;
+        let slot = &mut self.slots[i];
+        slot.errors += 1;
+        let (name, n) = (slot.manifest.name.clone(), slot.errors);
         self.errors.push((name.clone(), format!("{what}: {e}")));
         if page_turn && matches!(e, PluginError::Limit(_)) {
             self.disable(&name, "too slow on a page turn");
-        } else if self.error_counts[i] >= self.max_errors {
-            let n = self.error_counts[i];
+        } else if n >= self.max_errors {
             self.disable(&name, &format!("{n} errors"));
         }
     }
@@ -348,14 +355,13 @@ impl PluginManager {
     /// for a plugin's manifest and runs the call inside it; errors are recorded, never
     /// propagated.
     pub fn broadcast(&mut self, ev: &Lifecycle, mut with_ctx: impl FnMut(&PluginManifest, &mut dyn FnMut(&mut HostCtx) -> Result<()>)) {
-        for i in 0..self.plugins.len() {
-            if self.disabled[i] {
+        for i in 0..self.slots.len() {
+            let Slot { plugin: p, manifest, enabled, .. } = &mut self.slots[i];
+            if !*enabled {
                 continue;
             }
-            let manifest = self.plugins[i].manifest().clone();
             let mut outcome = Ok(());
-            let p = &mut self.plugins[i];
-            with_ctx(&manifest, &mut |cx| {
+            with_ctx(manifest, &mut |cx| {
                 outcome = match ev {
                     Lifecycle::BookOpen => p.on_book_open(cx),
                     Lifecycle::PageChange(n) => p.on_page_change(cx, *n),
@@ -373,10 +379,10 @@ impl PluginManager {
 
     fn call(&mut self, plugin: &str, what: &str, f: impl FnOnce(&mut dyn Plugin) -> Result<()>) -> Result<()> {
         let i = self.index(plugin).ok_or_else(|| PluginError::Unsupported(format!("no plugin {plugin}")))?;
-        if self.disabled[i] {
+        if !self.slots[i].enabled {
             return Err(PluginError::Unsupported(format!("plugin {plugin} is disabled")));
         }
-        let r = f(self.plugins[i].as_mut());
+        let r = f(self.slots[i].plugin.as_mut());
         self.record(i, what, &r, false);
         r
     }
@@ -393,9 +399,10 @@ impl PluginManager {
 
     /// Enabled plugins that want ticks now, with their interval ([`Plugin::tick_interval`]).
     pub fn tick_intervals(&self) -> Vec<(String, std::time::Duration)> {
-        (0..self.plugins.len())
-            .filter(|&i| !self.disabled[i])
-            .filter_map(|i| self.plugins[i].tick_interval().map(|d| (self.plugins[i].manifest().name.clone(), d.max(std::time::Duration::from_millis(100)))))
+        self.slots
+            .iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| s.plugin.tick_interval().map(|d| (s.manifest.name.clone(), d.max(std::time::Duration::from_millis(100)))))
             .collect()
     }
 
@@ -408,9 +415,9 @@ impl PluginManager {
     /// ([`Plugin::tile_state`]) or else the registered text. `None` when the plugin is
     /// disabled or has no such tile.
     pub fn tile_state(&self, plugin: &str, id: &str) -> Option<TileState> {
-        let i = self.index(plugin).filter(|&i| !self.disabled[i])?;
+        let slot = self.enabled(plugin)?;
         let tile = self.registry.control_tiles.iter().find(|t| t.plugin == plugin && t.id == id)?;
-        self.plugins[i].tile_state(id).or_else(|| Some(TileState { text: tile.state.clone(), on: None }))
+        slot.plugin.tile_state(id).or_else(|| Some(TileState { text: tile.state.clone(), on: None }))
     }
 
     /// Delivers the answer to UI request `id` of `plugin`.

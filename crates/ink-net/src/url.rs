@@ -198,12 +198,13 @@ pub fn same_origin(a: &str, b: &str) -> bool {
 /// Percent-encodes everything except the RFC 3986 unreserved characters
 /// (`A-Z a-z 0-9 - . _ ~`). Spaces become `%20`.
 pub fn encode_component(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            out.extend(['%', HEX[usize::from(b >> 4)] as char, HEX[usize::from(b & 15)] as char]);
         }
     }
     out

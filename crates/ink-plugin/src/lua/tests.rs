@@ -115,6 +115,13 @@ fn plugin_in(dir: &Path, src: &str, perms: &[Permission]) -> (LuaPlugin, Registr
     (p, registry)
 }
 
+/// A plugin with manifest `m`, loaded (registrations dropped).
+fn loaded(m: &PluginManifest, dir: &Path, src: &str) -> LuaPlugin {
+    let mut p = LuaPlugin::from_source(m.clone(), dir, src).unwrap();
+    p.on_load(&mut Registrar { plugin: "t", registry: &mut Registry::default() }).unwrap();
+    p
+}
+
 const ALL: [Permission; 4] = [Permission::Document, Permission::Ui, Permission::Storage, Permission::Network];
 
 #[test]
@@ -194,10 +201,6 @@ fn load_plugin_checks_folder() {
     let names: Vec<&str> = errors.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, vec!["Bad Name", "other"]);
     assert!(load_dir(&root.join("none")).0.is_empty());
-}
-
-fn r_tiles(mgr: &PluginManager) -> usize {
-    mgr.registry.control_tiles.len()
 }
 
 const FULL: &str = r##"
@@ -310,7 +313,7 @@ fn full_plugin_through_the_manager() {
     env.with(&m, |cx| mgr.action("t", "sel", cx)).unwrap();
     env.with(&m, |cx| mgr.library_action("t", "lib", Path::new("/mnt/us/Books/x.epub"), cx)).unwrap();
     assert_eq!(env.ui.0.last(), Some(&UiRequest::Toast { text: "lib /mnt/us/Books/x.epub".into() }));
-    assert_eq!((r_tiles(&mgr), mgr.registry.library_entries[0].icon.as_str()), (1, "chart"));
+    assert_eq!((mgr.registry.control_tiles.len(), mgr.registry.library_entries[0].icon.as_str()), (1, "chart"));
     env.ui.0.clear();
     env.with(&m, |cx| mgr.action("t", "tile", cx)).unwrap();
     assert_eq!(env.ui.0, vec![UiRequest::TileState { id: "tile".into(), text: "tapped".into() }]);
@@ -352,8 +355,7 @@ fn errors_limits_and_permissions() {
     // Endless page-turn hook: page-turn limit (500 ms default; 50 ms here).
     let mut m2 = manifest(&ALL);
     m2.time_limit_ms = Some(50);
-    let mut p = LuaPlugin::from_source(m2.clone(), &dir, "return { on_page_change = function() while true do end end }").unwrap();
-    p.on_load(&mut Registrar { plugin: "t", registry: &mut Registry::default() }).unwrap();
+    let mut p = loaded(&m2, &dir, "return { on_page_change = function() while true do end end }");
     let t = Instant::now();
     let err = env.with(&m2, |cx| p.on_page_change(cx, 0)).unwrap_err();
     assert!(matches!(err, PluginError::Limit(_)), "{err}");
@@ -460,6 +462,21 @@ fn files_io_require_and_json() {
 }
 
 #[test]
+fn json_of_nested_arrays_is_linear() {
+    // Each level of arrays used to be converted twice (as an object, then as an array),
+    // so a tree of depth 14 took 37 s on the host (release) inside one host call, where
+    // the Lua time limit does not count.
+    let h = LuaHost::new().unwrap();
+    let tree: Value = h.lua().load("local function t(d) if d == 0 then return 1 end return { t(d - 1), t(d - 1) } end return t(14)").eval().unwrap();
+    let t = Instant::now();
+    let j = lua_to_json(&tree).unwrap();
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert_eq!(j[1][0][1][0][1][0][1][0][1][0][1][0][1][0], 1);
+    let mixed: Value = h.lua().load("return { 1, 2, x = { 3 }, [1.5] = true }").eval().unwrap();
+    assert_eq!(lua_to_json(&mixed).unwrap(), serde_json::json!({ "1": 1, "2": 2, "x": [3], "1.5": true }));
+}
+
+#[test]
 fn http_streaming_through_on_http() {
     let dir = tmpdir("http");
     let src = r#"
@@ -481,8 +498,7 @@ fn http_streaming_through_on_http() {
       end }"#;
     let mut m = manifest(&ALL);
     m.hosts = vec!["x.org".into()];
-    let mut p = LuaPlugin::from_source(m.clone(), &dir, src).unwrap();
-    p.on_load(&mut Registrar { plugin: "t", registry: &mut Registry::default() }).unwrap();
+    let mut p = loaded(&m, &dir, src);
     let mut env = Env::new(&dir);
     let err = env.with(&m, |cx| p.on_action(cx, "deny")).unwrap_err();
     assert!(err.to_string().contains("not in hosts"), "{err}");
@@ -517,8 +533,7 @@ fn host_calls_and_host_memory_are_bounded() {
         if id == "big" then ink.ui.view({ title = "t", markdown = string.rep("z", 5 * 1024 * 1024) }) end
         if id == "fine" then for i = 1, 50 do ink.ui.status("w", "x") end ink.ui.toast(string.rep("a", 3000)) end
       end }"#;
-    let mut p = LuaPlugin::from_source(m.clone(), &dir, src).unwrap();
-    p.on_load(&mut Registrar { plugin: "t", registry: &mut Registry::default() }).unwrap();
+    let mut p = loaded(&m, &dir, src);
     env.doc.slow = true;
     for id in ["search", "psearch"] {
         let t = Instant::now();
@@ -530,8 +545,7 @@ fn host_calls_and_host_memory_are_bounded() {
     env.doc.slow = false;
     // The caps, with time to reach them (slow emulated ARM included).
     m.time_limit_ms = Some(5000);
-    let mut p = LuaPlugin::from_source(m.clone(), &dir, src).unwrap();
-    p.on_load(&mut Registrar { plugin: "t", registry: &mut Registry::default() }).unwrap();
+    let mut p = loaded(&m, &dir, src);
     for (id, want) in [("toasts", "too many UI requests"), ("logs", "too many log lines"), ("stores", "too many settings and book writes"), ("big", "larger than")] {
         env.ui.0.clear();
         let err = env.with(&m, |cx| p.on_action(cx, id)).unwrap_err().to_string();

@@ -216,7 +216,9 @@ impl Drop for TestServer {
     }
 }
 
-fn server_tls_config() -> io::Result<Arc<rustls::ServerConfig>> {
+/// The rustls server configuration with the TEST-ONLY certificate (for raw servers in
+/// tests that play misbehaving HTTPS peers).
+pub fn server_tls_config() -> io::Result<Arc<rustls::ServerConfig>> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
     let mut certs = Vec::new();

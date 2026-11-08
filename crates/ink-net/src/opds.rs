@@ -8,11 +8,13 @@
 //! against the URL the feed was fetched from (after redirects). `data:` URIs pass through.
 
 use crate::download::{extension_for_mime, sanitize_filename, Download};
-use crate::http::{HttpClient, Request};
+use crate::http::{basic_auth_value, HttpClient, Request};
 use crate::url::{encode_component, resolve};
 use crate::{NetError, Result};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Prefix of every acquisition relation.
@@ -229,29 +231,33 @@ impl OpdsFeed {
         self.links.iter().find(|l| l.rel == rel)
     }
 
+    fn href(&self, rel: &str) -> Option<&str> {
+        self.link(rel).map(|l| l.href.as_str())
+    }
+
     /// Next page.
     pub fn next_url(&self) -> Option<&str> {
-        self.link("next").map(|l| l.href.as_str())
+        self.href("next")
     }
 
     /// Previous page (`previous` or `prev`).
     pub fn prev_url(&self) -> Option<&str> {
-        self.link("previous").or_else(|| self.link("prev")).map(|l| l.href.as_str())
+        self.href("previous").or_else(|| self.href("prev"))
     }
 
     /// First page.
     pub fn first_url(&self) -> Option<&str> {
-        self.link("first").map(|l| l.href.as_str())
+        self.href("first")
     }
 
     /// Last page.
     pub fn last_url(&self) -> Option<&str> {
-        self.link("last").map(|l| l.href.as_str())
+        self.href("last")
     }
 
     /// Catalog root.
     pub fn start_url(&self) -> Option<&str> {
-        self.link("start").map(|l| l.href.as_str())
+        self.href("start")
     }
 
     /// Navigation or acquisition.
@@ -374,7 +380,8 @@ fn named_entity(name: &str) -> Option<&'static str> {
 }
 
 fn is_block(tag: &str) -> bool {
-    matches!(tag.to_ascii_lowercase().as_str(), "p" | "div" | "br" | "li" | "ul" | "ol" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "tr" | "blockquote" | "pre" | "dt" | "dd" | "hr" | "table")
+    const BLOCKS: &[&str] = &["p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "blockquote", "pre", "dt", "dd", "hr", "table"];
+    BLOCKS.iter().any(|b| b.eq_ignore_ascii_case(tag))
 }
 
 /// Normalizes whitespace per line and drops empty lines.
@@ -416,29 +423,64 @@ fn one_line(s: &str) -> String {
 // ---------------------------------------------------------------------------------------
 // Atom parser.
 
-fn local(name: &[u8]) -> String {
+fn local(name: &[u8]) -> Cow<'_, str> {
     let n = match name.iter().position(|&b| b == b':') {
         Some(i) => &name[i + 1..],
         None => name,
     };
-    String::from_utf8_lossy(n).into_owned()
+    String::from_utf8_lossy(n)
 }
 
-fn attrs(e: &BytesStart<'_>) -> Vec<(String, String, String)> {
-    // (full name, local name, value)
-    e.attributes()
-        .with_checks(false)
-        .flatten()
-        .map(|a| {
-            let full = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-            let value = decode_entities(&String::from_utf8_lossy(&a.value));
-            (full.clone(), local(full.as_bytes()), value)
-        })
-        .collect()
+/// The open elements of the lenient parse. End tags need the innermost open element of
+/// their name; scanning the stack for it made a feed of unmatched end tags quadratic, so
+/// each name keeps the depths where it is open.
+#[derive(Default)]
+struct OpenElements {
+    /// Name ids, outermost first.
+    stack: Vec<usize>,
+    ids: HashMap<String, usize>,
+    /// Per name id: the stack indices where it is open, innermost last.
+    open_at: Vec<Vec<usize>>,
 }
 
-fn attr<'a>(list: &'a [(String, String, String)], local_name: &str) -> Option<&'a str> {
-    list.iter().find(|(_, l, _)| l == local_name).map(|(_, _, v)| v.as_str())
+impl OpenElements {
+    fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn push(&mut self, name: &str) {
+        let id = match self.ids.get(name) {
+            Some(&id) => id,
+            None => {
+                self.ids.insert(name.to_string(), self.open_at.len());
+                self.open_at.push(Vec::new());
+                self.open_at.len() - 1
+            }
+        };
+        self.open_at[id].push(self.stack.len());
+        self.stack.push(id);
+    }
+
+    /// Stack index of the innermost open element named `name`.
+    fn innermost(&self, name: &str) -> Option<usize> {
+        self.ids.get(name).and_then(|&id| self.open_at[id].last().copied())
+    }
+
+    /// Closes the element at stack index `p` and everything inside it.
+    fn truncate(&mut self, p: usize) {
+        for id in self.stack.drain(p.min(self.stack.len())..) {
+            self.open_at[id].pop();
+        }
+    }
+}
+
+/// `(local name, value)` of every attribute.
+fn attrs(e: &BytesStart<'_>) -> Vec<(String, String)> {
+    e.attributes().with_checks(false).flatten().map(|a| (local(a.key.as_ref()).into_owned(), decode_entities(&String::from_utf8_lossy(&a.value)))).collect()
+}
+
+fn attr<'a>(list: &'a [(String, String)], local_name: &str) -> Option<&'a str> {
+    list.iter().find(|(l, _)| l == local_name).map(|(_, v)| v.as_str())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -455,6 +497,14 @@ struct Capture {
     buf: String,
 }
 
+/// The link element that is open (see `parse_feed`).
+fn open_link<'a>(link: Option<(bool, usize)>, entry: &'a mut Option<OpdsEntry>, feed: &'a mut OpdsFeed) -> Option<&'a mut OpdsLink> {
+    match link? {
+        (true, _) => entry.as_mut()?.links.last_mut(),
+        (false, _) => feed.links.last_mut(),
+    }
+}
+
 /// Parses an OPDS Atom feed (or a single `<entry>` document) fetched from `base_url`.
 pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
     let mut reader = Reader::from_str(xml);
@@ -466,20 +516,21 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
         c.expand_empty_elements = true;
     }
     let mut feed = OpdsFeed { version: OpdsVersion::Atom1, ..Default::default() };
-    let mut path: Vec<String> = Vec::new();
+    let mut path = OpenElements::default();
     let mut entry: Option<OpdsEntry> = None;
     let mut entry_depth = 0usize;
     let mut cap: Option<Capture> = None;
     let mut root: Option<String> = None;
     let mut author_depth: Option<usize> = None;
-    // (index into entry.links or feed.links, in entry?, depth)
-    let mut link: Option<(usize, bool, usize)> = None;
+    // The open <link>: (in the entry?, depth). It is the last link of the entry or feed.
+    let mut link: Option<(bool, usize)> = None;
     loop {
         let ev = reader.read_event().map_err(|e| NetError::Format(format!("xml at byte {}: {e}", reader.buffer_position())))?;
         match ev {
             Event::Start(e) => {
-                let name = local(e.name().as_ref());
-                path.push(name.clone());
+                let qname = e.name();
+                let name = local(qname.as_ref());
+                path.push(&name);
                 let depth = path.len();
                 if let Some(c) = cap.as_mut() {
                     if c.mode == Mode::Xhtml && is_block(&name) {
@@ -488,13 +539,13 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                     continue;
                 }
                 if root.is_none() {
-                    root = Some(name.clone());
+                    root = Some(name.to_string());
                     if name != "feed" && name != "entry" {
                         return Err(NetError::Format(format!("not an Atom feed (root <{name}>)")));
                     }
                 }
                 let a = attrs(&e);
-                match name.as_str() {
+                match &*name {
                     "entry" if entry.is_none() => {
                         entry = Some(OpdsEntry::default());
                         entry_depth = depth;
@@ -513,22 +564,14 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                             ..Default::default()
                         };
                         match entry.as_mut() {
-                            Some(en) => {
-                                en.links.push(l);
-                                link = Some((en.links.len() - 1, true, depth));
-                            }
-                            None => {
-                                feed.links.push(l);
-                                link = Some((feed.links.len() - 1, false, depth));
-                            }
+                            Some(en) => en.links.push(l),
+                            None => feed.links.push(l),
                         }
+                        link = Some((entry.is_some(), depth));
                     }
                     "indirectAcquisition" => {
-                        if let (Some((i, in_entry, _)), Some(t)) = (link, attr(&a, "type")) {
-                            let target = if in_entry { entry.as_mut().and_then(|en| en.links.get_mut(i)) } else { feed.links.get_mut(i) };
-                            if let Some(l) = target {
-                                l.indirect.push(t.to_string());
-                            }
+                        if let (Some(l), Some(t)) = (open_link(link, &mut entry, &mut feed), attr(&a, "type")) {
+                            l.indirect.push(t.to_string());
                         }
                     }
                     "price" => {
@@ -551,10 +594,10 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                         } else {
                             Mode::Text
                         };
-                        cap = Some(Capture { depth, name, mode, buf: String::new() });
+                        cap = Some(Capture { depth, name: name.into_owned(), mode, buf: String::new() });
                     }
                     "title" | "id" | "updated" | "published" | "issued" | "language" | "publisher" | "subtitle" | "icon" | "name" | "totalResults" | "itemsPerPage" | "startIndex" => {
-                        cap = Some(Capture { depth, name, mode: Mode::Text, buf: String::new() });
+                        cap = Some(Capture { depth, name: name.into_owned(), mode: Mode::Text, buf: String::new() });
                     }
                     _ => {}
                 }
@@ -576,9 +619,10 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                 }
             }
             Event::End(e) => {
-                let name = local(e.name().as_ref());
+                let qname = e.name();
+                let name = local(qname.as_ref());
                 // Pop to the matching open element (tolerates unclosed children).
-                let pos = path.iter().rposition(|p| *p == name);
+                let pos = path.innermost(&name);
                 if let Some(c) = cap.as_mut() {
                     match pos {
                         // An end tag that matches no open element: ignored.
@@ -605,12 +649,8 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                         Mode::Xhtml => tidy_lines(&c.buf),
                     };
                     if let Some(cur) = c.name.strip_prefix("price ") {
-                        if let Some((i, in_entry, _)) = link {
-                            let v = format!("{} {}", one_line(&text), cur.trim()).trim().to_string();
-                            let l = if in_entry { entry.as_mut().and_then(|en| en.links.get_mut(i)) } else { feed.links.get_mut(i) };
-                            if let Some(l) = l {
-                                l.price = Some(v);
-                            }
+                        if let Some(l) = open_link(link, &mut entry, &mut feed) {
+                            l.price = Some(format!("{} {}", one_line(&text), cur.trim()).trim().to_string());
                         }
                     } else if let Some(en) = entry.as_mut() {
                         match c.name.as_str() {
@@ -650,7 +690,7 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
                     if author_depth.is_some_and(|d| d >= closing_depth) {
                         author_depth = None;
                     }
-                    if link.is_some_and(|(_, _, d)| d >= closing_depth) {
+                    if link.is_some_and(|(_, d)| d >= closing_depth) {
                         link = None;
                     }
                     if entry.is_some() && entry_depth >= closing_depth {
@@ -707,12 +747,16 @@ fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
     };
     let props = v.get("properties");
     let mut indirect = Vec::new();
-    let mut ia = props.and_then(|p| p.get("indirectAcquisition")).and_then(|x| x.as_array()).and_then(|a| a.first()).cloned();
+    // Nested acquisitions, outermost first: the first of each level's array.
+    fn first(x: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
+        x?.as_array()?.first()
+    }
+    let mut ia = first(props.and_then(|p| p.get("indirectAcquisition")));
     while let Some(i) = ia {
         if let Some(t) = i.get("type").and_then(|t| t.as_str()) {
             indirect.push(t.to_string());
         }
-        ia = i.get("child").and_then(|c| c.as_array()).and_then(|a| a.first()).cloned();
+        ia = first(i.get("child"));
     }
     let price = props.and_then(|p| p.get("price")).map(|p| format!("{} {}", p.get("value").map(|v| v.to_string()).unwrap_or_default(), p.get("currency").and_then(|c| c.as_str()).unwrap_or("")).trim().to_string());
     Some(OpdsLink {
@@ -733,7 +777,7 @@ fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
 }
 
 fn json_publication(p: &serde_json::Value, base: &str) -> OpdsEntry {
-    let md = p.get("metadata").cloned().unwrap_or_default();
+    let md = p.get("metadata").unwrap_or(&serde_json::Value::Null);
     let mut e = OpdsEntry {
         id: md.get("identifier").and_then(json_str).unwrap_or_default(),
         title: md.get("title").and_then(json_str).map(|t| one_line(&t)).unwrap_or_default(),
@@ -791,7 +835,7 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
     if !v.is_object() {
         return Err(NetError::Format("opds2: not a JSON object".into()));
     }
-    let md = v.get("metadata").cloned().unwrap_or_default();
+    let md = v.get("metadata").unwrap_or(&serde_json::Value::Null);
     let mut feed = OpdsFeed {
         id: md.get("identifier").and_then(json_str).unwrap_or_default(),
         title: md.get("title").and_then(json_str).unwrap_or_default(),
@@ -883,7 +927,8 @@ pub fn parse_opensearch(xml: &str, base_url: &str) -> Result<Vec<OpenSearchUrl>>
     loop {
         match reader.read_event().map_err(|e| NetError::Format(format!("opensearch xml: {e}")))? {
             Event::Start(e) | Event::Empty(e) => {
-                let name = local(e.name().as_ref());
+                let qname = e.name();
+                let name = local(qname.as_ref());
                 if name == "OpenSearchDescription" {
                     root_ok = true;
                 }
@@ -1057,14 +1102,11 @@ impl<'a> OpdsClient<'a> {
         let base = if entry.title.trim().is_empty() { crate::url::last_segment(&link.href) } else { entry.title.clone() };
         let name = sanitize_filename(&format!("{}{ext}", base.trim()));
         // The catalog's size confirms a body the server sends without a length.
-        let mut d = Download::new(&link.href, dir.join(name)).expected_len(link.length);
-        if let Some((u, p)) = &self.auth {
-            let r = Request::get("").basic_auth(u, p);
-            if let Some(v) = r.header_value("authorization") {
-                d = d.header("Authorization", v);
-            }
+        let d = Download::new(&link.href, dir.join(name)).expected_len(link.length);
+        match &self.auth {
+            Some((u, p)) => d.header("Authorization", &basic_auth_value(u, p)),
+            None => d,
         }
-        d
     }
 }
 

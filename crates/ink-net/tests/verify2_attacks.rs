@@ -2,12 +2,14 @@
 //! them.
 //!
 //! Raw `TcpListener` servers in this file play misbehaving peers; `ink_net::testserver`
-//! plays the well-behaved ones. Tests that failed on the branch head they were written
-//! against (ac340c7) carry `#[ignore = "verifier: ..."]`; run them with
-//! `cargo test -p ink-net --test verify2_attacks -- --ignored`.
+//! plays the well-behaved ones. Three tests failed on the branch head they were written
+//! against (ac340c7) and were marked `#[ignore = "verifier: ..."]`: quadratic OPDS end
+//! tags, a 206 to a request without Range, a 401 portal page dropping the KOSync queue.
+//! They are fixed and run normally now; none in this file is ignored.
 //!
 //! The two memory attacks count allocations with a global allocator, so each one is a test
-//! binary of its own: `tests/verify2_memory_sse.rs` and `tests/verify2_memory_opds.rs`.
+//! binary of its own: `tests/verify2_memory_sse.rs` (fixed, runs normally) and
+//! `tests/verify2_memory_opds.rs` (still ignored: an open defect).
 
 use ink_net::connectivity::NetActivity;
 use ink_net::download::{lock_path, part_path, sha256_hex, Checksum, Download, DownloadProgress, Hooks};
@@ -17,35 +19,18 @@ use ink_net::opds::parse_feed;
 use ink_net::sse::EventSource;
 use ink_net::testserver::{file_bytes, TestServer};
 use ink_net::{CancelToken, NetError};
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
+mod common;
+use common::header_of;
+
 // ---------------------------------------------------------------------------------------
 // Helpers.
-
-type Handler = dyn Fn(&mut std::net::TcpStream, String, usize) + Send + Sync;
-
-/// Reads one request head (up to the blank line).
-fn read_head(s: &mut dyn Read) -> String {
-    let mut buf = Vec::new();
-    let mut b = [0u8; 1];
-    while !buf.ends_with(b"\r\n\r\n") && buf.len() < 65536 {
-        match s.read(&mut b) {
-            Ok(1) => buf.push(b[0]),
-            _ => break,
-        }
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-fn header_of<'a>(head: &'a str, name: &str) -> Option<&'a str> {
-    head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim()))
-}
 
 /// `bytes=N-` -> N.
 fn range_start(head: &str) -> Option<usize> {
@@ -55,30 +40,11 @@ fn range_start(head: &str) -> Option<usize> {
 /// Plain HTTP server; `h(stream, request head, connection number)` runs per connection.
 /// Returns the base URL and the connection counter.
 fn raw_server(h: impl Fn(&mut std::net::TcpStream, String, usize) + Send + Sync + 'static) -> (String, Arc<AtomicUsize>) {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", l.local_addr().unwrap());
-    let h: Arc<Handler> = Arc::new(h);
-    let n = Arc::new(AtomicUsize::new(0));
-    let n2 = n.clone();
-    std::thread::spawn(move || {
-        for c in l.incoming() {
-            let Ok(mut s) = c else { continue };
-            let (h, i) = (h.clone(), n2.fetch_add(1, Ordering::SeqCst));
-            std::thread::spawn(move || {
-                let _ = s.set_nodelay(true);
-                let head = read_head(&mut s);
-                h(&mut s, head, i);
-            });
-        }
-    });
-    (base, n)
+    common::serve("http", |tcp| tcp, h)
 }
 
 fn tmpdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ink-net-verify2-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    common::tmpdir("verify2", name)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -102,14 +68,12 @@ fn unmatched_end_tags_feed(n: usize, in_content: bool) -> String {
 }
 
 #[test]
-#[ignore = "verifier: OPDS parse_feed is quadratic in unmatched end tags (path rposition per end tag)"]
 fn opds_unmatched_end_tags_parse_in_linear_time() {
     // 50 000 unclosed elements and 50 000 end tags that close none of them: 350 KB, far
-    // below OpdsClient's 16 MB limit. Each end tag scans the whole stack of open names
-    // (`path.iter().rposition`) and the stack never shrinks, so the parse is quadratic.
-    // Measured on the host (release): 10k pairs 0.3 s, 20k 1.2 s, 40k 5.1 s; balanced
-    // tags of the same size take 1-4 ms. A 1 MB feed of this kind takes minutes on the
-    // Kindle's ARM cores, a 16 MB one hours.
+    // below OpdsClient's 16 MB limit. Each end tag used to scan the whole stack of open
+    // names (`path.iter().rposition`) and the stack never shrinks, so the parse was
+    // quadratic: 9 s for this feed on the host (release), minutes for 1 MB on the
+    // Kindle. The parser now keeps the open depths of each name.
     let mut slow = Vec::new();
     for in_content in [false, true] {
         let xml = unmatched_end_tags_feed(50_000, in_content);
@@ -144,13 +108,13 @@ fn opds_balanced_deep_markup_stays_fast() {
 // Downloads.
 
 #[test]
-#[ignore = "verifier: a 206 to a GET without Range is renamed as the whole book (Content-Range total ignored)"]
 fn download_206_without_a_range_request_is_not_renamed_short() {
     // A broken server or cache answers a plain GET with `206` and the first 1000 bytes of
     // a 5000-byte book (`Content-Range: bytes 0-999/5000`, `Content-Length: 1000`). The
-    // 206 is only handled as a partial answer when a `.part` exists; otherwise it takes
-    // the 2xx branch, which looks only at `Content-Length`, so 1000 bytes count as the
-    // whole file and are renamed to `dest`.
+    // 206 was only handled as a partial answer when a `.part` existed; otherwise it took
+    // the 2xx branch, which looked only at `Content-Length`, so 1000 bytes counted as the
+    // whole file and were renamed to `dest`. Now the Content-Range total is the length to
+    // reach: the run fails and keeps the 1000 bytes for a resume.
     let data = Arc::new(file_bytes(5000));
     let d2 = data.clone();
     let (base, _) = raw_server(move |w, _head, _| {
@@ -166,6 +130,7 @@ fn download_206_without_a_range_request_is_not_renamed_short() {
         "a 206 for bytes 0-999 of 5000 was renamed into place as a {on_disk:?}-byte file; run returned {:?}",
         r.map(|o| (o.bytes, o.resumed_from))
     );
+    assert_eq!(std::fs::metadata(part_path(&dest)).map(|m| m.len()).ok(), Some(1000), ".part kept for a resume");
 }
 
 #[test]
@@ -422,13 +387,13 @@ impl HttpClient for Portal401 {
 }
 
 #[test]
-#[ignore = "verifier: a 401 HTML page (portal/proxy, not the sync server) makes SyncQueue::drain drop every queued push"]
 fn kosync_queue_survives_a_401_html_page_from_a_portal() {
     // The cycle-1 fix stops a 2xx HTML page from counting as success, "so SyncQueue keeps
-    // the entry". The same portal answering 401 gives NetError::Unauthorized, and drain()
-    // clears the whole queue: weeks of unsynced progress from every book are lost without
-    // the sync server ever being reached. KOReader's KOSyncQueue:drain keeps the remaining
-    // items on any failure (it clears only on logout).
+    // the entry". The same portal answering 401 gave NetError::Unauthorized, and drain()
+    // cleared the whole queue: weeks of unsynced progress from every book were lost
+    // without the sync server ever being reached. A 401 HTML page is now a format error
+    // too. KOReader's KOSyncQueue:drain keeps the remaining items on any failure (it
+    // clears only on logout).
     let c = KoSyncClient::new(&Portal401, KoSyncAccount::new("http://192.0.2.10:7200", "u", "p"));
     let mut q = SyncQueue::default();
     for (i, doc) in ["a", "b", "c"].iter().enumerate() {
@@ -438,7 +403,7 @@ fn kosync_queue_survives_a_401_html_page_from_a_portal() {
         );
     }
     let r = c.push(&q.items[0].progress);
-    eprintln!("push through the portal: {r:?}");
+    assert!(matches!(&r, Err(NetError::Format(m)) if m.contains("captive portal")), "{r:?}");
     assert_eq!(q.drain(&c), 0);
     assert_eq!(q.items.len(), 3, "a 401 login page from a portal dropped the queued pushes");
 }

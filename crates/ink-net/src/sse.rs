@@ -23,7 +23,6 @@
 use crate::connectivity::NetActivity;
 use crate::http::{HttpClient, Request};
 use crate::{CancelToken, NetError, Result};
-use std::collections::VecDeque;
 use std::io::Read;
 use std::ops::ControlFlow;
 use std::time::Duration;
@@ -145,47 +144,62 @@ impl SseParser {
     /// Feeds bytes; returns the events completed by them. After an overflow
     /// ([`SseParser::overflowed`]) it returns only the events completed before it, and
     /// nothing on later calls.
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<SseEvent> {
+    pub fn feed(&mut self, mut bytes: &[u8]) -> Vec<SseEvent> {
         let mut out = Vec::new();
-        if self.overflow {
-            return out;
-        }
-        for &b in bytes {
-            if self.skip_lf {
-                self.skip_lf = false;
-                if b == b'\n' {
-                    continue;
-                }
-            }
-            match b {
-                b'\r' | b'\n' => {
-                    self.skip_lf = b == b'\r';
-                    let mut raw = std::mem::take(&mut self.buf);
-                    if self.first_line {
-                        self.first_line = false;
-                        if raw.starts_with(b"\xEF\xBB\xBF") {
-                            raw.drain(..3);
-                        }
-                    }
-                    let line = String::from_utf8_lossy(&raw).into_owned();
-                    if let Some(ev) = self.line(&line) {
-                        out.push(ev);
-                    }
-                    if self.held() > self.max_event_bytes {
-                        self.stop_overflowed();
-                        return out;
-                    }
-                }
-                _ => {
-                    self.buf.push(b);
-                    if self.held() > self.max_event_bytes {
-                        self.stop_overflowed();
-                        return out;
-                    }
-                }
-            }
+        while !self.overflow && !bytes.is_empty() {
+            let (used, ev) = self.feed_until_event(bytes);
+            out.extend(ev);
+            bytes = &bytes[used..];
         }
         out
+    }
+
+    /// Feeds bytes until one event completes: returns how many bytes were used and the
+    /// event, if one completed. Callers that hand each event on before parsing further
+    /// (as [`SseReader`] does) hold one event at a time, however many a read contains.
+    /// After an overflow it uses nothing and returns nothing.
+    pub fn feed_until_event(&mut self, bytes: &[u8]) -> (usize, Option<SseEvent>) {
+        let mut rest = bytes;
+        while !self.overflow && !rest.is_empty() {
+            // The LF of a CR LF pair, possibly at the start of the next chunk.
+            if std::mem::take(&mut self.skip_lf) && rest[0] == b'\n' {
+                rest = &rest[1..];
+                continue;
+            }
+            let end = rest.iter().position(|&b| b == b'\r' || b == b'\n');
+            let text = &rest[..end.unwrap_or(rest.len())];
+            if self.held() + text.len() > self.max_event_bytes {
+                self.stop_overflowed();
+                break;
+            }
+            self.buf.extend_from_slice(text);
+            let Some(end) = end else {
+                rest = &[];
+                break;
+            };
+            self.skip_lf = rest[end] == b'\r';
+            rest = &rest[end + 1..];
+            if let Some(ev) = self.end_line() {
+                return (bytes.len() - rest.len(), Some(ev));
+            }
+            if self.held() > self.max_event_bytes {
+                self.stop_overflowed();
+            }
+        }
+        (bytes.len() - rest.len(), None)
+    }
+
+    /// Handles the line collected in `buf`.
+    fn end_line(&mut self) -> Option<SseEvent> {
+        let mut raw = std::mem::take(&mut self.buf);
+        let bom = std::mem::take(&mut self.first_line) && raw.starts_with(b"\xEF\xBB\xBF");
+        let ev = self.line(&String::from_utf8_lossy(&raw[if bom { 3 } else { 0 }..]));
+        // Keep a small line buffer for the next line; give a big one back.
+        if raw.capacity() <= 64 << 10 {
+            raw.clear();
+            self.buf = raw;
+        }
+        ev
     }
 
     /// Ends the stream. A trailing event without a blank line is discarded, as the
@@ -251,23 +265,24 @@ impl SseParser {
 pub struct SseReader<R> {
     inner: R,
     parser: SseParser,
-    pending: VecDeque<SseEvent>,
     buf: Vec<u8>,
+    /// `buf[start..end]`: read but not parsed yet.
+    start: usize,
+    end: usize,
     eof: bool,
     cancel: Option<CancelToken>,
-    error: Option<NetError>,
 }
 
 impl<R> std::fmt::Debug for SseReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SseReader").field("parser", &self.parser).field("pending", &self.pending.len()).field("eof", &self.eof).finish_non_exhaustive()
+        f.debug_struct("SseReader").field("parser", &self.parser).field("unparsed", &(self.end - self.start)).field("eof", &self.eof).finish_non_exhaustive()
     }
 }
 
 impl<R: Read> SseReader<R> {
     /// Wraps a body.
     pub fn new(inner: R) -> Self {
-        SseReader { inner, parser: SseParser::new(), pending: VecDeque::new(), buf: vec![0; 8192], eof: false, cancel: None, error: None }
+        SseReader { inner, parser: SseParser::new(), buf: vec![0; 8192], start: 0, end: 0, eof: false, cancel: None }
     }
 
     /// Sets the per-event limit ([`SseParser::max_event_bytes`]; default
@@ -290,13 +305,22 @@ impl<R: Read> SseReader<R> {
 
     /// The next event; `Ok(None)` at the end of the stream. An event over the limit gives
     /// [`NetError::TooLarge`] once (after the events completed before it), then `Ok(None)`.
+    ///
+    /// Events are parsed one at a time from what was read, so only one is held however
+    /// many a single read completes (each event carries its own copy of the last id).
     pub fn next_event(&mut self) -> Result<Option<SseEvent>> {
         loop {
-            if let Some(ev) = self.pending.pop_front() {
-                return Ok(Some(ev));
-            }
-            if let Some(e) = self.error.take() {
-                return Err(e);
+            if self.start < self.end {
+                let (used, ev) = self.parser.feed_until_event(&self.buf[self.start..self.end]);
+                self.start += used;
+                if ev.is_some() {
+                    return Ok(ev);
+                }
+                if self.parser.overflowed() {
+                    self.start = self.end;
+                    self.eof = true;
+                    return Err(NetError::TooLarge(self.parser.max_event_bytes()));
+                }
             }
             if self.eof {
                 return Ok(None);
@@ -312,14 +336,8 @@ impl<R: Read> SseReader<R> {
             if n == 0 {
                 self.eof = true;
                 self.parser.finish();
-                continue;
             }
-            let evs = self.parser.feed(&self.buf[..n]);
-            self.pending.extend(evs);
-            if self.parser.overflowed() {
-                self.eof = true;
-                self.error = Some(NetError::TooLarge(self.parser.max_event_bytes()));
-            }
+            (self.start, self.end) = (0, n);
         }
     }
 }
@@ -409,11 +427,12 @@ impl<'a> EventSource<'a> {
                             Ok(Some(ev)) => {
                                 // This connection works: the reconnect budget starts over.
                                 attempts = 0;
-                                self.last_event_id = ev.id.clone();
+                                let stop = on_event(&ev).is_break();
                                 if let Some(ms) = ev.retry {
                                     self.retry = Duration::from_millis(ms);
                                 }
-                                if on_event(&ev).is_break() {
+                                self.last_event_id = ev.id;
+                                if stop {
                                     return Ok(());
                                 }
                             }
