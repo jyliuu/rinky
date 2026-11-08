@@ -15,7 +15,7 @@ use ink_doc::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// One spine item handed to the engine.
@@ -985,9 +985,7 @@ impl Document for HtmlDocument {
         self.laid.borrow_mut().clear();
         self.save_positions();
         self.positions.borrow_mut().clear();
-        let shared = Arc::new(Shared::default());
-        *shared.map.lock().unwrap() = MapState::new(n);
-        self.shared = shared;
+        self.shared = Arc::new(Shared { map: Mutex::new(MapState::new(n)), ..Default::default() });
         // Cache.
         if self.cache.is_none() {
             self.cache = self.default_cache();
@@ -1039,9 +1037,7 @@ impl Document for HtmlDocument {
                     // (old) shared state, so the fresh map is never touched by them.
                     self.shared.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     self.worker = None;
-                    let shared = Arc::new(Shared::default());
-                    *shared.map.lock().unwrap() = MapState::new(n);
-                    self.shared = shared;
+                    self.shared = Arc::new(Shared { map: Mutex::new(MapState::new(n)), ..Default::default() });
                 } else if complete {
                     hit = true;
                     self.load_positions(p);
