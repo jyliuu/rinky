@@ -330,7 +330,7 @@ impl VocabScreen {
         p.canvas.fill_rect(x, y, iw as i32, t.rule_px, t.light);
         y += space(4);
         if let Some(d) = &card.definition {
-            for line in wrap_lines(p, d, t.body.px, t.body.style, iw as f32).into_iter().take(6) {
+            for line in wrap_lines(p, &one_paragraph(d), t.body.px, t.body.style, iw as f32).into_iter().take(6) {
                 p.text_left(Rect::new(x, y, iw, 56), &line, t.body.px, t.body.style, t.fg);
                 y += 56;
             }
@@ -338,7 +338,7 @@ impl VocabScreen {
         }
         let ctx = context_line(card);
         if !ctx.is_empty() {
-            for line in wrap_lines(p, &ctx, t.label.px, Style::Italic, iw as f32).into_iter().take(4) {
+            for line in wrap_lines(p, &one_paragraph(&ctx), t.label.px, Style::Italic, iw as f32).into_iter().take(4) {
                 p.text_left(Rect::new(x, y, iw, 52), &line, t.label.px, Style::Italic, t.muted);
                 y += 52;
             }
@@ -352,6 +352,13 @@ impl VocabScreen {
         }
         hint(p, "Tap the card to turn it back");
     }
+}
+
+/// `text` with every run of whitespace (newlines too) as one space: the card shows the
+/// meaning and the context as one flowing paragraph each, as the card's own wrap did
+/// before it used [`wrap_lines`], which starts a new line at every `\n`.
+fn one_paragraph(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl AppScreen for VocabScreen {
@@ -411,6 +418,11 @@ impl AppScreen for VocabScreen {
 #[cfg(test)]
 mod unit {
     use super::*;
+
+    #[test]
+    fn card_text_flows_as_one_paragraph() {
+        assert_eq!(one_paragraph("a long-standing\n\n resentment\t"), "a long-standing resentment");
+    }
 
     #[test]
     fn context_lines() {
