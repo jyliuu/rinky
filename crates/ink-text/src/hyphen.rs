@@ -122,28 +122,20 @@ impl Hyphenator for PatternHyphenator {
             return Vec::new();
         }
         let graphemes: Vec<usize> = core.grapheme_indices(true).map(|(i, _)| i).collect();
-        // Explicit hyphens: break only after them (the dictionary would not).
-        if core.contains('-') {
-            return core
-                .match_indices('-')
-                .map(|(i, _)| i + 1)
-                .filter(|i| *i < core.len() && graphemes.binary_search(i).is_ok())
-                .map(|i| start + i)
-                .collect();
-        }
-        // The dictionary works on lower case. The `hyphenation` crate's own folding only
-        // corrects offsets for 'İ'; letters whose lower case has another byte length (ẞ is
-        // 3 bytes, ß 2) would shift every later point. Fold here, keep a byte map, and map
-        // each point back to the original word.
-        let (lower, map) = fold_lowercase(core);
-        self.dict
-            .opportunities(&lower)
-            .into_iter()
-            .filter_map(|b| map.binary_search_by_key(&b, |(lo, _)| *lo).ok().map(|k| map[k].1))
-            // Never between a letter and its combining marks (NFD text).
-            .filter(|b| *b > 0 && *b < core.len() && graphemes.binary_search(b).is_ok())
-            .map(|b| start + b)
-            .collect()
+        let points: Vec<usize> = if core.contains('-') {
+            // Explicit hyphens: break only after them (the dictionary would not).
+            core.match_indices('-').map(|(i, _)| i + 1).collect()
+        } else {
+            // The dictionary works on lower case. The `hyphenation` crate's own folding
+            // only corrects offsets for 'İ'; letters whose lower case has another byte
+            // length (ẞ is 3 bytes, ß 2) would shift every later point. Fold here, keep a
+            // byte map, and map each point back to the original word.
+            let (lower, map) = fold_lowercase(core);
+            let back = |b: usize| map.binary_search_by_key(&b, |(lo, _)| *lo).ok().map(|k| map[k].1);
+            self.dict.opportunities(&lower).into_iter().filter_map(back).collect()
+        };
+        // Never between a letter and its combining marks (NFD text).
+        points.into_iter().filter(|b| *b > 0 && *b < core.len() && graphemes.binary_search(b).is_ok()).map(|b| start + b).collect()
     }
 
     fn language(&self) -> Option<&Language> {

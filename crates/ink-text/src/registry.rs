@@ -179,13 +179,6 @@ impl FontFamily {
     }
 }
 
-/// True when face `index` of `path` can set Latin body text (has `a`, `A` and `0`).
-fn is_text_face(path: &Path, index: u32) -> bool {
-    let Ok(bytes) = map_file(path) else { return false };
-    let Ok(face) = ttf_parser::Face::parse(bytes, index) else { return false };
-    ['a', 'A', 'e', '0'].iter().all(|c| face.glyph_index(*c).is_some())
-}
-
 /// Groups scanned faces into text families by family name: per slot (regular, bold,
 /// italic, bold italic) the face whose weight is nearest 400 (regular slots, weight
 /// below 600) or 700 (bold slots). Left out: faces of `.ttc` collections (index > 0 or
@@ -197,10 +190,7 @@ pub fn group_families(entries: &[FontEntry]) -> Vec<FontFamily> {
     let mut by_name: BTreeMap<String, (usize, FontFamily)> = BTreeMap::new();
     for e in entries {
         let is_ttc = e.path.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("ttc"));
-        if is_ttc || e.info.index != 0 || e.info.family.trim().is_empty() || PREFERRED_FALLBACKS.contains(&e.stem.as_str()) {
-            continue;
-        }
-        if !is_text_face(&e.path, e.info.index) {
+        if is_ttc || e.info.index != 0 || !e.info.latin || e.info.family.trim().is_empty() || PREFERRED_FALLBACKS.contains(&e.stem.as_str()) {
             continue;
         }
         let key = e.info.family.trim().to_ascii_lowercase();
@@ -298,7 +288,7 @@ mod tests {
             dir_rank: rank,
             info: FaceInfo { family: family.into(), weight, italic, bold: weight >= 600, ..FaceInfo::default() },
         };
-        // Files that do not exist are not text faces: grouping only sees real fonts.
+        // Faces without Latin letters (here: made up, not read from a font) are left out.
         let fake = vec![mk("Ember-Thin", "Ember", 100, false, 0), mk("Ember-Rg", "Ember", 400, false, 0)];
         assert!(group_families(&fake).is_empty());
         // Real files: the repository's Noto Serif faces form one family.

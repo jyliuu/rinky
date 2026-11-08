@@ -189,6 +189,21 @@ impl Builder {
         self.acc.line(l.0, l.1, p.0, p.1);
         self.last = p;
     }
+
+    /// Flattens a curve whose control polygon bends by `dev` pixels into lines through
+    /// `at(t)`: about sqrt(3 dev) of them.
+    fn flatten(&mut self, dev: f32, at: impl Fn(f32, f32) -> (f32, f32)) {
+        let n = 1 + (3.0 * dev).sqrt().floor() as usize;
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            self.line_px(at(t, 1.0 - t));
+        }
+    }
+}
+
+/// How far `b` bends away from the line `a`-`c` (the second difference), in pixels.
+fn bend(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    (a.0 - 2.0 * b.0 + c.0).hypot(a.1 - 2.0 * b.1 + c.1)
 }
 
 impl OutlineBuilder for Builder {
@@ -204,37 +219,18 @@ impl OutlineBuilder for Builder {
     }
 
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        let p0 = self.last;
-        let p1 = self.map(x1, y1);
-        let p2 = self.map(x, y);
-        let dev = (p0.0 - 2.0 * p1.0 + p2.0).hypot(p0.1 - 2.0 * p1.1 + p2.1);
-        let n = 1 + (3.0 * dev).sqrt().floor() as usize;
-        for i in 1..=n {
-            let t = i as f32 / n as f32;
-            let mt = 1.0 - t;
-            let q = (
-                mt * mt * p0.0 + 2.0 * mt * t * p1.0 + t * t * p2.0,
-                mt * mt * p0.1 + 2.0 * mt * t * p1.1 + t * t * p2.1,
-            );
-            self.line_px(q);
-        }
+        let (p0, p1, p2) = (self.last, self.map(x1, y1), self.map(x, y));
+        self.flatten(bend(p0, p1, p2), |t, mt| {
+            (mt * mt * p0.0 + 2.0 * mt * t * p1.0 + t * t * p2.0, mt * mt * p0.1 + 2.0 * mt * t * p1.1 + t * t * p2.1)
+        });
     }
 
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        let p0 = self.last;
-        let p1 = self.map(x1, y1);
-        let p2 = self.map(x2, y2);
-        let p3 = self.map(x, y);
-        let dev1 = (p0.0 - 2.0 * p1.0 + p2.0).hypot(p0.1 - 2.0 * p1.1 + p2.1);
-        let dev2 = (p1.0 - 2.0 * p2.0 + p3.0).hypot(p1.1 - 2.0 * p2.1 + p3.1);
-        let n = 1 + (3.0 * dev1.max(dev2)).sqrt().floor() as usize;
-        for i in 1..=n {
-            let t = i as f32 / n as f32;
-            let mt = 1.0 - t;
+        let (p0, p1, p2, p3) = (self.last, self.map(x1, y1), self.map(x2, y2), self.map(x, y));
+        self.flatten(bend(p0, p1, p2).max(bend(p1, p2, p3)), |t, mt| {
             let (a, b, c, d) = (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
-            let q = (a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0, a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1);
-            self.line_px(q);
-        }
+            (a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0, a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1)
+        });
     }
 
     fn close(&mut self) {
