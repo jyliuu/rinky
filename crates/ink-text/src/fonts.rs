@@ -721,7 +721,8 @@ impl Fonts {
 /// Blends `value` into the canvas with the coverage of `m` placed at `(x, y)`, only
 /// inside `clip` (which lies on the canvas). Row slices, not a bounds-checked get/set
 /// per pixel: every line of UI text goes through here on each paint. With value 0 this
-/// is exactly `Canvas::draw_mask`'s darkening.
+/// is exactly `Canvas::draw_mask`'s darkening. Zero coverage leaves a pixel as it is
+/// (`p * 255 / 255`), so the loop needs no branch for it and vectorizes.
 fn blend_mask(canvas: &mut Canvas, x: i32, y: i32, m: &GlyphMask, value: u8, clip: Rect) {
     let area = Rect::new(x, y, m.width as u32, m.height as u32).intersect(&clip);
     if area.is_empty() {
@@ -732,10 +733,8 @@ fn blend_mask(canvas: &mut Canvas, x: i32, y: i32, m: &GlyphMask, value: u8, cli
         let mi = (py - y) as usize * m.width + (area.x - x) as usize;
         let ci = py as usize * canvas.width + area.x as usize;
         for (p, &a) in canvas.pixels[ci..ci + n].iter_mut().zip(&m.coverage[mi..mi + n]) {
-            if a != 0 {
-                let a = a as u32;
-                *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
-            }
+            let a = a as u32;
+            *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
         }
     }
 }
