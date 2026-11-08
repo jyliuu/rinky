@@ -63,36 +63,26 @@ impl<K: Hash + Eq + Clone, V> ByteCache<K, V> {
         if bytes > self.cap {
             return false;
         }
-        while self.used + bytes > self.cap {
-            if !self.evict_one() {
-                break;
-            }
-        }
+        self.evict_to(self.cap - bytes);
         self.tick += 1;
         self.used += bytes;
         self.map.insert(k, (v, bytes, self.tick));
         true
     }
 
-    fn evict_one(&mut self) -> bool {
-        let Some(oldest) = self.map.iter().min_by_key(|(_, e)| e.2).map(|(k, _)| k.clone()) else {
-            return false;
-        };
-        if let Some(e) = self.map.remove(&oldest) {
-            self.used -= e.1;
+    /// Evicts least recently used entries until at most `limit` bytes are held.
+    fn evict_to(&mut self, limit: usize) {
+        while self.used > limit {
+            let Some(oldest) = self.map.iter().min_by_key(|(_, e)| e.2).map(|(k, _)| k.clone()) else { break };
+            self.used -= self.map.remove(&oldest).map_or(0, |e| e.1);
             self.evictions += 1;
         }
-        true
     }
 
     /// Changes the cap, evicting as needed.
     pub fn set_cap(&mut self, cap: usize) {
         self.cap = cap;
-        while self.used > self.cap {
-            if !self.evict_one() {
-                break;
-            }
-        }
+        self.evict_to(cap);
     }
 
     /// Drops everything.
