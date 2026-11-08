@@ -36,6 +36,7 @@ use ink_device::{Canvas, Point, Rect, Size};
 use ink_doc::Selection;
 use ink_text::Style;
 use ink_ui::dialog::wrap_lines;
+use ink_ui::controls::paint_round_button;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
 use ink_ui::widget::split_cols;
 use ink_ui::{paint_button, ButtonKind, EventResult, Gesture, Icon, PaintCx, Popup, UiEvent, Widget};
@@ -709,8 +710,7 @@ impl Widget for SelectionCard {
         let fg = t.fg;
         if self.more {
             let (back, pills, next) = self.more_rects(b);
-            stroke_round_rect(cx.canvas, back, back.w as f32 / 2.0, t.border_px as f32, fg);
-            cx.icon(Icon::Back, back, back.w / 2, fg);
+            paint_round_button(cx, back, Icon::Back);
             let title = Rect::new(back.right() + PAD, back.y, (body.right() - PAD - back.right() - PAD).max(0) as u32, back.h);
             cx.text_left(title, "More actions", t.heading.px, t.heading.style, fg);
             for (i, r) in pills {

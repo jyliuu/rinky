@@ -47,7 +47,8 @@ use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::sidecar::BookSettings;
 use ink_store::Settings;
 use ink_text::Style;
-use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
+use ink_ui::controls::{paint_round_button, paint_slider_knob, paint_slider_track};
+use ink_ui::draw::{fill_round_rect, stroke_round_rect};
 use ink_ui::{BottomSheet, Button, EventResult, Gesture, Icon, Label, PaintCx, Segmented, Tabs, Toggle, TouchKind, UiEvent, Widget};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -815,31 +816,20 @@ impl SliderPanel {
     fn paint_row(&self, cx: &mut PaintCx, k: usize, row: Rect) {
         let spec = &SLIDERS[self.which[k]];
         let v = self.shown.borrow().get(self.which[k]);
-        let (fg, bg) = (cx.theme.fg, cx.theme.bg);
+        let fg = cx.theme.fg;
         let (label, minus, track, plus) = Self::parts(row);
         // Caption above, value below (bold), in the label column.
         let top = Rect::new(label.x, label.y + 4, label.w, label.h / 2 - 4);
         let bottom = Rect::new(label.x, label.y + label.h as i32 / 2, label.w, label.h / 2 - 4);
         cx.text_left(top, spec.label, cx.theme.small_px, Style::Regular, fg);
         cx.text_left(bottom, &spec.shown_text(v), cx.theme.font_px, Style::Bold, fg);
-        for (r, icon) in [(minus, Icon::Minus), (plus, Icon::Plus)] {
-            stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, cx.theme.border_px as f32, fg);
-            cx.icon(icon, r, r.w / 2, fg);
-        }
-        let ty = track.y as f32 + track.h as f32 / 2.0;
+        paint_round_button(cx, minus, Icon::Minus);
+        paint_round_button(cx, plus, Icon::Plus);
         let f = if spec.max > spec.min { (v - spec.min) / (spec.max - spec.min) } else { 0.0 };
-        let kx = track.x as f32 + f * track.w as f32;
-        let th = 12.0;
         let dragging = self.drag.is_some_and(|(d, _)| d == k);
         // While dragging (DU) the track is drawn black only: no gray under DU.
-        let track_v = if dragging { bg } else { cx.theme.track() };
-        fill_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, track.w, th as u32), th / 2.0, track_v);
-        if dragging {
-            stroke_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, track.w, th as u32), th / 2.0, 2.0, fg);
-        }
-        fill_round_rect(cx.canvas, Rect::new(track.x, (ty - th / 2.0) as i32, (kx - track.x as f32).max(0.0) as u32, th as u32), th / 2.0, fg);
-        Path::new().circle(kx, ty, 26.0).fill(cx.canvas, fg);
-        Path::new().circle(kx, ty, 21.0).fill(cx.canvas, if dragging { fg } else { bg });
+        let knob = paint_slider_track(cx, track, f, dragging);
+        paint_slider_knob(cx, track, knob, dragging);
     }
 }
 

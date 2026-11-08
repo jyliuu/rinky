@@ -21,7 +21,8 @@ use ink_device::{Rect, RefreshClass, Size};
 use ink_doc::Position;
 use ink_text::Style;
 use ink_ui::bars::APP_BAR_H;
-use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
+use ink_ui::controls::{paint_round_button, paint_slider_knob, paint_slider_track};
+use ink_ui::draw::{fill_round_rect, Path};
 use ink_ui::theme::space;
 use ink_ui::widget::split_cols;
 use ink_ui::{AppBar, BarAction, Button, EventResult, Icon, PaintCx, Slider, TouchKind, UiEvent, Widget};
@@ -414,7 +415,6 @@ impl Widget for Scrubber {
         let t = cx.theme.clone();
         let (fg, bg) = (t.fg, t.bg);
         let (minus, track, plus) = Slider::parts(b);
-        let ty = track.y as f32 + track.h as f32 / 2.0;
         let kx = track.x as f32 + self.fraction(self.value_page()) * track.w as f32;
         // Caption half.
         let top = Rect::new(b.x, b.y, b.w, b.h / 2);
@@ -439,15 +439,11 @@ impl Widget for Scrubber {
             }
         }
         // Page step buttons.
-        for (r, icon) in [(minus, Icon::Back), (plus, Icon::Forward)] {
-            stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, t.border_px as f32, fg);
-            cx.icon(icon, r, r.w / 2, fg);
-        }
+        paint_round_button(cx, minus, Icon::Back);
+        paint_round_button(cx, plus, Icon::Forward);
         // Track, fill, chapter ticks (white notches in the fill, black after it), knob.
-        let th = 12u32;
-        let tr = Rect::new(track.x, (ty - th as f32 / 2.0) as i32, track.w, th);
-        fill_round_rect(cx.canvas, tr, th as f32 / 2.0, t.track());
-        fill_round_rect(cx.canvas, Rect::new(tr.x, tr.y, (kx - track.x as f32).max(0.0) as u32, th), th as f32 / 2.0, fg);
+        let knob = paint_slider_track(cx, track, self.fraction(self.value_page()), false);
+        let ty = knob.1;
         let mut last_x = i32::MIN;
         for c in &self.chapters {
             let x = track.x + (self.fraction(c.page) * track.w as f32) as i32;
@@ -458,9 +454,7 @@ impl Widget for Scrubber {
             let col = if (x as f32) < kx - 2.0 { bg } else { fg };
             cx.canvas.fill_rect(x - 2, (ty - 16.0) as i32, 4, 32, col);
         }
-        let kr = (track.h as f32 * 0.28).min(26.0);
-        Path::new().circle(kx, ty, kr).fill(cx.canvas, fg);
-        Path::new().circle(kx, ty, kr - 5.0).fill(cx.canvas, if self.dragging { fg } else { bg });
+        paint_slider_knob(cx, track, knob, self.dragging);
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
