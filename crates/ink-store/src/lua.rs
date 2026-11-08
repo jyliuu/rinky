@@ -565,17 +565,10 @@ impl Parser<'_> {
         if matches!(self.peek(), Some(b'p' | b'P')) {
             is_float = true;
             self.i += 1;
-            let neg = match self.peek() {
-                Some(b'-') => {
-                    self.i += 1;
-                    true
-                }
-                Some(b'+') => {
-                    self.i += 1;
-                    false
-                }
-                _ => false,
-            };
+            let neg = self.peek() == Some(b'-');
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.i += 1;
+            }
             let mut e: i64 = 0;
             let mut digits = false;
             while let Some(c) = self.peek().filter(u8::is_ascii_digit) {
@@ -625,21 +618,11 @@ impl Parser<'_> {
     }
 
     fn escape(&mut self, out: &mut Vec<u8>) -> Result<(), LuaError> {
+        /// One-character escapes and the byte each stands for.
+        const SIMPLE: [(u8, u8); 10] =
+            [(b'a', 7), (b'b', 8), (b'f', 12), (b'n', b'\n'), (b'r', b'\r'), (b't', b'\t'), (b'v', 11), (b'\\', b'\\'), (b'"', b'"'), (b'\'', b'\'')];
         let Some(c) = self.peek() else { return Err(self.err("unfinished escape".into())) };
-        let simple = match c {
-            b'a' => Some(7),
-            b'b' => Some(8),
-            b'f' => Some(12),
-            b'n' => Some(b'\n'),
-            b'r' => Some(b'\r'),
-            b't' => Some(b'\t'),
-            b'v' => Some(11),
-            b'\\' => Some(b'\\'),
-            b'"' => Some(b'"'),
-            b'\'' => Some(b'\''),
-            _ => None,
-        };
-        if let Some(b) = simple {
+        if let Some(&(_, b)) = SIMPLE.iter().find(|e| e.0 == c) {
             out.push(b);
             self.i += 1;
             return Ok(());
