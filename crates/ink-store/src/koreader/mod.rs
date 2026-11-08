@@ -493,28 +493,25 @@ pub fn metadata_from_table(path: &Path, t: &Table, paging: Option<bool>) -> KoBo
     }
 }
 
+/// How a list of annotations stores its pages: `Some(true)` when the first entry's `page`
+/// is a number (paging), `Some(false)` when it is an xpointer string (rolling), else `None`.
+fn stored_paging(list: &Table) -> Option<bool> {
+    match list.get_index(1)?.as_table()?.get("page")? {
+        Value::Int(_) | Value::Num(_) => Some(true),
+        Value::Str(_) => Some(false),
+        _ => None,
+    }
+}
+
 /// Paging if the stored annotations say so (numeric `page`), else if `last_page` is set.
 fn guess_paging(t: &Table, has_last_page: bool) -> bool {
-    for key in ["annotations", "bookmarks"] {
-        if let Some(first) = t.table(key).and_then(|a| a.seq().first().and_then(|v| v.as_table())) {
-            match first.get("page") {
-                Some(Value::Int(_) | Value::Num(_)) => return true,
-                Some(Value::Str(_)) => return false,
-                _ => {}
-            }
-        }
-    }
-    has_last_page
+    ["annotations", "bookmarks"].into_iter().find_map(|key| t.table(key).and_then(stored_paging)).unwrap_or(has_last_page)
 }
 
 /// True if the annotation list stores pages the way `paging` expects (numbers for paging,
 /// xpointer strings for rolling). Empty lists match.
 fn list_matches(list: &Table, paging: bool) -> bool {
-    match list.seq().first().and_then(|v| v.as_table()).and_then(|a| a.get("page")) {
-        Some(Value::Int(_) | Value::Num(_)) => paging,
-        Some(Value::Str(_)) => !paging,
-        _ => true,
-    }
+    stored_paging(list).is_none_or(|p| p == paging)
 }
 
 fn annotations(t: &Table, paging: bool) -> Vec<KoAnnotation> {
