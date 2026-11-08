@@ -543,15 +543,32 @@ impl Keyboard {
                 self.switch_layout(&lang);
                 self.queue.push(KeyAction::NextLanguage);
             }
-            KeyAction::Char(c) => {
-                self.queue.push(KeyAction::Char(self.cased(c)));
-                if self.shift && !self.caps_lock {
-                    self.shift = false;
-                    self.full = true;
-                }
-            }
+            KeyAction::Char(c) => self.type_text(self.cased(c)),
             a => self.queue.push(a.clone()),
         }
+    }
+
+    /// Queues typed text (already cased); a one-shot shift ends with it.
+    fn type_text(&mut self, text: String) {
+        self.queue.push(KeyAction::Char(text));
+        if self.shift && !self.caps_lock {
+            self.shift = false;
+            self.full = true;
+        }
+    }
+
+    /// Ends contact `slot`: its alternates popup and its press go, and what they covered
+    /// is queued for a refresh.
+    fn release(&mut self, b: Rect, slot: u8) -> (Option<AltPopup>, Option<Press>) {
+        let popup = self.popup.take_if(|p| p.slot == slot);
+        if let Some(p) = &popup {
+            self.changed.push(p.rect);
+        }
+        let press = self.pressed.iter().position(|p| p.slot == slot).map(|i| self.pressed.remove(i));
+        if let Some(p) = &press {
+            self.mark_key(b, p.key);
+        }
+        (popup, press)
     }
 
     fn touch(&mut self, t: &Touch, b: Rect) -> EventResult {
@@ -627,42 +644,19 @@ impl Keyboard {
                     _ => EventResult::Ignored,
                 }
             }
-            TouchKind::Cancel => {
-                // The contact ended without a lift (rotation, lost release): forget the
-                // press and the alternates popup; type nothing.
-                let mut handled = false;
-                if let Some(p) = self.popup.take_if(|p| p.slot == t.slot) {
-                    self.changed.push(p.rect);
-                    handled = true;
-                }
-                if let Some(pi) = self.pressed.iter().position(|p| p.slot == t.slot) {
-                    let press = self.pressed.remove(pi);
-                    self.mark_key(b, press.key);
-                    handled = true;
-                }
-                if handled {
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                }
-            }
+            // The contact ended without a lift (rotation, lost release): forget the press
+            // and the alternates popup; type nothing.
+            TouchKind::Cancel => match self.release(b, t.slot) {
+                (None, None) => EventResult::Ignored,
+                _ => EventResult::Handled,
+            },
             TouchKind::Up => {
-                if let Some(p) = self.popup.take_if(|p| p.slot == t.slot) {
-                    self.changed.push(p.rect);
-                    if let Some(pi) = self.pressed.iter().position(|p| p.slot == t.slot) {
-                        let press = self.pressed.remove(pi);
-                        self.mark_key(b, press.key);
-                    }
-                    self.queue.push(KeyAction::Char(p.options[p.selected].clone()));
-                    if self.shift && !self.caps_lock {
-                        self.shift = false;
-                        self.full = true;
-                    }
+                let (popup, press) = self.release(b, t.slot);
+                if let Some(p) = popup {
+                    self.type_text(p.options[p.selected].clone());
                     return EventResult::Action("keyboard".into());
                 }
-                let Some(pi) = self.pressed.iter().position(|p| p.slot == t.slot) else { return EventResult::Ignored };
-                let press = self.pressed.remove(pi);
-                self.mark_key(b, press.key);
+                let Some(press) = press else { return EventResult::Ignored };
                 if !press.repeated {
                     if let Some((_, k)) = self.key_rect(b, press.key) {
                         self.commit(&k);
