@@ -821,7 +821,10 @@ struct LazySpine {
     paths: Vec<String>,
     /// Stored (uncompressed) size of each spine item: 0 when it cannot be read.
     sizes: Vec<usize>,
+    /// Open handles nobody is using; there is always at least one handle.
     handles: Mutex<Vec<ZipLoader<File>>>,
+    /// Signalled when a handle comes back to `handles`.
+    returned: std::sync::Condvar,
     /// The inflater [`ZipLoader::read_until_ci`] reuses for every head.
     inflate: Mutex<flate2::Decompress>,
 }
@@ -832,28 +835,47 @@ impl LazySpine {
         let sizes = paths.iter().map(|p| if p.is_empty() { 0 } else { loader.stored_size(p).unwrap_or(0) }).collect();
         let obfuscated = loader.obfuscated.clone();
         let (handles, inflate) = (Mutex::new(vec![loader]), Mutex::new(flate2::Decompress::new(false)));
-        LazySpine { file: file.to_path_buf(), obfuscated, paths: paths.to_vec(), sizes, handles, inflate }
+        let returned = std::sync::Condvar::new();
+        LazySpine { file: file.to_path_buf(), obfuscated, paths: paths.to_vec(), sizes, handles, returned, inflate }
     }
 
-    /// Runs `f` with a handle on the file; `None` when no handle can be opened.
-    fn with_handle<T>(&self, f: impl FnOnce(&ZipLoader<File>) -> T) -> Option<T> {
-        let pooled = self.handles.lock().unwrap_or_else(|e| e.into_inner()).pop();
-        let loader = match pooled {
-            Some(l) => l,
-            None => match open_archive(&self.file) {
-                Ok(mut l) => {
-                    l.obfuscated = self.obfuscated.clone();
-                    l
+    /// Runs `f` with a handle on the file: an idle one, else a newly opened one, else
+    /// (the file cannot be opened again, e.g. no file descriptors left) the next one
+    /// another thread gives back. A spine item is never read as empty for want of a
+    /// handle: it would stay empty.
+    fn with_handle<T>(&self, f: impl FnOnce(&ZipLoader<File>) -> T) -> T {
+        /// Gives the handle back when dropped, also when `f` panics.
+        struct Lent<'a>(&'a LazySpine, Option<ZipLoader<File>>);
+        impl Drop for Lent<'_> {
+            fn drop(&mut self) {
+                if let Some(l) = self.1.take() {
+                    self.0.handles.lock().unwrap_or_else(|e| e.into_inner()).push(l);
+                    self.0.returned.notify_one();
                 }
-                Err(e) => {
-                    log::warn!("epub: another handle on {}: {e}", self.file.display());
-                    return None;
-                }
-            },
-        };
-        let out = f(&loader);
-        self.handles.lock().unwrap_or_else(|e| e.into_inner()).push(loader);
-        Some(out)
+            }
+        }
+        let lent = Lent(self, Some(self.take_handle()));
+        f(lent.1.as_ref().expect("lent handle"))
+    }
+
+    fn take_handle(&self) -> ZipLoader<File> {
+        if let Some(l) = self.handles.lock().unwrap_or_else(|e| e.into_inner()).pop() {
+            return l;
+        }
+        match open_archive(&self.file) {
+            Ok(mut l) => {
+                l.obfuscated = self.obfuscated.clone();
+                return l;
+            }
+            Err(e) => log::warn!("epub: another handle on {}: {e}", self.file.display()),
+        }
+        let mut idle = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(l) = idle.pop() {
+                return l;
+            }
+            idle = self.returned.wait(idle).unwrap_or_else(|e| e.into_inner());
+        }
     }
 }
 
@@ -863,7 +885,7 @@ impl ink_html::book::SpineSource for LazySpine {
         if path.is_empty() {
             return String::new();
         }
-        self.with_handle(|l| l.read(path).map(chapter_text).unwrap_or_default()).unwrap_or_default()
+        self.with_handle(|l| l.read(path).map(chapter_text).unwrap_or_default())
     }
 
     /// The bytes up to the first `<body` (any case), decoded as [`chapter_text`] decodes
@@ -876,7 +898,7 @@ impl ink_html::book::SpineSource for LazySpine {
             return None;
         }
         let mut inflate = self.inflate.lock().unwrap_or_else(|e| e.into_inner());
-        let bytes = self.with_handle(|l| l.read_until_ci(path, b"<body", MAX_HEAD, &mut inflate))??;
+        let bytes = self.with_handle(|l| l.read_until_ci(path, b"<body", MAX_HEAD, &mut inflate))?;
         let utf16 = bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]);
         let declared = xml::declared_encoding(&bytes).and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()));
         if utf16 || declared.is_some_and(|e| e != encoding_rs::UTF_8) {
@@ -896,11 +918,11 @@ struct SpineFiles(Arc<LazySpine>);
 
 impl ResourceLoader for SpineFiles {
     fn read(&self, path: &str) -> Result<Vec<u8>> {
-        self.0.with_handle(|l| l.read(path)).unwrap_or_else(|| Err(DocError::NotFound(path.into())))
+        self.0.with_handle(|l| l.read(path))
     }
 
     fn exists(&self, path: &str) -> bool {
-        self.0.with_handle(|l| l.exists(path)).unwrap_or(false)
+        self.0.with_handle(|l| l.exists(path))
     }
 }
 
@@ -1245,6 +1267,27 @@ mod tests {
         assert_eq!(l, e);
         assert!(l.last().unwrap().contains(r#"["OEBPS/a.css", "OEBPS/b.css", "OEBPS/c.css", "OEBPS/d.css", "OEBPS/e.css", "OEBPS/g.css", "OEBPS/h.css"]"#), "{l:?}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reader_without_a_handle_waits_for_one() {
+        use ink_html::book::SpineSource;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/juliet.epub");
+        let (loader, pkg, _) = prepare(&path, None).unwrap();
+        let paths = spine_paths(&pkg);
+        // A path that cannot be opened: the pool has only the handle it was given.
+        let spine = LazySpine::new(Path::new("/nonexistent/juliet.epub"), loader, &paths);
+        let want = spine.read(1);
+        assert!(!want.is_empty());
+        std::thread::scope(|s| {
+            let reader = spine.with_handle(|_| {
+                let h = s.spawn(|| spine.read(1));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                assert!(!h.is_finished(), "read without a handle");
+                h
+            });
+            assert_eq!(reader.join().unwrap(), want);
+        });
     }
 
     #[test]
