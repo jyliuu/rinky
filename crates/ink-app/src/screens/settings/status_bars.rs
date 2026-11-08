@@ -367,7 +367,7 @@ impl Preview {
     /// bar's inner edge as if the bar were on, plus [`footer::BAR_EDGE`] / 2.
     fn band(b: Rect, bars: &StatusBars, edge: Edge) -> Rect {
         let bar = bar_ref(bars, edge);
-        let h = (footer::BAR_EDGE + footer::band_h(bar, true, footer::has_progress(bar)) + footer::BAR_EDGE / 2) as u32;
+        let h = (footer::BAR_EDGE + bar.band_h(true, bar.has_progress()) + footer::BAR_EDGE / 2) as u32;
         match edge {
             Edge::Top => Rect::new(b.x, b.y, b.w, h),
             Edge::Bottom => Rect::new(b.x, b.bottom() - h as i32, b.w, h),
@@ -453,7 +453,7 @@ impl SettingsScreen {
             self.tree.add(None, Box::new(tab), Rect::new(x, y, w, cx.theme.control_h()));
             y += cx.theme.control_h() as i32 + space(2);
             let bar = bar_ref(&bars, *e);
-            let slider = Slider::new("Text size", MIN_FONT_PX, MAX_FONT_PX, 2.0, footer::bar_px(bar), "sbar-size");
+            let slider = Slider::new("Text size", MIN_FONT_PX, MAX_FONT_PX, 2.0, bar.text_px(), "sbar-size");
             self.tree.add(None, Box::new(slider), Rect::new(x, y, w, LIGHT_SLIDER_H));
             y += LIGHT_SLIDER_H as i32 + space(1);
         }

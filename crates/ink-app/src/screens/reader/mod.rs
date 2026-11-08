@@ -2439,7 +2439,7 @@ impl ReaderScreen {
             let rows = if self.status_bars_hidden {
                 Some(Vec::new())
             } else if self.overlay.is_none() && !self.rerender && self.error.is_none() {
-                self.redraw_bar_text(cx, &status)
+                self.redraw_bars(cx, &status, footer::Part::Text)
             } else {
                 None
             };
