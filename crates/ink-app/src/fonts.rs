@@ -317,9 +317,14 @@ pub fn add_fallback_chain(fonts: &mut Fonts, chain: &[UiFallback], builtin: bool
     added.len()
 }
 
-/// The embedded Noto Sans UI fonts with the UI fallback faces.
+/// The embedded Noto Sans UI fonts with the UI fallback faces. Its `fontdue` face
+/// (about 1 s on a Kindle) is left for later ([`Fonts::from_static_deferred`]): the UI
+/// text of a first frame is shaped and measured from the font tables, and the app loop
+/// parses it on a thread once the first frame is on screen.
 pub fn builtin_ui_fonts() -> Fonts {
-    family_fonts("", false).expect("embedded UI font")
+    let mut fonts = Fonts::from_static_deferred([UI_REGULAR; 3]).expect("embedded UI font");
+    add_ui_fallbacks(&mut fonts, false);
+    fonts
 }
 
 /// The UI family `name` with its bold and italic faces, for UI text whose emphasis

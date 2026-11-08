@@ -46,6 +46,8 @@ All notable changes to rinky are listed here. The format is based on
   colours now come out darker (pure red is 77 of 255 instead of 129).
 - PDF and comic page turns are near instant when you rest on a page for a moment:
   rinky draws the next page (or the previous one, after turning back) while you read.
+- rinky starts faster: the first screen no longer waits for the interface font to be
+  fully loaded.
 
 ### Fixed
 - Reading settings (Aa): a preset or a font size step now also refreshes the preview

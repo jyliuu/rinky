@@ -445,6 +445,8 @@ impl App {
         if let Some(span) = self.pending_span.take() {
             span.finish();
         }
+        // The built-in UI face, left unparsed for the first frame (`builtin_ui_fonts`).
+        self.fonts.parse_in_background();
         if let Some(t) = self.busy_since.take() {
             let d = t.elapsed();
             let name = self.stack.last().map_or("(none)", |s| s.name());
