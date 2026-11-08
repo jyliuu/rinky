@@ -1490,8 +1490,6 @@ impl ink_plugin::Plugin for Rescanner {
     }
 }
 
-/// A plugin that adds a book while the library is shown gets it listed at the next
-/// event, without leaving the library.
 /// A library started again shows its saved books in the first frame; a book copied
 /// in while rinky was off is listed once the folder scan comes in on a timer tick.
 #[test]
@@ -1513,6 +1511,8 @@ fn a_restarted_library_shows_saved_books_then_the_scanned_ones() {
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
+/// A plugin that adds a book while the library is shown gets it listed at the next
+/// event, without leaving the library.
 #[test]
 fn plugin_rescan_while_the_library_is_shown() {
     let (dir, paths) = books("plugin-rescan", &["juliet.epub"]);
