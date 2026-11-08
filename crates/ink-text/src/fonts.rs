@@ -338,7 +338,13 @@ fn parse_all(faces: [&[u8]; 3]) -> Result<[Arc<Font>; 3], TextError> {
     let parse = |bytes: &[u8]| Font::from_bytes(bytes, FontSettings::default()).map(Arc::new).map_err(|e| TextError::Font(e.to_string()));
     let r = parse(faces[0])?;
     let b = if faces[1] == faces[0] { r.clone() } else { parse(faces[1])? };
-    let i = if faces[2] == faces[0] { r.clone() } else if faces[2] == faces[1] { b.clone() } else { parse(faces[2])? };
+    let i = if faces[2] == faces[0] {
+        r.clone()
+    } else if faces[2] == faces[1] {
+        b.clone()
+    } else {
+        parse(faces[2])?
+    };
     Ok([r, b, i])
 }
 
