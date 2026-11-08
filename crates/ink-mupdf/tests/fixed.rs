@@ -592,3 +592,27 @@ fn zoom_step_cuts_pages_into_more_screens_and_back() {
     assert_eq!(d.zoom_step(1), None, "at the top of the ladder");
     assert_eq!(d.options().zoom, 4.0);
 }
+
+/// The trait's view options reach the engine: two columns cut each page into two
+/// screens, the current page stays on screen, and the engine's own gamma stays.
+#[test]
+fn fixed_view_through_the_document_trait() {
+    let path = pdf_path();
+    let mut d = open(&path, "gamma=1.5", W, H);
+    let base = d.fixed_view().expect("a fixed-layout document has view options");
+    assert_eq!(base, ink_doc::FixedView::default());
+    let before = d.page_count().pages;
+    d.set_current_page(d.page_of(&"page:2".parse().unwrap()).unwrap());
+    let view = ink_doc::FixedView { columns: 2, ..base };
+    d.set_fixed_view(&view).unwrap();
+    assert_eq!(d.fixed_view(), Some(view));
+    assert_eq!(d.options().gamma, 1.5, "gamma is the engine's, not the view's");
+    assert!(d.page_count().pages > before, "two columns: more screens ({} vs {before})", d.page_count().pages);
+    let Position::Page(at) = d.position_of_page(d.current_page()).unwrap() else { panic!("a page position") };
+    assert_eq!(at.page, 2, "the page shown before stays on screen");
+    // Setting the same view again changes nothing (the screen cache stays).
+    let cur = d.current_page();
+    d.render_page(cur, &mut Canvas::new(W as usize, H as usize)).unwrap();
+    d.set_fixed_view(&view).unwrap();
+    assert!(d.is_cached(cur));
+}

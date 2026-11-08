@@ -43,7 +43,7 @@ use crate::text::PageText;
 use crate::{Fit, FixedOptions, Spreads};
 use ink_device::{Canvas, Point, Rect};
 use ink_doc::{
-    DocError, DocKind, Document, Link, LinkTarget, LayoutSettings, Metadata, PageCount, PagePosition, Position,
+    DocError, DocKind, Document, FixedView, Link, LinkTarget, LayoutSettings, Metadata, PageCount, PagePosition, Position,
     Result, SearchHit, Selection, TocEntry,
 };
 use std::cell::{OnceCell, RefCell};
@@ -973,6 +973,18 @@ impl Document for MupdfDocument {
         opts.zoom = LADDER[to];
         self.set_options(opts);
         Some(LADDER[to])
+    }
+
+    fn fixed_view(&self) -> Option<FixedView> {
+        Some(self.opts.view())
+    }
+
+    fn set_fixed_view(&mut self, view: &FixedView) -> Result<()> {
+        let opts = self.opts.with_view(view);
+        if opts != self.opts {
+            self.set_options(opts);
+        }
+        Ok(())
     }
 
     fn layout(&self) -> &LayoutSettings {

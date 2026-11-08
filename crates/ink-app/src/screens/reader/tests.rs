@@ -79,6 +79,20 @@ impl Harness {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(book);
         let path = dir.join(Path::new(book).file_name().unwrap());
         std::fs::copy(&src, &path).unwrap();
+        Self::at(test, dir, path, wait)
+    }
+
+    /// Opens a book written from `bytes` as `name` (a generated PDF or CBZ:
+    /// `ink_mupdf::testgen`).
+    pub fn generated(test: &str, name: &str, bytes: &[u8]) -> Self {
+        let dir = tmp(test);
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        Self::at(test, dir, path, true)
+    }
+
+    /// Opens `path` (inside the test's directory `dir`, removed on drop).
+    fn at(test: &str, dir: PathBuf, path: PathBuf, wait: bool) -> Self {
         let (dev, probe) = headless::open(HeadlessOptions::default());
         let size = dev.screen.size();
         let space = ScreenSpace { panel: dev.screen.panel_size(), rotation: dev.screen.rotation() };
@@ -1833,4 +1847,97 @@ fn the_end_card_opens_the_next_book_of_the_series_or_goes_to_the_library() {
     assert!(h.reader.overlay().unwrap().button_rect("end-next").is_none());
     h.tap_button("end-library");
     assert_eq!(h.transitions, vec![Transition::Pop]);
+}
+
+/// The Aa sheet of a PDF has the View tab; choosing two columns there cuts every page
+/// into two screens at once (the page drawn again), keeps the page read, is saved in
+/// the book's sidecar, and comes back when the book is opened again.
+#[test]
+fn aa_view_tab_changes_a_pdf_and_saves_it_for_the_book() {
+    let mut h = Harness::generated("aa-view", "paper.pdf", &ink_mupdf::testgen::fixture_pdf());
+    let pages0 = h.reader.doc.as_deref().unwrap().page_count().pages;
+    assert_eq!(pages0, 10, "fit page: one screen per page");
+    // Page 2 (the two-column page of the fixture).
+    h.reader.go_to_page(1);
+    h.paint();
+    let before = h.probe.panel().clone();
+    h.tap_at(636, 848);
+    h.tap_button("aa");
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Aa));
+    let o = h.reader.overlay().unwrap();
+    assert!(o.button_rect("aa-tab:1").is_some() && o.button_rect("aa-tab:2").is_none(), "View and Page tabs only");
+    // Tab 0 is View: tap it in case another test left the shared tab elsewhere.
+    h.tap_button("aa-tab:0");
+    h.shot("01-view");
+    let o = h.reader.overlay().unwrap();
+    assert!(!o.ids.contains_key("size"), "no font size for a PDF");
+    let cols = o.tree.bounds(o.ids["columns"]).unwrap();
+    // "Two" is the right half of the two-choice row.
+    h.tap_at(cols.x + cols.w as i32 * 3 / 4, cols.y + cols.h as i32 / 2);
+    assert_eq!(h.reader.actions().last().map(String::as_str), Some("aa-columns:2"));
+    settle_aa(&mut h);
+    let doc = h.reader.doc.as_deref().unwrap();
+    assert_eq!(doc.fixed_view().map(|v| v.columns), Some(2));
+    assert_eq!(doc.page_count().pages, 20, "two screens per page");
+    let Position::Page(at) = doc.position_of_page(h.reader.page()).unwrap() else { panic!("a page position") };
+    assert_eq!(at.page, 1, "still on the page read before");
+    h.tap_button("close");
+    assert_eq!(h.kind(), None);
+    h.shot("02-columns");
+    // The page area shows the left column now, not the whole page.
+    let changed = h.panel_rows_differ(&before, 200, 1400);
+    assert!(changed > 10_000, "the page was drawn again with the new view ({changed} pixels changed)");
+    let st = BookState::load(&h.reader.path).unwrap();
+    assert_eq!(st.settings.columns, Some(2));
+    assert_eq!((st.settings.zoom, st.settings.rtl), (None, None), "only what was chosen is saved");
+    // Opening the book again: its own view, over the defaults.
+    let mut again = ReaderScreen::new(h.reader.path.clone());
+    let p = providers();
+    again.on_enter(&mut cx!(h, p)).unwrap();
+    let doc = again.doc.as_deref().unwrap();
+    assert_eq!(doc.fixed_view().map(|v| (v.columns, v.fit)), Some((2, ink_doc::Fit::Page)));
+    assert_eq!(doc.page_count().pages, 20);
+}
+
+/// A comic's own view (right to left, two-page spreads) reaches the document on a
+/// relayout, and the sheet shows it.
+#[test]
+fn aa_view_tab_shows_a_comic_s_own_view() {
+    let mut h = Harness::generated("aa-view-cbz", "comic.cbz", &ink_mupdf::testgen::fixture_cbz(6));
+    h.reader.book_settings.rtl = Some(true);
+    h.reader.book_settings.spreads = Some("always".into());
+    h.with_cx(|r, cx| r.relayout(cx, RefreshClass::Gc16)).unwrap();
+    let doc = h.reader.doc.as_deref().unwrap();
+    assert_eq!(doc.fixed_view().map(|v| (v.rtl, v.spreads)), Some((true, ink_doc::Spreads::Always)));
+    assert!(doc.page_count().pages < 6, "spreads: two pages on a screen");
+    h.paint();
+    h.tap_at(636, 848);
+    h.tap_button("aa");
+    h.tap_button("aa-tab:0");
+    let o = h.reader.overlay().unwrap();
+    assert!(o.ids.contains_key("rtl") && o.ids.contains_key("spreads"));
+    h.shot("01-view");
+}
+
+/// A comic set to right to left: a tap on the left side goes forward, the right side
+/// back, and the page turn wave sweeps the other way.
+#[test]
+fn right_to_left_comic_turns_forward_on_the_left() {
+    use ink_device::Wave;
+    let mut h = Harness::generated("rtl-turns", "manga.cbz", &ink_mupdf::testgen::fixture_cbz(6));
+    let last = |h: &Harness| *h.probe.updates().last().unwrap();
+    h.tap_at(1100, 900);
+    assert_eq!(h.reader.page(), 1, "left to right: the right side goes forward");
+    h.reader.book_settings.rtl = Some(true);
+    h.with_cx(|r, cx| r.relayout(cx, RefreshClass::Gc16)).unwrap();
+    h.paint();
+    h.tap_at(100, 900);
+    assert_eq!(h.reader.page(), 2, "right to left: the left side goes forward");
+    assert_eq!(last(&h).wave, Some(Wave::Right));
+    h.tap_at(1100, 900);
+    assert_eq!(h.reader.page(), 1, "and the right side back");
+    assert_eq!(last(&h).wave, Some(Wave::Left));
+    // Page keys keep their meaning: forward is forward.
+    h.key(Key::PageNext);
+    assert_eq!(h.reader.page(), 2);
 }

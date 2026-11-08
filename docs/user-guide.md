@@ -181,6 +181,9 @@ Tap **Aa** in the menu, or swipe up from the bottom edge, to open *Reading setti
   first-line indent.
 - **Page:** page turn wave, status bars, how often the page flashes to clear ghosting,
   and night mode.
+- **View** (PDF and comics only, in place of Text and Layout): fit, columns,
+  contrast, two pages side by side, crop margins and right to left. See *PDF and
+  comics* below.
 
 Text and Layout changes apply to the open book only. **Use for all books** makes them
 the default for every book, which you can also set under *Settings > Default layout*.
@@ -213,6 +216,23 @@ place of Highlight.
 
 PDF and CBZ pages are shown whole. Pinch out to zoom in and pinch in to zoom out; the
 zoom lasts until you close the book. Fonts and margins do not apply.
+
+For these books *Reading settings* (Aa) has a **View** tab in place of Text and
+Layout. What you choose there is kept for that book only:
+
+- **Fit:** *Whole page*, or *Page width* to fill the screen from side to side and read
+  each page in parts from top to bottom.
+- **Columns:** *Two* for papers printed in two columns. You read down the left column,
+  then the right one, each as large as the screen allows.
+- **Contrast:** *More*, *High* or *Highest* make faint scans and grey text darker.
+- **Two pages side by side:** *Auto* shows two pages at once for comics when the
+  Kindle is turned sideways; *On* always does, *Off* never does. Two pages only show
+  with the whole page fit, one column and no zoom.
+- **Crop margins:** cuts the white border off each page, so the text is larger.
+- **Right to left:** for manga. Page turns go the other way: the left two thirds of
+  the screen and a swipe to the right go to the next page, the right third and a swipe
+  to the left go back, and in two-page view the right page comes first. Page keys keep
+  their meaning.
 
 ## 5. Light, sleep and settings
 

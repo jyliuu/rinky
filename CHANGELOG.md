@@ -13,6 +13,12 @@ All notable changes to rinky are listed here. The format is based on
   or else the unfinished book opened last) and goes back to the library. Back, or
   *Back to book*, returns to the last page. The card appears with one flash; taps on
   it do not flash.
+- PDF, comic (CBZ) and XPS books have a **View** tab in *Reading settings* (Aa), in
+  place of the font and margin tabs that did nothing to them: fit the whole page or
+  the page width, read two-column papers one column at a time, darker contrast for
+  faint scans, two pages side by side, crop the white margins, and right to left for
+  manga, where a tap on the left or a swipe to the right turns to the next page. The
+  choices are kept for each book.
 
 ## [0.5.3] - 2026-11-07
 

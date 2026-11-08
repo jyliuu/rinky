@@ -784,6 +784,12 @@ impl ReaderScreen {
         ink_ui::message::draw_message(cx.canvas, cx.fonts, &refs);
     }
 
+    /// The book reads right to left (a fixed-layout book with Aa › View › Right to left):
+    /// page-turn gestures and the turn wave go the other way.
+    fn reads_right_to_left(&self) -> bool {
+        self.doc.as_deref().and_then(|d| d.fixed_view()).is_some_and(|v| v.rtl)
+    }
+
     fn turn(&mut self, step: i64, cx: &mut AppCtx) {
         let Some(doc) = self.doc.as_ref() else { return };
         let total = doc.page_count().pages as i64;
@@ -799,8 +805,9 @@ impl ReaderScreen {
             self.rerender = true;
             self.turned = true;
             self.dirty = Some(cx.refresh.page_turn());
-            // No right-to-left books yet: a next page sweeps left.
-            self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, false));
+            // A next page sweeps left, right in a right-to-left book.
+            let rtl = self.reads_right_to_left();
+            self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, rtl));
         }
     }
 
@@ -1769,8 +1776,14 @@ impl ReaderScreen {
         let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
         let size = cx.screen.size();
         let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
-        if &layout != doc.layout() {
+        // A fixed-layout book's view options (Aa › View) changed.
+        let view = doc.fixed_view().map(|v| aa::fixed_view(v, &self.book_settings)).filter(|v| Some(*v) != doc.fixed_view());
+        if &layout != doc.layout() || view.is_some() {
             doc.set_current_page(self.page);
+            if let Some(v) = view {
+                log::info!("reader: fixed-layout view {v:?}");
+                doc.set_fixed_view(&v)?;
+            }
             doc.set_layout(&layout)?;
             self.page = doc.current_page();
             self.forget_page_numbers();
@@ -2190,7 +2203,20 @@ impl AppScreen for ReaderScreen {
         let saved_pos = saved.as_deref().and_then(|s| s.parse::<Position>().ok());
         trace.step("state+md5");
         let doc = match open_traced(cx.providers, &self.path, &layout, Some(&cache), md5.as_deref(), saved_pos.as_ref(), &mut trace) {
-            Ok(doc) => doc,
+            Ok(mut doc) => {
+                // A fixed-layout book's own view (Aa › View) over the document's defaults.
+                if let Some(base) = doc.fixed_view() {
+                    let view = aa::fixed_view(base, &self.book_settings);
+                    if view != base {
+                        log::info!("reader: fixed-layout view of this book {view:?}");
+                        if let Err(e) = doc.set_fixed_view(&view) {
+                            log::warn!("reader: fixed-layout view: {e}");
+                        }
+                        trace.step("fixed-layout view");
+                    }
+                }
+                doc
+            }
             Err(e) => {
                 // The message stays on screen until the user taps: the reader does not
                 // end the app (or leave the library) on its own.

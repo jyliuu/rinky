@@ -78,6 +78,54 @@ pub enum DocKind {
     Fixed,
 }
 
+/// How a fixed-layout page is scaled to the screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fit {
+    /// Whole page on screen.
+    #[default]
+    Page,
+    /// Page width fills the screen; the page continues on the next screens.
+    Width,
+}
+
+/// Two fixed-layout pages side by side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Spreads {
+    /// For comic books (CBZ) when the screen is landscape.
+    #[default]
+    Auto,
+    /// Always (fit page, zoom 1, one column only).
+    Always,
+    /// Never.
+    Never,
+}
+
+/// The view options of a fixed-layout document that a reader offers in its settings
+/// (see [`Document::fixed_view`]). The engine may keep more options of its own (zoom,
+/// gamma, rotation), which a change of the view leaves as they are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FixedView {
+    /// Whole page or page width.
+    pub fit: Fit,
+    /// White margins cropped automatically.
+    pub crop_margins: bool,
+    /// Text columns read one after the other (1 = off).
+    pub columns: u8,
+    /// Contrast (1.0 = none, larger is steeper).
+    pub contrast: f32,
+    /// Two pages side by side.
+    pub spreads: Spreads,
+    /// Pages run right to left (manga): the right page of a spread comes first, and the
+    /// reader turns pages the other way.
+    pub rtl: bool,
+}
+
+impl Default for FixedView {
+    fn default() -> Self {
+        FixedView { fit: Fit::Page, crop_margins: false, columns: 1, contrast: 1.0, spreads: Spreads::Auto, rtl: false }
+    }
+}
+
 /// Settings a reflowable layout depends on. Fixed-layout documents use `width` and
 /// `height` as the target size and ignore the rest.
 #[derive(Clone, Debug, PartialEq)]
@@ -351,6 +399,19 @@ pub trait Document {
     /// (reflowable) or the zoom is already at its limit.
     fn zoom_step(&mut self, _steps: i32) -> Option<f32> {
         None
+    }
+
+    /// The view options of a fixed-layout document; `None` for reflowable documents.
+    fn fixed_view(&self) -> Option<FixedView> {
+        None
+    }
+
+    /// Changes the view options of a fixed-layout document. Screens are cut again;
+    /// positions stay valid and the current position stays on screen (read the page
+    /// with `current_page()` after it), page numbers do not. Default (reflowable):
+    /// [`DocError::Unsupported`].
+    fn set_fixed_view(&mut self, _view: &FixedView) -> Result<()> {
+        Err(DocError::Unsupported("fixed-layout view options".into()))
     }
 
     /// Current layout settings.
