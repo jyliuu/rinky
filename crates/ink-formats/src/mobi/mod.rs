@@ -22,7 +22,7 @@ pub mod mobi6;
 pub mod palmdb;
 
 use crate::book::{Book, BookInfo, Cover, Identifier};
-use crate::util::{extension_for, sniff_media_type};
+use crate::util::{extension_for, sniff_media_type, LANGUAGES};
 use crate::Format;
 use header::{exth, MobiHeader};
 use ink_doc::{DocError, ResourceLoader, Result};
@@ -309,7 +309,7 @@ impl Mobi {
         info.metadata.authors = all(exth::AUTHOR);
         info.metadata.publisher = get(exth::PUBLISHER);
         info.metadata.description = get(exth::DESCRIPTION).map(|d| crate::xml::collapse_ws(&crate::xml::strip_tags(&d)));
-        info.metadata.language = get(exth::LANGUAGE).or_else(|| locale_language(h.locale));
+        info.metadata.language = get(exth::LANGUAGE).or_else(|| LANGUAGES.iter().find(|l| l.1 == h.locale & 0xFF).map(|l| l.2.to_string()));
         info.subjects = all(exth::SUBJECT);
         info.date = get(exth::DATE);
         for isbn in all(exth::ISBN) {
@@ -335,31 +335,6 @@ impl Mobi {
         }
         info
     }
-}
-
-/// Language from the MOBI locale field (low byte = Windows primary language id).
-fn locale_language(locale: u32) -> Option<String> {
-    Some(
-        match locale & 0xFF {
-            9 => "en",
-            7 => "de",
-            12 => "fr",
-            10 => "es",
-            16 => "it",
-            6 => "da",
-            19 => "nl",
-            25 => "ru",
-            22 => "pt",
-            29 => "sv",
-            20 => "no",
-            11 => "fi",
-            21 => "pl",
-            4 => "zh",
-            17 => "ja",
-            _ => return None,
-        }
-        .to_string(),
-    )
 }
 
 fn find_kf8(db: &PalmDb, h: &MobiHeader) -> Option<MobiHeader> {

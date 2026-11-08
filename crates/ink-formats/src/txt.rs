@@ -13,6 +13,7 @@
 
 use crate::book::{Book, BookInfo, Target, TocNode};
 use crate::encoding::{decode_text, decode_text_owned};
+use crate::util::LANGUAGES;
 use crate::xml::{escape_text, push_text};
 use crate::Format;
 use ink_doc::{DirLoader, DocError, Result};
@@ -387,33 +388,12 @@ fn header_metadata(text: &str, info: &mut BookInfo) {
                 info.metadata.authors = v.split(" and ").map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
             }
         } else if let Some(v) = field("Language:") {
-            info.metadata.language.get_or_insert(language_code(&v));
+            let name = v.to_lowercase();
+            info.metadata.language.get_or_insert(LANGUAGES.iter().find(|l| l.0 == name).map_or(name.clone(), |l| l.2.to_string()));
         } else if l.starts_with("*** START OF") {
             break;
         }
     }
-}
-
-fn language_code(name: &str) -> String {
-    match name.to_lowercase().as_str() {
-        "english" => "en",
-        "german" => "de",
-        "french" => "fr",
-        "spanish" => "es",
-        "italian" => "it",
-        "danish" => "da",
-        "dutch" => "nl",
-        "russian" => "ru",
-        "portuguese" => "pt",
-        "swedish" => "sv",
-        "norwegian" => "no",
-        "finnish" => "fi",
-        "polish" => "pl",
-        "chinese" => "zh",
-        "japanese" => "ja",
-        other => return other.to_string(),
-    }
-    .to_string()
 }
 
 fn info_of(path: &Path, text: &str, encoding: &str) -> BookInfo {
