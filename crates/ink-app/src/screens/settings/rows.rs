@@ -369,15 +369,14 @@ impl SettingsList {
         self.visible(b).into_iter().find(|(k, _)| *k == i).map(|(_, r)| r)
     }
 
+    /// The visible row under `p` that passes `pick`, with its rectangle.
+    fn row_at(&self, b: Rect, p: Point, pick: impl Fn(&Row) -> bool) -> Option<(usize, Rect)> {
+        b.contains(p).then(|| self.visible(b))?.into_iter().find(|(i, r)| r.contains(p) && pick(&self.rows[*i]))
+    }
+
     /// The visible slider row under `p` and its slider's rectangle.
     fn slider_at(&self, b: Rect, p: Point) -> Option<(usize, Rect)> {
-        if !b.contains(p) {
-            return None;
-        }
-        self.visible(b)
-            .into_iter()
-            .find(|(i, r)| r.contains(p) && self.rows[*i].kind == Kind::Slider)
-            .map(|(i, r)| (i, SettingsList::slider_rect(r)))
+        self.row_at(b, p, |r| r.kind == Kind::Slider).map(|(i, r)| (i, SettingsList::slider_rect(r)))
     }
 
     /// A touch for a slider row: the down that starts a drag on its track and every
@@ -385,7 +384,7 @@ impl SettingsList {
     /// it is dragged; the lift reports the slider's `action:<value>`.
     fn slider_touch(&mut self, ev: &UiEvent, t: &ink_ui::Touch, b: Rect) -> Option<EventResult> {
         if let Some(i) = self.dragging {
-            let r = self.visible(b).into_iter().find(|(k, _)| *k == i).map(|(_, r)| SettingsList::slider_rect(r));
+            let r = self.shown_rect(b, i).map(SettingsList::slider_rect);
             if matches!(t.kind, TouchKind::Up | TouchKind::Cancel) {
                 self.dragging = None;
             }
@@ -419,10 +418,7 @@ impl SettingsList {
     }
 
     fn item_at(&self, b: Rect, p: Point) -> Option<usize> {
-        if !b.contains(p) {
-            return None;
-        }
-        self.visible(b).into_iter().find(|(i, r)| r.contains(p) && self.rows[*i].tappable()).map(|(i, _)| i)
+        self.row_at(b, p, Row::tappable).map(|(i, _)| i)
     }
 
     /// The shared scroll bar for the list in `b`, in pixels: the whole content, the
@@ -682,20 +678,16 @@ impl Widget for SettingsList {
                 if let Some(i) = self.item_at(b, *pos) {
                     self.changed.extend(self.pressed.take());
                     self.changed.push(i);
-                    let (up, down) = order_buttons(self.visible(b).into_iter().find(|(k, _)| *k == i).map_or(b, |(_, r)| r));
+                    let (up, down) = order_buttons(self.shown_rect(b, i).unwrap_or(b));
                     let row = &mut self.rows[i];
                     return EventResult::Action(match &mut row.trail {
-                        Trail::Order { up: can_up, .. } if up.contains(*pos) => {
-                            if !*can_up {
+                        // An arrow reports its direction, an inactive one nothing.
+                        Trail::Order { up: can_up, down: can_down, .. } if up.contains(*pos) || down.contains(*pos) => {
+                            let (dir, can) = if up.contains(*pos) { ("up", *can_up) } else { ("down", *can_down) };
+                            if !can {
                                 return EventResult::Handled;
                             }
-                            format!("{}:up", row.action)
-                        }
-                        Trail::Order { down: can_down, .. } if down.contains(*pos) => {
-                            if !*can_down {
-                                return EventResult::Handled;
-                            }
-                            format!("{}:down", row.action)
+                            format!("{}:{dir}", row.action)
                         }
                         // A switch (an ordered item's too, outside its arrows) flips.
                         Trail::Toggle(on) | Trail::Order { on, .. } => {
