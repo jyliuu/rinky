@@ -661,10 +661,6 @@ fn opds2_catalog(base: &str) -> String {
     .to_string()
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
 fn kosync_route(req: &Recorded, state: &State, w: &mut Conn, seg: &[&str]) -> io::Result<End> {
     let err = |code: u32, message: &str| serde_json::json!({ "code": code, "message": message });
     if req.header("accept") != Some(KOSYNC_ACCEPT) {
@@ -715,7 +711,7 @@ fn kosync_route(req: &Recorded, state: &State, w: &mut Conn, seg: &[&str]) -> io
             if !has_all {
                 return json(w, req, 403, &err(2003, "Invalid request"));
             }
-            let ts = now_secs();
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             let mut stored = body.clone();
             stored["timestamp"] = ts.into();
             state.progress.lock().unwrap().insert((user, doc.to_string()), stored);

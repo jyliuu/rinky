@@ -42,7 +42,7 @@
 //!    to `dest`.
 
 use crate::connectivity::{Connectivity, KeepAwake, NetActivity};
-use crate::http::{HttpClient, Request, Response};
+use crate::http::{HttpClient, Request};
 use crate::{hex, CancelToken, NetError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -206,12 +206,6 @@ fn parse_content_range(v: &str) -> Option<(Option<u64>, Option<u64>)> {
     let range = range.trim();
     let start = if range == "*" { None } else { Some(range.split('-').next()?.trim().parse().ok()?) };
     Some((start, total.trim().parse().ok()))
-}
-
-/// True when the body ends with a zero-length chunk (ureq reports a cut chunked body as
-/// an error).
-fn is_chunked(resp: &Response) -> bool {
-    resp.header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
 }
 
 /// Destinations with a run in this process (key: canonical directory + file name).
@@ -439,8 +433,10 @@ impl Download {
                     return Err(NetError::TooLarge(max as usize));
                 }
             }
-            // Does the body have an end of its own (a length or a last chunk)?
-            let framed = total.is_some() || resp.content_length().is_some() || is_chunked(&resp);
+            // Does the body have an end of its own (a length or a last chunk; ureq reports a
+            // cut chunked body as an error)?
+            let chunked = resp.header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+            let framed = total.is_some() || resp.content_length().is_some() || chunked;
             let new_meta = PartMeta {
                 url: self.url.clone(),
                 etag: resp.header("etag").map(str::to_string),
@@ -530,20 +526,13 @@ impl Download {
         }
         std::fs::rename(part, &self.dest)?;
         let _ = std::fs::remove_file(meta_path(&self.dest));
-        sync_dir(&self.dest);
+        // Make the rename durable.
+        #[cfg(unix)]
+        if let Some(dir) = self.dest.parent().filter(|d| !d.as_os_str().is_empty()) {
+            let _ = File::open(dir).and_then(|d| d.sync_all());
+        }
         Ok(DownloadOutcome { path: self.dest.clone(), bytes, resumed_from, sha256, url: url.to_string(), mime, server_filename })
     }
-}
-
-fn sync_dir(path: &Path) {
-    #[cfg(unix)]
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        if let Ok(d) = File::open(dir) {
-            let _ = d.sync_all();
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = path;
 }
 
 /// SHA-256 of a file and, when `with_md5`, its MD5 (lowercase hex). Every download

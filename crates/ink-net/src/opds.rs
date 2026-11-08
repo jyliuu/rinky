@@ -245,16 +245,6 @@ impl OpdsFeed {
         self.href("previous").or_else(|| self.href("prev"))
     }
 
-    /// First page.
-    pub fn first_url(&self) -> Option<&str> {
-        self.href("first")
-    }
-
-    /// Last page.
-    pub fn last_url(&self) -> Option<&str> {
-        self.href("last")
-    }
-
     /// Catalog root.
     pub fn start_url(&self) -> Option<&str> {
         self.href("start")

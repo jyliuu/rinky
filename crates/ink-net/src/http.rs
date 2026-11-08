@@ -478,10 +478,6 @@ pub fn map_ureq(e: ureq::Error) -> NetError {
     }
 }
 
-fn is_redirect(status: u16) -> bool {
-    matches!(status, 301 | 302 | 303 | 307 | 308)
-}
-
 /// Header names that carry credentials; dropped when a redirect changes the origin.
 pub fn is_sensitive_header(name: &str) -> bool {
     // `auth` covers Authorization and Proxy-Authorization.
@@ -519,7 +515,7 @@ impl HttpClient for UreqClient {
                 return Err(NetError::Http(format!("https only: refusing {}", req.url)));
             }
             let resp = self.send_once(&req)?;
-            if req.max_redirects == 0 || !is_redirect(resp.status) {
+            if req.max_redirects == 0 || !matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
                 return Ok(resp);
             }
             let Some(location) = resp.header("location").map(str::to_string) else {

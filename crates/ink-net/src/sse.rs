@@ -106,11 +106,6 @@ impl SseParser {
         self.max_event_bytes
     }
 
-    /// Changes the limit (takes effect with the next byte).
-    pub fn set_max_event_bytes(&mut self, max: usize) {
-        self.max_event_bytes = max;
-    }
-
     /// True once an event went over the limit. The parser then has freed its buffers and
     /// ignores all further input ([`SseParser::feed`] returns nothing); events completed
     /// before the overflow were returned normally. [`SseParser::finish`] does not clear it.
@@ -284,7 +279,7 @@ impl<R: Read> SseReader<R> {
     /// Sets the per-event limit ([`SseParser::max_event_bytes`]; default
     /// [`DEFAULT_MAX_EVENT_BYTES`]).
     pub fn max_event_bytes(mut self, max: usize) -> Self {
-        self.parser.set_max_event_bytes(max);
+        self.parser.max_event_bytes = max;
         self
     }
 
