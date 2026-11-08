@@ -8,8 +8,8 @@ All notable changes to rinky are listed here. The format is based on
 
 ### Added
 - The end of a book: turning past the last page shows a card with the book's title.
-  It marks the book as finished, takes a rating of one to five stars (kept where
-  KOReader keeps its rating), suggests what to read next (the next book of the series,
+  It marks the book as finished, takes a rating of one to five stars (a rating
+  imported from KOReader shows there too), suggests what to read next (the next book of the series,
   or else the unfinished book opened last) and goes back to the library. Back, or
   *Back to book*, returns to the last page. The card appears with one flash; taps on
   it do not flash.

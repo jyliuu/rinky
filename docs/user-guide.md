@@ -129,7 +129,8 @@ title. On the card you can:
 - tap **Mark as finished**. The button turns black and says *Finished*; tap it again
   if you change your mind. It is the same status as *Mark as finished* in the library.
 - give the book one to five stars under **Your rating**. Tap another star to change it.
-  The rating is kept with the book, where KOReader keeps its rating too.
+  The rating is kept with the book in rinky's own file; a rating you gave in KOReader
+  shows here after a KOReader import. rinky does not write it back to KOReader.
 - tap the book under **Open next** to start reading it. rinky suggests the next book of
   the same series from your library, or else the unfinished book you opened last. When
   there is nothing to suggest, this part is left out.
