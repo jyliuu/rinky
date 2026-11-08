@@ -18,7 +18,7 @@ pub fn from_bytes(bytes: &[u8]) -> Option<Canvas> {
     let (iw, ih) = ink_html::images::intrinsic_size(bytes)?;
     let s = (THUMB_W as f32 / iw as f32).min(THUMB_H as f32 / ih as f32);
     let (w, h) = (((iw as f32 * s).round() as u32).max(1), ((ih as f32 * s).round() as u32).max(1));
-    let img = ink_html::images::decode_scaled(bytes, w, h, None)?;
+    let img = ink_html::images::decode_thumbnail(bytes, w, h)?;
     let (w, h) = (img.width() as usize, img.height() as usize);
     let pixels = img.into_raw();
     (pixels.len() == w * h).then(|| Canvas::from_pixels(w, h, pixels))

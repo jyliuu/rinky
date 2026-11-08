@@ -2,7 +2,7 @@
 //! with `resvg`), scaling and Floyd-Steinberg dithering to the 16 gray levels of the
 //! e-ink panel. Transparent pixels are composited on white.
 
-use image::{GrayImage, ImageReader};
+use image::{DynamicImage, GrayImage, ImageReader};
 use ink_device::Canvas;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -52,6 +52,27 @@ pub fn intrinsic_size(bytes: &[u8]) -> Option<(u32, u32)> {
 /// A decoded gray image scaled to `w` x `h` (not dithered). `resolve` loads resources an
 /// SVG refers to.
 pub fn decode_scaled(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<'_>>) -> Option<GrayImage> {
+    decode_with(bytes, w, h, resolve, GrayMath::ImageCrate)
+}
+
+/// [`decode_scaled`] for a thumbnail that is stored, not drawn as is (library covers):
+/// 8-bit colour becomes gray with integer Rec. 709 weights, where the image crate's
+/// conversion (f32 colour management per pixel) takes about 70 ms for a 600 x 900
+/// cover on a Kindle. The two differ by at most one level of 255 (rounding).
+pub fn decode_thumbnail(bytes: &[u8], w: u32, h: u32) -> Option<GrayImage> {
+    decode_with(bytes, w, h, None, GrayMath::Integer)
+}
+
+/// How [`whole_decode`] turns 8-bit colour into gray.
+#[derive(Clone, Copy, PartialEq)]
+enum GrayMath {
+    /// The image crate's `to_luma8` (what page goldens were made with).
+    ImageCrate,
+    /// [`gray_of`]: integer Rec. 709 luma, rounded.
+    Integer,
+}
+
+fn decode_with(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<'_>>, math: GrayMath) -> Option<GrayImage> {
     if w == 0 || h == 0 || w > 8000 || h > 8000 {
         return None;
     }
@@ -71,7 +92,7 @@ pub fn decode_scaled(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<
         let out = match fmt {
             Some(image::ImageFormat::Png) => png_shrunk(bytes, w, h),
             Some(image::ImageFormat::Jpeg) => jpeg_shrunk(bytes, w, h),
-            _ if source_px <= MAX_OTHER_PX => whole_decode(bytes, w, h),
+            _ if source_px <= MAX_OTHER_PX => whole_decode(bytes, w, h, math),
             _ => None,
         };
         if out.is_none() {
@@ -79,7 +100,7 @@ pub fn decode_scaled(bytes: &[u8], w: u32, h: u32, resolve: Option<HrefResolver<
         }
         return out;
     }
-    whole_decode(bytes, w, h)
+    whole_decode(bytes, w, h, math)
 }
 
 /// Sources above this many pixels go through the bounded-memory decoders.
@@ -94,13 +115,30 @@ pub const MAX_OTHER_PX: u64 = 16 << 20;
 const MAX_SOURCE_W: u32 = 100_000;
 
 /// Decodes the whole image with the `image` crate, then scales it.
-fn whole_decode(bytes: &[u8], w: u32, h: u32) -> Option<GrayImage> {
+fn whole_decode(bytes: &[u8], w: u32, h: u32, math: GrayMath) -> Option<GrayImage> {
     let mut r = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(256 << 20);
     r.limits(limits);
     let img = r.decode().ok()?;
-    let gray = if img.color().has_alpha() {
+    if math == GrayMath::ImageCrate {
+        return Some(finish_size(image_crate_gray(img)?, w, h));
+    }
+    let (iw, ih) = (img.width(), img.height());
+    let raw = match img {
+        DynamicImage::ImageLuma8(i) => return Some(finish_size(i, w, h)),
+        DynamicImage::ImageLumaA8(i) => gray_pixels::<2>(i.as_raw()),
+        DynamicImage::ImageRgb8(i) => gray_pixels::<3>(i.as_raw()),
+        DynamicImage::ImageRgba8(i) => gray_pixels::<4>(i.as_raw()),
+        other => return Some(finish_size(image_crate_gray(other)?, w, h)),
+    };
+    Some(finish_size(GrayImage::from_raw(iw, ih, raw)?, w, h))
+}
+
+/// An image as 8-bit gray with the image crate's conversion, transparency composited
+/// on white.
+fn image_crate_gray(img: DynamicImage) -> Option<GrayImage> {
+    if img.color().has_alpha() {
         let la = img.to_luma_alpha8();
         let (iw, ih) = la.dimensions();
         let raw: Vec<u8> = la
@@ -110,11 +148,15 @@ fn whole_decode(bytes: &[u8], w: u32, h: u32) -> Option<GrayImage> {
             .iter()
             .map(|p| over_white(p[0] as u32, p[1] as u32))
             .collect();
-        GrayImage::from_raw(iw, ih, raw)?
+        GrayImage::from_raw(iw, ih, raw)
     } else {
-        img.to_luma8()
-    };
-    Some(finish_size(gray, w, h))
+        Some(img.to_luma8())
+    }
+}
+
+/// [`gray_of`] for every pixel of `C`-channel 8-bit data.
+fn gray_pixels<const C: usize>(raw: &[u8]) -> Vec<u8> {
+    raw.as_chunks::<C>().0.iter().map(|p| gray_of(p, C)).collect()
 }
 
 /// 8-bit gray of one pixel with `channels` (1 gray, 2 gray+alpha, 3 RGB, 4 RGBA)
@@ -789,7 +831,7 @@ mod tests {
                 });
                 resize_gray(&y, tw, th)
             } else {
-                whole_decode(bytes, tw, th).unwrap()
+                whole_decode(bytes, tw, th, GrayMath::ImageCrate).unwrap()
             };
             let d = mean_diff(&fast, &whole);
             assert!(d < 2.0, "{name} {tw}x{th}: mean difference {d}");
@@ -874,6 +916,29 @@ mod tests {
         let row: Vec<u8> = (0..50).map(|x| r.get_pixel(x, 0).0[0]).collect();
         assert!(row.windows(2).all(|w| w[0] <= w[1]), "{row:?}");
         assert!(row[0] < 8 && row[49] > 247, "{row:?}");
+    }
+
+    #[test]
+    fn thumbnails_match_the_image_crate_gray_within_rounding() {
+        let px = |x: u32, y: u32| Rgba([(x * 4) as u8, (y * 5) as u8, ((x * y) % 256) as u8, (255 - y * 3) as u8]);
+        let rgba = RgbaImage::from_fn(64, 48, px);
+        let img = DynamicImage::ImageRgba8(rgba);
+        let sources = [
+            ("png rgba", encode(&img, ImageFormat::Png), 1),
+            ("png rgb", encode(&DynamicImage::ImageRgb8(img.to_rgb8()), ImageFormat::Png), 1),
+            ("jpeg rgb", encode(&DynamicImage::ImageRgb8(img.to_rgb8()), ImageFormat::Jpeg), 1),
+            ("png gray", encode(&DynamicImage::ImageLuma8(img.to_luma8()), ImageFormat::Png), 0),
+            ("png gray+alpha", encode(&DynamicImage::ImageLumaA8(img.to_luma_alpha8()), ImageFormat::Png), 0),
+        ];
+        for (name, bytes, most) in sources {
+            // At the source size (no resize to blur the difference) and scaled down.
+            for (w, h) in [(64, 48), (20, 15)] {
+                let exact = decode_scaled(&bytes, w, h, None).unwrap();
+                let fast = decode_thumbnail(&bytes, w, h).unwrap();
+                let worst = exact.as_raw().iter().zip(fast.as_raw()).map(|(&a, &b)| a.abs_diff(b)).max();
+                assert!(worst <= Some(most), "{name} {w}x{h}: {worst:?}");
+            }
+        }
     }
 
     /// A 40 x 60 gray PNG (a diagonal ramp with a dark frame), served as `a.png`.
