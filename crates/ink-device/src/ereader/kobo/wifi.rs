@@ -115,8 +115,10 @@ fn read_env() -> WifiEnv {
     WifiEnv { module, interface: firmware_env("INTERFACE").unwrap_or_else(|| "wlan0".into()), platform }
 }
 
+/// Runs a tool with the lipc runner's guards (a timeout that kills its process group,
+/// pipes drained on threads); returns stdout.
 fn run(prog: &str, args: &[&str]) -> Result<String> {
-    crate::lipc::run_tool(prog, args, TOOL_TIMEOUT)
+    crate::lipc::Lipc::new().run(prog, args, TOOL_TIMEOUT)
 }
 
 /// Runs a tool that leaves a daemon behind (`wpa_supplicant -B`, a DHCP client) with its
