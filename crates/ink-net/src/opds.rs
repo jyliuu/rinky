@@ -759,6 +759,11 @@ fn json_names(v: Option<&serde_json::Value>) -> Vec<String> {
     }
 }
 
+/// The array at `key` of a JSON object (empty when absent or not an array).
+fn json_array<'a>(v: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {
+    v.get(key).and_then(|a| a.as_array()).map_or(&[], Vec::as_slice)
+}
+
 fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
     let href = v.get("href")?.as_str()?;
     let templated = v.get("templated").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -816,25 +821,21 @@ fn json_publication(p: &serde_json::Value, base: &str) -> OpdsEntry {
         categories: json_names(md.get("subject")),
         ..Default::default()
     };
-    if let Some(links) = p.get("links").and_then(|l| l.as_array()) {
-        e.links.extend(links.iter().filter_map(|l| json_link(l, base)));
+    e.links.extend(json_array(p, "links").iter().filter_map(|l| json_link(l, base)));
+    // The largest image is the cover, the smallest (if there are several) the thumbnail.
+    let area = |l: &serde_json::Value| l.get("width").and_then(|w| w.as_u64()).unwrap_or(0) * l.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
+    let imgs: Vec<(u64, OpdsLink)> = json_array(p, "images").iter().filter_map(|l| json_link(l, base).map(|k| (area(l), k))).collect();
+    let largest = imgs.iter().enumerate().max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.0.cmp(&a.0))).map(|(i, _)| i);
+    let smallest = imgs.iter().enumerate().min_by(|a, b| a.1 .0.cmp(&b.1 .0).then(a.0.cmp(&b.0))).map(|(i, _)| i);
+    if let Some(i) = largest {
+        let mut c = imgs[i].1.clone();
+        c.rel = IMAGE_RELS[0].into();
+        e.links.push(c);
     }
-    if let Some(images) = p.get("images").and_then(|l| l.as_array()) {
-        // The largest image is the cover, the smallest (if there are several) the thumbnail.
-        let area = |l: &serde_json::Value| l.get("width").and_then(|w| w.as_u64()).unwrap_or(0) * l.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
-        let imgs: Vec<(u64, OpdsLink)> = images.iter().filter_map(|l| json_link(l, base).map(|k| (area(l), k))).collect();
-        let largest = imgs.iter().enumerate().max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.0.cmp(&a.0))).map(|(i, _)| i);
-        let smallest = imgs.iter().enumerate().min_by(|a, b| a.1 .0.cmp(&b.1 .0).then(a.0.cmp(&b.0))).map(|(i, _)| i);
-        if let Some(i) = largest {
-            let mut c = imgs[i].1.clone();
-            c.rel = IMAGE_RELS[0].into();
-            e.links.push(c);
-        }
-        if let Some(i) = smallest.filter(|_| imgs.len() > 1) {
-            let mut t = imgs[i].1.clone();
-            t.rel = THUMBNAIL_RELS[0].into();
-            e.links.push(t);
-        }
+    if let Some(i) = smallest.filter(|_| imgs.len() > 1) {
+        let mut t = imgs[i].1.clone();
+        t.rel = THUMBNAIL_RELS[0].into();
+        e.links.push(t);
     }
     e
 }
@@ -872,43 +873,30 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
         // Saturating: a hostile catalog may send page and size near u64::MAX.
         feed.start_index = Some(page.saturating_sub(1).saturating_mul(per).saturating_add(1));
     }
-    if let Some(links) = v.get("links").and_then(|l| l.as_array()) {
-        feed.links.extend(links.iter().filter_map(|l| json_link(l, base_url)));
-    }
+    feed.links.extend(json_array(&v, "links").iter().filter_map(|l| json_link(l, base_url)));
     let add_items = |obj: &serde_json::Value, feed: &mut OpdsFeed| {
-        if let Some(nav) = obj.get("navigation").and_then(|n| n.as_array()) {
-            feed.entries.extend(nav.iter().filter_map(|n| json_navigation(n, base_url)));
-        }
-        if let Some(pubs) = obj.get("publications").and_then(|n| n.as_array()) {
-            feed.entries.extend(pubs.iter().map(|p| json_publication(p, base_url)));
-        }
+        feed.entries.extend(json_array(obj, "navigation").iter().filter_map(|n| json_navigation(n, base_url)));
+        feed.entries.extend(json_array(obj, "publications").iter().map(|p| json_publication(p, base_url)));
     };
     add_items(&v, &mut feed);
-    if let Some(groups) = v.get("groups").and_then(|g| g.as_array()) {
-        for g in groups {
-            let title = g.get("metadata").and_then(|m| m.get("title")).and_then(json_str).unwrap_or_default();
-            if let Some(more) = g.get("links").and_then(|l| l.as_array()).and_then(|a| a.iter().filter_map(|l| json_link(l, base_url)).find(|l| l.rel == "self")) {
-                let mut l = more;
-                l.rel = "subsection".into();
-                if l.mime.is_empty() {
-                    l.mime = "application/opds+json".into();
-                }
-                feed.entries.push(OpdsEntry { id: l.href.clone(), title: title.clone(), links: vec![l], ..Default::default() });
+    for g in json_array(&v, "groups") {
+        let title = g.get("metadata").and_then(|m| m.get("title")).and_then(json_str).unwrap_or_default();
+        if let Some(mut l) = json_array(g, "links").iter().filter_map(|l| json_link(l, base_url)).find(|l| l.rel == "self") {
+            l.rel = "subsection".into();
+            if l.mime.is_empty() {
+                l.mime = "application/opds+json".into();
             }
-            add_items(g, &mut feed);
+            feed.entries.push(OpdsEntry { id: l.href.clone(), title: title.clone(), links: vec![l], ..Default::default() });
         }
+        add_items(g, &mut feed);
     }
-    if let Some(facets) = v.get("facets").and_then(|f| f.as_array()) {
-        for f in facets {
-            let group = f.get("metadata").and_then(|m| m.get("title")).and_then(json_str);
-            for l in f.get("links").and_then(|l| l.as_array()).into_iter().flatten() {
-                if let Some(mut link) = json_link(l, base_url) {
-                    link.active_facet = link.rel == "self";
-                    link.rel = REL_FACET.into();
-                    link.facet_group = group.clone();
-                    feed.links.push(link);
-                }
-            }
+    for f in json_array(&v, "facets") {
+        let group = f.get("metadata").and_then(|m| m.get("title")).and_then(json_str);
+        for mut link in json_array(f, "links").iter().filter_map(|l| json_link(l, base_url)) {
+            link.active_facet = link.rel == "self";
+            link.rel = REL_FACET.into();
+            link.facet_group = group.clone();
+            feed.links.push(link);
         }
     }
     Ok(feed)
