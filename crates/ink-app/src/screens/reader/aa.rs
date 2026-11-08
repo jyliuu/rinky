@@ -1013,13 +1013,6 @@ struct FamilyGrid {
     page: usize,
 }
 
-/// A cell of the [`FamilyGrid`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Cell2 {
-    Name(usize),
-    More,
-}
-
 impl FamilyGrid {
     fn cols(b: Rect) -> u32 {
         if b.w >= 1100 {
@@ -1037,8 +1030,9 @@ impl FamilyGrid {
         (per, per_page, self.names.len().div_ceil(per_page.max(1)).max(1))
     }
 
-    /// The cells of the current page.
-    fn cells(&self, b: Rect) -> Vec<(Rect, Cell2)> {
+    /// The cells of the current page with the index of their family; `None`: the last
+    /// cell, "More", when there are several pages.
+    fn cells(&self, b: Rect) -> Vec<(Rect, Option<usize>)> {
         let cols = Self::cols(b);
         let (per, per_page, pages) = self.paging(b);
         let paged = per_page < per;
@@ -1048,16 +1042,11 @@ impl FamilyGrid {
             let (c, r) = (n as u32 % cols, n as u32 / cols);
             Rect::new(b.x + (c * (w + GAP)) as i32, b.y + (r * (CONTROL_H + GAP)) as i32, w, CONTROL_H)
         };
-        let mut out: Vec<(Rect, Cell2)> =
-            (page * per_page..((page + 1) * per_page).min(self.names.len())).enumerate().map(|(n, i)| (at(n), Cell2::Name(i))).collect();
+        let mut out: Vec<_> = (page * per_page..((page + 1) * per_page).min(self.names.len())).enumerate().map(|(n, i)| (at(n), Some(i))).collect();
         if paged {
-            out.push((at(per - 1), Cell2::More));
+            out.push((at(per - 1), None));
         }
         out
-    }
-
-    fn pages(&self, b: Rect) -> usize {
-        self.paging(b).2
     }
 
     fn selected(&self) -> String {
@@ -1069,11 +1058,11 @@ impl Widget for FamilyGrid {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         let (fg, bg) = (cx.theme.fg, cx.theme.bg);
         let sel = self.selected();
-        let pages = self.pages(b);
+        let pages = self.paging(b).2;
         for (r, cell) in self.cells(b) {
             let rad = cx.theme.radius;
             match cell {
-                Cell2::Name(i) => {
+                Some(i) => {
                     let name = &self.names[i];
                     let on = name.eq_ignore_ascii_case(&sel);
                     if on {
@@ -1087,7 +1076,7 @@ impl Widget for FamilyGrid {
                     let x = inner.x as f32 + (inner.w as f32 - w) / 2.0;
                     fonts::draw_family_text(cx, name, px, x, inner, name, if on { bg } else { fg }, inner);
                 }
-                Cell2::More => {
+                None => {
                     stroke_round_rect(cx.canvas, r, rad, cx.theme.border_px as f32, fg);
                     let text = format!("More ({}/{})", self.page % pages + 1, pages);
                     cx.text_centered(r, &text, cx.theme.small_px, Style::Bold, fg);
@@ -1099,24 +1088,19 @@ impl Widget for FamilyGrid {
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         let UiEvent::Gesture(g) = ev else { return EventResult::Ignored };
         let Gesture::Tap { pos } = g else { return EventResult::Handled };
-        for (r, cell) in self.cells(b) {
-            if !r.contains(*pos) {
-                continue;
+        match self.cells(b).into_iter().find(|(r, _)| r.contains(*pos)) {
+            Some((_, Some(i))) => {
+                let a = format!("aa-font:{}", self.names[i]);
+                self.shown.borrow_mut().apply(&a);
+                EventResult::Action(a)
             }
-            return match cell {
-                Cell2::Name(i) => {
-                    let a = format!("aa-font:{}", self.names[i]);
-                    self.shown.borrow_mut().apply(&a);
-                    EventResult::Action(a)
-                }
-                Cell2::More => {
-                    self.page = (self.page + 1) % self.pages(b);
-                    log::info!("aa: font list page {}", self.page + 1);
-                    EventResult::Handled
-                }
-            };
+            Some((_, None)) => {
+                self.page = (self.page + 1) % self.paging(b).2;
+                log::info!("aa: font list page {}", self.page + 1);
+                EventResult::Handled
+            }
+            None => EventResult::Handled,
         }
-        EventResult::Handled
     }
 }
 
