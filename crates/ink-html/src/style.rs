@@ -222,6 +222,28 @@ impl<T: Copy> Edges<T> {
     pub fn all(v: T) -> Self {
         Edges { top: v, right: v, bottom: v, left: v }
     }
+
+    /// One to four values of a CSS box shorthand (top, right, bottom, left; a missing
+    /// side copies its opposite); `None` for no values.
+    fn from_values(v: &[T]) -> Option<Self> {
+        let at = |i: usize, or: usize| v[if i < v.len() { i } else { or }];
+        Some(Edges { top: *v.first()?, right: at(1, 0), bottom: at(2, 0), left: at(3, if v.len() > 1 { 1 } else { 0 }) })
+    }
+
+    /// Each side of `self` combined with the same side of `o`.
+    fn zip<U: Copy, V>(self, o: Edges<U>, f: impl Fn(T, U) -> V) -> Edges<V> {
+        Edges { top: f(self.top, o.top), right: f(self.right, o.right), bottom: f(self.bottom, o.bottom), left: f(self.left, o.left) }
+    }
+
+    /// The side a CSS property suffix names (`top`, `block-start`, `inline-end`, ...).
+    fn side(&mut self, name: &str) -> &mut T {
+        match name {
+            "top" | "block-start" => &mut self.top,
+            "right" | "inline-end" => &mut self.right,
+            "bottom" | "block-end" => &mut self.bottom,
+            _ => &mut self.left,
+        }
+    }
 }
 
 impl Edges<Len> {
@@ -830,15 +852,10 @@ impl Cascade {
 
     fn edges(&self, v: &[Tok], font: f32) -> Option<Edges<Len>> {
         let vals: Vec<Len> = v.iter().filter_map(|t| self.len(t, font)).collect();
-        if vals.is_empty() || vals.len() != v.iter().filter(|t| !matches!(t, Tok::Comma)).count() {
+        if vals.len() != v.iter().filter(|t| !matches!(t, Tok::Comma)).count() {
             return None;
         }
-        Some(match vals.len() {
-            1 => Edges::all(vals[0]),
-            2 => Edges { top: vals[0], right: vals[1], bottom: vals[0], left: vals[1] },
-            3 => Edges { top: vals[0], right: vals[1], bottom: vals[2], left: vals[1] },
-            _ => Edges { top: vals[0], right: vals[1], bottom: vals[2], left: vals[3] },
-        })
+        Edges::from_values(&vals)
     }
 
     fn border_width(&self, t: &Tok, font: f32) -> Option<f32> {
@@ -987,73 +1004,27 @@ impl Cascade {
                 }
             }
             "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "padding-top" | "padding-right" | "padding-bottom"
-            | "padding-left" => {
+            | "padding-left" | "margin-block-start" | "margin-block-end" | "margin-inline-start" | "margin-inline-end"
+            | "padding-inline-start" => {
                 if let Some(l) = v.first().and_then(|t| self.len(t, font)) {
                     let (edges, side) = d.name.split_once('-').unwrap();
-                    let e = if edges == "margin" { &mut s.margin } else { &mut s.padding };
-                    match side {
-                        "top" => e.top = l,
-                        "right" => e.right = l,
-                        "bottom" => e.bottom = l,
-                        _ => e.left = l,
-                    }
+                    *if edges == "margin" { &mut s.margin } else { &mut s.padding }.side(side) = l;
                 }
             }
-            "margin-block-start" | "margin-block-end" | "margin-inline-start" | "margin-inline-end" => {
-                if let Some(l) = v.first().and_then(|t| self.len(t, font)) {
-                    match d.name.as_str() {
-                        "margin-block-start" => s.margin.top = l,
-                        "margin-block-end" => s.margin.bottom = l,
-                        "margin-inline-start" => s.margin.left = l,
-                        _ => s.margin.right = l,
-                    }
-                }
-            }
-            "padding-inline-start" => {
-                if let Some(l) = v.first().and_then(|t| self.len(t, font)) {
-                    s.padding.left = l;
-                }
-            }
-            "border" => {
+            "border" | "border-top" | "border-right" | "border-bottom" | "border-left" => {
+                // A width alone (no visible style) draws no border.
                 let (w, vis) = self.border_parts(v, font);
-                let width = match vis {
-                    Some(false) => 0.0,
-                    Some(true) => w.unwrap_or(3.0 * self.ctx.px_scale()),
-                    None => w.unwrap_or(0.0).min(0.0),
-                };
-                s.border = Edges::all(width);
-            }
-            "border-top" | "border-right" | "border-bottom" | "border-left" => {
-                let (w, vis) = self.border_parts(v, font);
-                let width = match vis {
-                    Some(false) => 0.0,
-                    Some(true) => w.unwrap_or(3.0 * self.ctx.px_scale()),
-                    None => 0.0,
-                };
-                match &d.name[7..] {
-                    "top" => s.border.top = width,
-                    "right" => s.border.right = width,
-                    "bottom" => s.border.bottom = width,
-                    _ => s.border.left = width,
+                let width = if vis == Some(true) { w.unwrap_or(3.0 * self.ctx.px_scale()) } else { 0.0 };
+                match d.name.strip_prefix("border-") {
+                    Some(side) => *s.border.side(side) = width,
+                    None => s.border = Edges::all(width),
                 }
             }
             "border-width" => {
                 let ws: Vec<f32> = v.iter().filter_map(|t| self.border_width(t, font)).collect();
-                if !ws.is_empty() {
-                    let get = |i: usize| ws[i.min(ws.len() - 1)];
-                    let e = match ws.len() {
-                        1 => Edges::all(ws[0]),
-                        2 => Edges { top: ws[0], right: ws[1], bottom: ws[0], left: ws[1] },
-                        3 => Edges { top: ws[0], right: ws[1], bottom: ws[2], left: ws[1] },
-                        _ => Edges { top: get(0), right: get(1), bottom: get(2), left: get(3) },
-                    };
+                if let Some(e) = Edges::from_values(&ws) {
                     // Only sides that already have a visible style keep a width.
-                    s.border = Edges {
-                        top: if s.border.top > 0.0 { e.top } else { 0.0 },
-                        right: if s.border.right > 0.0 { e.right } else { 0.0 },
-                        bottom: if s.border.bottom > 0.0 { e.bottom } else { 0.0 },
-                        left: if s.border.left > 0.0 { e.left } else { 0.0 },
-                    };
+                    s.border = s.border.zip(e, |cur, w| if cur > 0.0 { w } else { 0.0 });
                 }
             }
             "border-style" => {
@@ -1064,22 +1035,9 @@ impl Cascade {
                         _ => None,
                     })
                     .collect();
-                if !styles.is_empty() {
-                    let get = |i: usize| styles[i.min(styles.len() - 1)];
-                    let (t, r, b, l) = match styles.len() {
-                        1 => (get(0), get(0), get(0), get(0)),
-                        2 => (get(0), get(1), get(0), get(1)),
-                        3 => (get(0), get(1), get(2), get(1)),
-                        _ => (get(0), get(1), get(2), get(3)),
-                    };
+                if let Some(on) = Edges::from_values(&styles) {
                     let def = 3.0 * self.ctx.px_scale();
-                    let pick = |on: bool, cur: f32| if on { if cur > 0.0 { cur } else { def } } else { 0.0 };
-                    s.border = Edges {
-                        top: pick(t, s.border.top),
-                        right: pick(r, s.border.right),
-                        bottom: pick(b, s.border.bottom),
-                        left: pick(l, s.border.left),
-                    };
+                    s.border = s.border.zip(on, |cur, on| if !on { 0.0 } else if cur > 0.0 { cur } else { def });
                 }
             }
             "width" | "height" | "max-width" | "max-height" => {
@@ -1411,6 +1369,23 @@ mod tests {
         assert_eq!(p.vertical_align, VAlign::Super);
         assert_eq!(p.text_transform, TextTransform::Upper);
         assert_eq!(p.list_style, ListStyle::UpperRoman, "inherited");
+    }
+
+    #[test]
+    fn box_shorthands_and_sides() {
+        let c = cascade(
+            "div { margin: 1px 2px 3px; padding: 1px 2px; border-style: solid none; border-width: 1px 2px 3px 4px }
+             p { margin-block-start: 5px; margin-inline-end: 6px; padding-inline-start: 7px; border: 1px; border-left: 2px solid }",
+        );
+        let root = ComputedStyle::root(32.0);
+        let d = c.compute(E { tree: TREE, i: 1 }, &root);
+        let px = |a: f32, b: f32, c: f32, d: f32| Edges { top: Len::Px(a), right: Len::Px(b), bottom: Len::Px(c), left: Len::Px(d) };
+        assert_eq!(d.margin, px(2.0, 4.0, 6.0, 4.0));
+        assert_eq!(d.padding, px(2.0, 4.0, 2.0, 4.0));
+        assert_eq!(d.border, Edges { top: 2.0, right: 0.0, bottom: 6.0, left: 0.0 }, "widths only on styled sides");
+        let p = c.compute(E { tree: TREE, i: 2 }, &d);
+        assert_eq!((p.margin.top, p.margin.right, p.padding.left), (Len::Px(10.0), Len::Px(12.0), Len::Px(14.0)));
+        assert_eq!(p.border, Edges { top: 0.0, right: 0.0, bottom: 0.0, left: 4.0 }, "a width without a style draws nothing");
     }
 
     #[test]
