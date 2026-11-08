@@ -20,19 +20,10 @@ pub struct Parts<'a> {
     pub fragment: Option<&'a str>,
 }
 
+/// Length of the scheme: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` before a `:`.
 fn scheme_len(s: &str) -> Option<usize> {
-    let b = s.as_bytes();
-    if b.first().is_none_or(|c| !c.is_ascii_alphabetic()) {
-        return None;
-    }
-    for (i, &c) in b.iter().enumerate().skip(1) {
-        match c {
-            b':' => return Some(i),
-            c if c.is_ascii_alphanumeric() || c == b'+' || c == b'-' || c == b'.' => {}
-            _ => return None,
-        }
-    }
-    None
+    let i = s.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))?;
+    (s[i..].starts_with(':') && s.starts_with(|c: char| c.is_ascii_alphabetic())).then_some(i)
 }
 
 /// Splits a URI reference into its components.
