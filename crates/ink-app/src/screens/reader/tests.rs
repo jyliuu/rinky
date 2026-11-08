@@ -1693,3 +1693,24 @@ fn page_turns_carry_the_hardware_wave() {
     assert_eq!((last(&h).rect, last(&h).wave), (FULL, None));
     assert_eq!(h.probe.uncovered(), vec![]);
 }
+
+/// A Wi-Fi status change from the network worker redraws the bars' text rows at once
+/// (as the minute tick does), only when a bar shows the Wi-Fi widget.
+#[test]
+fn a_wifi_status_change_redraws_only_the_bars() {
+    use ink_device::{NetEvent, NetStatus, PowerEvent};
+    let connected = || InputEvent::Power(PowerEvent::Network(NetEvent::Status(NetStatus::Connected { essid: "Home".into(), signal: None })));
+    let mut h = Harness::new("wifi-bars", "juliet.epub");
+    let n = h.probe.updates().len();
+    h.feed(connected());
+    assert_eq!(h.probe.updates().len(), n, "no Wi-Fi widget: nothing drawn");
+    h.settings.status_bars.top.right = vec!["battery".into(), "wifi".into()];
+    h.tap_at(1100, 900);
+    let page = h.reader.page();
+    let n = h.probe.updates().len();
+    h.feed(connected());
+    let ups: Vec<_> = h.probe.updates()[n..].iter().map(|u| (u.rect, u.class)).collect();
+    assert!(!ups.is_empty(), "the bars were drawn again");
+    assert!(ups.iter().all(|(r, c)| r.h < 200 && *c != RefreshClass::Gc16), "{ups:?}");
+    assert_eq!(h.reader.page(), page);
+}

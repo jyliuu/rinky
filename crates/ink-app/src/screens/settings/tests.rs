@@ -125,7 +125,7 @@ fn wifi_page() -> Vec<Row> {
     let f = FakeState::default();
     let nets: Vec<WifiNetwork> =
         f.networks.iter().map(|n| WifiNetwork { known: f.profiles.iter().any(|p| p.essid == n.essid), ..n.clone() }).collect();
-    wifi_rows(&WifiState { enabled: true, ..Default::default() }, false, &nets)
+    wifi_rows(&ink_device::NetStatus::NoNetwork, false, &nets)
 }
 
 /// Centre of a rectangle as a script tap.
@@ -317,6 +317,22 @@ fn wifi_open_network_connects_and_is_saved() {
     let f = r.fake.borrow();
     assert_eq!(f.connected.as_deref(), Some("Cafe"));
     assert!(f.profiles.iter().any(|p| p.essid == "Cafe"));
+}
+
+/// A join that runs in the background: the page says "Connecting…" and changes when
+/// the network worker reports the connection (a `net` step), without a tap.
+#[test]
+fn wifi_page_follows_the_network_events() {
+    let open = format!("{}{}shot connecting\n", main_tap("page:wifi"), tap_row(wifi_page(), "net:1"));
+    let quiet = run_with("wifi-bg", &open, Settings::default(), true, |f| f.background = true);
+    let told = run_with("wifi-bg-event", &format!("{open}net connected Cafe\nwait 50\nshot connected\n"), Settings::default(), true, |f| f.background = true);
+    assert_eq!(told.fake.borrow().connected.as_deref(), Some("Cafe"));
+    assert!(
+        told.probe.updates().len() > quiet.probe.updates().len(),
+        "the event repainted the page: {} vs {} updates",
+        told.probe.updates().len(),
+        quiet.probe.updates().len()
+    );
 }
 
 #[test]
@@ -565,9 +581,27 @@ fn airplane_switch_on_the_main_page_keeps_the_page() {
 }
 
 #[test]
+fn wifi_rows_say_what_the_network_is_doing() {
+    use ink_device::NetStatus;
+    let nets = FakeState::default().networks;
+    let line = |s: &NetStatus| wifi_rows(s, false, &nets).into_iter().find(|r| r.action == "wifi").and_then(|r| r.subtitle).unwrap();
+    assert_eq!(line(&NetStatus::Off), "Off");
+    assert_eq!(line(&NetStatus::NoNetwork), "Not connected");
+    assert_eq!(line(&NetStatus::Connecting { essid: None }), "Looking for saved networks…");
+    assert_eq!(line(&NetStatus::Connecting { essid: Some("Home".into()) }), "Connecting to Home…");
+    assert_eq!(line(&NetStatus::Connected { essid: "Home".into(), signal: None }), "Connected to Home");
+    // The network being joined says so; none is checked before it is joined.
+    let rows = wifi_rows(&NetStatus::Connecting { essid: Some("Home".into()) }, false, &nets);
+    let home = rows.iter().find(|r| r.action == "net:0").unwrap();
+    assert_eq!((home.subtitle.as_deref(), home.trail), (Some("Connecting…"), Trail::Check(false)));
+    let toggle = |s: &NetStatus| wifi_rows(s, false, &nets).into_iter().find(|r| r.action == "wifi").unwrap().trail;
+    assert_ne!(toggle(&NetStatus::Off), toggle(&NetStatus::NoNetwork), "the switch shows the radio");
+}
+
+#[test]
 fn wifi_rows_show_signal_lock_and_the_connection() {
     let nets = FakeState::default().networks;
-    let state = WifiState { enabled: true, essid: Some("Cafe".into()), signal: Some(3), ..Default::default() };
+    let state = ink_device::NetStatus::Connected { essid: "Cafe".into(), signal: Some(3) };
     let rows = wifi_rows(&state, false, &nets);
     let home = rows.iter().find(|r| r.action == "net:0").unwrap();
     assert_eq!((home.lead, home.lock, home.trail), (rows::Lead::Signal(5), true, Trail::Check(false)));

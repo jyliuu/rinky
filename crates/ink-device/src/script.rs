@@ -9,6 +9,8 @@
 //! swipe X1 Y1 X2 Y2    finger down, 6 moves over 300 ms, finger up
 //! key NAME             press and release: power, next, prev, home, menu, back, or a number
 //! power EVENT          a powerd event line, e.g. `power goingToScreenSaver`
+//! net NEWS             a network worker event: `connected ESSID`, `connecting [ESSID]`,
+//!                      `nonetwork`, `off`, `failed ESSID`, `scanned N`
 //! wait MS              advance the clock by MS milliseconds
 //! sleep MS             real time: no input for MS milliseconds; the app's timeouts run
 //!                      as on the device (headless and simulator backends)
@@ -42,6 +44,8 @@ pub enum Step {
     Key(Key),
     /// A powerd event.
     Power(String),
+    /// A network worker event ([`net_event`]).
+    Net(crate::netman::NetEvent),
     /// Advance the clock.
     Wait(u64),
     /// No input for this many real milliseconds.
@@ -92,6 +96,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>> {
             ("swipe", 5) => Step::Swipe(n(1)? as i32, n(2)? as i32, n(3)? as i32, n(4)? as i32),
             ("key", 2) => Step::Key(key_by_name(w[1]).ok_or_else(bad)?),
             ("power", 2..) => Step::Power(w[1..].join(" ")),
+            ("net", 2..) => Step::Net(net_event(&w[1..]).ok_or_else(bad)?),
             ("wait", 2) => Step::Wait(n(1)? as u64),
             ("sleep", 2) => Step::Sleep(n(1)? as u64),
             ("shot", 2) => Step::Shot(w[1].to_string()),
@@ -112,6 +117,22 @@ pub fn parse(text: &str) -> Result<Vec<Step>> {
         steps.push(step);
     }
     Ok(steps)
+}
+
+/// A `net` step's event: `connected ESSID`, `connecting [ESSID]`, `nonetwork`, `off`,
+/// `failed ESSID`, `scanned N` (a name may have spaces).
+pub fn net_event(w: &[&str]) -> Option<crate::netman::NetEvent> {
+    use crate::netman::{NetEvent, NetStatus};
+    let name = (w.len() > 1).then(|| w[1..].join(" "));
+    Some(match (*w.first()?, name) {
+        ("connected", Some(essid)) => NetEvent::Status(NetStatus::Connected { essid, signal: None }),
+        ("connecting", essid) => NetEvent::Status(NetStatus::Connecting { essid }),
+        ("nonetwork", None) => NetEvent::Status(NetStatus::NoNetwork),
+        ("off", None) => NetEvent::Status(NetStatus::Off),
+        ("failed", Some(essid)) => NetEvent::JoinFailed(essid),
+        ("scanned", Some(n)) => NetEvent::Scanned(Ok(n.parse().ok()?)),
+        _ => return None,
+    })
 }
 
 /// Output of a script player: an input event, or a request to save a screenshot.
@@ -184,6 +205,7 @@ impl ScriptPlayer {
                     self.queue.push_back(Played::Event(InputEvent::Power(ev)));
                 }
             }
+            Step::Net(ref e) => self.queue.push_back(Played::Event(InputEvent::Power(PowerEvent::Network(e.clone())))),
             Step::Wait(ms) => self.clock += Duration::from_millis(ms),
             Step::Shot(ref name) => self.queue.push_back(Played::Shot(name.clone())),
             Step::Sleep(ms) => self.queue.push_back(Played::Sleep(Duration::from_millis(ms))),
@@ -260,6 +282,25 @@ mod tests {
         }
         assert!(parse("tap 1").is_err());
         assert!(parse("key nonsense").is_err());
+    }
+
+    #[test]
+    fn net_steps_become_network_events() {
+        use crate::netman::{NetEvent, NetStatus};
+        let steps = parse("net connected Home Wifi
+net connecting
+net failed Cafe
+net scanned 3
+net off
+").unwrap();
+        assert_eq!(steps[0], Step::Net(NetEvent::Status(NetStatus::Connected { essid: "Home Wifi".into(), signal: None })));
+        assert_eq!(steps[1], Step::Net(NetEvent::Status(NetStatus::Connecting { essid: None })));
+        assert_eq!(steps[2], Step::Net(NetEvent::JoinFailed("Cafe".into())));
+        assert_eq!(steps[3], Step::Net(NetEvent::Scanned(Ok(3))));
+        let mut p = ScriptPlayer::new(&steps[4..]);
+        assert_eq!(p.next_item(), Played::Event(InputEvent::Power(PowerEvent::Network(NetEvent::Status(NetStatus::Off)))));
+        assert!(parse("net connected").is_err());
+        assert!(parse("net scanned x").is_err());
     }
 
     #[test]

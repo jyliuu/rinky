@@ -40,7 +40,7 @@
 
 use super::{ReaderScreen, DOG_EAR};
 use crate::router::AppCtx;
-use ink_device::{Canvas, Rect};
+use ink_device::{Canvas, NetStatus, Rect};
 use ink_doc::{Document, LayoutSettings, TocEntry};
 use ink_store::prefs::{StatusBar, StatusBars};
 use ink_text::{Fonts, Style};
@@ -277,8 +277,8 @@ pub struct DeviceStatus {
     pub clock: String,
     /// Battery percent and charging.
     pub battery: Option<(u8, bool)>,
-    /// Wi-Fi: `Some(true)` connected, `Some(false)` on but not connected or off.
-    pub wifi: Option<bool>,
+    /// Wi-Fi: what the network is doing (`None`: not shown or not available).
+    pub wifi: Option<NetStatus>,
     /// Front light level.
     pub light: Option<u32>,
 }
@@ -292,7 +292,8 @@ impl DeviceStatus {
         let d = DeviceStatus {
             clock: if uses("clock") { s.clock.local_now().clock(false) } else { String::new() },
             battery: ["battery", "battery_icon", "battery_icon_percent"].into_iter().any(uses).then(|| s.battery.state().ok().map(|b| (b.percent, b.charging))).flatten(),
-            wifi: uses("wifi").then(|| s.wifi.state().ok().map(|w| w.essid.is_some())).flatten(),
+            // The network worker's last status: no device read (fine on every page).
+            wifi: uses("wifi").then(|| s.wifi.status().ok()).flatten(),
             light: uses("frontlight").then(|| s.light.brightness().ok()).flatten(),
         };
         log::info!("footer: device values {d:?} read in {} ms", t.elapsed().as_millis());
@@ -433,7 +434,14 @@ pub fn widget_piece(name: &str, info: &FooterInfo) -> Option<Piece> {
         "battery" => info.device.battery.map(|(p, c)| Piece::Text(if c { format!("{p}% +") } else { format!("{p}%") }, Style::Regular)),
         "battery_icon" => info.device.battery.map(|(p, c)| Piece::Battery(p, c, false)),
         "battery_icon_percent" => info.device.battery.map(|(p, c)| Piece::Battery(p, c, true)),
-        "wifi" => info.device.wifi.filter(|on| *on).map(|_| Piece::Icon(Icon::Wifi, String::new())),
+        "wifi" => info.device.wifi.as_ref().map(|w| {
+            let icon = match w {
+                NetStatus::Connected { .. } => Icon::Wifi,
+                NetStatus::Connecting { .. } => Icon::WifiConnecting,
+                NetStatus::Off | NetStatus::NoNetwork => Icon::WifiOff,
+            };
+            Piece::Icon(icon, String::new())
+        }),
         "frontlight" => info.device.light.map(|l| Piece::Icon(Icon::Light, l.to_string())),
         "page" => (info.total > 0).then(|| Piece::Text((info.page + 1).to_string(), Style::Regular)),
         "page_of_total" => (info.total > 0).then(|| {
@@ -1026,7 +1034,7 @@ mod tests {
             total: 10,
             progress: 0.5,
             pages_left_chapter: Some(1),
-            device: DeviceStatus { clock: "09:05".into(), battery: Some((80, true)), wifi: Some(false), light: Some(12) },
+            device: DeviceStatus { clock: "09:05".into(), battery: Some((80, true)), wifi: Some(NetStatus::NoNetwork), light: Some(12) },
             ..FooterInfo::default()
         };
         let t = |n: &str| match widget_piece(n, &info) {
@@ -1040,7 +1048,12 @@ mod tests {
         assert_eq!(widget_piece("battery_icon_percent", &info), Some(Piece::Battery(80, true, true)));
         assert_eq!(widget_piece("battery_icon", &info), Some(Piece::Battery(80, true, false)));
         assert_eq!(t("pages_left_chapter"), "1 page left in chapter");
-        assert_eq!(widget_piece("wifi", &info), None, "no icon while not connected");
+        let wifi = |w: Option<NetStatus>| widget_piece("wifi", &FooterInfo { device: DeviceStatus { wifi: w, ..info.device.clone() }, ..info.clone() });
+        assert_eq!(wifi(Some(NetStatus::NoNetwork)), Some(Piece::Icon(Icon::WifiOff, String::new())));
+        assert_eq!(wifi(Some(NetStatus::Off)), Some(Piece::Icon(Icon::WifiOff, String::new())));
+        assert_eq!(wifi(Some(NetStatus::Connecting { essid: Some("Home".into()) })), Some(Piece::Icon(Icon::WifiConnecting, String::new())));
+        assert_eq!(wifi(Some(NetStatus::Connected { essid: "Home".into(), signal: None })), Some(Piece::Icon(Icon::Wifi, String::new())));
+        assert_eq!(wifi(None), None, "not available: nothing");
         assert_eq!(widget_piece("bookmark", &info), None);
         assert_eq!(widget_piece("sparkles", &info), None);
     }

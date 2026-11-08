@@ -36,7 +36,7 @@ pub mod selection;
 mod tests;
 
 use crate::router::{AppCtx, AppScreen, Route, ScreenRegistry, Transition};
-use ink_device::{Canvas, Key, Point, Rect, RefreshClass, Size};
+use ink_device::{Canvas, Key, NetEvent, Point, PowerEvent, Rect, RefreshClass, Size};
 use ink_doc::{Document, LayoutSettings, Link, LinkTarget, Position, SearchHit, Selection, TocEntry};
 use ink_store::sidecar::{BookSettings, Bookmark, Highlight};
 use ink_store::BookState;
@@ -2224,9 +2224,17 @@ impl AppScreen for ReaderScreen {
                 _ => Transition::None,
             });
         }
+        // A Wi-Fi status change: the bars show it at once (their minute tick, now).
+        if let UiEvent::Power(PowerEvent::Network(NetEvent::Status(_))) = ev {
+            if footer::uses_widget(&cx.settings.status_bars, "wifi") && self.bars.next_tick.is_some() {
+                self.bars.next_tick = Some(Instant::now());
+            }
+            return Ok(Transition::None);
+        }
         // The position goes to the sidecar once the page rested, or before the device
         // sleeps (power events).
-        if matches!(ev, UiEvent::Power(_)) || self.position_due().is_some_and(|d| Instant::now() >= d) {
+        let network = matches!(ev, UiEvent::Power(PowerEvent::Network(_)));
+        if (matches!(ev, UiEvent::Power(_)) && !network) || self.position_due().is_some_and(|d| Instant::now() >= d) {
             self.flush_position();
         }
         // Plugin dialogs, menus, viewers and keyboards got the event first in the app

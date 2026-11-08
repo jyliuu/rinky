@@ -102,6 +102,23 @@ pub struct App {
     /// back: the next frame's GC16 damage is shown as GL16 (`Change::Pop`), so a screen
     /// that draws all again on reveal as on entry (with GC16) does not flash.
     revealed_part: bool,
+    /// The last network status reported (toasts only on a change).
+    net_shown: Option<ink_device::NetStatus>,
+}
+
+/// The toast for network event `e` after status `shown`: a new connection, a failed
+/// join, or a search after a start that found nothing. `None` for everything else (a
+/// repeated status, a search going on).
+pub fn network_toast(shown: Option<&ink_device::NetStatus>, e: &ink_device::NetEvent) -> Option<String> {
+    use ink_device::{NetEvent, NetStatus};
+    match e {
+        NetEvent::Status(NetStatus::Connected { essid, .. }) if shown.and_then(NetStatus::connected_to) != Some(essid.as_str()) => {
+            Some(if essid.is_empty() { "Connected to Wi-Fi".into() } else { format!("Connected to {essid}") })
+        }
+        NetEvent::Status(NetStatus::NoNetwork) if shown == Some(&NetStatus::Connecting { essid: None }) => Some("No saved network found".into()),
+        NetEvent::JoinFailed(essid) => Some(format!("Couldn't connect to {essid}")),
+        _ => None,
+    }
 }
 
 /// How far (logical pixels) a touch that starts in the top or bottom edge zone must
@@ -294,12 +311,22 @@ impl App {
             battery_log,
             shown,
             revealed_part: false,
+            net_shown: None,
         }
     }
 
-    /// Keeps what the network worker reports that must outlive the process ("Wi-Fi was
-    /// on", for the next start).
+    /// Tells about the network worker's news in a toast ("Connected to Home", "Couldn't
+    /// connect to Home", "No saved network found"; one per change, none while asleep)
+    /// and keeps what must outlive the process ("Wi-Fi was on", for the next start).
     fn network_event(&mut self, e: &ink_device::NetEvent) {
+        let awake = self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake;
+        if let Some(text) = network_toast(self.net_shown.as_ref(), e).filter(|_| awake) {
+            log::info!("wifi: toast {text:?}");
+            crate::export::toast(&mut self.plugins, text);
+        }
+        if let ink_device::NetEvent::Status(s) = e {
+            self.net_shown = Some(s.clone());
+        }
         if let ink_device::NetEvent::WasOn(on) = e {
             if self.settings.device.wifi_was_on != *on {
                 log::info!("wifi: was on {on} (kept in the settings)");
@@ -705,6 +732,48 @@ mod edge_tests {
         assert_eq!(out.last(), Some(&tap2));
         let mut e = EarlyEdgeSwipe::default();
         assert_eq!(e.filter(vec![t(TouchKind::Down, 600, 800, 800), t(TouchKind::Move, 600, 1000, 800)], h).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    use ink_device::{NetEvent, NetStatus};
+
+    #[test]
+    fn toasts_tell_each_change_once() {
+        let home = NetStatus::Connected { essid: "Home".into(), signal: Some(3) };
+        let searching = NetStatus::Connecting { essid: None };
+        let t = |shown: Option<&NetStatus>, e: NetEvent| network_toast(shown, &e);
+        assert_eq!(t(Some(&searching), NetEvent::Status(home.clone())).as_deref(), Some("Connected to Home"));
+        assert_eq!(t(None, NetEvent::Status(home.clone())).as_deref(), Some("Connected to Home"));
+        // The signal changed: the same connection, no toast.
+        assert_eq!(t(Some(&home), NetEvent::Status(NetStatus::Connected { essid: "Home".into(), signal: Some(5) })), None);
+        assert_eq!(t(Some(&home), NetEvent::Status(NetStatus::Connected { essid: "Cafe".into(), signal: None })).as_deref(), Some("Connected to Cafe"));
+        assert_eq!(t(Some(&searching), NetEvent::Status(NetStatus::NoNetwork)).as_deref(), Some("No saved network found"));
+        // After a failed background join the failure toasted already.
+        assert_eq!(t(Some(&NetStatus::Connecting { essid: Some("Home".into()) }), NetEvent::Status(NetStatus::NoNetwork)), None);
+        assert_eq!(t(Some(&home), NetEvent::JoinFailed("Office".into())).as_deref(), Some("Couldn't connect to Office"));
+        assert_eq!(t(Some(&home), NetEvent::Status(searching.clone())), None);
+        assert_eq!(t(Some(&home), NetEvent::Status(NetStatus::Off)), None);
+        assert_eq!(t(None, NetEvent::Scanned(Ok(3))), None);
+        assert_eq!(t(None, NetEvent::Status(NetStatus::Connected { essid: String::new(), signal: None })).as_deref(), Some("Connected to Wi-Fi"));
+    }
+
+    #[test]
+    fn wifi_was_on_is_kept_in_the_settings() {
+        let dir = std::env::temp_dir().join(format!("ink-app-wifi-was-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (device, _probe) = ink_device::headless::open(ink_device::headless::HeadlessOptions::default());
+        let paths = Paths { root: dir.join("home") };
+        let mut app = App::new(device, Settings::default(), paths.clone());
+        app.network_event(&NetEvent::WasOn(true));
+        assert!(app.settings.device.wifi_was_on);
+        assert!(Settings::load(&paths.settings()).unwrap().device.wifi_was_on);
+        app.network_event(&NetEvent::WasOn(false));
+        assert!(!Settings::load(&paths.settings()).unwrap().device.wifi_was_on);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
