@@ -31,11 +31,12 @@
 //! this session, in the current layout. Drawing saved highlights after a reopen needs a
 //! `Document` call that maps a position range to rectangles.
 
-use super::overlay::{Overlay, OverlayKind, PageScrim};
+use super::overlay::{keyword_icon, Overlay, OverlayKind};
 use ink_device::{Canvas, Point, Rect, Size};
 use ink_doc::Selection;
 use ink_text::Style;
 use ink_ui::dialog::wrap_lines;
+use ink_ui::controls::paint_round_button;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
 use ink_ui::widget::split_cols;
 use ink_ui::{paint_button, ButtonKind, EventResult, Gesture, Icon, PaintCx, Popup, UiEvent, Widget};
@@ -58,11 +59,7 @@ pub fn invert(canvas: &mut Canvas, rects: &[Rect]) {
 pub fn frame(canvas: &mut Canvas, rects: &[Rect]) {
     const T: i32 = 3;
     for r in rects {
-        let r = Rect::new(r.x - T - 1, r.y - 1, r.w + 2 * (T as u32 + 1), r.h + 2);
-        canvas.fill_rect(r.x, r.y, r.w as i32, T, 0);
-        canvas.fill_rect(r.x, r.bottom() - T, r.w as i32, T, 0);
-        canvas.fill_rect(r.x, r.y, T, r.h as i32, 0);
-        canvas.fill_rect(r.right() - T, r.y, T, r.h as i32, 0);
+        canvas.stroke_rect(Rect::new(r.x - T - 1, r.y - 1, r.w + 2 * (T as u32 + 1), r.h + 2), T, 0);
     }
 }
 
@@ -303,15 +300,12 @@ pub fn span_select(doc: &mut dyn ink_doc::Document, size: Size, anchor_page: usi
             SpanEnd::PageEnd => (anchor.first, e),
         };
         vec![(page, from, to)]
-    } else if page > anchor_page {
-        let mut v = vec![(anchor_page, anchor.first, e)];
-        v.extend((anchor_page + 1..page).map(|p| (p, s, e)));
-        v.push((page, s, end_last));
-        v
     } else {
-        let mut v = vec![(page, end_first, e)];
-        v.extend((page + 1..anchor_page).map(|p| (p, s, e)));
-        v.push((anchor_page, s, anchor.last));
+        // (page, point) of the earlier and the later end.
+        let ((p0, from), (p1, to)) = if page > anchor_page { ((anchor_page, anchor.first), (page, end_last)) } else { ((page, end_first), (anchor_page, anchor.last)) };
+        let mut v = vec![(p0, from, e)];
+        v.extend((p0 + 1..p1).map(|p| (p, s, e)));
+        v.push((p1, s, to));
         v
     };
     let parts: Vec<Selection> = segs.into_iter().filter_map(|(p, from, to)| doc.select(p, from, to).ok().flatten()).collect();
@@ -371,11 +365,7 @@ pub fn edge_word(doc: &mut dyn ink_doc::Document, page: usize, size: Size, forwa
     let at = if forward { page_start() } else { page_end(size) };
     let ch = doc.select(page, at, at).ok().flatten().and_then(|s| if forward { s.rects.first().copied() } else { s.rects.last().copied() });
     let word = ch.and_then(|r| word_hit(doc, page, Point::new(r.x + r.w as i32 / 2, r.y + r.h as i32 / 2)));
-    match word {
-        Some(w) => SpanEnd::Word(w),
-        None if forward => SpanEnd::PageStart,
-        None => SpanEnd::PageEnd,
-    }
+    word.map_or(if forward { SpanEnd::PageStart } else { SpanEnd::PageEnd }, SpanEnd::Word)
 }
 
 /// The text lines of `page` as `(top, bottom)` bands, top to bottom (overlapping rects
@@ -545,23 +535,14 @@ pub struct Tool {
     pub action: String,
 }
 
-/// Icon for a plugin selection action, picked from its label.
-fn plugin_icon(label: &str) -> Icon {
-    let l = label.to_lowercase();
-    if ["dict", "look", "define", "word"].iter().any(|k| l.contains(k)) {
-        Icon::Book
-    } else if l.contains("translat") {
-        Icon::Globe
-    } else if ["note", "comment", "ask", "chat"].iter().any(|k| l.contains(k)) {
-        Icon::Chat
-    } else if ["share", "send", "export"].iter().any(|k| l.contains(k)) {
-        Icon::Forward
-    } else if l.contains("copy") {
-        Icon::ListView
-    } else {
-        Icon::Star
-    }
-}
+/// Icons of plugin selection actions by keywords of their label ([`keyword_icon`]).
+const PLUGIN_ICONS: [(&[&str], Icon); 5] = [
+    (&["dict", "look", "define", "word"], Icon::Book),
+    (&["translat"], Icon::Globe),
+    (&["note", "comment", "ask", "chat"], Icon::Chat),
+    (&["share", "send", "export"], Icon::Forward),
+    (&["copy"], Icon::ListView),
+];
 
 /// Every tool of the card in order: Highlight (Remove highlight when the selection is a
 /// saved highlight, `highlighted`), Note, Insightful (`plugin-sel:I` with
@@ -581,7 +562,7 @@ pub fn all_tools(plugins: &[String], insightful: Option<usize>, highlighted: boo
     if let Some(i) = insightful.filter(|i| *i < plugins.len()) {
         v.push(Tool { label: "Insightful".into(), icon: Some(Icon::Sparkle), action: format!("plugin-sel:{i}") });
     }
-    v.extend(plugins.iter().enumerate().filter(|(i, _)| Some(*i) != insightful).map(|(i, l)| Tool { label: l.clone(), icon: Some(plugin_icon(l)), action: format!("plugin-sel:{i}") }));
+    v.extend(plugins.iter().enumerate().filter(|(i, _)| Some(*i) != insightful).map(|(i, l)| Tool { label: l.clone(), icon: Some(keyword_icon(l, &PLUGIN_ICONS)), action: format!("plugin-sel:{i}") }));
     v.push(Tool { label: "Search".into(), icon: Some(Icon::Search), action: "sel-search".into() });
     v
 }
@@ -636,11 +617,6 @@ impl SelectionCard {
     /// The card without its shadow.
     pub fn body(b: Rect) -> Rect {
         Rect::new(b.x, b.y, b.w.saturating_sub(SHADOW), b.h.saturating_sub(SHADOW))
-    }
-
-    /// Rectangles of the main row's tools inside the card `b`.
-    pub fn tool_rects(&self, b: Rect) -> Vec<Rect> {
-        tool_rects(b, self.tools.len())
     }
 
     /// The "More" page: (back button, pills with their index in `rest`, next-page pill).
@@ -709,8 +685,7 @@ impl Widget for SelectionCard {
         let fg = t.fg;
         if self.more {
             let (back, pills, next) = self.more_rects(b);
-            stroke_round_rect(cx.canvas, back, back.w as f32 / 2.0, t.border_px as f32, fg);
-            cx.icon(Icon::Back, back, back.w / 2, fg);
+            paint_round_button(cx, back, Icon::Back);
             let title = Rect::new(back.right() + PAD, back.y, (body.right() - PAD - back.right() - PAD).max(0) as u32, back.h);
             cx.text_left(title, "More actions", t.heading.px, t.heading.style, fg);
             for (i, r) in pills {
@@ -724,7 +699,7 @@ impl Widget for SelectionCard {
             return;
         }
         // The quote: a black bar on the left, italic text, at most the lines that fit.
-        let rects = self.tool_rects(b);
+        let rects = tool_rects(b, self.tools.len());
         let top = body.y + PAD;
         let bottom = rects.first().map_or(body.bottom(), |r| r.y) - GAP as i32;
         let px = QUOTE_LH as f32 / 1.3;
@@ -771,7 +746,7 @@ impl Widget for SelectionCard {
             }
             return EventResult::Handled;
         }
-        match self.tool_rects(b).iter().zip(&self.tools).find(|(r, _)| r.contains(*pos)) {
+        match tool_rects(b, self.tools.len()).iter().zip(&self.tools).find(|(r, _)| r.contains(*pos)) {
             Some((_, t)) if t.action == "sel-more" => {
                 self.more = true;
                 self.first = 0;
@@ -791,8 +766,7 @@ impl Widget for SelectionCard {
 /// row are listed after "More". `above`: the card stays above this y (the top of the
 /// dictionary card added next to it).
 pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, highlighted: bool, size: Size, above: Option<i32>) -> Overlay {
-    let mut o = Overlay::new(OverlayKind::Selection);
-    o.tree.add(None, Box::new(PageScrim { action: "sel-cancel".into() }), Rect::from_size(size));
+    let mut o = Overlay::over_page(OverlayKind::Selection, size, "sel-cancel");
     let anchor = bounds(&sel.rects).unwrap_or_default();
     let w = size.w.saturating_sub(48).min(CARD_W);
     let (tools, rest) = layout_tools(plugins, insightful, highlighted, w);
@@ -822,14 +796,10 @@ pub fn note_editor(quote: &str, size: Size) -> Overlay {
     use ink_ui::bars::APP_BAR_H;
     use ink_ui::{AppBar, BarAction, Keyboard, Label, TextInput};
     let mut o = Overlay::new(OverlayKind::Note);
-    let w = size.w;
     let root = o.tree.add(None, Box::new(Bar::new(Rule::None)), Rect::from_size(size));
+    let w = size.w;
     let bar = AppBar::new("Add note").action(BarAction::text("Save", "note-save")).action(BarAction::icon(Icon::Close, "close"));
-    let bar_r = Rect::new(0, 0, w, APP_BAR_H);
-    for (r, a) in bar.action_rects(bar_r).into_iter().zip(&bar.actions) {
-        o.buttons.push((a.action.clone(), r));
-    }
-    o.tree.add(Some(root), Box::new(bar), bar_r);
+    o.app_bar(Some(root), bar, Rect::new(0, 0, w, APP_BAR_H));
     let quote_r = Rect::new(32, APP_BAR_H as i32 + 24, w.saturating_sub(64), 120);
     o.tree.add(Some(root), Box::new(Label::left(format!("\u{201c}{quote}\u{201d}"), 34.0).styled(Style::Italic)), quote_r);
     let field_r = Rect::new(32, quote_r.bottom() + 16, w.saturating_sub(64), 110);
@@ -1017,11 +987,19 @@ pub(super) mod tests {
         meta: ink_doc::Metadata,
         layout: ink_doc::LayoutSettings,
         selection: Option<Selection>,
+        /// The last [`ink_doc::Document::set_read_ahead`] call, shared with the test.
+        pub read_ahead: std::rc::Rc<std::cell::Cell<Option<bool>>>,
     }
 
     impl PagedDoc {
         fn new(pages: Vec<Vec<&'static str>>) -> Self {
-            PagedDoc { pages, meta: Default::default(), layout: ink_doc::LayoutSettings::for_screen(1272, 1696), selection: None }
+            PagedDoc {
+                pages,
+                meta: Default::default(),
+                layout: ink_doc::LayoutSettings::for_screen(1272, 1696),
+                selection: None,
+                read_ahead: Default::default(),
+            }
         }
         fn at(&self, page: usize, p: Point) -> (usize, usize) {
             let lines = &self.pages[page];
@@ -1088,6 +1066,9 @@ pub(super) mod tests {
         }
         fn set_selection(&mut self, sel: Selection) {
             self.selection = Some(sel);
+        }
+        fn set_read_ahead(&mut self, on: bool) {
+            self.read_ahead.set(Some(on));
         }
     }
 

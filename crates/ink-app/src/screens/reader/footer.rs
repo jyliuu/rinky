@@ -1,4 +1,4 @@
-//! Status bars in the page margins (owner: the `statusbar` builder).
+//! Status bars in the page margins.
 //!
 //! The reader draws two KOReader-like bars from `settings.status_bars`
 //! ([`ink_store::prefs::StatusBars`]): the top bar [`BAR_EDGE`] below the top screen
@@ -200,15 +200,9 @@ impl ChapterMap {
             // Ticks from Kindle locations while the page fraction still moves.
             let mut map = Self::from_entries(&entries, toc.len(), &[], 0);
             let top = toc.iter().map(|e| e.level).min().unwrap_or(0);
-            let locations = doc.location_count().filter(|l| l.0 > 1);
-            map.marks = match locations {
-                Some(n) => thin_marks(
-                    toc.iter()
-                        .filter(|e| ticks_entry(toc.len(), top, e.level))
-                        .filter_map(|e| doc.location(&e.position).map(|l| l.0.saturating_sub(1) as f32 / (n.0 - 1) as f32)),
-                ),
-                None => Vec::new(),
-            };
+            let last = doc.location_count().filter(|l| l.0 > 1).map(|n| (n.0 - 1) as f32);
+            let fraction = |e: &TocEntry| Some(doc.location(&e.position)?.0.saturating_sub(1) as f32 / last?);
+            map.marks = if last.is_some() { thin_marks(toc.iter().filter(|e| ticks_entry(toc.len(), top, e.level)).filter_map(fraction)) } else { Vec::new() };
             map
         };
         map.key = Self::key_of(doc);
@@ -445,11 +439,8 @@ pub fn widget_piece(name: &str, info: &FooterInfo) -> Option<Piece> {
         "frontlight" => info.device.light.map(|l| Piece::Icon(Icon::Light, l.to_string())),
         "page" => (info.total > 0).then(|| Piece::Text((info.page + 1).to_string(), Style::Regular)),
         "page_of_total" => (info.total > 0).then(|| {
-            let text = match info.total_estimate {
-                Some(e) => format!("{} / {}", info.page + 1, about(e)),
-                None => format!("{} / {}", info.page + 1, info.total),
-            };
-            Piece::Text(text, Style::Regular)
+            let total = info.total_estimate.map_or_else(|| info.total.to_string(), about);
+            Piece::Text(format!("{} / {}", info.page + 1, total), Style::Regular)
         }),
         "percent" => Some(Piece::Text(percent_text(info.progress), Style::Bold)),
         "chapter_title" => info.chapter_title.clone().and_then(text),
@@ -559,21 +550,6 @@ pub struct BarRows {
     pub centre: f32,
 }
 
-/// The bar's text size: its `font_px` within [`MIN_FONT_PX`]..=[`MAX_FONT_PX`].
-pub fn bar_px(bar: &StatusBar) -> f32 {
-    bar.text_px()
-}
-
-/// True when `bar` has a progress bar style other than `none`.
-pub fn has_progress(bar: &StatusBar) -> bool {
-    bar.has_progress()
-}
-
-/// Height of a bar's band ([`StatusBar::band_h`]).
-pub fn band_h(bar: &StatusBar, text: bool, progress: bool) -> i32 {
-    bar.band_h(text, progress)
-}
-
 /// Pixels `edge`'s bar of `bars` takes from its screen edge to its inner edge
 /// ([`StatusBar::room`]: [`BAR_EDGE`] plus the band), 0 when the bar is off or empty.
 /// The reader's top and bottom text margins are measured from there (see
@@ -612,7 +588,7 @@ pub fn text_layout(mut l: LayoutSettings, bars: &StatusBars) -> LayoutSettings {
 /// Where `edge`'s bar goes on a `layout` screen. The bars do not depend on the text
 /// margins: each spans the screen width less [`BAR_INSET`] at both sides (the top bar
 /// stops before the bookmark corner, the bottom bar starts right of `bar_left`) and sits
-/// [`BAR_EDGE`] from its screen edge, as high as its rows ([`band_h`]). The bottom bar
+/// [`BAR_EDGE`] from its screen edge, as high as its rows ([`StatusBar::band_h`]). The bottom bar
 /// has its progress bar above the text row, the top bar below it. `text` says whether the
 /// bar has any slot text (widgets or plugin texts), `progress` whether it has a progress
 /// bar.
@@ -620,7 +596,7 @@ pub fn bar_rows(layout: &LayoutSettings, edge: Edge, bar: &StatusBar, text: bool
     let w = layout.width as i32;
     let mut left = BAR_INSET;
     let mut right = w - BAR_INSET;
-    let h = band_h(bar, text, progress);
+    let h = bar.band_h(text, progress);
     let y = match edge {
         Edge::Top => {
             // The bookmark mark is a triangle, widest at the screen top: at the bar's top
@@ -636,7 +612,7 @@ pub fn bar_rows(layout: &LayoutSettings, edge: Edge, bar: &StatusBar, text: bool
         }
     };
     let centre = layout.width as f32 / 2.0;
-    let px = bar_px(bar);
+    let px = bar.text_px();
     let mut rows = BarRows { text: None, progress: None, px, centre };
     if right - left < 64 || h == 0 {
         return rows;
@@ -644,19 +620,13 @@ pub fn bar_rows(layout: &LayoutSettings, edge: Edge, bar: &StatusBar, text: bool
     let width = (right - left) as u32;
     let text_h = (px * 1.4).ceil() as i32;
     let box_h = if bar.progress_bar == "thick" { THICK_BOX_H } else { THIN_BOX_H } as i32;
-    match (text, progress) {
-        (true, true) => {
-            let (ty, by) = match edge {
-                Edge::Top => (y, y + text_h + ROW_GAP as i32),
-                Edge::Bottom => (y + box_h + ROW_GAP as i32, y),
-            };
-            rows.text = Some(Rect::new(left, ty, width, text_h as u32));
-            rows.progress = Some(Rect::new(left, by, width, box_h as u32));
-        }
-        (false, true) => rows.progress = Some(Rect::new(left, y, width, box_h as u32)),
-        (true, false) => rows.text = Some(Rect::new(left, y, width, text_h as u32)),
-        _ => {}
-    }
+    let (ty, by) = match (edge, text && progress) {
+        (Edge::Top, true) => (y, y + text_h + ROW_GAP as i32),
+        (Edge::Bottom, true) => (y + box_h + ROW_GAP as i32, y),
+        _ => (y, y),
+    };
+    rows.text = text.then(|| Rect::new(left, ty, width, text_h as u32));
+    rows.progress = progress.then(|| Rect::new(left, by, width, box_h as u32));
     rows
 }
 
@@ -676,7 +646,7 @@ pub fn rows_for(layout: &LayoutSettings, bars: &StatusBars, edge: Edge, info: &F
     let (bar, plugin) = edge_bar(bars, edge, info);
     let plugin = plugin.iter().any(|t| !t.is_empty());
     let widgets = bar.enabled && [&bar.left, &bar.center, &bar.right].iter().any(|s| !s.is_empty());
-    bar_rows(layout, edge, bar, widgets || plugin, bar.enabled && has_progress(bar), info.bar_left)
+    bar_rows(layout, edge, bar, widgets || plugin, bar.enabled && bar.has_progress(), info.bar_left)
 }
 
 /// A slot laid out in a row: its pieces with their widths, and its left x.
@@ -690,17 +660,10 @@ fn plan_row(cx: &mut PaintCx, row: Rect, px: f32, centre: f32, bar: &StatusBar, 
     let sep = bar.separator.as_str();
     let sep_w = if sep.is_empty() { 0.0 } else { cx.text_width(Style::Regular, px, sep) };
     let slot = |cx: &mut PaintCx, names: &[String], extra: &str| -> Vec<(Piece, f32)> {
-        let mut v: Vec<(Piece, f32)> = Vec::new();
-        if bar.enabled {
-            for n in names {
-                if let Some(p) = widget_piece(n, info) {
-                    let w = piece_width(cx, &p, px);
-                    v.push((p, w));
-                }
-            }
-        }
-        if !extra.is_empty() {
-            let p = Piece::Text(extra.to_string(), Style::Regular);
+        let names = if bar.enabled { names } else { &[] };
+        let plugin = (!extra.is_empty()).then(|| Piece::Text(extra.to_string(), Style::Regular));
+        let mut v = Vec::new();
+        for p in names.iter().filter_map(|n| widget_piece(n, info)).chain(plugin) {
             let w = piece_width(cx, &p, px);
             v.push((p, w));
         }
@@ -929,23 +892,19 @@ impl ReaderScreen {
             return Ok(Vec::new());
         }
         let t = Instant::now();
-        self.bars.device = Some(DeviceStatus::read(cx, &cx.settings.status_bars));
+        // redraw_bars reads the device values: the tick is due (bar_info).
         let status = self.status_shown.clone();
-        let Some(rows) = self.redraw_bar_text(cx, &status) else { return Ok(Vec::new()) };
+        let Some(rows) = self.redraw_bars(cx, &status, Part::Text) else { return Ok(Vec::new()) };
         log::info!("footer: minute tick redrew {} bar rows in {} ms", rows.len(), t.elapsed().as_millis());
         Ok(rows.into_iter().map(|r| cx.refresh.damage(Change::Status, r)).collect())
     }
 
-    /// Redraws only the text rows of the bars, with plugin status texts `status`, into the
-    /// canvas and the page buffer, and returns the rows (clipped to the screen). `None`
-    /// when that is not enough: no document or page buffer, or the new texts change
-    /// which rows the bars take (the page must then be drawn again).
-    pub(super) fn redraw_bar_text(&mut self, cx: &mut AppCtx, status: &[String; 3]) -> Option<Vec<Rect>> {
-        self.redraw_bars(cx, status, Part::Text)
-    }
-
-    /// [`Self::redraw_bar_text`], with the progress bars too when `part` is [`Part::All`]
-    /// (pagination finished: the chapter ticks and the fill change).
+    /// Redraws the text rows of the bars, with plugin status texts `status`, into the
+    /// canvas and the page buffer, and returns the rows (clipped to the screen); the
+    /// progress bars too when `part` is [`Part::All`] (pagination finished: the chapter
+    /// ticks and the fill change). `None` when that is not enough: no document or page
+    /// buffer, or the new texts change which rows the bars take (the page must then be
+    /// drawn again).
     pub(super) fn redraw_bars(&mut self, cx: &mut AppCtx, status: &[String; 3], part: Part) -> Option<Vec<Rect>> {
         if self.page_buf.as_ref().is_none_or(|b| b.size() != cx.canvas.size()) {
             return None;

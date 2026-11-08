@@ -171,9 +171,12 @@ get wrong:
   exact total is needed (tests do).
 - **A new trait method with a default body must also be delegated in
   `ink_formats::BookDocument`**, or reflowable books will silently use the default.
-- Fixed-layout options (fit, crop, columns, contrast) are inherent methods of
-  `MupdfDocument` (`set_options`), not part of the trait; `RINKY_FIXED` sets them for
-  now.
+- Fixed-layout options are `ink_mupdf::FixedOptions` (`MupdfDocument::set_options`);
+  `RINKY_FIXED` gives the defaults. The part a reader changes (fit, crop, columns,
+  contrast, spreads, right to left) goes through the trait as `ink_doc::FixedView`
+  (`Document::fixed_view`, `set_fixed_view`); `FixedOptions::view` and `with_view`
+  are the one mapping between the two. The reader keeps a book's choices in its
+  sidecar and puts them over the defaults (`screens/reader/aa.rs`, `fixed_view`).
 
 ## Device layer
 

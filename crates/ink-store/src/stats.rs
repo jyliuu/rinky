@@ -383,17 +383,15 @@ impl StatsDb {
     }
 
     fn totals(&self, md5: Option<&str>) -> Result<Vec<BookTotals>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT b.md5, b.title, b.authors, b.pages,
+        let sql = "SELECT b.md5, b.title, b.authors, b.pages,
                     (SELECT coalesce(sum(duration), 0) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT count(DISTINCT page) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT count(*) FROM session s WHERE s.id_book = b.id),
                     (SELECT min(start_time) FROM page_stat_data p WHERE p.id_book = b.id),
                     (SELECT max(start_time + duration) FROM page_stat_data p WHERE p.id_book = b.id)
              FROM book b WHERE (?1 IS NULL OR b.md5 = ?1)
-             ORDER BY 9 DESC NULLS LAST, b.id",
-        )?;
-        let rows = st.query_map([md5], |r| {
+             ORDER BY 9 DESC NULLS LAST, b.id";
+        crate::query_all(&self.conn, sql, [md5], |r| {
             Ok(BookTotals {
                 md5: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 title: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -405,48 +403,33 @@ impl StatsDb {
                 first_read: r.get::<_, Option<i64>>(7)?.map(u),
                 last_read: r.get::<_, Option<i64>>(8)?.map(u),
             })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })
     }
 
     /// Sessions, newest first; of one book when `md5` is given.
     pub fn sessions(&self, md5: Option<&str>, limit: usize) -> Result<Vec<Session>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT s.id, b.md5, s.start_time, s.end_time, s.duration, s.pages, s.source FROM session s JOIN book b ON b.id = s.id_book
-             WHERE (?1 IS NULL OR b.md5 = ?1) ORDER BY s.start_time DESC, s.id DESC LIMIT ?2",
-        )?;
-        let rows = st.query_map(params![md5, limit as i64], row_session)?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let sql = "SELECT s.id, b.md5, s.start_time, s.end_time, s.duration, s.pages, s.source FROM session s JOIN book b ON b.id = s.id_book
+             WHERE (?1 IS NULL OR b.md5 = ?1) ORDER BY s.start_time DESC, s.id DESC LIMIT ?2";
+        crate::query_all(&self.conn, sql, params![md5, limit as i64], row_session)
     }
 
     /// Page records of the book with `md5`, oldest first.
     pub fn page_stats(&self, md5: &str) -> Result<Vec<PageRecord>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT p.page, p.total_pages, p.start_time, p.duration FROM page_stat_data p JOIN book b ON b.id = p.id_book
-             WHERE b.md5 = ?1 ORDER BY p.start_time, p.page",
-        )?;
-        let rows = st.query_map([md5], |r| {
-            Ok(PageRecord {
-                page: u32_of(r.get(0)?),
-                total_pages: u32_of(r.get(1)?),
-                start_time: u(r.get(2)?),
-                duration: u32_of(r.get(3)?),
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let sql = "SELECT p.page, p.total_pages, p.start_time, p.duration FROM page_stat_data p JOIN book b ON b.id = p.id_book
+             WHERE b.md5 = ?1 ORDER BY p.start_time, p.page";
+        crate::query_all(&self.conn, sql, [md5], |r| {
+            Ok(PageRecord { page: u32_of(r.get(0)?), total_pages: u32_of(r.get(1)?), start_time: u(r.get(2)?), duration: u32_of(r.get(3)?) })
+        })
     }
 
     /// Reading per day for page records starting in `from..to`, with days counted in a
     /// time zone `utc_offset` seconds east of UTC.
     pub fn daily(&self, from: u64, to: u64, utc_offset: i64) -> Result<Vec<DayTotal>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT date(start_time + ?3, 'unixepoch') AS day, sum(duration), count(*), count(DISTINCT id_book)
-             FROM page_stat_data WHERE start_time >= ?1 AND start_time < ?2 GROUP BY day ORDER BY day",
-        )?;
-        let rows = st.query_map(params![from as i64, to as i64, utc_offset], |r| {
+        let sql = "SELECT date(start_time + ?3, 'unixepoch') AS day, sum(duration), count(*), count(DISTINCT id_book)
+             FROM page_stat_data WHERE start_time >= ?1 AND start_time < ?2 GROUP BY day ORDER BY day";
+        crate::query_all(&self.conn, sql, params![from as i64, to as i64, utc_offset], |r| {
             Ok(DayTotal { day: r.get(0)?, seconds: u(r.get(1)?), pages: u(r.get(2)?), books: u(r.get(3)?) })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        })
     }
 
     /// Copies KOReader's statistics in: books are matched by md5 (created if missing),
@@ -535,21 +518,39 @@ fn update_book_totals(conn: &Connection, book: i64) -> Result<()> {
     Ok(())
 }
 
+/// `spans` (inclusive `(start, end)`, any order, may overlap) sorted by start with the
+/// overlapping ones joined, so [`covers`] can binary search them.
+fn merge_spans(mut spans: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    spans.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(spans.len());
+    for (a, b) in spans {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// True when `t` lies in one of `merged` (from [`merge_spans`]); O(log n).
+fn covers(merged: &[(i64, i64)], t: i64) -> bool {
+    let i = merged.partition_point(|&(a, _)| a <= t);
+    i > 0 && t <= merged[i - 1].1
+}
+
 /// Replaces the `koreader` sessions of `book` with sessions built from its page records
 /// that no rinky session covers. Returns the number of sessions.
 fn rebuild_koreader_sessions(conn: &Connection, book: i64) -> Result<usize> {
     conn.execute("DELETE FROM session WHERE id_book = ?1 AND source = 'koreader'", [book])?;
-    let ours: Vec<(i64, i64)> = conn
-        .prepare("SELECT start_time, end_time FROM session WHERE id_book = ?1")?
-        .query_map([book], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<std::result::Result<_, _>>()?;
-    let rows: Vec<(i64, i64, i64)> = conn
-        .prepare("SELECT start_time, duration, page FROM page_stat_data WHERE id_book = ?1 ORDER BY start_time, page")?
-        .query_map([book], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<std::result::Result<_, _>>()?;
+    // Sorted and joined once, so each page record is checked in O(log sessions) rather
+    // than against every session (an imported history has thousands of each).
+    let ours: Vec<(i64, i64)> = crate::query_all(conn, "SELECT start_time, end_time FROM session WHERE id_book = ?1", [book], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let ours = merge_spans(ours);
+    let sql = "SELECT start_time, duration, page FROM page_stat_data WHERE id_book = ?1 ORDER BY start_time, page";
+    let rows: Vec<(i64, i64, i64)> = crate::query_all(conn, sql, [book], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     let mut sessions: Vec<(i64, i64, i64, std::collections::HashSet<i64>)> = Vec::new();
     for (start, dur, page) in rows {
-        if ours.iter().any(|&(a, b)| start >= a && start <= b) {
+        if covers(&ours, start) {
             continue;
         }
         match sessions.last_mut() {
@@ -576,6 +577,19 @@ mod tests {
 
     fn juliet() -> StatsBook {
         StatsBook { md5: "cf7ce9b8d4e135c8ac340f18d1e58c85".into(), title: "Romeo and Juliet".into(), authors: "William Shakespeare".into(), pages: Some(180), ..Default::default() }
+    }
+
+    #[test]
+    fn covered_times_match_a_linear_scan() {
+        // Unsorted, overlapping, touching, nested and single-instant spans.
+        let spans = vec![(50, 60), (10, 20), (15, 30), (31, 31), (100, 200), (120, 130), (30, 30), (70, 70), (-5, 0)];
+        let merged = merge_spans(spans.clone());
+        assert!(merged.windows(2).all(|w| w[0].1 < w[1].0), "{merged:?}");
+        for t in -10..=210 {
+            let linear = spans.iter().any(|&(a, b)| t >= a && t <= b);
+            assert_eq!(covers(&merged, t), linear, "t = {t}");
+        }
+        assert!(!covers(&merge_spans(Vec::new()), 0));
     }
 
     #[test]

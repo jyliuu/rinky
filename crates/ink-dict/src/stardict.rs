@@ -198,12 +198,9 @@ impl std::fmt::Debug for Dictionary {
 
 fn read_limited(path: &Path, gz: bool) -> Result<Vec<u8>> {
     let f = std::fs::File::open(path).map_err(|e| io_err(path, e))?;
+    let r: Box<dyn Read> = if gz { Box::new(flate2::read::MultiGzDecoder::new(f)) } else { Box::new(f) };
     let mut out = Vec::new();
-    if gz {
-        flate2::read::MultiGzDecoder::new(f).take(MAX_INDEX + 1).read_to_end(&mut out).map_err(|e| io_err(path, e))?;
-    } else {
-        f.take(MAX_INDEX + 1).read_to_end(&mut out).map_err(|e| io_err(path, e))?;
-    }
+    r.take(MAX_INDEX + 1).read_to_end(&mut out).map_err(|e| io_err(path, e))?;
     if out.len() as u64 > MAX_INDEX {
         return Err(DictError::Format(format!("{}: index over {} MiB", path.display(), MAX_INDEX >> 20)));
     }

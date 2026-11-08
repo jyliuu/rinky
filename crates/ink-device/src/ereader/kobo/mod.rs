@@ -21,7 +21,7 @@ use crate::services::{Battery, BatteryState, Light, Power, Usb, UsbState, Wifi, 
 use crate::sleep::{Resume, SleepState};
 use crate::netman::{self, Cmd, NetBackend, NetHandle, NetQueue, NetStatus, Probe};
 use crate::sysfs::SysRoot;
-use crate::usb::{DriveModeState, UsbCable};
+use crate::usb::UsbCable;
 use crate::wifi::WifiProfile;
 use crate::{DeviceError, Result};
 use std::cell::{Cell, RefCell};
@@ -255,10 +255,6 @@ impl Power for KoboServices {
         self.shared.request(Request::Defer(duration))
     }
 
-    fn request_screensaver(&mut self) -> Result<()> {
-        self.shared.request(Request::Sleep)
-    }
-
     fn state(&self) -> Result<String> {
         Ok(self.shared.sleep_state().name().into())
     }
@@ -394,9 +390,5 @@ impl Usb for KoboServices {
 
     fn cable(&self) -> Result<UsbCable> {
         Ok(self.shared.cable(&self.sys))
-    }
-
-    fn drive_mode(&self) -> Result<DriveModeState> {
-        Ok(DriveModeState::Off)
     }
 }

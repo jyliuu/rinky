@@ -16,6 +16,8 @@ doctest = false
 
 [dependencies]
 ink-plugin.workspace = true
+# Calendar math (`clock::civil_from_days`), already in the tree through ink-plugin.
+ink-device.workspace = true
 ink-store.workspace = true
 rusqlite.workspace = true
 log.workspace = true

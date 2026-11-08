@@ -139,8 +139,8 @@ struct Converted {
     toc: Vec<TocNode>,
 }
 
-fn convert(path: &Path, bytes: &[u8]) -> Converted {
-    let label = declared_charset(bytes);
+fn convert(path: &Path, bytes: Vec<u8>) -> Converted {
+    let label = declared_charset(&bytes);
     let d = decode_with_label(bytes, label.as_deref());
     let mut c = Collect::default();
     let xhtml = xhtml::to_xhtml(&d.text, &mut c);
@@ -156,12 +156,12 @@ fn convert(path: &Path, bytes: &[u8]) -> Converted {
 
 /// Metadata of an HTML file.
 pub fn read_info(path: &Path) -> Result<BookInfo> {
-    Ok(convert(path, &std::fs::read(path)?).info)
+    Ok(convert(path, std::fs::read(path)?).info)
 }
 
 /// Opens an HTML file as a one-chapter book.
 pub fn load(path: &Path) -> Result<Book> {
-    let c = convert(path, &std::fs::read(path)?);
+    let c = convert(path, std::fs::read(path)?);
     let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("index.html").to_string();
     Ok(Book {
@@ -193,7 +193,7 @@ mod tests {
         let src = "<html lang=da><head><title>Eventyr</title><meta name=author content='H. C. Andersen'></head><body>\
                    <h1>Del 1</h1><p>tekst<h2 id=k1>Kapitel 1</h2><p>mere<h2>Kapitel 2</h2><h3>Afsnit</h3><h1>Del 2</h1></body>";
         let (cp, _, _) = encoding_rs::WINDOWS_1252.encode(src);
-        let c = convert(Path::new("/x/eventyr.html"), &cp);
+        let c = convert(Path::new("/x/eventyr.html"), cp.to_vec());
         assert_eq!(c.info.metadata.title, "Eventyr");
         assert_eq!(c.info.metadata.authors, vec!["H. C. Andersen"]);
         assert_eq!(c.info.metadata.language.as_deref(), Some("da"));

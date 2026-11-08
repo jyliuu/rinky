@@ -200,9 +200,7 @@ pub struct BookChats {
 }
 
 /// Seconds since 1970.
-pub fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
+pub use ink_store::now_secs as now;
 
 /// File name of a book's chats (in the data folder).
 pub fn file_name(book_id: &str) -> String {
@@ -499,18 +497,9 @@ pub fn render(conv: &Conversation, x: Extras) -> (String, Vec<String>) {
 
 /// `12 Oct 2026` for seconds since 1970 (UTC).
 pub fn date(secs: u64) -> String {
-    // Days to civil date (Howard Hinnant's algorithm).
-    let z = (secs / 86_400) as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (y, m, d) = ink_device::clock::civil_from_days((secs / 86_400) as i64);
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    format!("{d} {} {y}", MONTHS[(m - 1) as usize])
+    format!("{d} {} {y}", MONTHS[m as usize - 1])
 }
 
 /// The chat list as viewer Markdown (`chat_list.lua`): "Start new chat", then a card

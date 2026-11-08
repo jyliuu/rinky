@@ -72,39 +72,24 @@ pub fn guess_legacy(bytes: &[u8]) -> &'static Encoding {
 
 /// Decodes `bytes` with detection (BOM, UTF-16 pattern, UTF-8, chardetng).
 pub fn decode_text(bytes: &[u8]) -> Decoded {
-    match legacy_or_decoded(bytes) {
-        Ok(d) => d,
-        Err(()) => match std::str::from_utf8(bytes) {
-            Ok(s) => Decoded { text: s.to_string(), encoding: UTF_8.name(), source: EncodingSource::ValidUtf8 },
-            Err(_) => decode_invalid_utf8(bytes),
-        },
-    }
+    decode_text_owned(bytes.to_vec())
 }
 
 /// [`decode_text`] taking the bytes: valid UTF-8 (most books) becomes the text without
 /// a copy, so a big file is not held twice while it is decoded.
 pub fn decode_text_owned(bytes: Vec<u8>) -> Decoded {
-    match legacy_or_decoded(&bytes) {
-        Ok(d) => d,
-        Err(()) => match String::from_utf8(bytes) {
-            Ok(text) => Decoded { text, encoding: UTF_8.name(), source: EncodingSource::ValidUtf8 },
-            Err(e) => decode_invalid_utf8(e.as_bytes()),
-        },
-    }
-}
-
-/// Text recognised by its byte order mark or UTF-16 zero pattern; `Err` when the bytes
-/// should be tried as UTF-8.
-fn legacy_or_decoded(bytes: &[u8]) -> Result<Decoded, ()> {
-    if let Some((enc, bom)) = Encoding::for_bom(bytes) {
+    if let Some((enc, bom)) = Encoding::for_bom(&bytes) {
         let text = enc.decode_without_bom_handling(&bytes[bom..]).0.into_owned();
-        return Ok(Decoded { text, encoding: enc.name(), source: EncodingSource::Bom });
+        return Decoded { text, encoding: enc.name(), source: EncodingSource::Bom };
     }
-    if let Some(enc) = utf16_without_bom(bytes) {
-        let text = enc.decode_without_bom_handling(bytes).0.into_owned();
-        return Ok(Decoded { text, encoding: enc.name(), source: EncodingSource::ZeroPattern });
+    if let Some(enc) = utf16_without_bom(&bytes) {
+        let text = enc.decode_without_bom_handling(&bytes).0.into_owned();
+        return Decoded { text, encoding: enc.name(), source: EncodingSource::ZeroPattern };
     }
-    Err(())
+    match String::from_utf8(bytes) {
+        Ok(text) => Decoded { text, encoding: UTF_8.name(), source: EncodingSource::ValidUtf8 },
+        Err(e) => decode_invalid_utf8(e.as_bytes()),
+    }
 }
 
 /// Bytes that are not valid UTF-8: UTF-8 with a sequence cut at the end (a truncated
@@ -121,17 +106,17 @@ fn decode_invalid_utf8(bytes: &[u8]) -> Decoded {
     Decoded { text, encoding: enc.name(), source: EncodingSource::Guessed }
 }
 
-/// Decodes with a declared label when it is known, else with detection.
-pub fn decode_with_label(bytes: &[u8], label: Option<&str>) -> Decoded {
-    if Encoding::for_bom(bytes).is_none() {
+/// Decodes with a declared label when it is known, else with detection ([`decode_text_owned`]).
+pub fn decode_with_label(bytes: Vec<u8>, label: Option<&str>) -> Decoded {
+    if Encoding::for_bom(&bytes).is_none() {
         if let Some(enc) = label.and_then(|l| Encoding::for_label(l.trim().as_bytes())) {
             // A UTF-16 label on ASCII-compatible bytes is a lie (HTML spec): use UTF-8.
             let enc = if enc == UTF_16LE || enc == UTF_16BE { UTF_8 } else { enc };
-            let text = enc.decode_without_bom_handling(bytes).0.into_owned();
+            let text = enc.decode_without_bom_handling(&bytes).0.into_owned();
             return Decoded { text, encoding: enc.name(), source: EncodingSource::Declared };
         }
     }
-    decode_text(bytes)
+    decode_text_owned(bytes)
 }
 
 #[cfg(test)]
@@ -176,7 +161,7 @@ mod tests {
         let d = decode_text(&cp1252);
         assert_eq!(d.encoding, "windows-1252");
         assert_eq!(d.text, da);
-        let d = decode_with_label(&cp1252, Some("ISO-8859-1"));
+        let d = decode_with_label(cp1252.into_owned(), Some("ISO-8859-1"));
         assert_eq!((d.encoding, d.source), ("windows-1252", EncodingSource::Declared));
     }
 

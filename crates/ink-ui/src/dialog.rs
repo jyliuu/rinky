@@ -4,7 +4,7 @@
 //! Modal layers go on top of a [`Scrim`]: it takes every touch outside them and reports
 //! its action (for example `dismiss`) on a tap, so nothing underneath reacts.
 
-use crate::draw::{fill_round_rect, stroke_round_rect, Path};
+use crate::draw::{fill_round_rect, fill_top_round_rect, stroke_round_rect, stroke_top_round_rect};
 use crate::gesture::{Direction, Gesture};
 use crate::icon::Icon;
 use crate::widget::{paint_button, split_rows, ButtonKind, EventResult, PaintCx, Widget};
@@ -12,7 +12,7 @@ use crate::UiEvent;
 use ink_device::{Rect, RefreshClass, Size};
 use ink_text::hyphen::NoHyphenation;
 use ink_text::linebreak::wrap;
-use ink_text::Style;
+use ink_text::{Style, TextRun};
 use std::time::Duration;
 
 /// A modal message with buttons. Tapping a button reports its action; tapping outside
@@ -177,19 +177,14 @@ pub fn split_check(label: &str) -> (bool, &str) {
     }
 }
 
-/// Width of the column the check icon sits in (icon side + gap), reserved on every row
-/// when any row of the menu is checked.
-pub fn check_gutter() -> i32 {
-    48 + crate::theme::space(2)
-}
-
 impl Widget for Menu {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         let t = cx.theme;
         fill_round_rect(cx.canvas, b, t.radius_lg, t.bg);
         stroke_round_rect(cx.canvas, b, t.radius_lg, t.border_px as f32, t.fg);
         let rows = split_rows(b, &vec![self.row_h; self.items.len()]);
-        let gutter = if self.items.iter().any(|(l, _)| split_check(l).0) { check_gutter() } else { 0 };
+        // The check icon's column (icon side + gap), on every row when any is checked.
+        let gutter = if self.items.iter().any(|(l, _)| split_check(l).0) { 48 + crate::theme::space(2) } else { 0 };
         for (i, (r, (label, _))) in rows.iter().zip(&self.items).enumerate() {
             let (checked, label) = split_check(label);
             if i > 0 {
@@ -221,8 +216,8 @@ impl Widget for Menu {
 pub struct BottomSheet {
     /// Title shown on the sheet's top bar.
     pub title: String,
-    /// The sheet took a touch or a tap that changes nothing on it (set by `event`,
-    /// cleared by `damage`).
+    /// The sheet took a gesture that changes nothing on it (set by `event`, cleared by
+    /// `damage`).
     pub taken: bool,
 }
 
@@ -244,9 +239,8 @@ impl Widget for BottomSheet {
         let t = cx.theme;
         // Rounded top corners and a black edge along the top and sides (the sheet
         // stands on the bottom edge of the screen).
-        let (x, y, w, h) = (b.x as f32, b.y as f32, b.w as f32, b.h as f32);
-        Path::new().top_round_rect(x, y, w, h, t.radius_lg).fill(cx.canvas, t.bg);
-        Path::new().top_round_rect_outline(x, y, w, h, t.radius_lg, t.border_px as f32).fill(cx.canvas, t.fg);
+        fill_top_round_rect(cx.canvas, b, t.radius_lg, t.bg);
+        stroke_top_round_rect(cx.canvas, b, t.radius_lg, t.border_px, t.fg);
         // The side edges stop 8 px above the bottom: the panel's last 8 px stay empty.
         cx.canvas.fill_rect(b.x, b.bottom() - 8, b.w as i32, 8, t.bg);
         // Grab handle: a pill, mid gray, thick enough not to ghost.
@@ -259,15 +253,19 @@ impl Widget for BottomSheet {
     fn event(&mut self, ev: &UiEvent, _b: Rect) -> EventResult {
         match ev {
             UiEvent::Gesture(Gesture::Swipe { dir: Direction::Down, .. }) => EventResult::Action("close".into()),
-            UiEvent::Gesture(_) | UiEvent::Touch(_) => {
+            // Taps on the sheet's empty parts do not fall through to what is under it.
+            UiEvent::Gesture(_) => {
                 self.taken = true;
                 EventResult::Handled
             }
+            // Touch notifications are left alone: a widget that takes one is painted
+            // again, and for the sheet that is every control on it (the touch-down and
+            // the lift of each tap on a control the sheet does not handle itself).
             _ => EventResult::Ignored,
         }
     }
 
-    /// A touch or tap on the sheet's empty parts changes nothing: no rectangle, so no
+    /// A tap on the sheet's empty parts changes nothing: no rectangle, so no
     /// refresh (the tree would otherwise repaint the whole sheet, which for a tall sheet
     /// becomes a full-screen flash). The first paint is reported in full.
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
@@ -299,6 +297,11 @@ pub struct Popup {
 /// `(x offset, text, style)` pieces. Breaks only at spaces; a word that changes style
 /// inside (`foo<i>bar</i>`) stays whole; a word wider than `max` gets a line of its own.
 pub fn wrap_spans(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32) -> Vec<Vec<(f32, String, Style)>> {
+    span_lines(cx, spans, px, max).into_iter().map(|l| l.into_iter().map(|(x, t, s, _)| (x, t, s)).collect()).collect()
+}
+
+/// [`wrap_spans`] with each piece's shaped run, which measured it and draws it.
+fn span_lines(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32) -> Vec<Vec<(f32, String, Style, TextRun)>> {
     // Words as pieces of one style each, and whether a space comes before the word.
     let mut words: Vec<(bool, Vec<(String, Style)>)> = Vec::new();
     let mut space = true;
@@ -319,12 +322,12 @@ pub fn wrap_spans(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32
     }
     let fonts = &mut *cx.fonts;
     let space_w = fonts.shaped_width(Style::Regular, px, " ");
-    let mut lines: Vec<Vec<(f32, String, Style)>> = Vec::new();
-    let mut line: Vec<(f32, String, Style)> = Vec::new();
+    let mut lines = Vec::new();
+    let mut line = Vec::new();
     let mut x = 0.0f32;
     for (gap, pieces) in words {
-        let widths: Vec<f32> = pieces.iter().map(|(t, s)| fonts.shaped_width(*s, px, t)).collect();
-        let w: f32 = widths.iter().sum();
+        let runs: Vec<TextRun> = pieces.iter().map(|(t, s)| fonts.shape(*s, px, t)).collect();
+        let w: f32 = runs.iter().map(|r| r.width).sum();
         let gap = if gap && !line.is_empty() { space_w } else { 0.0 };
         if !line.is_empty() && x + gap + w > max {
             lines.push(std::mem::take(&mut line));
@@ -332,8 +335,9 @@ pub fn wrap_spans(cx: &mut PaintCx, spans: &[(String, Style)], px: f32, max: f32
         } else {
             x += gap;
         }
-        for ((t, s), pw) in pieces.into_iter().zip(widths) {
-            line.push((x, t, s));
+        for ((t, s), run) in pieces.into_iter().zip(runs) {
+            let pw = run.width;
+            line.push((x, t, s, run));
             x += pw;
         }
     }
@@ -401,12 +405,12 @@ impl Widget for Popup {
                 y += px * 1.3;
             }
         } else {
-            for line in wrap_spans(cx, &self.spans, px, max) {
+            for line in span_lines(cx, &self.spans, px, max) {
                 if y > bottom as f32 - 8.0 {
                     break;
                 }
-                for (dx, text, style) in line {
-                    cx.draw_text_clipped(style, px, left + dx, y, &text, fg, inner);
+                for (dx, _, _, run) in line {
+                    cx.put_run(&run, left + dx, y, fg, Some(inner));
                 }
                 y += px * 1.3;
             }
@@ -537,6 +541,12 @@ mod tests {
             dir: crate::Direction::Down,
         });
         assert_eq!(s.event(&swipe, BottomSheet::frame(screen, 700)), EventResult::Action("close".into()));
+        // Touch notifications pass by (taking one would repaint every control on it).
+        let p = Point::new(600, 1300);
+        for kind in [crate::TouchKind::Down, crate::TouchKind::Up] {
+            let touch = UiEvent::Touch(crate::Touch { slot: 0, kind, pos: p, start: p, held: Duration::ZERO, moved: false });
+            assert_eq!(s.event(&touch, BottomSheet::frame(screen, 700)), EventResult::Ignored);
+        }
         let t = Toast { text: "Saved".into(), timeout: Duration::from_secs(2) };
         assert_eq!(t.refresh_class(), RefreshClass::Du);
         assert!(Toast::frame(screen).bottom() < 1696);

@@ -25,19 +25,6 @@ fn origin(url: &str) -> Option<&str> {
     Some(&url[..url.len() - rest.len() + host.len()])
 }
 
-/// Percent-encodes everything except `A-Z a-z 0-9 - _ . ~`.
-fn url_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 /// The list URL for `provider` with endpoint `base_url`, or `None` without a list.
 /// `query` is sent to OpenRouter only (DeepSeek's list is filtered locally).
 pub fn url(provider: &str, base_url: &str, query: Option<&str>) -> Option<String> {
@@ -48,7 +35,7 @@ pub fn url(provider: &str, base_url: &str, query: Option<&str>) -> Option<String
             let mut u = format!("{base}/api/v1/models?output_modalities=text&supported_parameters=tools&sort=most-popular");
             if let Some(q) = query.map(str::trim).filter(|q| !q.is_empty()) {
                 u.push_str("&q=");
-                u.push_str(&url_encode(q));
+                u.push_str(&ink_net::url::encode_component(q));
             }
             Some(u)
         }

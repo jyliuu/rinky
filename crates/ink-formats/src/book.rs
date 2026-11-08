@@ -235,14 +235,6 @@ impl Skeleton {
         let mut nodes = vec![SkelNode { name: u32::MAX, children: Vec::new(), ids: [None, None], wanted_below: false }];
         let mut stack: Vec<u32> = vec![0];
         let mut skipped = 0usize;
-        // Local name as `xml::qname_parts` takes it: after the first `:`.
-        fn local(q: &[u8]) -> std::borrow::Cow<'_, str> {
-            let s = String::from_utf8_lossy(q);
-            match s {
-                std::borrow::Cow::Borrowed(b) => std::borrow::Cow::Borrowed(b.split_once(':').map_or(b, |(_, l)| l)),
-                std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o.split_once(':').map_or(o.as_str(), |(_, l)| l).to_string()),
-            }
-        }
         struct Names {
             list: Vec<String>,
             ids: HashMap<String, u32>,
@@ -250,7 +242,7 @@ impl Skeleton {
         let mut nm = Names { list: Vec::new(), ids: HashMap::new() };
         fn add(e: &quick_xml::events::BytesStart, nodes: &mut Vec<SkelNode>, stack: &[u32], nm: &mut Names, wanted: &HashSet<&str>) -> u32 {
             let q = e.name();
-            let l = local(q.as_ref());
+            let l = xml::local_name(q.as_ref());
             let name = match nm.ids.get(l.as_ref()) {
                 Some(&n) => n,
                 None => {
@@ -322,7 +314,7 @@ impl Skeleton {
                         continue;
                     }
                     let q = e.name();
-                    let l = local(q.as_ref());
+                    let l = xml::local_name(q.as_ref());
                     let Some(&name) = nm.ids.get(l.as_ref()) else { continue };
                     if let Some(pos) = stack.iter().rposition(|&n| nodes[n as usize].name == name) {
                         if pos > 0 {
@@ -794,6 +786,9 @@ impl Document for BookDocument {
     fn wait_paginated(&mut self, timeout: std::time::Duration) -> bool {
         self.doc.wait_paginated(timeout)
     }
+    fn set_read_ahead(&mut self, on: bool) {
+        self.doc.set_read_ahead(on)
+    }
     fn page_estimate(&self) -> Option<usize> {
         self.doc.page_estimate()
     }
@@ -905,7 +900,7 @@ mod tests {
         }
         let mut chapters = 0;
         for b in books {
-            let book = crate::epub::load(&b).unwrap_or_else(|e| panic!("{}: {e}", b.display()));
+            let book = crate::epub::load(&b, None).unwrap_or_else(|e| panic!("{}: {e}", b.display()));
             for ch in &book.chapters {
                 same_paths(&ch.html, &[]);
                 chapters += 1;

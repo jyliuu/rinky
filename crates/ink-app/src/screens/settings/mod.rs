@@ -1,4 +1,4 @@
-//! Settings screen (owner: the wave B `settings` agent).
+//! Settings screen.
 //!
 //! One screen with pages. The main page is ONE vertically scrolling list ([`rows`]: a
 //! swipe jumps half a page, a long swipe a whole page, one GL16 repaint) with sections:
@@ -145,6 +145,43 @@ pub fn current_settings<'a>(cx: &'a AppCtx) -> &'a Settings {
     cx.settings_update.as_ref().unwrap_or(cx.settings)
 }
 
+/// The name of an export format in the settings list.
+fn export_format_name(f: ExportFormat) -> &'static str {
+    match f {
+        ExportFormat::Markdown => "Markdown",
+        ExportFormat::Clippings => "Kindle clippings",
+        ExportFormat::Json => "JSON",
+    }
+}
+
+/// Where "Export all highlights" writes in format `f`.
+fn export_subtitle(f: ExportFormat) -> &'static str {
+    match f {
+        ExportFormat::Markdown => "One Markdown file per book, in rinky/exports",
+        ExportFormat::Clippings => "All books in rinky/exports/My Clippings.txt",
+        ExportFormat::Json => "One JSON file per book, in rinky/exports",
+    }
+}
+
+/// Rows of the KOReader import page (import, library, highlight export and its format).
+pub(crate) fn koreader_rows(format: ExportFormat) -> Vec<Row> {
+    let mut rows = vec![
+        Row::header("From KOReader"),
+        Row::item("Import from KOReader", "ko-import").icon(Icon::Download).subtitle("Positions, highlights, notes, status, statistics"),
+        Row::note("KOReader's files are only read, never changed."),
+        Row::header("Library"),
+        Row::item("Rescan the library", "lib-rescan").icon(Icon::Sync).subtitle("Read the book folders again"),
+        Row::item("Browse files", "lib-files").icon(Icon::Folder).subtitle("Open a book from any folder"),
+        Row::note("These run on the library screen; it opens when you tap."),
+        Row::header("Highlights"),
+        Row::item("Export all highlights", "export-all").icon(Icon::Download).subtitle(export_subtitle(format)),
+        Row::header("Export format"),
+    ];
+    rows.extend(ExportFormat::ALL.iter().map(|f| Row::choice(export_format_name(*f), *f == format, format!("exportfmt:{}", f.name()))));
+    rows.push(Row::note("Export highlights in the reader menu and the book menu use it too."));
+    rows
+}
+
 /// A module page that is not wired yet.
 struct ComingSoon;
 
@@ -202,6 +239,7 @@ use crate::router::{AppCtx, AppScreen, ScreenRegistry, Transition};
 use crate::plugin_host::{self, hooks, PluginEntry};
 use crate::update;
 use ink_device::{Device, Key, NetEvent, NetStatus, PowerEvent, Rect, RefreshClass, Rotation, Size, WifiNetwork};
+use ink_store::export::ExportFormat;
 use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::{Paths, Settings};
 use ink_ui::bars::APP_BAR_H;
@@ -247,7 +285,7 @@ pub fn register(reg: &mut ScreenRegistry) {
         }
         Ok(Box::new(screen))
     });
-    reg.register("quicklight", |_| Ok(Box::new(quick_light::QuickLightScreen::default())));
+    reg.register("quicklight", |_| Ok(Box::new(quick_light::ControlCenterScreen::default())));
 }
 
 pub use page::{app_bar_rect, content_rect, STATUS_H};
@@ -1140,7 +1178,7 @@ impl SettingsScreen {
             Page::Layout => self.build_layout(cx, content),
             Page::Nav => self.build_nav(cx, content),
             Page::Folders => self.build_folders(cx, content),
-            Page::Koreader => self.build_koreader(content),
+            Page::Koreader => self.build_koreader(cx, content),
             Page::Language => self.build_language(cx, content),
             Page::Module(_) => self.build_module(cx, content),
             Page::Refresh => self.build_refresh(cx, content),
@@ -1218,7 +1256,7 @@ impl SettingsScreen {
 
     /// The Light page: a slider row for the brightness and one for the warmth.
     fn build_light(&mut self, cx: &mut AppCtx, content: Rect) {
-        self.add_rows(light_rows(&QuickLight::from_services(&cx.services)), content);
+        self.add_rows(light_rows(&QuickLight::read(&*cx.services.light)), content);
     }
 
     fn build_sleep(&mut self, cx: &mut AppCtx, content: Rect) {
@@ -1357,22 +1395,8 @@ impl SettingsScreen {
         self.add_rows(rows, content);
     }
 
-    fn build_koreader(&mut self, content: Rect) {
-        let rows = vec![
-            Row::header("From KOReader"),
-            Row::item("Import from KOReader", "ko-import")
-                .icon(Icon::Download)
-                .subtitle("Positions, highlights, notes, status, statistics"),
-            Row::note("KOReader's files are only read, never changed."),
-            Row::header("Library"),
-            Row::item("Rescan the library", "lib-rescan").icon(Icon::Sync).subtitle("Read the book folders again"),
-            Row::item("Browse files", "lib-files").icon(Icon::Folder).subtitle("Open a book from any folder"),
-            Row::note("These run on the library screen; it opens when you tap."),
-            Row::header("Highlights"),
-            Row::item("Export all highlights", "export-all")
-                .icon(Icon::Download)
-                .subtitle("One Markdown file per book, in rinky/exports"),
-        ];
+    fn build_koreader(&mut self, cx: &mut AppCtx, content: Rect) {
+        let rows = koreader_rows(current_settings(cx).export_format());
         self.add_rows(rows, content);
     }
 
@@ -1928,18 +1952,11 @@ impl SettingsScreen {
                 self.set_status(if on { "Justified text" } else { "Ragged right text" });
             }
             "nav" => {
-                let Some((name, op)) = order::split(arg) else { return Ok(Transition::None) };
-                let mut items = crate::plugin_entries::nav_chosen(current_settings(cx), cx.plugins);
+                let items = crate::plugin_entries::nav_chosen(current_settings(cx), cx.plugins);
                 let extra = crate::plugin_entries::nav_choices(cx.plugins);
                 let list = crate::plugin_entries::merged(ink_store::prefs::NAV_ITEMS, &extra);
-                match order::apply(&mut items, &list, name, op, NAV_MIN, NAV_MAX) {
-                    Ok(text) => {
-                        log::info!("settings: navigation bar {items:?}");
-                        edit_settings(cx, |s| s.ui.nav_items = items);
-                        self.status_text = text;
-                    }
-                    Err(text) => self.status_text = text,
-                }
+                let Some(reply) = order::page_action(a, "nav", &list, items, (NAV_MIN, NAV_MAX), cx, |s, v| s.ui.nav_items = v) else { return Ok(Transition::None) };
+                self.status_text = reply.status.unwrap_or_default();
                 // The switch flipped in the list even when refused: build it again.
                 self.rebuild = Some(RefreshClass::Gl16);
             }
@@ -1963,8 +1980,9 @@ impl SettingsScreen {
                 self.set_status(format!("{} {}", dir.display(), if on == "on" { "added" } else { "removed" }));
             }
             "export-all" => {
+                let format = current_settings(cx).export_format();
                 let text = match crate::export::load_index(cx.paths) {
-                    Ok(index) => crate::export::export_everything(cx.paths, &index),
+                    Ok(index) => crate::export::export_everything(cx.paths, &index, format),
                     Err(e) => {
                         log::warn!("settings: export all: {e}");
                         format!("Export failed: {e}")
@@ -1981,6 +1999,11 @@ impl SettingsScreen {
                 crate::screens::library::request(req);
                 log::info!("settings: library request {req:?}; back to the screen below");
                 return Ok(Transition::Pop);
+            }
+            "exportfmt" => {
+                let Some(f) = ExportFormat::from_name(arg) else { return Ok(Transition::None) };
+                edit_settings(cx, |s| s.export_format = f.name().to_string());
+                self.rebuild_with(format!("Export format: {}", export_format_name(f)));
             }
             "lang" => {
                 if !LANGUAGES.iter().any(|(c, _)| *c == arg) {

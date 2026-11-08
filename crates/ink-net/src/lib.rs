@@ -16,10 +16,21 @@
 //!
 //! This crate depends on no other ink crate: the app wires ink-device's Wi-Fi and power
 //! services into [`Connectivity`] and [`KeepAwake`].
-//!
-//! Owner from wave A: the `net` agent.
 
 #![warn(missing_docs)]
+
+/// `impl Debug` that shows only the listed fields, for types that hold a body or a trait
+/// object: `debug_fields!([generics] Type, "Name", |s| "field": expr, ...)`.
+macro_rules! debug_fields {
+    ([$($g:tt)*] $t:ty, $name:literal, |$s:ident| $($f:literal: $e:expr),+) => {
+        impl<$($g)*> std::fmt::Debug for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let $s = self;
+                f.debug_struct($name)$(.field($f, &$e))+.finish_non_exhaustive()
+            }
+        }
+    };
+}
 
 pub mod connectivity;
 pub mod download;

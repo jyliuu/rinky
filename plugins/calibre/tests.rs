@@ -16,6 +16,7 @@ use std::time::Instant;
 
 #[test]
 fn frame_encode_decode() {
+    assert_eq!((op::name(op::OK), op::name(op::GET_BOOK_COUNT), op::name(op::ERROR), op::name(10)), ("OK", "GET_BOOK_COUNT", "ERROR", "?"));
     let f = encode(op::OK, &json!({"a": 1}));
     assert_eq!(f, b"11[0,{\"a\":1}]");
     assert_eq!(decode(&f), Ok(Some((Frame { op: 0, arg: json!({"a": 1}) }, f.len()))));
@@ -418,7 +419,7 @@ fn plugin_connects_receives_and_rescans() {
     store.settings.insert("books_dir".into(), json!(root.join("Books").to_str().unwrap()));
     let perms = [Permission::Ui, Permission::Storage, Permission::Network];
     let mut ui = UiQueue::default();
-    let mut p = CalibrePlugin::new();
+    let mut p = CalibrePlugin::default();
     assert_eq!(p.tick_interval(), None, "no ticks while idle");
     p.on_action(&mut HostCtx::new(&mut ui, &mut store, &perms), "connect").unwrap();
     assert!(p.tick_interval().is_some());
@@ -456,7 +457,7 @@ fn plugin_reports_refused_connection() {
     store.settings.insert("server".into(), json!(format!("127.0.0.1:{port}")));
     let perms = [Permission::Ui, Permission::Storage, Permission::Network];
     let mut ui = UiQueue::default();
-    let mut p = CalibrePlugin::new();
+    let mut p = CalibrePlugin::default();
     p.connect(&mut HostCtx::new(&mut ui, &mut store, &perms)).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while p.connected() && Instant::now() < deadline {
@@ -465,7 +466,7 @@ fn plugin_reports_refused_connection() {
     }
     assert!(matches!(p.status(), Status::Ended(m) if m.contains("connection refused")), "{:?}", p.status());
     // Without the network permission nothing starts.
-    let mut q = CalibrePlugin::new();
+    let mut q = CalibrePlugin::default();
     assert!(q.connect(&mut HostCtx::new(&mut ui, &mut store, &[Permission::Ui, Permission::Storage])).is_err());
 }
 
@@ -477,7 +478,7 @@ fn tile_entry_and_the_open_settings_row() {
     store.settings.insert("server".into(), json!(format!("127.0.0.1:{port}")));
     let perms = [Permission::Ui, Permission::Storage, Permission::Network];
     let mut ui = UiQueue::default();
-    let mut p = CalibrePlugin::new();
+    let mut p = CalibrePlugin::default();
 
     // Registered: the "Calibre" tile (needs Wi-Fi) and the library action.
     let mut reg = ink_plugin::Registry::default();
@@ -531,7 +532,7 @@ fn tile_entry_and_the_open_settings_row() {
     assert!(!ui.0.iter().any(|r| matches!(r, UiRequest::MenuLabel { .. })));
 
     // A tap while connected disconnects.
-    let mut q = CalibrePlugin::new();
+    let mut q = CalibrePlugin::default();
     q.on_action(&mut HostCtx::new(&mut ui, &mut store, &perms), "toggle").unwrap();
     q.on_action(&mut HostCtx::new(&mut ui, &mut store, &perms), "toggle").unwrap();
     assert_eq!(q.status(), &Status::Disconnecting);

@@ -121,6 +121,25 @@ and on Kobos that have them turn pages too.
 
 rinky saves your position after every page turn, and the book opens there next time.
 
+### The end of a book
+
+Turn the page once more on the last page and a card comes up over it with the book's
+title. On the card you can:
+
+- tap **Mark as finished**. The button turns black and says *Finished*; tap it again
+  if you change your mind. It is the same status as *Mark as finished* in the library.
+- give the book one to five stars under **Your rating**. Tap another star to change it.
+  The rating is kept with the book in rinky's own file; a rating you gave in KOReader
+  shows here after a KOReader import. rinky does not write it back to KOReader.
+- tap the book under **Open next** to start reading it. rinky suggests the next book of
+  the same series from your library, or else the unfinished book you opened last. When
+  there is nothing to suggest, this part is left out.
+- tap **Back to library**, or **Back to book** to return to the last page. Back, the
+  previous-page key and a tap beside the card return to the last page too.
+
+The screen flashes once when the card appears, as it covers most of the page. Taps on
+the card change only what they touch.
+
 ### The reader menu
 
 A tap in the middle of the page opens the menu. The top bar has, from the left:
@@ -162,6 +181,9 @@ Tap **Aa** in the menu, or swipe up from the bottom edge, to open *Reading setti
   first-line indent.
 - **Page:** page turn wave, status bars, how often the page flashes to clear ghosting,
   and night mode.
+- **View** (PDF and comics only, in place of Text and Layout): fit, columns,
+  contrast, two pages side by side, crop margins and right to left. See *PDF and
+  comics* below.
 
 Text and Layout changes apply to the open book only. **Use for all books** makes them
 the default for every book, which you can also set under *Settings > Default layout*.
@@ -194,6 +216,23 @@ place of Highlight.
 
 PDF and CBZ pages are shown whole. Pinch out to zoom in and pinch in to zoom out; the
 zoom lasts until you close the book. Fonts and margins do not apply.
+
+For these books *Reading settings* (Aa) has a **View** tab in place of Text and
+Layout. What you choose there is kept for that book only:
+
+- **Fit:** *Whole page*, or *Page width* to fill the screen from side to side and read
+  each page in parts from top to bottom.
+- **Columns:** *Two* for papers printed in two columns. You read down the left column,
+  then the right one, each as large as the screen allows.
+- **Contrast:** *More*, *High* or *Highest* make faint scans and grey text darker.
+- **Two pages side by side:** *Auto* shows two pages at once for comics when the
+  Kindle is turned sideways; *On* always does, *Off* never does. Two pages only show
+  with the whole page fit, one column and no zoom.
+- **Crop margins:** cuts the white border off each page, so the text is larger.
+- **Right to left:** for manga. Page turns go the other way: the left two thirds of
+  the screen and a swipe to the right go to the next page, the right third and a swipe
+  to the left go back, and in two-page view the right page comes first. Page keys keep
+  their meaning.
 
 ## 5. Light, sleep and settings
 
@@ -418,16 +457,29 @@ root; use it only on a network you trust, and turn it off again.
 
 ## 7. Export your highlights
 
-rinky writes a book's highlights, notes and bookmarks to a Markdown file,
-`/mnt/us/rinky/exports/<title>.md`: title and author, then each entry in book order
-with its chapter, the quoted text, your note, the page and the date. Copy it off over
-USB or SSH.
+rinky writes a book's highlights, notes and bookmarks to a file in
+`/mnt/us/rinky/exports/`. Copy it off over USB or SSH. You choose the kind of file under
+*Settings > KOReader import > Export format*:
+
+- **Markdown** (the default): `<title>.md`, easy to read anywhere. Title and author,
+  then each entry in book order with its chapter, the quoted text, your note, the page
+  and the date.
+- **Kindle clippings**: the same layout as the `My Clippings.txt` a Kindle keeps, so
+  tools that import Kindle highlights (Readwise, Clippings.io and others) take it as
+  it is. One book goes to `<title>.txt`; exporting every book at once writes them all
+  to one `My Clippings.txt`. A note follows its highlight as a separate clipping, as
+  on a Kindle.
+- **JSON**: `<title>.json`, with every detail (text, note, chapter, page, dates,
+  highlight style and position), for your own scripts.
+
+Where to export from:
 
 - While reading: *Contents*, the *Highlights* tab, *Export*.
 - In the library: hold a book, *Export highlights*.
 - Every book at once: *Settings > KOReader import > Export all highlights*.
 - Over SSH: `/mnt/us/rinky/rinky export-highlights BOOK` (a path or part of a title),
-  or `--all`.
+  or `--all`. Add `--format clippings` or `--format json` for the other kinds of file;
+  without it you get Markdown.
 
 Exporting again replaces the file. Page numbers are filled in when you export from the
 reader; from the library only PDFs get them.

@@ -13,6 +13,7 @@
 
 use crate::book::{Book, BookInfo, Target, TocNode};
 use crate::encoding::{decode_text, decode_text_owned};
+use crate::util::LANGUAGES;
 use crate::xml::{escape_text, push_text};
 use crate::Format;
 use ink_doc::{DirLoader, DocError, Result};
@@ -61,37 +62,26 @@ fn normalise(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Lines of normalised text without trailing whitespace (tabs and indents kept).
+/// Lines of normalised text without trailing whitespace (tabs and indents kept), so a
+/// blank line is an empty one.
 fn lines_of(t: &str) -> Vec<&str> {
     let t = t.strip_prefix('\u{feff}').unwrap_or(t);
     t.split('\n').map(|l| l.trim_end()).collect()
 }
 
 fn mode_of(lines: &[&str]) -> Mode {
-    let nonblank: Vec<&str> = lines.iter().copied().filter(|l| !l.trim().is_empty()).collect();
-    if nonblank.is_empty() {
+    let nonblank = lines.iter().filter(|l| !l.is_empty()).count();
+    if nonblank == 0 {
         return Mode::Line;
     }
-    // Runs of blank lines between text lines.
-    let mut separators = 0;
-    let mut seen_text = false;
-    let mut in_blank = false;
-    for l in lines {
-        if l.trim().is_empty() {
-            in_blank = true;
-        } else {
-            if seen_text && in_blank {
-                separators += 1;
-            }
-            seen_text = true;
-            in_blank = false;
-        }
-    }
-    if separators * 10 >= nonblank.len() {
+    // Runs of blank lines between text lines: the steps from a blank line to text, less
+    // the one after blank lines at the start.
+    let steps = lines.windows(2).filter(|w| w[0].is_empty() && !w[1].is_empty()).count();
+    if (steps - usize::from(lines[0].is_empty())) * 10 >= nonblank {
         return Mode::Blank;
     }
-    let indented = nonblank.iter().filter(|l| l.starts_with("  ") || l.starts_with('\t') || l.starts_with('\u{3000}')).count();
-    if indented * 5 >= nonblank.len() && indented < nonblank.len() {
+    let indented = lines.iter().filter(|l| l.starts_with("  ") || l.starts_with('\t') || l.starts_with('\u{3000}')).count();
+    if indented * 5 >= nonblank && indented < nonblank {
         Mode::Indent
     } else {
         Mode::Line
@@ -108,7 +98,7 @@ fn groups<'t>(lines: &[&'t str], mode: Mode) -> Vec<Vec<&'t str>> {
         }
     };
     for &l in lines {
-        let blank = l.trim().is_empty();
+        let blank = l.is_empty();
         match mode {
             Mode::Blank => {
                 if blank {
@@ -221,7 +211,7 @@ fn join_lines(lines: &[&str]) -> String {
         if i > 0 {
             out.push(' ');
         }
-        out.push_str(l.trim());
+        out.push_str(l.trim_start());
     }
     out
 }
@@ -244,7 +234,7 @@ fn blocks_of(groups: &[Vec<&str>], mode: Mode, allow_caps: bool) -> Vec<Block> {
         };
         match heading {
             Some(level) => out.push(Block::Heading { level, title: join_lines(g) }),
-            None if mode == Mode::Line => out.push(Block::Para(g[0].trim().to_string())),
+            None if mode == Mode::Line => out.push(Block::Para(g[0].trim_start().to_string())),
             None => out.push(Block::Para(join_lines(g))),
         }
     }
@@ -280,17 +270,6 @@ fn demote_contents_lists(blocks: &mut [Block]) {
             }
         }
     }
-}
-
-/// Text converted to chapters and a TOC.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TxtConversion {
-    /// XHTML chapters (`text-NNN.xhtml`).
-    pub chapters: Vec<HtmlChapter>,
-    /// Nested TOC: parts with their chapters.
-    pub toc: Vec<TocNode>,
-    /// Encoding used.
-    pub encoding: &'static str,
 }
 
 fn xhtml(title: &str, body: &str) -> String {
@@ -377,13 +356,6 @@ pub fn convert_text(text: &str, title: &str) -> (Vec<HtmlChapter>, Vec<TocNode>)
     (out, toc)
 }
 
-/// Converts text bytes: detects the encoding, then [`convert_text`].
-pub fn convert(bytes: &[u8], title: &str) -> TxtConversion {
-    let d = decode_text(bytes);
-    let (chapters, toc) = convert_text(&d.text, title);
-    TxtConversion { chapters, toc, encoding: d.encoding }
-}
-
 /// Metadata from a Project Gutenberg style header in the first lines.
 fn header_metadata(text: &str, info: &mut BookInfo) {
     for line in text.lines().take(120) {
@@ -398,33 +370,12 @@ fn header_metadata(text: &str, info: &mut BookInfo) {
                 info.metadata.authors = v.split(" and ").map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
             }
         } else if let Some(v) = field("Language:") {
-            info.metadata.language.get_or_insert(language_code(&v));
+            let name = v.to_lowercase();
+            info.metadata.language.get_or_insert(LANGUAGES.iter().find(|l| l.0 == name).map_or(name.clone(), |l| l.2.to_string()));
         } else if l.starts_with("*** START OF") {
             break;
         }
     }
-}
-
-fn language_code(name: &str) -> String {
-    match name.to_lowercase().as_str() {
-        "english" => "en",
-        "german" => "de",
-        "french" => "fr",
-        "spanish" => "es",
-        "italian" => "it",
-        "danish" => "da",
-        "dutch" => "nl",
-        "russian" => "ru",
-        "portuguese" => "pt",
-        "swedish" => "sv",
-        "norwegian" => "no",
-        "finnish" => "fi",
-        "polish" => "pl",
-        "chinese" => "zh",
-        "japanese" => "ja",
-        other => return other.to_string(),
-    }
-    .to_string()
 }
 
 fn info_of(path: &Path, text: &str, encoding: &str) -> BookInfo {
@@ -595,9 +546,9 @@ mod tests {
     fn encodings_and_header() {
         let src = "Глава 1\n\nМой дядя самых честных правил, когда не в шутку занемог.\n\nГлава 2\n\nОн уважать себя заставил и лучше выдумать не мог.\n".repeat(20);
         let (cp, _, _) = encoding_rs::WINDOWS_1251.encode(&src);
-        let c = convert(&cp, "t");
-        assert_eq!(c.encoding, "windows-1251");
-        assert!(c.chapters.iter().any(|ch| ch.html.contains("Мой дядя")));
+        let d = decode_text(&cp);
+        assert_eq!(d.encoding, "windows-1251");
+        assert!(convert_text(&d.text, "t").0.iter().any(|ch| ch.html.contains("Мой дядя")));
         let mut info = BookInfo::new(Format::Txt);
         header_metadata("Title: Alice\nAuthor: Lewis Carroll\nLanguage: English\n*** START OF", &mut info);
         assert_eq!(info.metadata.title, "Alice");

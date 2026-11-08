@@ -1,4 +1,4 @@
-//! Library and home screen (owner: the `library` agent, wave B).
+//! Library and home screen.
 //!
 //! - The book folders from the settings (`/mnt/us/Books`, `/mnt/us/documents`) are
 //!   scanned into ink-store's `library.json`; metadata comes from `ink_formats::read_info`
@@ -22,7 +22,10 @@
 //!   finished/unread, collections, delete with confirmation). A book that cannot be
 //!   opened shows the reader's error screen; a tap there pops back here.
 //! - The power key and `UiEvent::Quit` leave the app. There is no exit button here: the
-//!   only exit in the UI is Settings > "Exit to Kindle". The device's "library rescan" event (after USB drive mode) rescans.
+//!   only exit in the UI is Settings > "Exit to Kindle".
+//! - A `PowerEvent::LibraryRescan` from the device backend (sent when the userstore
+//!   comes back from the computer) starts a rescan. rinky has no screen of its own for
+//!   USB drive mode.
 
 mod book_menu;
 mod browse;
@@ -69,6 +72,22 @@ pub fn request(r: Request) {
 
 fn take_request() -> Option<Request> {
     REQUEST.lock().ok().and_then(|mut q| q.take())
+}
+
+thread_local! {
+    /// Books the reader opened by itself ("Open next" on the end card), with the time.
+    /// Screens run on the app loop's thread (tests: each on its own).
+    static OPENED: std::cell::RefCell<Vec<(PathBuf, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tells the library that the reader opened `path` now: when the library is shown next,
+/// the book counts as opened then, and its progress is read from its sidecar.
+pub fn note_opened(path: &std::path::Path) {
+    OPENED.with(|v| v.borrow_mut().push((path.to_path_buf(), model::now())));
+}
+
+fn take_opened() -> Vec<(PathBuf, u64)> {
+    OPENED.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
 /// Registers the library for [`Route::Library`]. The factory does no IO.
@@ -293,6 +312,8 @@ pub struct LibraryScreen {
     run_action: Option<(ink_plugin::registry::LibraryAction, PathBuf)>,
     /// A toast to show in `handle` (needs `cx`): the result of "Export highlights".
     toast: Option<String>,
+    /// File format of "Export highlights" (from the settings, read on enter).
+    export_format: ink_store::export::ExportFormat,
     /// Rescan or KOReader import on a worker thread; it owns the library meanwhile
     /// (`lib` is `None`) and the screen shows only a progress line.
     pub(crate) job: Option<Job<LibJob>>,
@@ -369,6 +390,7 @@ impl LibraryScreen {
             plugin_actions: Vec::new(),
             run_action: None,
             toast: None,
+            export_format: ink_store::export::ExportFormat::default(),
             job: None,
             busy_text: String::new(),
             busy_dirty: false,
@@ -1061,7 +1083,10 @@ impl AppScreen for LibraryScreen {
                 if let Some(p) = &self.prefs {
                     self.mode = if model::load_prefs(p, &mut self.query) { ViewMode::Grid } else { ViewMode::List };
                 }
-                let mut lib = Library::open(cx.paths, &self.dirs);
+                // The saved books are shown first; the folders are read on a thread
+                // and the changes come in with the timer (it took 0.8 s for 3000 books
+                // on the Kindle emulator before the first frame).
+                let mut lib = Library::open_saved(cx.paths, &self.dirs);
                 // The "Book cover" screensaver shows the last book read until one is opened.
                 if let Some(b) = lib.index.recent(1).first() {
                     crate::sleep_cover::prepare(cx.paths, &b.path, cx.screen.panel_size());
@@ -1077,6 +1102,15 @@ impl AppScreen for LibraryScreen {
                     lib.refresh_state(&p);
                     lib.save();
                 }
+                // Books the reader went on to ("Open next"): opened then, read since.
+                let more = take_opened();
+                for (p, t) in &more {
+                    lib.record_open_at(p, *t);
+                    lib.refresh_state(p);
+                }
+                if !more.is_empty() {
+                    lib.save();
+                }
                 if self.dirs != cx.settings.library_dirs {
                     log::info!("library: folders changed to {:?}; rescan", cx.settings.library_dirs);
                     self.dirs = cx.settings.library_dirs.clone();
@@ -1086,6 +1120,7 @@ impl AppScreen for LibraryScreen {
             }
         }
         self.plugin_actions = cx.plugins.library_actions().to_vec();
+        self.export_format = cx.settings.export_format();
         // Nothing of the previous screen may stay on the panel.
         self.dirty = Some(RefreshClass::Gc16);
         // A plugin added books (OPDS download).
@@ -1173,7 +1208,7 @@ impl AppScreen for LibraryScreen {
             return Some(worker::POLL);
         }
         let search = self.search_due.map(|t| t.saturating_duration_since(Instant::now()));
-        let extract = self.lib.as_ref().filter(|l| l.pending() > 0).map(|_| META_POLL);
+        let extract = self.lib.as_ref().filter(|l| l.pending() > 0 || l.scanning()).map(|_| META_POLL);
         match (search, extract) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -1196,6 +1231,11 @@ impl LibraryScreen {
                     if self.dirty.is_none() {
                         self.dirty = Some(RefreshClass::Du);
                     }
+                }
+                // The folders read on a thread since the library opened.
+                if self.lib.as_mut().is_some_and(Library::take_scan) {
+                    log::info!("library: the folder scan added or removed books; repainted");
+                    self.redraw();
                 }
                 if let Some(lib) = self.lib.as_mut() {
                     // Books queued by a rescan while the thread ran start the next one.

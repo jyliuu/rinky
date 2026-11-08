@@ -15,14 +15,16 @@ use crate::Format;
 use ink_doc::{percent_decode, resolve_href, DocError, MemoryLoader, Result};
 use ink_html::HtmlChapter;
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::Path;
+use zip::ZipArchive;
 
 const REL_BOOK: &str = "http://www.fictionbook.org/FictionBook3/relationships/Book";
 const REL_BODY: &str = "http://www.fictionbook.org/FictionBook3/relationships/body";
 const REL_THUMB: &str = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail";
 
 struct Package {
-    zip: zip::ZipArchive<std::fs::File>,
+    zip: ZipArchive<File>,
     /// Normalised part name ([`part_key`]) -> zip entry name.
     names: HashMap<String, String>,
 }
@@ -34,8 +36,11 @@ fn part_key(name: &str) -> String {
 }
 
 impl Package {
-    fn open(path: &Path) -> Result<Self> {
-        let zip = zip::ZipArchive::new(std::fs::File::open(path)?).map_err(|e| DocError::Format(format!("FB3: not a zip: {e}")))?;
+    fn open(path: &Path, zip: Option<ZipArchive<File>>) -> Result<Self> {
+        let zip = match zip {
+            Some(zip) => zip,
+            None => ZipArchive::new(File::open(path)?).map_err(|e| DocError::Format(format!("FB3: not a zip: {e}")))?,
+        };
         let names = zip.file_names().filter_map(|n| n.ok()).map(|n| (part_key(&n), n.into_owned())).collect();
         Ok(Package { zip, names })
     }
@@ -338,9 +343,9 @@ fn read_parts(pkg: &mut Package) -> Result<Parts> {
     Ok(Parts { info, body_path, thumb })
 }
 
-/// Metadata and cover of an FB3 file.
-pub fn read_info(path: &Path) -> Result<BookInfo> {
-    let mut pkg = Package::open(path)?;
+/// Metadata and cover of an FB3 file (`zip`: its archive, when already open).
+pub fn read_info(path: &Path, zip: Option<ZipArchive<File>>) -> Result<BookInfo> {
+    let mut pkg = Package::open(path, zip)?;
     let mut p = read_parts(&mut pkg)?;
     if p.info.metadata.title.is_empty() {
         p.info.metadata.title = crate::title_from(path);
@@ -356,9 +361,9 @@ pub fn read_info(path: &Path) -> Result<BookInfo> {
     Ok(p.info)
 }
 
-/// Converts an FB3 file.
-pub fn load(path: &Path) -> Result<Book> {
-    let mut pkg = Package::open(path)?;
+/// Converts an FB3 file (`zip`: its archive, when already open).
+pub fn load(path: &Path, zip: Option<ZipArchive<File>>) -> Result<Book> {
+    let mut pkg = Package::open(path, zip)?;
     let mut p = read_parts(&mut pkg)?;
     if p.info.metadata.title.is_empty() {
         p.info.metadata.title = crate::title_from(path);
@@ -425,7 +430,7 @@ pub fn load(path: &Path) -> Result<Book> {
         };
         chapters.push(HtmlChapter { path: files.path(i), html: chapter_html(&title, &c.out) });
     }
-    let mut toc = files.section_toc(&body, section_title);
+    let mut toc = files.section_toc(&body, &section_title);
     for (i, (kind, els)) in units.iter().enumerate() {
         if *kind == "notes" {
             if let Some(t) = els[0].child("title").map(|t| t.text_collapsed()).filter(|t| !t.is_empty()) {
@@ -446,13 +451,13 @@ mod tests {
 
     #[test]
     fn sample_fb3() {
-        let info = read_info(&fixture()).unwrap();
+        let info = read_info(&fixture(), None).unwrap();
         assert_eq!(info.metadata.title, "FB3 Sample Book");
         assert_eq!(info.metadata.authors, vec!["Inkreader Fixtures"]);
         assert_eq!(info.metadata.series, Some(("Inkreader Tests".into(), 4.0)));
         assert_eq!(info.metadata.language.as_deref(), Some("en"));
         assert_eq!(info.cover.as_ref().map(|c| c.media_type.as_str()), Some("image/png"));
-        let book = load(&fixture()).unwrap();
+        let book = load(&fixture(), None).unwrap();
         assert_eq!(book.chapters.len(), 4);
         for c in &book.chapters {
             assert!(xml::is_well_formed(&c.html), "{}", c.html);
@@ -493,11 +498,11 @@ mod tests {
             z.write_all(data).unwrap();
         }
         z.finish().unwrap();
-        let info = read_info(&f).unwrap();
+        let info = read_info(&f, None).unwrap();
         assert_eq!(info.metadata.title, "Книга");
         assert_eq!(info.metadata.language.as_deref(), Some("ru"));
         assert_eq!(info.cover.map(|c| c.media_type), Some("image/png".to_string()));
-        let book = load(&f).unwrap();
+        let book = load(&f, None).unwrap();
         assert!(book.chapters.iter().any(|c| c.html.contains("Текст")));
         assert_eq!(book.toc[0].title, "Глава");
         std::fs::remove_dir_all(dir).unwrap();

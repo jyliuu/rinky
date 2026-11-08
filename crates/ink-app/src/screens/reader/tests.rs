@@ -79,6 +79,20 @@ impl Harness {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(book);
         let path = dir.join(Path::new(book).file_name().unwrap());
         std::fs::copy(&src, &path).unwrap();
+        Self::at(test, dir, path, wait)
+    }
+
+    /// Opens a book written from `bytes` as `name` (a generated PDF or CBZ:
+    /// `ink_mupdf::testgen`).
+    pub fn generated(test: &str, name: &str, bytes: &[u8]) -> Self {
+        let dir = tmp(test);
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        Self::at(test, dir, path, true)
+    }
+
+    /// Opens `path` (inside the test's directory `dir`, removed on drop).
+    fn at(test: &str, dir: PathBuf, path: PathBuf, wait: bool) -> Self {
         let (dev, probe) = headless::open(HeadlessOptions::default());
         let size = dev.screen.size();
         let space = ScreenSpace { panel: dev.screen.panel_size(), rotation: dev.screen.rotation() };
@@ -473,6 +487,47 @@ fn aa_preview_shows_the_text_weight() {
         h.shot(&format!("0{}-{name}", i + 1));
     }
     assert!(ink[1] as f64 > ink[0] as f64 * 1.1 && ink[2] as f64 > ink[1] as f64 * 1.1, "preview ink normal, darker, darkest: {ink:?}");
+}
+
+/// A change on one control of the Aa sheet that other controls show (a preset sets the
+/// size, spacing, margins, justify and hyphenation; a size step can select or clear a
+/// preset; a font changes the preview) is shown in the same frame: no pixel stays
+/// drawn outside every update rect, also through key presses and the relayout.
+#[test]
+fn aa_controls_show_every_value_they_change() {
+    let mut h = Harness::new("aa-damage", "juliet.epub");
+    h.tap_at(636, 848);
+    h.tap_button("aa");
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Aa));
+    let o = h.reader.overlay().unwrap();
+    let presets = o.tree.bounds(o.ids["preset"]).unwrap();
+    let weight = o.tree.bounds(o.ids["weight"]).unwrap();
+    let justify = ink_ui::Toggle::switch_rect(o.tree.bounds(o.ids["justify"]).unwrap());
+    let n = aa::PRESETS.len() as i32;
+    let chip = |i: i32| (presets.x + presets.w as i32 * (2 * i + 1) / (2 * n), presets.y + presets.h as i32 / 2);
+    for i in [3, 0, 2, 1] {
+        let (x, y) = chip(i);
+        h.tap_at(x, y);
+        assert_eq!(h.reader.actions().last().map(String::as_str), Some(format!("aa-preset:{i}").as_str()));
+        assert_eq!(h.probe.uncovered(), vec![], "preset {i}");
+        h.key(Key::PageNext);
+        h.key(Key::PagePrev);
+        assert_eq!(h.probe.uncovered(), vec![], "keys after preset {i}");
+    }
+    // Standard is selected; a size step clears it and a step back selects it again.
+    for r in [slider_plus(&h, "size"), aa::slider_parts(h.reader.overlay().unwrap(), "size").unwrap().0] {
+        let n = h.probe.updates().len();
+        h.tap(r);
+        assert_eq!(h.probe.uncovered(), vec![], "{:?}", h.reader.actions().last());
+        let ups = &h.probe.updates()[n..];
+        assert!(ups.iter().any(|u| u.rect.intersect(&presets) == presets), "the preset row is shown again: {ups:?}");
+    }
+    h.tap(justify);
+    h.tap_at(weight.x + weight.w as i32 / 2, weight.y + weight.h as i32 / 2);
+    assert_eq!(h.probe.uncovered(), vec![], "{:?}", h.reader.actions());
+    settle_aa(&mut h);
+    h.key(Key::PageNext);
+    assert_eq!(h.probe.uncovered(), vec![], "after the relayout");
 }
 
 #[test]
@@ -1657,6 +1712,28 @@ fn a_page_turn_is_one_update_with_the_bars() {
     }
 }
 
+/// The minute tick reads the device values once and shows the bar rows.
+#[test]
+fn the_minute_tick_reads_the_device_once() {
+    struct Counted(std::rc::Rc<std::cell::Cell<u32>>);
+    impl ink_device::Battery for Counted {
+        fn state(&self) -> ink_device::Result<ink_device::BatteryState> {
+            self.0.set(self.0.get() + 1);
+            Ok(ink_device::BatteryState { percent: 57, charging: false })
+        }
+    }
+    let mut h = Harness::new("tick-reads", "juliet.epub");
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    h.dev.battery = Box::new(Counted(reads.clone()));
+    h.reader.bars.next_tick = Some(std::time::Instant::now());
+    let n = h.probe.updates().len();
+    let damage = h.with_cx(|r, cx| r.bars_tick(cx)).unwrap();
+    assert!(!damage.is_empty(), "the bar rows are redrawn");
+    assert_eq!(reads.get(), 1, "battery reads in one tick");
+    assert_eq!(h.reader.bars.device.as_ref().unwrap().battery, Some((57, false)));
+    assert_eq!(h.probe.updates().len(), n);
+}
+
 /// A page turn's one update carries the hardware page-turn wave (next page sweeps left,
 /// previous right); with `reader.page_animation = "off"` and for jumps it has none.
 #[test]
@@ -1704,6 +1781,25 @@ fn a_wifi_status_change_redraws_only_the_bars() {
     assert_eq!(h.probe.updates().len(), n, "a signal change draws nothing");
 }
 
+/// A book is opened with the read-ahead off (its first page does not wait for the
+/// pages after it) and the reader turns it on once that page is on the panel.
+#[test]
+fn read_ahead_is_turned_on_after_the_first_page() {
+    let mut h = Harness::open("read-ahead", "juliet.epub", true);
+    // What on_enter leaves after opening a book, with a probe document.
+    let probe = selection::tests::three_pages();
+    let ahead = probe.read_ahead.clone();
+    h.reader.doc = Some(Box::new(probe));
+    h.reader.plugins_pending = true;
+    h.reader.rerender = true;
+    h.reader.dirty = Some(RefreshClass::Gc16);
+    assert_eq!(ahead.get(), None);
+    h.paint();
+    assert_eq!(ahead.get(), Some(true), "turned on after the first page");
+    h.paint();
+    assert_eq!(ahead.get(), Some(true));
+}
+
 /// A document that cannot map a saved range to rectangles (fixed layouts): the
 /// highlights made this session are drawn from the rectangles kept for their page and
 /// layout, found under a tap, and forgotten when removed.
@@ -1737,4 +1833,309 @@ fn session_highlights_of_an_unmappable_document() {
     assert!(r.session_hl.is_empty() && r.saved_hl.is_empty());
     assert!(r.highlight_at(Point::new(150, 185)).is_none());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Shows the last page of the book as a jump and returns its page number.
+fn to_last_page(h: &mut Harness) -> usize {
+    let last = h.reader.doc.as_ref().unwrap().page_count().pages - 1;
+    h.reader.go_to_page(last);
+    h.paint();
+    assert_eq!(h.reader.page(), last);
+    last
+}
+
+#[test]
+fn turning_past_the_last_page_shows_the_end_card_with_one_flash() {
+    let mut h = Harness::new("end-card", "synthetic.epub");
+    // Not at the end: a turn is a turn.
+    h.key(Key::PageNext);
+    assert_eq!((h.reader.page(), h.kind()), (1, None));
+    let last = to_last_page(&mut h);
+    let page = h.probe.panel().clone();
+    h.shot("01-last-page");
+    let before = h.probe.updates().len();
+    h.key(Key::PageNext);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End));
+    assert_eq!(h.reader.page(), last, "the page stays");
+    h.shot("02-end-card");
+    let ups = &h.probe.updates()[before..];
+    assert_eq!(ups.len(), 1, "one update: {ups:?}");
+    assert_eq!((ups[0].class, ups[0].rect), (RefreshClass::Gc16, FULL), "{ups:?}");
+    // More turns forward change nothing.
+    let before = h.probe.updates().len();
+    h.key(Key::PageNext);
+    assert_eq!(h.probe.updates().len(), before);
+    // Back: the last page again, exactly, without a flash.
+    h.key(Key::Back);
+    assert_eq!(h.kind(), None);
+    assert_eq!(h.reader.page(), last);
+    assert_eq!(h.panel_rows_differ(&page, 0, page.height), 0);
+    let ups = &h.probe.updates()[before..];
+    assert!(!ups.is_empty() && ups.iter().all(|u| u.class != RefreshClass::Gc16), "{ups:?}");
+    // A tap beside the card and the previous-page key also go back to the page.
+    h.key(Key::PageNext);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End));
+    let card = h.reader.overlay().unwrap().tree.bounds(h.reader.overlay().unwrap().ids["card"]).unwrap();
+    h.tap_at(636, card.y / 2);
+    assert_eq!(h.kind(), None);
+    h.key(Key::PageNext);
+    h.key(Key::PagePrev);
+    assert_eq!((h.kind(), h.reader.page()), (None, last));
+    // A tap on the right of the last page opens it too.
+    h.tap_at(1100, 900);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End));
+    assert!(h.transitions.is_empty(), "{:?}", h.transitions);
+}
+
+#[test]
+fn the_end_card_marks_finished_and_rates_without_flashing() {
+    let mut h = Harness::new("end-rate", "synthetic.epub");
+    to_last_page(&mut h);
+    h.key(Key::PageNext);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End));
+    let path = h.reader.path.clone();
+    let before = h.probe.updates().len();
+    h.tap_button("end-finished");
+    assert_eq!(BookState::load(&path).unwrap().status, ink_store::ReadingStatus::Complete);
+    assert!(h.reader.end.as_ref().unwrap().finished);
+    h.tap_button("end-star:4");
+    assert_eq!(BookState::load(&path).unwrap().rating, Some(4));
+    h.shot("03-finished-rated");
+    h.tap_button("end-star:2");
+    assert_eq!(BookState::load(&path).unwrap().rating, Some(2));
+    // Each tap refreshes the button pressed and what changed; nothing flashes.
+    let ups = &h.probe.updates()[before..];
+    assert!(!ups.is_empty(), "the card changed on screen");
+    assert!(ups.iter().all(|u| u.class != RefreshClass::Gc16 && u.rect != FULL), "{ups:?}");
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::End), "the card stays open");
+    // A second tap undoes "finished"; the position saved later keeps status and rating.
+    h.tap_button("end-finished");
+    let s = BookState::load(&path).unwrap();
+    assert_eq!((s.status, s.rating), (ink_store::ReadingStatus::Reading, Some(2)));
+    h.key(Key::Back);
+    h.reader.position_unsaved = Some((Instant::now(), Instant::now()));
+    h.reader.flush_position();
+    let s = BookState::load(&path).unwrap();
+    assert_eq!((s.status, s.rating), (ink_store::ReadingStatus::Reading, Some(2)));
+    assert!(s.position.is_some());
+    // Opened again, the card shows what the sidecar holds.
+    h.key(Key::PageNext);
+    let e = h.reader.end.as_ref().unwrap();
+    assert_eq!((e.finished, e.rating), (false, Some(2)));
+}
+
+#[test]
+fn the_end_card_opens_the_next_book_of_the_series_or_goes_to_the_library() {
+    let mut h = Harness::new("end-next", "synthetic.epub");
+    let cur = h.reader.path.clone();
+    let next = h.dir.join("second.epub");
+    std::fs::copy(&cur, &next).unwrap();
+    let entry = |p: &Path, title: &str, i: f32| ink_store::BookEntry {
+        path: p.to_path_buf(),
+        title: title.into(),
+        series: Some("Synthetic".into()),
+        series_index: Some(i),
+        format: "epub".into(),
+        ..Default::default()
+    };
+    let mut index = ink_store::LibraryIndex::default();
+    index.books = vec![entry(&cur, "First", 1.0), entry(&next, "Second", 2.0)];
+    std::fs::create_dir_all(&h.paths.root).unwrap();
+    index.save(&h.paths.library()).unwrap();
+    to_last_page(&mut h);
+    h.key(Key::PageNext);
+    let n = h.reader.end.as_ref().unwrap().next.clone().expect("a suggestion");
+    assert_eq!((n.path.as_path(), n.title.as_str(), n.why.as_str()), (next.as_path(), "Second", "Next in Synthetic · book 2"));
+    h.tap_button("end-next");
+    assert_eq!(h.transitions.last(), Some(&Transition::Replace(crate::router::Route::Reader(next.clone()))));
+    // Without a library index: no suggestion; "Back to library" leaves the reader.
+    std::fs::remove_file(h.paths.library()).unwrap();
+    h.transitions.clear();
+    h.key(Key::Back);
+    h.key(Key::PageNext);
+    assert!(h.reader.overlay().unwrap().button_rect("end-next").is_none());
+    h.tap_button("end-library");
+    assert_eq!(h.transitions, vec![Transition::Pop]);
+}
+
+/// The Aa sheet of a PDF has the View tab; choosing two columns there cuts every page
+/// into two screens at once (the page drawn again), keeps the page read, is saved in
+/// the book's sidecar, and comes back when the book is opened again.
+#[test]
+fn aa_view_tab_changes_a_pdf_and_saves_it_for_the_book() {
+    let mut h = Harness::generated("aa-view", "paper.pdf", &ink_mupdf::testgen::fixture_pdf());
+    let pages0 = h.reader.doc.as_deref().unwrap().page_count().pages;
+    assert_eq!(pages0, 10, "fit page: one screen per page");
+    // Page 2 (the two-column page of the fixture).
+    h.reader.go_to_page(1);
+    h.paint();
+    let before = h.probe.panel().clone();
+    h.tap_at(636, 848);
+    h.tap_button("aa");
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Aa));
+    let o = h.reader.overlay().unwrap();
+    assert!(o.button_rect("aa-tab:1").is_some() && o.button_rect("aa-tab:2").is_none(), "View and Page tabs only");
+    // Tab 0 is View: tap it in case another test left the shared tab elsewhere.
+    h.tap_button("aa-tab:0");
+    h.shot("01-view");
+    let o = h.reader.overlay().unwrap();
+    assert!(!o.ids.contains_key("size"), "no font size for a PDF");
+    let cols = o.tree.bounds(o.ids["columns"]).unwrap();
+    // "Two" is the right half of the two-choice row.
+    h.tap_at(cols.x + cols.w as i32 * 3 / 4, cols.y + cols.h as i32 / 2);
+    assert_eq!(h.reader.actions().last().map(String::as_str), Some("aa-columns:2"));
+    settle_aa(&mut h);
+    let doc = h.reader.doc.as_deref().unwrap();
+    assert_eq!(doc.fixed_view().map(|v| v.columns), Some(2));
+    assert_eq!(doc.page_count().pages, 20, "two screens per page");
+    let Position::Page(at) = doc.position_of_page(h.reader.page()).unwrap() else { panic!("a page position") };
+    assert_eq!(at.page, 1, "still on the page read before");
+    h.tap_button("close");
+    assert_eq!(h.kind(), None);
+    h.shot("02-columns");
+    // The page area shows the left column now, not the whole page.
+    let changed = h.panel_rows_differ(&before, 200, 1400);
+    assert!(changed > 10_000, "the page was drawn again with the new view ({changed} pixels changed)");
+    let st = BookState::load(&h.reader.path).unwrap();
+    assert_eq!(st.settings.columns, Some(2));
+    assert_eq!((st.settings.zoom, st.settings.rtl), (None, None), "only what was chosen is saved");
+    // Opening the book again: its own view, over the defaults.
+    let mut again = ReaderScreen::new(h.reader.path.clone());
+    let p = providers();
+    again.on_enter(&mut cx!(h, p)).unwrap();
+    let doc = again.doc.as_deref().unwrap();
+    assert_eq!(doc.fixed_view().map(|v| (v.columns, v.fit)), Some((2, ink_doc::Fit::Page)));
+    assert_eq!(doc.page_count().pages, 20);
+}
+
+/// A comic's own view (right to left, two-page spreads) reaches the document on a
+/// relayout, and the sheet shows it.
+#[test]
+fn aa_view_tab_shows_a_comic_s_own_view() {
+    let mut h = Harness::generated("aa-view-cbz", "comic.cbz", &ink_mupdf::testgen::fixture_cbz(6));
+    h.reader.book_settings.rtl = Some(true);
+    h.reader.book_settings.spreads = Some("always".into());
+    h.with_cx(|r, cx| r.relayout(cx, RefreshClass::Gc16)).unwrap();
+    let doc = h.reader.doc.as_deref().unwrap();
+    assert_eq!(doc.fixed_view().map(|v| (v.rtl, v.spreads)), Some((true, ink_doc::Spreads::Always)));
+    assert!(doc.page_count().pages < 6, "spreads: two pages on a screen");
+    h.paint();
+    h.tap_at(636, 848);
+    h.tap_button("aa");
+    h.tap_button("aa-tab:0");
+    let o = h.reader.overlay().unwrap();
+    assert!(o.ids.contains_key("rtl") && o.ids.contains_key("spreads"));
+    h.shot("01-view");
+}
+
+/// A comic set to right to left: a tap on the left side goes forward, the right side
+/// back, and the page turn wave sweeps the other way.
+#[test]
+fn right_to_left_comic_turns_forward_on_the_left() {
+    use ink_device::Wave;
+    let mut h = Harness::generated("rtl-turns", "manga.cbz", &ink_mupdf::testgen::fixture_cbz(6));
+    let last = |h: &Harness| *h.probe.updates().last().unwrap();
+    h.tap_at(1100, 900);
+    assert_eq!(h.reader.page(), 1, "left to right: the right side goes forward");
+    h.reader.book_settings.rtl = Some(true);
+    h.with_cx(|r, cx| r.relayout(cx, RefreshClass::Gc16)).unwrap();
+    h.paint();
+    h.tap_at(100, 900);
+    assert_eq!(h.reader.page(), 2, "right to left: the left side goes forward");
+    assert_eq!(last(&h).wave, Some(Wave::Right));
+    h.tap_at(1100, 900);
+    assert_eq!(h.reader.page(), 1, "and the right side back");
+    assert_eq!(last(&h).wave, Some(Wave::Left));
+    // Page keys keep their meaning: forward is forward.
+    h.key(Key::PageNext);
+    assert_eq!(h.reader.page(), 2);
+}
+
+impl Harness {
+    /// The reader's prefetch timer has run out: backdates it and delivers the timer the
+    /// reader asked for (as the app loop does once no input came).
+    fn rest_for_prefetch(&mut self) {
+        let at = self.reader.prefetch_at.as_mut().expect("a prefetch is due");
+        *at -= PREFETCH_IDLE;
+        assert!(self.reader.timeout().is_some_and(|t| t.is_zero()));
+        let p = providers();
+        self.handle_event(&UiEvent::Timer(0), &p);
+        self.paint();
+    }
+
+    /// Asks the document to prefetch `page`: true when it was not ready yet.
+    fn prefetch(&mut self, page: usize) -> bool {
+        self.reader.doc.as_deref_mut().unwrap().prefetch_page(page)
+    }
+}
+
+/// A comic: once the page shown has rested, the page after it in the direction of the
+/// last turn is drawn into the document's cache; a turn before that moves the timer on.
+#[test]
+fn idle_reader_prefetches_the_page_in_the_direction_of_the_last_turn() {
+    let src = tmp("prefetch-src").join("comic.cbz");
+    std::fs::write(&src, ink_mupdf::testgen::fixture_cbz(12)).unwrap();
+    let mut h = Harness::new("prefetch", src.to_str().unwrap());
+    assert!(h.reader.timeout().is_some_and(|t| t <= PREFETCH_IDLE), "the first page set the timer");
+    h.rest_for_prefetch();
+    assert!(h.reader.prefetch_at.is_none());
+    assert!(!h.prefetch(1), "page 2 was drawn ahead");
+    // A turn back: the page before is the one drawn ahead.
+    h.reader.go_to_page(10);
+    h.paint();
+    h.key(Key::PagePrev);
+    assert_eq!(h.reader.page(), 9);
+    h.rest_for_prefetch();
+    assert!(!h.prefetch(8), "page 9 was drawn ahead");
+    assert!(h.prefetch(7), "page 8 was not");
+    // A jump keeps the direction (page 4 would come next) but a turn forward before the
+    // timer ran out moves the timer on: page 4 is never drawn, page 7 is.
+    h.reader.go_to_page(4);
+    h.paint();
+    h.key(Key::PageNext);
+    assert_eq!(h.reader.page(), 5);
+    assert!(h.reader.prefetch_at.is_some_and(|d| d > Instant::now()));
+    assert!(h.prefetch(3), "page 4 was not drawn ahead");
+    h.rest_for_prefetch();
+    assert!(!h.prefetch(6), "page 7 was drawn ahead");
+    // The last page has nothing after it.
+    h.reader.go_to_page(11);
+    h.paint();
+    h.rest_for_prefetch();
+    assert!(h.reader.prefetch_at.is_none());
+    let _ = std::fs::remove_dir_all(src.parent().unwrap());
+}
+
+/// The page drawn ahead waits for the event loop to go idle: input moves the timer on,
+/// and nothing is drawn while a finger is down or the menu is open.
+#[test]
+fn prefetch_waits_for_no_input_no_finger_and_no_overlay() {
+    let src = tmp("prefetch-idle-src").join("comic.cbz");
+    std::fs::write(&src, ink_mupdf::testgen::fixture_cbz(12)).unwrap();
+    let mut h = Harness::new("prefetch-idle", src.to_str().unwrap());
+    let p = providers();
+    let backdate = |h: &mut Harness| *h.reader.prefetch_at.as_mut().expect("a prefetch is pending") -= PREFETCH_IDLE * 2;
+    // A finger goes down after the timer ran out: the timer moves on and waits.
+    backdate(&mut h);
+    h.frame(400, 636, 848, TouchPhase::Down);
+    assert!(h.reader.prefetch_at.is_some_and(|d| d > Instant::now()), "input moved the timer on");
+    backdate(&mut h);
+    assert!(h.reader.prefetch_due().is_none(), "no prefetch while the finger is down");
+    h.handle_event(&UiEvent::Timer(0), &p);
+    assert!(h.reader.prefetch_at.is_some(), "nothing drawn under the finger");
+    // It lifts: a tap in the middle opens the menu, and the menu holds the prefetch back.
+    h.frame(60, 636, 848, TouchPhase::Up);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Menu));
+    backdate(&mut h);
+    assert!(h.reader.prefetch_due().is_none(), "no prefetch under the menu");
+    h.handle_event(&UiEvent::Timer(0), &p);
+    assert!(h.reader.prefetch_at.is_some(), "nothing drawn under the menu");
+    // The menu closes: the page after is drawn once the reader rested.
+    h.key(Key::Back);
+    assert_eq!(h.kind(), None);
+    assert!(h.reader.prefetch_at.is_some_and(|d| d > Instant::now()));
+    h.rest_for_prefetch();
+    assert!(h.reader.prefetch_at.is_none());
+    assert!(!h.prefetch(1), "page 2 was drawn ahead");
+    let _ = std::fs::remove_dir_all(src.parent().unwrap());
 }

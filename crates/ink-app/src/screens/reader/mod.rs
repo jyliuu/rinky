@@ -1,6 +1,6 @@
-//! Reader screen (owner from wave B: the `reader` agent).
+//! Reader screen.
 //!
-//! Phase 0 behaviour is the prototype's `run` loop:
+//! The page loop:
 //! - the saved page with a GC16 flash (no "Opening" screen in between: the screen below
 //!   stays until the page is ready);
 //! - taps, swipes, pinches and the other gestures run the actions of the user's gesture
@@ -12,10 +12,10 @@
 //!
 //! Page Next/Prev keys (host simulator) turn pages too. powerd events are logged.
 //!
-//! Phase 3 (wave B `reader`) adds overlays over the page ([`overlay`]): a tap in the
-//! middle of the page (or the top band, or the Menu key) opens the menu ([`menu`]): top
-//! bar with back, title, clock, battery and the tools; bottom bar with chapter, page,
-//! percent and a page slider. The page is kept in a buffer so closing an overlay puts it
+//! Overlays sit over the page ([`overlay`]): a tap in the middle of the page (or the
+//! top band, or the Menu key) opens the menu ([`menu`]): top bar with back, title,
+//! clock, battery and the tools; bottom bar with chapter, page, percent and a page
+//! slider. The page is kept in a buffer so closing an overlay puts it
 //! back without rendering it again.
 //!
 //! A book that cannot be opened (missing file, DRM, KFX, broken file) shows "Cannot open
@@ -24,6 +24,7 @@
 
 pub mod aa;
 pub mod actions;
+pub mod end;
 pub mod footer;
 pub mod goto;
 pub mod light_gestures;
@@ -204,7 +205,9 @@ pub fn open_book(
     w: u32,
     h: u32,
 ) -> anyhow::Result<Box<dyn Document>> {
-    open_traced(providers, path, &layout_for(settings, w, h), None, None, None, &mut crate::perf::OpenTrace::start())
+    let mut doc = open_traced(providers, path, &layout_for(settings, w, h), None, None, None, &mut crate::perf::OpenTrace::start())?;
+    doc.set_read_ahead(true);
+    Ok(doc)
 }
 
 /// Opens `path` with the first matching provider, enables the page-map cache in
@@ -212,7 +215,9 @@ pub fn open_book(
 /// with the steps recorded in `trace`: provider open (zip, container, spine), page-map
 /// cache id, layout of the first page. `md5` is the book's
 /// partial MD5 when the caller has it already; `at` is the position to open at (laid
-/// out first, see [`Document::open_at`]).
+/// out first, see [`Document::open_at`]). The document comes back with its read-ahead
+/// off ([`Document::set_read_ahead`]): the first page does not wait for the pages after
+/// it; turn it on once that page is shown.
 pub fn open_traced(
     providers: &[&dyn ink_doc::Provider],
     path: &Path,
@@ -238,6 +243,7 @@ pub fn open_traced(
     trace.step("page cache id");
     doc.set_layout(layout)?;
     trace.step_with_engine("set_layout");
+    doc.set_read_ahead(false);
     let count = doc.page_count();
     log::info!(
         "'{}': {}{} pages (parse {:?}, layout {:?})",
@@ -673,6 +679,16 @@ pub struct ReaderScreen {
     /// class is `Change::Jump` (REAGL; GC16 per the user's "full refresh every N pages"),
     /// not a flash of its own.
     jumped: bool,
+    /// What the end card shows while it is open ([`end`]).
+    end: Option<end::EndInfo>,
+    /// The way the last page turn went (+1 next, -1 previous): the page expected next.
+    turn_dir: i64,
+    /// When the page after the one shown is drawn ahead ([`ReaderScreen::prefetch_next`]):
+    /// set when a page is drawn and moved on by every input, so it comes once no input
+    /// came for [`PREFETCH_IDLE`]. Waits while a finger is down or an overlay is open.
+    prefetch_at: Option<Instant>,
+    /// A finger is on the panel (a touch went down and has not lifted yet).
+    touching: bool,
 }
 
 /// The sidecar gets the position once the page has rested this long. Page turns do no
@@ -681,6 +697,10 @@ pub struct ReaderScreen {
 pub const POSITION_SAVE_IDLE: Duration = Duration::from_secs(2);
 /// While pages keep turning, the position is still saved this often.
 pub const POSITION_SAVE_MAX: Duration = Duration::from_secs(10);
+/// A page drawn and no input for this long: the document draws the next page ahead
+/// (PDF and CBZ pages take most of a second on the Kindle). Short against reading a
+/// page, long enough that a quick second tap is read first.
+pub const PREFETCH_IDLE: Duration = Duration::from_millis(250);
 
 impl ReaderScreen {
     /// A reader for `path` (opened in `on_enter`).
@@ -743,6 +763,10 @@ impl ReaderScreen {
             position_unsaved: None,
             turned: false,
             jumped: false,
+            end: None,
+            turn_dir: 1,
+            prefetch_at: None,
+            touching: false,
         }
     }
 
@@ -780,18 +804,31 @@ impl ReaderScreen {
         ink_ui::message::draw_message(cx.canvas, cx.fonts, &refs);
     }
 
+    /// The book reads right to left (a fixed-layout book with Aa › View › Right to left):
+    /// page-turn gestures and the turn wave go the other way.
+    fn reads_right_to_left(&self) -> bool {
+        self.doc.as_deref().and_then(|d| d.fixed_view()).is_some_and(|v| v.rtl)
+    }
+
     fn turn(&mut self, step: i64, cx: &mut AppCtx) {
         let Some(doc) = self.doc.as_ref() else { return };
         let total = doc.page_count().pages as i64;
         let next = (self.page as i64 + step).clamp(0, (total - 1).max(0)) as usize;
+        // Past the last page: the end card (title, finished, rating, what next).
+        if step > 0 && next == self.page && self.overlay.is_none() && self.bridge.is_none() && self.at_book_end() {
+            self.open_end(cx);
+            return;
+        }
         self.bridge = None;
         if next != self.page {
             self.page = next;
             self.rerender = true;
             self.turned = true;
+            self.turn_dir = step.signum();
             self.dirty = Some(cx.refresh.page_turn());
-            // No right-to-left books yet: a next page sweeps left.
-            self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, false));
+            // A next page sweeps left, right in a right-to-left book.
+            let rtl = self.reads_right_to_left();
+            self.turn_wave = ink_store::prefs::page_animation_on(&cx.settings.reader.page_animation).then(|| ink_device::Wave::for_turn(step > 0, rtl));
         }
     }
 
@@ -913,6 +950,34 @@ impl ReaderScreen {
     /// When the unsaved position is due to be written.
     fn position_due(&self) -> Option<Instant> {
         self.position_unsaved.map(|(first, last)| (last + POSITION_SAVE_IDLE).min(first + POSITION_SAVE_MAX))
+    }
+
+    /// When the page after the one shown is drawn ahead: not while a finger is down (a
+    /// hold or a drag would stall behind the render) or an overlay is open (its taps
+    /// would); the timer comes back once both are gone.
+    fn prefetch_due(&self) -> Option<Instant> {
+        self.prefetch_at.filter(|_| !self.touching && self.overlay.is_none())
+    }
+
+    /// Draws the page after the one shown, in the direction of the last turn, into the
+    /// document's page cache (bounded by the document: 16 MiB of screens for MuPDF), so
+    /// the next turn shows it at once. The target comes from the page shown now: a turn
+    /// made since the timer was set moved the timer on, so a stale page is never drawn.
+    /// Not while a selection is dragged or a half-page bridge is shown.
+    fn prefetch_next(&mut self) {
+        self.prefetch_at = None;
+        if self.selecting.is_some() || self.bridge.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.as_deref_mut() else { return };
+        let Some(next) = self.page.checked_add_signed(self.turn_dir as isize) else { return };
+        if next >= doc.page_count().pages {
+            return;
+        }
+        let t = Instant::now();
+        if doc.prefetch_page(next) {
+            log::debug!("reader: page {} prefetched in {:.2} ms", next + 1, t.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     /// Writes the reading position to the sidecar if it changed since the last write.
@@ -1038,8 +1103,7 @@ impl ReaderScreen {
         let size = cx.screen.size();
         let anchor = link.rect.unwrap_or_default();
         let popup = |title: String, text: String, spans: Vec<(String, Style)>, buttons: Vec<(String, String)>| {
-            let mut o = Overlay::new(overlay::OverlayKind::Popup);
-            o.tree.add(None, Box::new(overlay::PageScrim { action: "close".into() }), Rect::from_size(size));
+            let mut o = Overlay::over_page(overlay::OverlayKind::Popup, size, "close");
             // Height from the text length (about 17 px per character at the popup's
             // 34 px text), between 320 px and 60 % of the screen.
             let pw = (size.w - 48).min(1100);
@@ -1761,8 +1825,14 @@ impl ReaderScreen {
         let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
         let size = cx.screen.size();
         let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
-        if &layout != doc.layout() {
+        // A fixed-layout book's view options (Aa › View) changed.
+        let view = doc.fixed_view().map(|v| aa::fixed_view(v, &self.book_settings)).filter(|v| Some(*v) != doc.fixed_view());
+        if &layout != doc.layout() || view.is_some() {
             doc.set_current_page(self.page);
+            if let Some(v) = view {
+                log::info!("reader: fixed-layout view {v:?}");
+                doc.set_fixed_view(&v)?;
+            }
             doc.set_layout(&layout)?;
             self.page = doc.current_page();
             self.forget_page_numbers();
@@ -1816,6 +1886,7 @@ impl ReaderScreen {
         if let Some(d) = self.dict_card.take() {
             self.dict_cancel.push(d);
         }
+        self.end = None;
         if let Some(o) = self.overlay.take() {
             self.swallow_gestures = true;
             if full {
@@ -1838,6 +1909,11 @@ impl ReaderScreen {
         let index = arg.parse::<usize>().ok();
         match name {
             "close" => self.close_overlay(),
+            _ if name.starts_with("end-") => {
+                if let Some(t) = self.end_action(name, arg, cx) {
+                    return Ok(t);
+                }
+            }
             actions::EXIT_CONFIRMED => return Ok(Transition::Exit),
             "back" => return Ok(Transition::Pop),
             "page" => {
@@ -1958,6 +2034,8 @@ impl ReaderScreen {
             UiEvent::Key(k) if k.pressed => match k.key {
                 Key::Power => return Ok(Transition::Exit),
                 Key::Back | Key::Menu => self.close_overlay(),
+                // The end card: the previous-page key goes back to the last page.
+                Key::PagePrev if o.kind == overlay::OverlayKind::End => self.close_overlay(),
                 _ if page_below => return self.handle_reading(ev, cx),
                 _ => {}
             },
@@ -2174,7 +2252,20 @@ impl AppScreen for ReaderScreen {
         let saved_pos = saved.as_deref().and_then(|s| s.parse::<Position>().ok());
         trace.step("state+md5");
         let doc = match open_traced(cx.providers, &self.path, &layout, Some(&cache), md5.as_deref(), saved_pos.as_ref(), &mut trace) {
-            Ok(doc) => doc,
+            Ok(mut doc) => {
+                // A fixed-layout book's own view (Aa › View) over the document's defaults.
+                if let Some(base) = doc.fixed_view() {
+                    let view = aa::fixed_view(base, &self.book_settings);
+                    if view != base {
+                        log::info!("reader: fixed-layout view of this book {view:?}");
+                        if let Err(e) = doc.set_fixed_view(&view) {
+                            log::warn!("reader: fixed-layout view: {e}");
+                        }
+                        trace.step("fixed-layout view");
+                    }
+                }
+                doc
+            }
             Err(e) => {
                 // The message stays on screen until the user taps: the reader does not
                 // end the app (or leave the library) on its own.
@@ -2243,6 +2334,16 @@ impl AppScreen for ReaderScreen {
         if (matches!(ev, UiEvent::Power(_)) && !network) || self.position_due().is_some_and(|d| Instant::now() >= d) {
             self.flush_position();
         }
+        // The page drawn ahead waits for the loop to go idle: input moves it on.
+        match ev {
+            UiEvent::Touch(t) => {
+                self.touching = !matches!(t.kind, ink_ui::TouchKind::Up | ink_ui::TouchKind::Cancel);
+                self.prefetch_at = self.prefetch_at.map(|_| Instant::now() + PREFETCH_IDLE);
+            }
+            UiEvent::Gesture(_) | UiEvent::Key(_) => self.prefetch_at = self.prefetch_at.map(|_| Instant::now() + PREFETCH_IDLE),
+            UiEvent::Timer(_) if self.prefetch_due().is_some_and(|d| Instant::now() >= d) => self.prefetch_next(),
+            _ => {}
+        }
         // Plugin dialogs, menus, viewers and keyboards got the event first in the app
         // loop (plugin_host::hooks::app_handle).
         let t = if self.overlay.is_some() {
@@ -2257,9 +2358,11 @@ impl AppScreen for ReaderScreen {
             t
         };
         // A screen pushed over the reader (settings, statistics, light) gets the timer
-        // and power events: write the position now.
+        // and power events: write the position now. It also gets the lift of a finger
+        // that went down here.
         if matches!(t, Ok(Transition::Push(_))) {
             self.flush_position();
+            self.touching = false;
         }
         t
     }
@@ -2294,7 +2397,11 @@ impl AppScreen for ReaderScreen {
         let edge = self.sel_edge.filter(|_| !self.sel_edge_lock && self.selecting.is_some()).map(|(_, since)| selection::EDGE_DWELL.saturating_sub(since.elapsed()));
         // Bars drawn while pagination counts: look again for the end of the count.
         let counting = (self.counting_shown && !self.status_bars_hidden && self.overlay.is_none()).then_some(COUNTING_POLL);
-        self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout()).into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting).min() // aa: debounce; statusbar: minute tick; position save; selection edge; page count
+        // The next page drawn ahead once the shown one rested.
+        let prefetch = self.prefetch_due().map(|d| d.saturating_duration_since(Instant::now()));
+        let expiry = self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout());
+        // aa: debounce; statusbar: minute tick; position save; selection edge; page count; prefetch
+        expiry.into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting).chain(prefetch).min()
     }
 }
 
@@ -2450,7 +2557,7 @@ impl ReaderScreen {
             let rows = if self.status_bars_hidden {
                 Some(Vec::new())
             } else if self.overlay.is_none() && !self.rerender && self.error.is_none() {
-                self.redraw_bar_text(cx, &status)
+                self.redraw_bars(cx, &status, footer::Part::Text)
             } else {
                 None
             };
@@ -2589,6 +2696,7 @@ impl ReaderScreen {
                 }
                 self.rerender = false;
                 save = true;
+                self.prefetch_at = Some(Instant::now() + PREFETCH_IDLE);
                 if let Some(t) = self.open_trace.as_mut() {
                     t.step("decorations+plugins");
                 }
@@ -2623,7 +2731,8 @@ impl ReaderScreen {
                 log::debug!("reader: page {} shown in 1 update ({class:?}, wave {wave:?})", self.page + 1);
             }
             self.finish_open_trace();
-            if std::mem::take(&mut self.plugins_pending) {
+            let first = std::mem::take(&mut self.plugins_pending);
+            if first {
                 if let Some(doc) = self.doc.as_deref_mut() {
                     let t = Instant::now();
                     cx.plugins.book_open(doc, &self.path);
@@ -2637,6 +2746,14 @@ impl ReaderScreen {
                 self.note_position();
                 if !std::mem::take(&mut self.turned) {
                     self.flush_position();
+                }
+            }
+            if first {
+                // The pages after this one: the next count (a page turn, the counting
+                // poll) lays them out or waits for the background pagination, not the
+                // frame that shows the first page.
+                if let Some(doc) = self.doc.as_deref_mut() {
+                    doc.set_read_ahead(true);
                 }
             }
             return Ok(shown);

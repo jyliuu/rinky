@@ -82,7 +82,7 @@ impl Env {
         let root = TempDir::new(&format!("wikipedia-{tag}"));
         let mut st = MemoryStorage { dir: root.join("plugins/wikipedia/data"), ..MemoryStorage::default() };
         st.settings.insert("save_dir".into(), json!(root.join("Books").to_str().unwrap()));
-        Env { p: WikipediaPlugin::new(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: FakeBook::titled("A Book"), root }
+        Env { p: WikipediaPlugin::default(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: FakeBook::titled("A Book"), root }
     }
 
     fn call(&mut self, f: impl FnOnce(&mut WikipediaPlugin, &mut HostCtx) -> Result<()>) {
@@ -149,7 +149,7 @@ fn labels(b: &[(String, String)]) -> Vec<&str> {
 
 #[test]
 fn registers_the_entries() {
-    let mut p = WikipediaPlugin::new();
+    let mut p = WikipediaPlugin::default();
     let mut reg = Registry::default();
     p.on_load(&mut Registrar { plugin: NAME, registry: &mut reg }).unwrap();
     assert!(reg.selection_actions.iter().any(|a| a.id == ACTION_LOOKUP && a.label == "Wikipedia"));
@@ -239,6 +239,8 @@ fn parses_the_article_and_builds_text() {
     assert!(html.contains("<meta charset=\"utf-8\"><title>A &lt;b&gt; &amp; C</title>"), "{html}");
     assert!(html.contains("<h2>Background</h2>") && html.contains("<h3>Voyage</h3>") && html.contains("<p><i>desc</i></p>"), "{html}");
     assert!(html.contains("CC BY-SA"), "{html}");
+    let at = |s: &str| html.find(s).unwrap_or(usize::MAX);
+    assert!(at("<h1>") < at("<p><i>desc</i></p>\n") && at("<p><i>desc</i></p>\n") < at("<h2>Background</h2>\n") && at("</h2>\n") < at("<hr>"), "{html}");
     assert_eq!(api::file_name("AC/DC: live?", "de"), "AC_DC_ live_ (Wikipedia de).html");
     // No space where the title is cut or after a leading dot.
     assert_eq!(api::file_name(&format!("{} yyy", "x".repeat(79)), "en"), format!("{} (Wikipedia en).html", "x".repeat(79)));
@@ -313,6 +315,13 @@ fn cache_keeps_fifty_and_survives_a_restart() {
     c.save(&path).unwrap();
     let mut back = Cache::load(&path);
     assert_eq!(back, c);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("\"description\"") && !text.contains("\"url\"") && !text.contains("null"), "absent fields are left out: {text}");
+    let mut one = Cache::default();
+    one.put("da", "q", &Summary { title: "T".into(), description: Some("D".into()), url: Some("https://da.wikipedia.org/wiki/T".into()), kind: "standard".into(), ..Summary::default() });
+    one.save(&path).unwrap();
+    assert_eq!(Cache::load(&path), one);
+    assert!(std::fs::read_to_string(&path).unwrap().contains("\"description\":\"D\""));
     assert_eq!(back.get("en", "Other  words").unwrap().extract, "new");
     // A damaged file is an empty cache.
     std::fs::write(&path, "{ not json").unwrap();
@@ -345,7 +354,7 @@ fn selection_to_card_and_cache() {
     assert!(cache.exists());
     assert_eq!(Cache::load(&cache).len(), 1);
     // The same word again (a new plugin, as after a restart): no request, the card at once.
-    e.p = WikipediaPlugin::new();
+    e.p = WikipediaPlugin::default();
     e.ui.0.clear();
     e.select("Mutiny on the Bounty");
     assert_eq!(e.jobs.reqs.len(), 1, "answered from the cache");

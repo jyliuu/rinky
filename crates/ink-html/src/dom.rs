@@ -294,22 +294,13 @@ impl ElemRef<'_> {
         self.dom.element(self.id).expect("element")
     }
 
-    fn sibling(&self, dir: i32) -> Option<Self> {
-        let p = self.dom.node(self.id).parent;
-        if p == NONE {
-            return None;
-        }
-        let kids = &self.dom.node(p).children;
-        let pos = kids.iter().position(|&c| c == self.id)? as i32;
-        let mut i = pos + dir;
-        while i >= 0 && (i as usize) < kids.len() {
-            let c = kids[i as usize];
-            if self.dom.element(c).is_some() {
-                return Some(ElemRef { dom: self.dom, id: c });
-            }
-            i += dir;
-        }
-        None
+    /// The nearest element sibling before (`next` false) or after this element.
+    fn sibling(&self, next: bool) -> Option<Self> {
+        let kids = &self.dom.nodes.get(self.dom.node(self.id).parent as usize)?.children;
+        let pos = kids.iter().position(|&c| c == self.id)?;
+        let is_element = |c: &&NodeId| self.dom.element(**c).is_some();
+        let found = if next { kids[pos + 1..].iter().find(is_element) } else { kids[..pos].iter().rev().find(is_element) };
+        found.map(|&id| ElemRef { dom: self.dom, id })
     }
 }
 
@@ -325,10 +316,10 @@ impl SelectorElement for ElemRef<'_> {
         (p != NONE).then_some(ElemRef { dom: self.dom, id: p })
     }
     fn prev_sibling(&self) -> Option<Self> {
-        self.sibling(-1)
+        self.sibling(false)
     }
     fn next_sibling(&self) -> Option<Self> {
-        self.sibling(1)
+        self.sibling(true)
     }
     fn is_root(&self) -> bool {
         self.dom.node(self.id).parent == NONE
@@ -393,35 +384,15 @@ pub fn split_raw_text(raw: &str) -> Vec<&str> {
     out
 }
 
+/// crengine's `codeconvert`: numeric references 128-159 are windows-1252 codes.
+const CP1252: [u16; 32] = [
+    8364, 129, 8218, 402, 8222, 8230, 8224, 8225, 710, 8240, 352, 8249, 338, 141, 381, 143,
+    144, 8216, 8217, 8220, 8221, 8226, 8211, 8212, 732, 8482, 353, 8250, 339, 157, 382, 376,
+];
+
 fn codeconvert(code: u32) -> u32 {
     match code {
-        128 => 8364,
-        130 => 8218,
-        131 => 402,
-        132 => 8222,
-        133 => 8230,
-        134 => 8224,
-        135 => 8225,
-        136 => 710,
-        137 => 8240,
-        138 => 352,
-        139 => 8249,
-        140 => 338,
-        142 => 381,
-        145 => 8216,
-        146 => 8217,
-        147 => 8220,
-        148 => 8221,
-        149 => 8226,
-        150 => 8211,
-        151 => 8212,
-        152 => 732,
-        153 => 8482,
-        154 => 353,
-        155 => 8250,
-        156 => 339,
-        158 => 382,
-        159 => 376,
+        128..=159 => CP1252[code as usize - 128] as u32,
         c => c,
     }
 }
@@ -545,9 +516,7 @@ fn expand_tabs(s: &str) -> String {
         if ch == '\t' {
             let delta = 8 - (x & 7);
             x += delta;
-            for _ in 0..delta {
-                out.push(' ');
-            }
+            out.extend(std::iter::repeat_n(' ', delta));
         } else {
             out.push(ch);
             x += 1;
@@ -560,14 +529,6 @@ fn expand_tabs(s: &str) -> String {
 pub trait Classifier {
     /// Structure style of element `id` (its ancestors and previous siblings exist).
     fn classify(&mut self, dom: &Dom, id: NodeId, parent_ws: WhiteSpace) -> StructStyle;
-}
-
-/// Elements that are always classified by their name, whatever the CSS says.
-fn fixed_display(name: &str) -> Option<Display> {
-    match name {
-        "body" => Some(Display::Block),
-        _ => None,
-    }
 }
 
 /// Builds a [`Dom`] from parser events, applying crengine's rules.
@@ -585,7 +546,8 @@ pub struct Builder<'c> {
 }
 
 impl<'c> Builder<'c> {
-    /// A builder; `classifier` decides display/white-space (None = element defaults only).
+    /// A builder; `classifier` decides display/white-space (None = element defaults
+    /// only). It is first asked at `<body>`, when the head's stylesheets are known.
     pub fn new(classifier: Option<&'c mut dyn Classifier>) -> Self {
         Builder {
             dom: Dom { body: NONE, ..Default::default() },
@@ -602,16 +564,6 @@ impl<'c> Builder<'c> {
     /// Stylesheet references met so far (complete once the body starts).
     pub fn sheets(&self) -> &[SheetRef] {
         &self.dom.sheets
-    }
-
-    /// Replaces the classifier (called when the head is complete).
-    pub fn set_classifier(&mut self, c: &'c mut dyn Classifier) {
-        self.classifier = Some(c);
-    }
-
-    /// True once `<body>` has been opened.
-    pub fn in_body(&self) -> bool {
-        !self.stack.is_empty()
     }
 
     fn top(&self) -> Option<NodeId> {
@@ -679,12 +631,10 @@ impl<'c> Builder<'c> {
         } else {
             self.dom.element(parent).map(|e| e.st.white_space).unwrap_or_default()
         };
-        let mut st = match self.classifier.as_deref_mut() {
-            Some(c) => c.classify(&self.dom, id, parent_ws),
-            None => default_struct(&name, parent_ws),
-        };
-        if let Some(d) = fixed_display(&name) {
-            st.display = d;
+        let mut st = self.classifier.as_deref_mut().map_or_else(|| default_struct(&name, parent_ws), |c| c.classify(&self.dom, id, parent_ws));
+        // `body` is a block whatever the CSS says.
+        if name == "body" {
+            st.display = Display::Block;
         }
         if in_svg || name == "svg" {
             st.display = if name == "svg" { st.display } else { Display::Inline };
@@ -1006,6 +956,7 @@ mod tests {
         assert_eq!(preprocess("Soft&shy;h &amp; &#169; &#x2014; &nbsp;n &bogus; &#32;&#32;x", false, true), "Soft\u{ad}h & © — \u{a0}n &bogus; \u{20}\u{20}x");
         assert_eq!(preprocess("&nbsp x", false, true), "\u{a0}x", "space-terminated entity eats the space");
         assert_eq!(preprocess("&#150;", false, true), "\u{2013}", "windows-1252 range");
+        assert_eq!(preprocess("&#127;&#128;&#129;&#141;&#156;&#159;&#160;", false, true), "\u{7f}€\u{81}\u{8d}œŸ\u{a0}", "its ends and holes");
         assert_eq!(preprocess("a\r\nb\rc", true, true), "a\nb\nc");
         // crengine's tab quirk: the column after a newline is 1.
         assert_eq!(preprocess("x\n\ty", true, true), "x\n       y");

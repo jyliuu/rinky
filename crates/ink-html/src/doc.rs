@@ -15,7 +15,7 @@ use ink_doc::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// One spine item handed to the engine.
@@ -65,12 +65,13 @@ pub struct HtmlDocument {
     cache_done: Cell<bool>,
     font_sources: FontSources,
     fonts: RefCell<FontBook>,
-    legacy_fonts: Option<ink_text::Fonts>,
     laid: RefCell<HashMap<usize, Arc<LaidOut>>>,
     flats: RefCell<HashMap<usize, Arc<FlatText>>>,
     images: RefCell<ImageCache>,
     /// The page the reader shows.
     current: Cell<usize>,
+    /// `page_count` keeps a few pages past `current` known ([`Document::set_read_ahead`]).
+    read_ahead: bool,
     /// (chapter, key) of the reading position: the start of the page the reader turned
     /// to, or the position the book was opened at. Kept across relayouts (font size,
     /// rotation and back return to the same page) until the reader turns a page.
@@ -136,11 +137,11 @@ impl HtmlDocument {
             cache_done: Cell::new(false),
             font_sources,
             fonts,
-            legacy_fonts: None,
             laid: RefCell::new(HashMap::new()),
             flats: RefCell::new(HashMap::new()),
             images: RefCell::new(ImageCache::default()),
             current: Cell::new(0),
+            read_ahead: true,
             reading: Cell::new(None),
             anchor: None,
             paths,
@@ -170,11 +171,6 @@ impl HtmlDocument {
         self.book.chapters.iter().filter(|c| !crate::v1::blocks::parse_xhtml(&c.html).is_empty()).count()
     }
 
-    /// Number of DocFragments (spine items with a content file).
-    pub fn fragment_count(&self) -> usize {
-        self.book.fragments as usize
-    }
-
     /// Path inside the book of spine item `i`.
     pub fn chapter_path(&self, i: usize) -> Option<&str> {
         self.book.chapters.get(i).map(|c| c.path.as_str())
@@ -188,11 +184,6 @@ impl HtmlDocument {
     /// The shared book data (DOMs, stylesheets).
     pub fn book(&self) -> &Arc<Book> {
         &self.book
-    }
-
-    /// Noto Serif faces for drawing UI next to the page (kept from phase 0).
-    pub fn fonts_mut(&mut self) -> &mut ink_text::Fonts {
-        self.legacy_fonts.get_or_insert_with(ink_text::Fonts::load)
     }
 
     /// Adds the system font family `name` (searched in the Kindle font directories and
@@ -313,28 +304,32 @@ impl HtmlDocument {
         if !waited.is_zero() {
             ink_doc::timing::record("wait for paginators", waited);
         }
-        self.write_cache_if_complete();
+        self.write_map(false);
         Ok(())
     }
 
-    /// Writes the cache file once the map is complete, unless the background thread
-    /// wrote it or still runs (it writes the file when it finds the map complete).
-    fn write_cache_if_complete(&self) {
+    /// Writes the page map to the cache file unless it came from there or is written
+    /// already: when the document closes (`closing`) a partial map, so the next open goes
+    /// on from it; otherwise a complete map, unless the background thread wrote it or
+    /// still runs (it writes the file when it finds the map complete).
+    fn write_map(&self, closing: bool) {
         if self.cache_done.get() || self.cache_hit {
             return;
         }
         let Some(path) = &self.cache_path else { return };
-        let chapters = {
-            let m = self.shared.map.lock().unwrap();
+        let (chapters, known) = {
+            let m = self.shared.map.lock().unwrap_or_else(|e| e.into_inner());
+            let (known, n) = (m.chapters.iter().filter(|c| c.is_some()).count(), m.chapters.len());
             let worker_writes = self.worker.is_some() && (!m.finished || m.cache_written);
-            if worker_writes || !m.chapters.iter().all(|c| c.is_some()) {
+            let write = if closing { known > 0 && known < n } else { !worker_writes && known == n };
+            if !write {
                 return;
             }
-            m.chapters.clone()
+            (m.chapters.clone(), known)
         };
         self.cache_done.set(true);
         match paginate::write_cache(path, &chapters) {
-            Ok(()) => log::info!("ink-html: page map cached in {}", path.display()),
+            Ok(()) => log::info!("ink-html: page map ({known} of {} spine items) saved in {}", chapters.len(), path.display()),
             Err(e) => log::warn!("ink-html: cannot write page map {}: {e}", path.display()),
         }
     }
@@ -417,7 +412,10 @@ impl HtmlDocument {
         if !complete {
             if self.book.loader.is_none() {
                 // The thread cannot read images through this loader: sizes first.
-                self.prefill_chapter_images(c);
+                let ch = &self.book.chapters[c];
+                for v in crate::book::scan_image_refs(&ch.html) {
+                    self.fg_image_size(&ink_doc::resolve_href(&ch.dir, &v));
+                }
             }
             paginate::start_full_layout(self.book.clone(), params, self.font_sources.clone(), self.shared.clone(), c);
         }
@@ -461,14 +459,6 @@ impl HtmlDocument {
         );
         self.correct_map(c, &l);
         Ok(l)
-    }
-
-    /// Reads the sizes of the images of chapter `c` through the foreground loader.
-    fn prefill_chapter_images(&self, c: usize) {
-        let ch = &self.book.chapters[c];
-        for v in crate::book::scan_image_refs(&ch.html) {
-            self.fg_image_size(&ink_doc::resolve_href(&ch.dir, &v));
-        }
     }
 
     /// True when the page map's entry for chapter `c` equals the page starts of `l`
@@ -676,10 +666,7 @@ impl HtmlDocument {
 
     /// The target of an href (`path#frag`): spine item, position and position key.
     fn href_target(&self, href: &str) -> Option<(usize, Position, (u32, u32))> {
-        let (path, frag) = match href.split_once('#') {
-            Some((p, f)) => (p, Some(f)),
-            None => (href, None),
-        };
+        let (path, frag) = href.split_once('#').map_or((href, None), |(p, f)| (p, Some(f)));
         let c = *self.paths.get(path)?;
         let frag_n = self.book.chapters[c].fragment?;
         let ch = self.book.chapter(c);
@@ -697,26 +684,8 @@ impl HtmlDocument {
         }
     }
 
-    /// The first page of every chapter in the known prefix of the page map (`None` from
-    /// the first unknown chapter on). One pass, for queries over many chapters.
-    fn first_pages(&self) -> Vec<Option<usize>> {
-        let m = self.shared.map.lock().unwrap();
-        let mut n = Some(0usize);
-        m.chapters
-            .iter()
-            .map(|c| {
-                let first = n;
-                n = match (n, c) {
-                    (Some(k), Some(p)) => Some(k + p.keys.len()),
-                    _ => None,
-                };
-                first
-            })
-            .collect()
-    }
-
     /// The page of key `key` in chapter `c` when that chapter's pages are known (`firsts`
-    /// from [`Self::first_pages`]).
+    /// from [`MapState::first_pages`]).
     fn known_page_key(&self, firsts: &[Option<usize>], c: usize, key: (u32, u32)) -> Option<usize> {
         let first = (*firsts.get(c)?)?;
         let m = self.shared.map.lock().unwrap();
@@ -956,62 +925,6 @@ impl HtmlDocument {
         }
     }
 
-    /// Page of `pos` when known without paginating more (see [`Document::page_of_known`]):
-    /// remembered, a spine item start, or in a spine item that is parsed already; `None`
-    /// rather than parsing a chapter on the UI thread.
-    fn known_page_of(&self, pos: &Position) -> Option<usize> {
-        let Position::XPointer(x) = pos else {
-            return if self.shared.map.lock().unwrap().known_pages().1 { self.page_of(pos).ok() } else { None };
-        };
-        let frag = x.fragment()?;
-        let Some(c) = self.book.chapter_of_fragment(frag) else {
-            // Past the last fragment: the end of the book, once it is known.
-            return if self.shared.map.lock().unwrap().known_pages().1 { self.page_of(pos).ok() } else { None };
-        };
-        {
-            let m = self.shared.map.lock().unwrap();
-            let first = m.first_page(c)?;
-            let keys = &m.chapters[c].as_ref()?.keys;
-            // The start of a chapter needs no DOM.
-            let start = *x == XPointer::fragment_start(frag) || *x == XPointer::fragment_point(frag);
-            if start && !keys.is_empty() {
-                return Some(first);
-            }
-        }
-        let key = pos.to_string();
-        if let Some(p) = self.memo_page(&key) {
-            return Some(p);
-        }
-        if !self.book.has_chapter(c) {
-            return None;
-        }
-        // Chapters 0..=c are paginated and c is parsed: no layout, no parse.
-        self.page_of(pos).ok()
-    }
-
-    /// Total pages estimated from the source sizes while pagination runs.
-    fn estimate_pages(&self) -> Option<usize> {
-        let m = self.shared.map.lock().unwrap();
-        let (prefix, all) = m.known_pages();
-        if all {
-            return None;
-        }
-        let (mut pages, mut bytes, mut unknown) = (0usize, 0usize, 0usize);
-        for (c, src) in m.chapters.iter().zip(&self.book.chapters) {
-            match c {
-                Some(p) => {
-                    pages += p.keys.len();
-                    bytes += src.html.len();
-                }
-                None => unknown += src.html.len(),
-            }
-        }
-        // About 2.5 KB of XHTML per page at the default size when nothing is known yet.
-        let per_page = if pages > 0 && bytes > 0 { bytes as f64 / pages as f64 } else { 2500.0 };
-        let est = pages + (unknown as f64 / per_page.max(1.0)).round() as usize;
-        Some(est.max(prefix).max(1))
-    }
-
     /// The flow layout of the chapter holding `page` (for tests and tools).
     pub fn page_layout(&self, page: usize) -> Result<(ChapterLayout, PageSpan)> {
         let (_, laid, span, _) = self.page_items(page)?;
@@ -1072,9 +985,7 @@ impl Document for HtmlDocument {
         self.laid.borrow_mut().clear();
         self.save_positions();
         self.positions.borrow_mut().clear();
-        let shared = Arc::new(Shared::default());
-        *shared.map.lock().unwrap() = MapState::new(n);
-        self.shared = shared;
+        self.shared = Arc::new(Shared { map: Mutex::new(MapState::new(n)), ..Default::default() });
         // Cache.
         if self.cache.is_none() {
             self.cache = self.default_cache();
@@ -1126,9 +1037,7 @@ impl Document for HtmlDocument {
                     // (old) shared state, so the fresh map is never touched by them.
                     self.shared.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     self.worker = None;
-                    let shared = Arc::new(Shared::default());
-                    *shared.map.lock().unwrap() = MapState::new(n);
-                    self.shared = shared;
+                    self.shared = Arc::new(Shared { map: Mutex::new(MapState::new(n)), ..Default::default() });
                 } else if complete {
                     hit = true;
                     self.load_positions(p);
@@ -1188,7 +1097,7 @@ impl Document for HtmlDocument {
     fn page_count(&self) -> PageCount {
         // Keep a few pages after the current one known, so a reader that clamps page
         // turns to the count never waits for the background thread.
-        if self.params.is_some() {
+        if self.params.is_some() && self.read_ahead {
             self.finish_deferred();
             let _ = self.ensure_pages(self.current.get().saturating_add(3));
         }
@@ -1221,8 +1130,8 @@ impl Document for HtmlDocument {
                     crate::images::decode_scaled(markup.as_bytes(), w, h, Some(res))
                 } else {
                     let bytes = resources.read(src).ok()?;
-                    let dir = src.rfind('/').map(|i| src[..=i].to_string()).unwrap_or_default();
-                    let res = if crate::images::is_svg(&bytes) { Some(svg_resolver(resources.as_ref(), &dir, &String::from_utf8_lossy(&bytes))) } else { None };
+                    let dir = crate::book::dir_of(src);
+                    let res = if crate::images::is_svg(&bytes) { Some(svg_resolver(resources.as_ref(), dir, &String::from_utf8_lossy(&bytes))) } else { None };
                     crate::images::decode_scaled(&bytes, w, h, res)
                 }
             })
@@ -1304,7 +1213,7 @@ impl Document for HtmlDocument {
             *self.toc_cache.borrow_mut() = Some(entries);
         }
         let cache = self.toc_cache.borrow();
-        let firsts = self.first_pages();
+        let firsts = self.shared.map.lock().unwrap().first_pages();
         cache
             .as_ref()
             .unwrap()
@@ -1319,7 +1228,7 @@ impl Document for HtmlDocument {
             return Ok(Vec::new());
         }
         let mut hits = Vec::new();
-        let firsts = self.first_pages();
+        let firsts = self.shared.map.lock().unwrap().first_pages();
         for c in 0..self.book.chapters.len() {
             if self.book.chapters[c].fragment.is_none() {
                 continue;
@@ -1638,6 +1547,10 @@ impl Document for HtmlDocument {
         self.cache = Some((dir.to_path_buf(), book_id.to_string()));
     }
 
+    fn set_read_ahead(&mut self, on: bool) {
+        self.read_ahead = on;
+    }
+
     fn wait_paginated(&mut self, timeout: Duration) -> bool {
         if let Some(w) = &self.worker {
             if !w.wait(timeout) {
@@ -1649,19 +1562,66 @@ impl Document for HtmlDocument {
         self.ensure_paginated(n.saturating_sub(1)).is_ok()
     }
 
+    /// Total pages estimated from the source sizes while pagination runs.
     fn page_estimate(&self) -> Option<usize> {
-        self.estimate_pages()
+        let m = self.shared.map.lock().unwrap();
+        let (prefix, all) = m.known_pages();
+        if all {
+            return None;
+        }
+        let (mut pages, mut bytes, mut unknown) = (0usize, 0usize, 0usize);
+        for (c, src) in m.chapters.iter().zip(&self.book.chapters) {
+            match c {
+                Some(p) => {
+                    pages += p.keys.len();
+                    bytes += src.html.len();
+                }
+                None => unknown += src.html.len(),
+            }
+        }
+        // About 2.5 KB of XHTML per page at the default size when nothing is known yet.
+        let per_page = if pages > 0 && bytes > 0 { bytes as f64 / pages as f64 } else { 2500.0 };
+        let est = pages + (unknown as f64 / per_page.max(1.0)).round() as usize;
+        Some(est.max(prefix).max(1))
     }
 
+    /// Known without paginating more: remembered, a spine item start, or in a spine item that is parsed already; `None`
+    /// rather than parsing a chapter on the UI thread.
     fn page_of_known(&self, pos: &Position) -> Option<usize> {
-        self.known_page_of(pos)
+        let Position::XPointer(x) = pos else {
+            return if self.shared.map.lock().unwrap().known_pages().1 { self.page_of(pos).ok() } else { None };
+        };
+        let frag = x.fragment()?;
+        let Some(c) = self.book.chapter_of_fragment(frag) else {
+            // Past the last fragment: the end of the book, once it is known.
+            return if self.shared.map.lock().unwrap().known_pages().1 { self.page_of(pos).ok() } else { None };
+        };
+        {
+            let m = self.shared.map.lock().unwrap();
+            let first = m.first_page(c)?;
+            let keys = &m.chapters[c].as_ref()?.keys;
+            // The start of a chapter needs no DOM.
+            let start = *x == XPointer::fragment_start(frag) || *x == XPointer::fragment_point(frag);
+            if start && !keys.is_empty() {
+                return Some(first);
+            }
+        }
+        let key = pos.to_string();
+        if let Some(p) = self.memo_page(&key) {
+            return Some(p);
+        }
+        if !self.book.has_chapter(c) {
+            return None;
+        }
+        // Chapters 0..=c are paginated and c is parsed: no layout, no parse.
+        self.page_of(pos).ok()
     }
 
     fn spine_starts(&self) -> Vec<usize> {
         if !self.page_count().complete {
             return Vec::new();
         }
-        let mut v: Vec<usize> = self.first_pages().into_iter().flatten().collect();
+        let mut v: Vec<usize> = self.shared.map.lock().unwrap().first_pages().into_iter().flatten().collect();
         v.dedup();
         v
     }
@@ -1679,21 +1639,7 @@ impl Drop for HtmlDocument {
         // open goes on from a partial map instead of paginating from the start.
         self.shared.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         self.save_positions();
-        if self.cache_done.get() || self.cache_hit {
-            return;
-        }
-        let Some(path) = &self.cache_path else { return };
-        let snapshot = {
-            let m = self.shared.map.lock().unwrap_or_else(|e| e.into_inner());
-            let known = m.chapters.iter().filter(|c| c.is_some()).count();
-            (known > 0 && known < m.chapters.len()).then(|| (m.chapters.clone(), known))
-        };
-        if let Some((chapters, known)) = snapshot {
-            match paginate::write_cache(path, &chapters) {
-                Ok(()) => log::info!("ink-html: partial page map ({known} of {} spine items) saved in {}", chapters.len(), path.display()),
-                Err(e) => log::warn!("ink-html: cannot write page map {}: {e}", path.display()),
-            }
-        }
+        self.write_map(true);
     }
 }
 
@@ -1984,6 +1930,62 @@ mod tests {
             HtmlChapter { path: "b.xhtml".into(), html: html("<p>The end.</p>") },
         ];
         HtmlDocument::new(Metadata::default(), chapters, Box::new(ink_doc::MemoryLoader::default())).unwrap()
+    }
+
+    /// With the read-ahead off the count is the pages known so far (nothing is laid
+    /// out for it); turned on, the count lays out the pages after the current one.
+    #[test]
+    fn read_ahead_off_counts_only_the_known_pages() {
+        let html = |b: &str| format!("<html xmlns='http://www.w3.org/1999/xhtml'><head><title>t</title></head><body>{b}</body></html>");
+        let long: String = (0..200).map(|i| format!("<p>Paragraph {i}: the quick brown fox jumps over the lazy dog.</p>")).collect();
+        let chapters = vec![
+            HtmlChapter { path: "a.xhtml".into(), html: html("<p>Title</p>") },
+            HtmlChapter { path: "b.xhtml".into(), html: html(&long) },
+            HtmlChapter { path: "c.xhtml".into(), html: html(&long) },
+        ];
+        let mut doc = HtmlDocument::new(Metadata::default(), chapters, Box::new(ink_doc::MemoryLoader::default())).unwrap();
+        doc.set_layout(&LayoutSettings::for_screen(600, 800)).unwrap();
+        // Only the first chapter known, and no background thread to change that.
+        doc.shared.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        doc.worker = None;
+        let first = doc.shared.map.lock().unwrap().chapters[0].clone();
+        let known = first.as_ref().unwrap().keys.len();
+        let mut map = MapState::new(3);
+        map.chapters[0] = first;
+        doc.shared = Arc::new(Shared { map: Mutex::new(map), ..Default::default() });
+        doc.set_read_ahead(false);
+        assert_eq!(doc.page_count(), PageCount { pages: known, complete: false });
+        assert!(doc.page_estimate().is_some());
+        doc.set_read_ahead(true);
+        let count = doc.page_count();
+        assert!(count.pages >= known + 3, "{count:?}");
+    }
+
+    /// The foreground writes only a complete map, unless the document closes: then a
+    /// partial one (and nothing when no chapter is known).
+    #[test]
+    fn page_map_written_complete_or_partial_on_close() {
+        let dir = std::env::temp_dir().join(format!("ink-html-write-map-{}", std::process::id()));
+        let path = dir.join("m.pagemap");
+        let mut doc = long_book();
+        doc.cache_path = Some(path.clone());
+        let pages = ChapterPages { keys: vec![(0, 0)], text_bytes: 1 };
+        *doc.shared.map.lock().unwrap() = MapState::new(2);
+        doc.write_map(true);
+        assert!(!path.exists(), "nothing known");
+        doc.shared.map.lock().unwrap().chapters[0] = Some(pages.clone());
+        doc.write_map(false);
+        assert!(!path.exists(), "partial map while open");
+        doc.write_map(true);
+        assert_eq!(paginate::read_cache(&path, 2), Some(vec![Some(pages.clone()), None]));
+        doc.cache_done.set(false);
+        doc.shared.map.lock().unwrap().chapters[1] = Some(pages.clone());
+        doc.write_map(true);
+        assert_eq!(paginate::read_cache(&path, 2), Some(vec![Some(pages.clone()), None]), "complete map not written on close");
+        doc.write_map(false);
+        assert_eq!(paginate::read_cache(&path, 2), Some(vec![Some(pages.clone()), Some(pages)]));
+        assert!(doc.cache_done.get());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two chapters whose inline `<svg>` wrappers have the same node id and size but show

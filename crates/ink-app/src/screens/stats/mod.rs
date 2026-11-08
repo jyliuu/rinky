@@ -18,7 +18,7 @@ pub mod vocab;
 mod tests;
 
 use crate::router::{AppCtx, AppScreen, Route, ScreenRegistry, Transition};
-use crate::screens::common::{paint_cx, pill, swipe_step, tap_pos};
+use crate::screens::common::{input, paint_cx, pill, Input};
 use ink_device::{Key, Rect, RefreshClass, Size};
 use ink_stats::report::{self, format_duration, Day, Overview};
 use ink_text::Style;
@@ -471,32 +471,16 @@ impl AppScreen for StatsScreen {
     }
 
     fn handle(&mut self, ev: &UiEvent, cx: &mut AppCtx) -> anyhow::Result<Transition> {
-        let size = cx.screen.size();
-        if matches!(ev, UiEvent::Quit) {
-            return Ok(Transition::Exit);
-        }
-        if let UiEvent::Key(k) = ev {
-            if !k.pressed {
-                return Ok(Transition::None);
-            }
-            let hit = match k.key {
-                Key::Back => return Ok(Transition::Pop),
-                Key::PageNext | Key::PagePrev => self.step(k.key == Key::PageNext),
-                _ => None,
-            };
-            return Ok(hit.map_or(Transition::None, |h| self.act(h, size)));
-        }
-        if let Some(step) = swipe_step(ev) {
+        let hit = match input(ev, &self.hits) {
+            Some(Input::Quit) => return Ok(Transition::Exit),
+            Some(Input::Key(Key::Back)) => return Ok(Transition::Pop),
+            Some(Input::Key(k @ (Key::PageNext | Key::PagePrev))) => self.step(k == Key::PageNext),
             // On the overview a swipe switches the chart between 7 and 30 days.
-            let hit = self.step(step > 0).unwrap_or(Hit::Range(if step > 0 { 30 } else { 7 }));
-            return Ok(self.act(hit, size));
-        }
-        if let Some(pos) = tap_pos(ev) {
-            if let Some(hit) = self.hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, h)| h.clone()) {
-                return Ok(self.act(hit, size));
-            }
-        }
-        Ok(Transition::None)
+            Some(Input::Swipe(step)) => Some(self.step(step > 0).unwrap_or(Hit::Range(if step > 0 { 30 } else { 7 }))),
+            Some(Input::Hit(hit)) => Some(hit),
+            _ => None,
+        };
+        Ok(hit.map_or(Transition::None, |h| self.act(h, cx.screen.size())))
     }
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {

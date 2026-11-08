@@ -192,34 +192,114 @@ impl Path {
         }
         let local: Vec<Vec<(f32, f32)>> =
             self.contours.iter().map(|c| c.iter().map(|p| (p.0 - b.x as f32, p.1 - b.y as f32)).collect()).collect();
-        let cov = fill_contours(b.w as usize, b.h as usize, &local);
-        blend(canvas, b, &cov, value);
+        COVERAGE.with_borrow_mut(|cache| {
+            let (cov, runs) = cache.get(b.w as usize, b.h as usize, local);
+            blend_runs(canvas, b, cov, runs, value);
+        });
+    }
+}
+
+/// Bytes the per-thread [`CoverageCache`] keeps (keys, coverage and runs).
+const COVERAGE_BUDGET: usize = 4 << 20;
+
+thread_local! {
+    static COVERAGE: std::cell::RefCell<CoverageCache> = std::cell::RefCell::default();
+}
+
+/// The coverage of recently filled paths, by their exact local contours. Widgets repaint
+/// the same shapes at the same places frame after frame (key outlines, buttons, panels),
+/// and `fill_contours` is a pure function: a bit-identical input gets its earlier output.
+#[derive(Default)]
+struct CoverageCache {
+    /// (key, coverage, its [`runs`]), least recently used first. The key holds the size,
+    /// each contour's length and the bits of every point.
+    entries: Vec<(Vec<u32>, Vec<u8>, Vec<Run>)>,
+    bytes: usize,
+}
+
+/// Memory of one [`CoverageCache`] entry.
+fn entry_bytes((key, cov, runs): &(Vec<u32>, Vec<u8>, Vec<Run>)) -> usize {
+    4 * key.len() + cov.len() + runs.len() * std::mem::size_of::<Run>()
+}
+
+impl CoverageCache {
+    fn get(&mut self, w: usize, h: usize, contours: Vec<Vec<(f32, f32)>>) -> (&[u8], &[Run]) {
+        let mut key = vec![w as u32, h as u32];
+        for c in &contours {
+            key.push(c.len() as u32);
+            key.extend(c.iter().flat_map(|p| [p.0.to_bits(), p.1.to_bits()]));
+        }
+        let entry = match self.entries.iter().position(|e| e.0 == key) {
+            Some(i) => self.entries.remove(i),
+            None => {
+                let cov = fill_contours(w, h, &contours);
+                let runs = runs(&cov, w);
+                let entry = (key, cov, runs);
+                self.bytes += entry_bytes(&entry);
+                entry
+            }
+        };
+        while self.bytes > COVERAGE_BUDGET && !self.entries.is_empty() {
+            self.bytes -= entry_bytes(&self.entries.remove(0));
+        }
+        self.entries.push(entry);
+        let (_, cov, runs) = self.entries.last().expect("just pushed");
+        (cov, runs)
+    }
+}
+
+/// A run of covered pixels in one row of a coverage mask: (start, end) indices and
+/// whether every pixel of it is fully covered.
+type Run = (usize, usize, bool);
+
+/// The runs of nonzero coverage of `cov`, a mask `w` wide.
+fn runs(cov: &[u8], w: usize) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::new();
+    if w == 0 {
+        return out;
+    }
+    // Row by row, each run found with a scan for its first and its last pixel.
+    for (row0, row) in (0..).step_by(w).zip(cov.chunks_exact(w)) {
+        let mut x = 0;
+        while let Some(s) = row[x..].iter().position(|&a| a != 0) {
+            let s = x + s;
+            let full = row[s] == 255;
+            let n = row[s..].iter().position(|&a| a == 0 || (a == 255) != full).unwrap_or(row.len() - s);
+            out.push((row0 + s, row0 + s + n, full));
+            x = s + n;
+        }
+    }
+    out
+}
+
+/// [`blend`] of a mask through its [`runs`]: pixels without coverage are not visited and
+/// fully covered ones are set, so a large outline or fill costs only its covered pixels.
+/// Row slices of the part of `r` that drawing may change, not a get/set per pixel.
+fn blend_runs(canvas: &mut Canvas, r: Rect, cov: &[u8], runs: &[Run], value: u8) {
+    let (area, rw, v) = (drawable(canvas, r), r.w as usize, value as u32);
+    for &(s, e, full) in runs {
+        let (y, x) = (r.y + (s / rw) as i32, r.x + (s % rw) as i32);
+        let (x0, x1) = (x.max(area.x), (x + (e - s) as i32).min(area.right()));
+        if y < area.y || y >= area.bottom() || x0 >= x1 {
+            continue;
+        }
+        let p0 = y as usize * canvas.width + x0 as usize;
+        let row = &mut canvas.pixels[p0..p0 + (x1 - x0) as usize];
+        if full {
+            row.fill(value);
+            continue;
+        }
+        // One formula for every coverage: with no branch the loop vectorizes.
+        for (p, &a) in row.iter_mut().zip(&cov[s + (x0 - x) as usize..]) {
+            let a = a as u32;
+            *p = ((*p as u32 * (255 - a) + v * a) / 255) as u8;
+        }
     }
 }
 
 /// Blends `value` into `r` of the canvas with per-pixel coverage `cov` (`r.w * r.h`).
 pub fn blend(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {
-    // Row slices of the part of `r` that drawing may change, instead of a bounds-checked
-    // get/set per pixel: the sheets and panels blend their full-size outlines on every
-    // paint.
-    let area = drawable(canvas, r);
-    if area.is_empty() {
-        return;
-    }
-    let (rw, cw, n) = (r.w as usize, canvas.width, area.w as usize);
-    let v = value as u32;
-    for y in area.y..area.bottom() {
-        let c0 = (y - r.y) as usize * rw + (area.x - r.x) as usize;
-        let p0 = y as usize * cw + area.x as usize;
-        let row = &mut canvas.pixels[p0..p0 + n];
-        for (p, &a) in row.iter_mut().zip(&cov[c0..c0 + n]) {
-            let a = a as u32;
-            if a == 0 {
-                continue;
-            }
-            *p = if a >= 255 { value } else { ((*p as u32 * (255 - a) + v * a) / 255) as u8 };
-        }
-    }
+    blend_runs(canvas, r, cov, &runs(cov, r.w as usize), value);
 }
 
 /// Fills a rounded rectangle.
@@ -230,6 +310,40 @@ pub fn fill_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, value: u8) {
 /// Strokes a rounded rectangle `width` thick inside `r`.
 pub fn stroke_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, width: f32, value: u8) {
     Path::new().round_rect_outline(r.x as f32, r.y as f32, r.w as f32, r.h as f32, radius, width).fill(canvas, value);
+}
+
+/// Rows at the top of a [`Path::top_round_rect`] of radius `radius` that its corners
+/// reach, or `None` when they reach the whole of `r` (a short shape).
+fn top_band(r: Rect, radius: f32) -> Option<u32> {
+    let band = radius.max(0.0).ceil() as u32 + 2;
+    (band < r.h).then_some(band)
+}
+
+/// Fills [`Path::top_round_rect`] of `r` with the same pixels: the rounded rows through
+/// the path, the rest as one rectangle. A sheet as tall as the screen would otherwise
+/// take a coverage mask of its whole area (a few MB, most of the coverage cache).
+pub fn fill_top_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, value: u8) {
+    let (x, y, w) = (r.x as f32, r.y as f32, r.w as f32);
+    let Some(band) = top_band(r, radius) else {
+        Path::new().top_round_rect(x, y, w, r.h as f32, radius).fill(canvas, value);
+        return;
+    };
+    Path::new().top_round_rect(x, y, w, band as f32, radius).fill(canvas, value);
+    canvas.fill_rect(r.x, r.y + band as i32, r.w as i32, (r.h - band) as i32, value);
+}
+
+/// Fills [`Path::top_round_rect_outline`] of `r` (`width` whole pixels) with the same
+/// pixels: the rounded rows through the path, the side edges below them as rectangles.
+pub fn stroke_top_round_rect(canvas: &mut Canvas, r: Rect, radius: f32, width: i32, value: u8) {
+    let (x, y, w, wf) = (r.x as f32, r.y as f32, r.w as f32, width as f32);
+    let Some(band) = top_band(r, radius).filter(|b| *b as i32 > width) else {
+        Path::new().top_round_rect_outline(x, y, w, r.h as f32, radius, wf).fill(canvas, value);
+        return;
+    };
+    Path::new().top_round_rect_outline(x, y, w, band as f32, radius, wf).fill(canvas, value);
+    let (y0, h) = (r.y + band as i32, (r.h - band) as i32);
+    canvas.fill_rect(r.x, y0, width, h, value);
+    canvas.fill_rect(r.right() - width, y0, width, h, value);
 }
 
 /// Draws `src` scaled to fit inside `r` (aspect kept, centred; each target pixel is the
@@ -306,6 +420,33 @@ pub fn center(r: Rect) -> (f32, f32) {
 mod tests {
     use super::*;
 
+    /// The banded top-rounded fill and outline draw exactly what one path over the whole
+    /// shape draws, also clipped, short and on a gray background.
+    #[test]
+    fn top_round_rect_bands_match_the_whole_path() {
+        let cases = [
+            (Rect::new(0, 240, 1272, 1456), 24.0, 3),
+            (Rect::new(0, 7, 300, 200), 24.5, 3),
+            (Rect::new(-5, 10, 200, 90), 10.0, 1),
+            (Rect::new(3, 20, 180, 20), 24.0, 3),
+            (Rect::new(10, 30, 150, 60), 0.0, 4),
+        ];
+        for (r, radius, width) in cases {
+            for clip in [None, Some(Rect::new(0, r.y + 5, 120, 40))] {
+                let (mut a, mut b) = (Canvas::new(400.max(r.right() as usize + 4), r.bottom() as usize + 4), Canvas::new(1, 1));
+                a.pixels.fill(0x88);
+                a.set_clip(clip);
+                b.clone_from(&a);
+                let (x, y, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+                Path::new().top_round_rect(x, y, w, h, radius).fill(&mut a, 255);
+                Path::new().top_round_rect_outline(x, y, w, h, radius, width as f32).fill(&mut a, 0);
+                fill_top_round_rect(&mut b, r, radius, 255);
+                stroke_top_round_rect(&mut b, r, radius, width, 0);
+                assert!(a.pixels == b.pixels, "{r:?} radius {radius} width {width} clip {clip:?}");
+            }
+        }
+    }
+
     /// `blend` before the row-slice version (2026-11-02): get/set per pixel.
     fn blend_reference(canvas: &mut Canvas, r: Rect, cov: &[u8], value: u8) {
         for y in 0..r.h as i32 {
@@ -351,6 +492,25 @@ mod tests {
 
     fn dark(c: &Canvas) -> usize {
         c.pixels.iter().filter(|v| **v < 128).count()
+    }
+
+    #[test]
+    fn a_repeated_fill_reuses_its_coverage_and_draws_the_same() {
+        let shape = |x: f32| {
+            let mut p = Path::new();
+            p.round_rect_outline(x, 30.5, 70.0, 40.0, 9.0, 3.0);
+            p
+        };
+        let (mut a, mut b) = (Canvas::new(200, 120), Canvas::new(200, 120));
+        shape(20.0).fill(&mut a, 0);
+        let cached = COVERAGE.with_borrow(|c| c.entries.len());
+        shape(20.0).fill(&mut b, 0);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.len()), cached, "the second fill is a hit");
+        assert_eq!(a.pixels, b.pixels);
+        // Another place is another key; the old entry stays usable.
+        shape(90.0).fill(&mut a, 0);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.len()), cached + 1);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.iter().map(entry_bytes).sum::<usize>()), COVERAGE.with_borrow(|c| c.bytes));
     }
 
     #[test]

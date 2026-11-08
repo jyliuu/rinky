@@ -15,16 +15,17 @@
 //! ticks, the return page), which the reader fills with
 //! `ReaderScreen::menu_overlay`.
 
-use super::overlay::{Bar, Overlay, OverlayKind, PageScrim, Rule};
+use super::overlay::{keyword_icon, Bar, Overlay, OverlayKind, Rule};
 use crate::router::{AppCtx, Route, Transition};
 use ink_device::{Rect, RefreshClass, Size};
 use ink_doc::Position;
 use ink_text::Style;
 use ink_ui::bars::APP_BAR_H;
-use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
+use ink_ui::controls::{paint_round_button, paint_slider_knob, paint_slider_track};
+use ink_ui::draw::{fill_round_rect, Path};
 use ink_ui::theme::space;
 use ink_ui::widget::split_cols;
-use ink_ui::{AppBar, BarAction, Button, EventResult, Icon, Menu, PaintCx, Slider, TouchKind, UiEvent, Widget};
+use ink_ui::{AppBar, BarAction, Button, EventResult, Icon, PaintCx, Slider, TouchKind, UiEvent, Widget};
 
 /// Height of the top bar (the app bar alone: the menu shows no status bar; the page's
 /// status bar is under it).
@@ -123,9 +124,8 @@ pub fn build(info: &MenuInfo, plugins: &[String], size: Size) -> Overlay {
 /// menu entries (a row at the top of the bottom bar, at most [`PLUGIN_PILLS`] pills, the
 /// last one `plugin-more` when there are more; actions `plugin-menu:I`).
 pub fn build_with(info: &MenuInfo, extra: &MenuExtra, plugins: &[String], size: Size) -> Overlay {
-    let mut o = Overlay::new(OverlayKind::Menu);
+    let mut o = Overlay::over_page(OverlayKind::Menu, size, "close");
     let w = size.w;
-    o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
     // Top: the app bar, over the page's status bar.
     let top = o.tree.add(None, Box::new(Bar::new(Rule::None)), Rect::new(0, 0, w, TOP_H));
     let mut bar = AppBar::new(info.title.clone()).with_back();
@@ -137,17 +137,9 @@ pub fn build_with(info: &MenuInfo, extra: &MenuExtra, plugins: &[String], size: 
     }
     let bar_r = Rect::new(0, 0, w, APP_BAR_H);
     o.buttons.push(("back".into(), AppBar::back_rect(bar_r)));
-    let rects = bar.action_rects(bar_r);
-    for ((_, action, _), r) in TOOLS.iter().zip(&rects) {
-        if r.w > 0 {
-            o.buttons.push((action.to_string(), *r));
-        }
-    }
-    let bar_id = o.tree.add(Some(top), Box::new(bar), bar_r);
-    if info.bookmarked {
-        if let Some(r) = TOOLS.iter().position(|t| t.1 == "bookmark").map(|i| rects[i]).filter(|r| r.w > 0) {
-            o.ids.insert("marked", o.tree.add(Some(bar_id), Box::new(Marked), r));
-        }
+    let bar_id = o.app_bar(Some(top), bar, bar_r);
+    if let Some(r) = o.button_rect("bookmark").filter(|_| info.bookmarked) {
+        o.ids.insert("marked", o.tree.add(Some(bar_id), Box::new(Marked), r));
     }
     // Bottom: progress row, scrubber, then the dock of plugin entries.
     let extra_h = if plugins.is_empty() { 0 } else { PLUGIN_ROW_H };
@@ -185,28 +177,23 @@ pub fn build_with(info: &MenuInfo, extra: &MenuExtra, plugins: &[String], size: 
     o
 }
 
+/// Icons of dock entries by keywords of their label ([`keyword_icon`]).
+const DOCK_ICONS: [(&[&str], Icon); 7] = [
+    (&["dict", "look", "define"], Icon::Book),
+    (&["wiki", "translat"], Icon::Globe),
+    (&["insightful", "ai"], Icon::Sparkle),
+    (&["sync"], Icon::Sync),
+    (&["calibre", "librar", "opds"], Icon::Library),
+    (&["ssh", "terminal"], Icon::Terminal),
+    (&["usb"], Icon::Usb),
+];
+
 /// The icon of a dock entry, picked from its label.
 pub fn dock_icon(label: &str) -> Icon {
-    let l = label.to_lowercase();
-    let has = |ks: &[&str]| ks.iter().any(|k| l.contains(k));
     if label == PLUGIN_MORE_LABEL {
         Icon::More
-    } else if has(&["dict", "look", "define"]) {
-        Icon::Book
-    } else if has(&["wiki", "translat"]) {
-        Icon::Globe
-    } else if has(&["insightful", "ai"]) {
-        Icon::Sparkle
-    } else if has(&["sync"]) {
-        Icon::Sync
-    } else if has(&["calibre", "librar", "opds"]) {
-        Icon::Library
-    } else if has(&["ssh", "terminal"]) {
-        Icon::Terminal
-    } else if has(&["usb"]) {
-        Icon::Usb
     } else {
-        Icon::Star
+        keyword_icon(label, &DOCK_ICONS)
     }
 }
 
@@ -215,11 +202,7 @@ const DOCK_PX: f32 = 28.0;
 
 /// The label of a dock entry `room` px wide: whole, or ellipsized.
 pub fn dock_caption(cx: &mut PaintCx, label: &str, room: f32) -> String {
-    if cx.text_width(Style::Regular, DOCK_PX, label) <= room {
-        label.to_string()
-    } else {
-        cx.ellipsize(label, DOCK_PX, Style::Regular, room)
-    }
+    cx.ellipsize(label, DOCK_PX, Style::Regular, room)
 }
 
 /// A plugin entry of the menu's dock: an icon over a short label, no outline. Reports
@@ -292,15 +275,8 @@ impl Widget for PluginPill {
 
 /// The More menu: a [`Menu`] under the More button with [`MORE`]'s entries.
 pub fn build_more(size: Size) -> Overlay {
-    let mut o = Overlay::new(OverlayKind::Menu);
-    o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
-    let menu = Menu::new(MORE.iter().map(|(l, a)| (l.to_string(), a.to_string())).collect());
-    let mw = 600u32.min(size.w.saturating_sub(48));
-    let r = Rect::new(size.w as i32 - mw as i32 - space(3), space(3), mw, menu.height());
-    for (i, (_, a)) in MORE.iter().enumerate() {
-        o.buttons.push((a.to_string(), Rect::new(r.x, r.y + (i as u32 * menu.row_h) as i32, r.w, menu.row_h)));
-    }
-    o.ids.insert("more", o.tree.add(None, Box::new(menu), r));
+    let mut o = Overlay::over_page(OverlayKind::Menu, size, "close");
+    o.menu("more", MORE.iter().map(|(l, a)| (l.to_string(), a.to_string())).collect(), size, |_| space(3));
     o
 }
 
@@ -315,18 +291,11 @@ const PLUGIN_MORE_LABEL: &str = "More";
 /// standing on the plugin row, right-aligned; actions `plugin-menu:I` with I the index in
 /// `plugins`. `plugins` are all the entries, as given to [`build_with`].
 pub fn build_plugin_more(plugins: &[String], size: Size) -> Overlay {
-    let mut o = Overlay::new(OverlayKind::Menu);
-    o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
+    let mut o = Overlay::over_page(OverlayKind::Menu, size, "close");
     let first = (PLUGIN_PILLS - 1).min(plugins.len());
-    let items: Vec<(String, String)> = plugins.iter().enumerate().skip(first).map(|(i, l)| (l.clone(), format!("plugin-menu:{i}"))).collect();
-    let menu = Menu::new(items.clone());
-    let mw = 600u32.min(size.w.saturating_sub(48));
+    let items = plugins.iter().enumerate().skip(first).map(|(i, l)| (l.clone(), format!("plugin-menu:{i}"))).collect();
     let bottom = size.h.saturating_sub(BOTTOM_H + PLUGIN_ROW_H) as i32;
-    let r = Rect::new(size.w as i32 - mw as i32 - space(3), (bottom - menu.height() as i32 - space(1)).max(space(3)), mw, menu.height());
-    for (i, (_, a)) in items.iter().enumerate() {
-        o.buttons.push((a.clone(), Rect::new(r.x, r.y + (i as u32 * menu.row_h) as i32, r.w, menu.row_h)));
-    }
-    o.ids.insert("plugin-more", o.tree.add(None, Box::new(menu), r));
+    o.menu("plugin-more", items, size, |h| (bottom - h as i32 - space(1)).max(space(3)));
     o
 }
 
@@ -429,7 +398,6 @@ impl Widget for Scrubber {
         let t = cx.theme.clone();
         let (fg, bg) = (t.fg, t.bg);
         let (minus, track, plus) = Slider::parts(b);
-        let ty = track.y as f32 + track.h as f32 / 2.0;
         let kx = track.x as f32 + self.fraction(self.value_page()) * track.w as f32;
         // Caption half.
         let top = Rect::new(b.x, b.y, b.w, b.h / 2);
@@ -454,15 +422,11 @@ impl Widget for Scrubber {
             }
         }
         // Page step buttons.
-        for (r, icon) in [(minus, Icon::Back), (plus, Icon::Forward)] {
-            stroke_round_rect(cx.canvas, r, r.w as f32 / 2.0, t.border_px as f32, fg);
-            cx.icon(icon, r, r.w / 2, fg);
-        }
+        paint_round_button(cx, minus, Icon::Back);
+        paint_round_button(cx, plus, Icon::Forward);
         // Track, fill, chapter ticks (white notches in the fill, black after it), knob.
-        let th = 12u32;
-        let tr = Rect::new(track.x, (ty - th as f32 / 2.0) as i32, track.w, th);
-        fill_round_rect(cx.canvas, tr, th as f32 / 2.0, t.track());
-        fill_round_rect(cx.canvas, Rect::new(tr.x, tr.y, (kx - track.x as f32).max(0.0) as u32, th), th as f32 / 2.0, fg);
+        let knob = paint_slider_track(cx, track, self.fraction(self.value_page()), false);
+        let ty = knob.1;
         let mut last_x = i32::MIN;
         for c in &self.chapters {
             let x = track.x + (self.fraction(c.page) * track.w as f32) as i32;
@@ -473,9 +437,7 @@ impl Widget for Scrubber {
             let col = if (x as f32) < kx - 2.0 { bg } else { fg };
             cx.canvas.fill_rect(x - 2, (ty - 16.0) as i32, 4, 32, col);
         }
-        let kr = (track.h as f32 * 0.28).min(26.0);
-        Path::new().circle(kx, ty, kr).fill(cx.canvas, fg);
-        Path::new().circle(kx, ty, kr - 5.0).fill(cx.canvas, if self.dragging { fg } else { bg });
+        paint_slider_knob(cx, track, knob, self.dragging);
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
@@ -557,7 +519,7 @@ impl super::ReaderScreen {
                 self.open_overlay(o, cx);
             }
             "export" => {
-                let text = self.export_highlights(cx.paths);
+                let text = self.export_highlights(cx.paths, cx.settings.export_format());
                 crate::export::toast(cx.plugins, text);
             }
             _ if a.starts_with("hl:") => {
@@ -569,9 +531,10 @@ impl super::ReaderScreen {
         Ok(Some(Transition::None))
     }
 
-    /// Writes this book's highlights, notes and bookmarks to `exports/<title>.md` and
-    /// returns the toast text. The open document gives the page numbers and percents.
-    fn export_highlights(&mut self, paths: &ink_store::Paths) -> String {
+    /// Writes this book's highlights, notes and bookmarks to `exports/<title>.<ext>` in
+    /// `format` and returns the toast text. The open document gives the page numbers and
+    /// percents.
+    fn export_highlights(&mut self, paths: &ink_store::Paths, format: ink_store::export::ExportFormat) -> String {
         let (title, authors, total) = match self.doc.as_deref() {
             Some(d) => (d.metadata().title.clone(), d.metadata().authors.clone(), d.page_count().pages as u32),
             None => (String::new(), Vec::new(), 0),
@@ -583,7 +546,7 @@ impl super::ReaderScreen {
             let pos = s.parse::<Position>().ok()?;
             doc?.page_of(&pos).ok().map(|p| p as u32)
         };
-        crate::export::export_one(paths, &entry, &ink_store::export::Locator { page_of: &page_of, total: (total > 0).then_some(total) })
+        crate::export::export_one(paths, &entry, &ink_store::export::Locator { page_of: &page_of, total: (total > 0).then_some(total) }, format)
     }
 }
 

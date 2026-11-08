@@ -678,25 +678,10 @@ impl App {
         }
         let from = self.stack.last().map_or("(none)", |s| s.name());
         let cause = ev.map_or_else(|| "no event".to_string(), describe);
-        match &t {
-            Transition::None => {}
-            Transition::Push(r) => log::info!("screen: {from} -> {} (push {r:?}; {cause})", r.kind()),
-            Transition::Replace(r) => log::info!("screen: {from} -> {} (replace {r:?}; {cause})", r.kind()),
-            Transition::Pop => {
-                let below = self.stack.len().checked_sub(2).and_then(|i| self.stack.get(i)).map_or("(exit)", |s| s.name());
-                log::info!("screen: {from} -> {below} (back; {cause})");
-                if below == "(exit)" {
-                    crate::logging::set_exit_reason(format!("back from the last screen {from} after {cause}"), false);
-                }
-            }
-            Transition::Exit => {
-                log::info!("screen: {from} -> (exit) ({cause})");
-                crate::logging::set_exit_reason(exit_reason(ev, from), false);
-            }
-        }
         match t {
             Transition::None => {}
             Transition::Push(r) => {
+                log::info!("screen: {from} -> {} (push {r:?}; {cause})", r.kind());
                 self.start_span(&r);
                 let s = self.registry.build(&r)?;
                 self.below.push((self.device.screen.night_mode(), self.epoch));
@@ -719,6 +704,7 @@ impl App {
                 }
             }
             Transition::Replace(r) => {
+                log::info!("screen: {from} -> {} (replace {r:?}; {cause})", r.kind());
                 self.start_span(&r);
                 let s = self.registry.build(&r)?;
                 self.exit_top(providers);
@@ -728,9 +714,15 @@ impl App {
                 self.mark_full_screen_top();
             }
             Transition::Pop => {
-                if let Some(below) = self.stack.len().checked_sub(2).and_then(|i| self.stack.get(i)) {
-                    let name = format!("screen {}: back -> first frame", below.name());
-                    self.span_from_event(name);
+                match self.stack.len().checked_sub(2).and_then(|i| self.stack.get(i)).map(|s| s.name()) {
+                    Some(below) => {
+                        log::info!("screen: {from} -> {below} (back; {cause})");
+                        self.span_from_event(format!("screen {below}: back -> first frame"));
+                    }
+                    None => {
+                        log::info!("screen: {from} -> (exit) (back; {cause})");
+                        crate::logging::set_exit_reason(format!("back from the last screen {from} after {cause}"), false);
+                    }
                 }
                 // What the popped screen covered; all of it when the night mode changed
                 // or the canvas below stopped holding the screen below (`epoch`).
@@ -747,6 +739,8 @@ impl App {
                 self.reveal_top(providers, exposed)?;
             }
             Transition::Exit => {
+                log::info!("screen: {from} -> (exit) ({cause})");
+                crate::logging::set_exit_reason(exit_reason(ev, from), false);
                 self.exit_all(providers);
                 return Ok(false);
             }

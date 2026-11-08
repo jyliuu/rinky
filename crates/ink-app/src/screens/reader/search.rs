@@ -251,14 +251,9 @@ pub fn build(query: &str, hits: Option<&[HitRow]>, keyboard: bool, size: Size) -
 /// empty titles are not shown).
 pub fn build_with_chapters(query: &str, hits: Option<&[HitRow]>, chapters: &[String], keyboard: bool, size: Size) -> Overlay {
     let mut o = Overlay::new(OverlayKind::Search);
-    let w = size.w;
     let root = o.tree.add(None, Box::new(Bar::new(Rule::None)), Rect::from_size(size));
-    let bar = AppBar::new("Search in book").action(BarAction::icon(Icon::Close, "close"));
-    let bar_r = Rect::new(0, 0, w, APP_BAR_H);
-    for (r, a) in bar.action_rects(bar_r).into_iter().zip(&bar.actions) {
-        o.buttons.push((a.action.clone(), r));
-    }
-    o.tree.add(Some(root), Box::new(bar), bar_r);
+    let w = size.w;
+    o.app_bar(Some(root), AppBar::new("Search in book").action(BarAction::icon(Icon::Close, "close")), Rect::new(0, 0, w, APP_BAR_H));
     let field_r = Rect::new(32, APP_BAR_H as i32 + 24, w.saturating_sub(64 + 236), FIELD_H);
     let mut field = TextInput::new("Words to find", "query");
     field.set_text(query);

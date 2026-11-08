@@ -25,9 +25,9 @@
 use crate::draw::{fill_round_rect, stroke_round_rect};
 use crate::gesture::{Touch, TouchKind};
 use crate::icon::Icon;
-use crate::widget::{EventResult, PaintCx, Widget};
+use crate::widget::{take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
-use ink_device::{Point, Rect, RefreshClass, Size};
+use ink_device::{Point, Rect, Size};
 use ink_text::Style;
 
 /// Border of a pressed key (and of shift while it is on), px, drawn inside the face.
@@ -80,12 +80,12 @@ pub struct KeySpec {
 }
 
 impl KeySpec {
-    fn ch(c: &str, alternates: &[&str]) -> Self {
+    fn ch(c: &str, alternates: Vec<String>) -> Self {
         KeySpec {
             label: c.into(),
             action: KeyAction::Char(c.into()),
             width: 2,
-            alternates: alternates.iter().map(|s| s.to_string()).collect(),
+            alternates,
             icon: None,
         }
     }
@@ -107,84 +107,43 @@ pub struct KeyboardLayout {
 /// Languages with a letter layout, in globe-key order.
 pub const LANGUAGES: [&str; 7] = ["en", "da", "de", "fr", "es", "sv", "nb"];
 
-/// Display name of a keyboard language (shown on the space bar).
+/// Each letter layout, in [`LANGUAGES`] order: language, display name (shown on the
+/// space bar), the three rows of letters.
+const LETTERS: [(&str, &str, [&str; 3]); 7] = [
+    ("en", "English", ["q w e r t y u i o p", "a s d f g h j k l", "z x c v b n m"]),
+    ("da", "Dansk", ["q w e r t y u i o p å", "a s d f g h j k l æ ø", "z x c v b n m"]),
+    ("de", "Deutsch", ["q w e r t z u i o p ü", "a s d f g h j k l ö ä", "y x c v b n m ß"]),
+    ("fr", "Français", ["a z e r t y u i o p", "q s d f g h j k l m", "w x c v b n '"]),
+    ("es", "Español", ["q w e r t y u i o p", "a s d f g h j k l ñ", "z x c v b n m"]),
+    ("sv", "Svenska", ["q w e r t y u i o p å", "a s d f g h j k l ö ä", "z x c v b n m"]),
+    ("nb", "Norsk", ["q w e r t y u i o p å", "a s d f g h j k l ø æ", "z x c v b n m"]),
+];
+
+/// Display name of a keyboard language (shown on the space bar); English for an unknown
+/// one.
 pub fn language_name(lang: &str) -> &'static str {
-    match lang {
-        "da" => "Dansk",
-        "de" => "Deutsch",
-        "fr" => "Français",
-        "es" => "Español",
-        "sv" => "Svenska",
-        "nb" => "Norsk",
-        _ => "English",
-    }
+    LETTERS.iter().find(|l| l.0 == lang).map_or("English", |l| l.1)
 }
 
-fn alternates(lang: &str, key: &str) -> &'static [&'static str] {
-    match (lang, key) {
-        ("da", "a") => &["å", "æ", "à", "á", "â", "ä"],
-        ("da", "e") => &["é", "è", "ê", "ë"],
-        ("da", "o") => &["ø", "ö", "ó", "ô"],
-        ("da", "u") => &["ü", "ú"],
-        ("de", "a") => &["ä", "à", "á", "â"],
-        ("de", "o") => &["ö", "ó", "ô"],
-        ("de", "u") => &["ü", "ú", "ù", "û"],
-        ("de", "s") => &["ß"],
-        ("de", "e") => &["é", "è", "ê"],
-        ("fr", "e") => &["é", "è", "ê", "ë"],
-        ("fr", "a") => &["à", "â", "æ"],
-        ("fr", "c") => &["ç"],
-        ("fr", "u") => &["ù", "û", "ü"],
-        ("fr", "i") => &["î", "ï"],
-        ("fr", "o") => &["ô", "œ"],
-        ("fr", "y") => &["ÿ"],
-        ("es", "a") => &["á", "à", "ä", "â"],
-        ("es", "e") => &["é", "è", "ë", "ê"],
-        ("es", "i") => &["í", "ì", "ï"],
-        ("es", "o") => &["ó", "ò", "ö", "º"],
-        ("es", "u") => &["ú", "ü", "ù"],
-        ("es", "n") => &["ñ"],
-        ("es", "c") => &["ç"],
-        ("es", "?") => &["¿"],
-        ("es", "!") => &["¡"],
-        ("es", ".") => &["¿", "¡", "…"],
-        ("sv", "a") => &["à", "á", "æ"],
-        ("sv", "e") => &["é", "è", "ë"],
-        ("sv", "o") => &["ø", "ó", "ô"],
-        ("sv", "u") => &["ü", "ú"],
-        ("sv", "ö") => &["ø"],
-        ("sv", "ä") => &["æ"],
-        ("nb", "a") => &["ä", "à", "á"],
-        ("nb", "e") => &["é", "è", "ê"],
-        ("nb", "o") => &["ö", "ó", "ô"],
-        ("nb", "u") => &["ü", "ú"],
-        ("nb", "ø") => &["ö"],
-        ("nb", "æ") => &["ä"],
-        (_, "a") => &["à", "á", "â", "ä", "æ", "ã", "å", "ā"],
-        (_, "c") => &["ç", "ć", "č"],
-        (_, "e") => &["è", "é", "ê", "ë", "ē", "ę"],
-        (_, "i") => &["ì", "í", "î", "ï"],
-        (_, "n") => &["ñ", "ń"],
-        (_, "o") => &["ò", "ó", "ô", "ö", "õ", "ø", "œ"],
-        (_, "s") => &["ß", "ś", "š"],
-        (_, "u") => &["ù", "ú", "û", "ü", "ū"],
-        (_, "y") => &["ý", "ÿ"],
-        (_, "z") => &["ž", "ź", "ż"],
-        (_, "l") => &["ł"],
-        (_, "-") => &["–", "—", "·"],
-        (_, ".") => &["…"],
-        (_, "'") => &["’", "‘", "‚"],
-        (_, "\"") => &["“", "”", "„", "«", "»"],
-        (_, "?") => &["¿"],
-        (_, "!") => &["¡"],
-        (_, "€") => &["$", "£", "¥", "¢"],
-        (_, "%") => &["‰"],
-        (_, "0") => &["°"],
-        (_, "1") => &["¹", "½"],
-        (_, "2") => &["²"],
-        (_, "3") => &["³"],
-        _ => &[],
-    }
+/// Long-press alternates in the layouts' space-separated style: per language (`""`: for
+/// every language, after its own), `|`-separated groups of a key and its alternates.
+const ALTERNATES: [(&str, &str); 9] = [
+    ("da", "a å æ à á â ä|e é è ê ë|o ø ö ó ô|u ü ú"),
+    ("de", "a ä à á â|o ö ó ô|u ü ú ù û|s ß|e é è ê"),
+    ("fr", "e é è ê ë|a à â æ|c ç|u ù û ü|i î ï|o ô œ|y ÿ"),
+    ("es", "a á à ä â|e é è ë ê|i í ì ï|o ó ò ö º|u ú ü ù|n ñ|c ç|? ¿|! ¡|. ¿ ¡ …"),
+    ("sv", "a à á æ|e é è ë|o ø ó ô|u ü ú|ö ø|ä æ"),
+    ("nb", "a ä à á|e é è ê|o ö ó ô|u ü ú|ø ö|æ ä"),
+    ("", "a à á â ä æ ã å ā|c ç ć č|e è é ê ë ē ę|i ì í î ï|n ñ ń|o ò ó ô ö õ ø œ|s ß ś š|u ù ú û ü ū|y ý ÿ|z ž ź ż|l ł"),
+    ("", "- – — ·|. …|' ’ ‘ ‚|\" “ ” „ « »|? ¿|! ¡"),
+    ("", "€ $ £ ¥ ¢|% ‰|0 °|1 ¹ ½|2 ²|3 ³"),
+];
+
+/// The alternates of `key` on `lang`'s keyboard.
+fn alternates(lang: &str, key: &str) -> Vec<String> {
+    let mut groups = ALTERNATES.iter().filter(|(l, _)| *l == lang || l.is_empty()).flat_map(|(_, g)| g.split('|'));
+    let alternates = groups.find_map(|g| g.strip_prefix(key)?.strip_prefix(' '));
+    alternates.map_or_else(Vec::new, |a| a.split(' ').map(String::from).collect())
 }
 
 fn units(row: &[KeySpec]) -> u32 {
@@ -220,16 +179,7 @@ impl KeyboardLayout {
 
     /// The letter layout of a language (`en`, `da`, `de`, `fr`, `es`, `sv`, `nb`).
     pub fn letters(lang: &str) -> Option<Self> {
-        let rows: [&str; 3] = match lang {
-            "en" => ["q w e r t y u i o p", "a s d f g h j k l", "z x c v b n m"],
-            "da" => ["q w e r t y u i o p å", "a s d f g h j k l æ ø", "z x c v b n m"],
-            "de" => ["q w e r t z u i o p ü", "a s d f g h j k l ö ä", "y x c v b n m ß"],
-            "fr" => ["a z e r t y u i o p", "q s d f g h j k l m", "w x c v b n '"],
-            "es" => ["q w e r t y u i o p", "a s d f g h j k l ñ", "z x c v b n m"],
-            "sv" => ["q w e r t y u i o p å", "a s d f g h j k l ö ä", "z x c v b n m"],
-            "nb" => ["q w e r t y u i o p å", "a s d f g h j k l ø æ", "z x c v b n m"],
-            _ => return None,
-        };
+        let rows = LETTERS.iter().find(|l| l.0 == lang)?.2;
         let (r1, r2, letters3) = (keys(lang, rows[0]), keys(lang, rows[1]), keys(lang, rows[2]));
         let total = units(&r1).max(units(&r2)).max(units(&letters3) + 6);
         let side = (total - units(&letters3)) / 2;
@@ -239,7 +189,7 @@ impl KeyboardLayout {
         let mut bottom = Self::bottom_row("?123", "symbols", ".", total);
         // The "." key keeps the language's punctuation alternates (Spanish ¿ ¡).
         if let Some(k) = bottom.iter_mut().find(|k| k.label == ".") {
-            k.alternates = alternates(lang, ".").iter().map(|s| s.to_string()).collect();
+            k.alternates = alternates(lang, ".");
         }
         Some(KeyboardLayout { name: lang.into(), rows: vec![r1, r2, r3, bottom] })
     }
@@ -391,14 +341,16 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
-    /// English keyboard (globe key cycles English, Danish, German, French).
+    /// English keyboard (the globe key cycles every language of [`LANGUAGES`]).
     pub fn new() -> Self {
-        Self::with_languages(&LANGUAGES)
+        Self::with_language_list(&LANGUAGES.map(String::from))
     }
 
-    /// A keyboard for `languages` (unknown ones are skipped), starting with the first.
-    pub fn with_languages(languages: &[&str]) -> Self {
-        let mut langs: Vec<String> = languages.iter().filter(|l| KeyboardLayout::letters(l).is_some()).map(|l| l.to_string()).collect();
+    /// A keyboard for the language codes in `langs` (e.g. the `ui.keyboard_layouts`
+    /// setting): unknown names are skipped, an empty list gives English; the first is
+    /// the default and the globe key cycles them in order.
+    pub fn with_language_list(langs: &[String]) -> Self {
+        let mut langs: Vec<String> = langs.iter().filter(|l| LETTERS.iter().any(|k| k.0 == l.as_str())).cloned().collect();
         if langs.is_empty() {
             langs.push("en".into());
         }
@@ -417,14 +369,6 @@ impl Keyboard {
             full: false,
             bounds: Rect::default(),
         }
-    }
-
-    /// A keyboard for the language codes in `langs` (e.g. the `ui.keyboard_layouts`
-    /// setting): unknown names are skipped, an empty list gives English; the first is
-    /// the default and the globe key cycles them in order.
-    pub fn with_language_list(langs: &[String]) -> Self {
-        let v: Vec<&str> = langs.iter().map(String::as_str).collect();
-        Self::with_languages(&v)
     }
 
     /// The current language code.
@@ -549,15 +493,32 @@ impl Keyboard {
                 self.switch_layout(&lang);
                 self.queue.push(KeyAction::NextLanguage);
             }
-            KeyAction::Char(c) => {
-                self.queue.push(KeyAction::Char(self.cased(c)));
-                if self.shift && !self.caps_lock {
-                    self.shift = false;
-                    self.full = true;
-                }
-            }
+            KeyAction::Char(c) => self.type_text(self.cased(c)),
             a => self.queue.push(a.clone()),
         }
+    }
+
+    /// Queues typed text (already cased); a one-shot shift ends with it.
+    fn type_text(&mut self, text: String) {
+        self.queue.push(KeyAction::Char(text));
+        if self.shift && !self.caps_lock {
+            self.shift = false;
+            self.full = true;
+        }
+    }
+
+    /// Ends contact `slot`: its alternates popup and its press go, and what they covered
+    /// is queued for a refresh.
+    fn release(&mut self, b: Rect, slot: u8) -> (Option<AltPopup>, Option<Press>) {
+        let popup = self.popup.take_if(|p| p.slot == slot);
+        if let Some(p) = &popup {
+            self.changed.push(p.rect);
+        }
+        let press = self.pressed.iter().position(|p| p.slot == slot).map(|i| self.pressed.remove(i));
+        if let Some(p) = &press {
+            self.mark_key(b, p.key);
+        }
+        (popup, press)
     }
 
     fn touch(&mut self, t: &Touch, b: Rect) -> EventResult {
@@ -633,42 +594,19 @@ impl Keyboard {
                     _ => EventResult::Ignored,
                 }
             }
-            TouchKind::Cancel => {
-                // The contact ended without a lift (rotation, lost release): forget the
-                // press and the alternates popup; type nothing.
-                let mut handled = false;
-                if let Some(p) = self.popup.take_if(|p| p.slot == t.slot) {
-                    self.changed.push(p.rect);
-                    handled = true;
-                }
-                if let Some(pi) = self.pressed.iter().position(|p| p.slot == t.slot) {
-                    let press = self.pressed.remove(pi);
-                    self.mark_key(b, press.key);
-                    handled = true;
-                }
-                if handled {
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                }
-            }
+            // The contact ended without a lift (rotation, lost release): forget the press
+            // and the alternates popup; type nothing.
+            TouchKind::Cancel => match self.release(b, t.slot) {
+                (None, None) => EventResult::Ignored,
+                _ => EventResult::Handled,
+            },
             TouchKind::Up => {
-                if let Some(p) = self.popup.take_if(|p| p.slot == t.slot) {
-                    self.changed.push(p.rect);
-                    if let Some(pi) = self.pressed.iter().position(|p| p.slot == t.slot) {
-                        let press = self.pressed.remove(pi);
-                        self.mark_key(b, press.key);
-                    }
-                    self.queue.push(KeyAction::Char(p.options[p.selected].clone()));
-                    if self.shift && !self.caps_lock {
-                        self.shift = false;
-                        self.full = true;
-                    }
+                let (popup, press) = self.release(b, t.slot);
+                if let Some(p) = popup {
+                    self.type_text(p.options[p.selected].clone());
                     return EventResult::Action("keyboard".into());
                 }
-                let Some(pi) = self.pressed.iter().position(|p| p.slot == t.slot) else { return EventResult::Ignored };
-                let press = self.pressed.remove(pi);
-                self.mark_key(b, press.key);
+                let Some(press) = press else { return EventResult::Ignored };
                 if !press.repeated {
                     if let Some((_, k)) = self.key_rect(b, press.key) {
                         self.commit(&k);
@@ -702,10 +640,9 @@ impl Widget for Keyboard {
         for (i, &(face, k)) in rects.iter().enumerate() {
             let special = !matches!(k.action, KeyAction::Char(_));
             let down = self.pressed.iter().any(|p| p.key == i) || (k.action == KeyAction::Shift && self.upper());
-            // Every face is white (special keys too); a pressed key (and shift while on)
-            // only gets a thicker border, inside its face. Nothing else in the face
-            // changes, so the refresh changes few pixels.
-            fill_round_rect(cx.canvas, face, radius, bg);
+            // Every face is white (special keys too), as the board under it already is; a
+            // pressed key (and shift while on) only gets a thicker border, inside its
+            // face. Nothing else in the face changes, so the refresh changes few pixels.
             stroke_round_rect(cx.canvas, face, radius, if down { PRESS_BORDER } else { 2.0 }, fg);
             let icon = match (&k.action, k.icon) {
                 (KeyAction::Shift, _) if self.caps_lock => Some(Icon::ShiftLocked),
@@ -767,16 +704,8 @@ impl Widget for Keyboard {
         match ev {
             UiEvent::Touch(t) => self.touch(t, b),
             // Gestures are made of touches the keyboard already handled.
-            UiEvent::Gesture(_) => EventResult::Handled,
-            _ => EventResult::Ignored,
+            _ => take_gestures(ev),
         }
-    }
-
-    fn refresh_class(&self) -> RefreshClass {
-        // Every key shows gray (antialiased captions, the alternates
-        // dot): GL16 keeps it, DU would turn it black or white. Only the changed key
-        // faces are refreshed, so it stays a small partial update.
-        RefreshClass::Gl16
     }
 
     fn damage(&mut self, _b: Rect) -> Option<Vec<Rect>> {
@@ -805,7 +734,7 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
     use crate::widget::WidgetTree;
-    use ink_device::Canvas;
+    use ink_device::{Canvas, RefreshClass};
     use ink_text::Fonts;
     use std::time::Duration;
 
@@ -935,6 +864,29 @@ mod tests {
         }
         assert_eq!(kb.layout.name, "en");
         assert!(kb.set_language("fr") && !kb.set_language("xx"));
+    }
+
+    #[test]
+    fn every_language_has_letters_and_a_name() {
+        assert_eq!(LETTERS.map(|l| l.0), LANGUAGES);
+        assert_eq!(language_name("fr"), "Français");
+        assert_eq!(language_name("xx"), "English");
+        assert!(KeyboardLayout::letters("xx").is_none());
+    }
+
+    #[test]
+    fn a_language_s_own_alternates_come_before_the_common_ones() {
+        let v = |lang, key| alternates(lang, key).join(" ");
+        assert_eq!(v("es", "."), "¿ ¡ …");
+        assert_eq!(v("en", "."), "…");
+        assert_eq!(v("da", "a"), "å æ à á â ä");
+        assert_eq!(v("de", "a"), "ä à á â");
+        assert_eq!(v("fr", "a"), "à â æ");
+        assert_eq!(v("en", "\""), "“ ” „ « »");
+        assert_eq!(v("sv", "ö"), "ø");
+        assert_eq!(v("", "3"), "³");
+        assert_eq!(v("en", "q"), "");
+        assert_eq!(v("en", "ab"), "");
     }
 
     #[test]

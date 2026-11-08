@@ -54,11 +54,12 @@ only print numbers.
 
 ## Golden images
 
-Three sets, exact match locally (CI tolerates 32 pixels per page):
+Four sets, exact match locally (CI tolerates 32 pixels per page):
 
 - page content: `tests/golden/*.png` (`crates/ink-html/tests/golden.rs`)
 - reader footer: `crates/ink-app/tests/golden/footer-*.png` (`footer_golden.rs`)
 - settings page and popup: `crates/ink-app/tests/golden/settings-*.png` (`settings_golden.rs`)
+- reader end card: `crates/ink-app/tests/golden/end-card*.png` (`end_card_golden.rs`)
 
 When a pixel change is intended:
 

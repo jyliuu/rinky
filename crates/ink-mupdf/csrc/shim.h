@@ -23,9 +23,8 @@ typedef struct { float x0, y0, x1, y1; } ink_rect;
 /* One character of structured text, in page space (points, y down). */
 typedef struct {
 	int c;              /* Unicode code point */
-	float x0, y0, x1, y1; /* bounding box of the character quad */
+	ink_rect r;         /* bounding box of the character quad */
 	int line;           /* line number on the page, 0-based, in MuPDF's reading order */
-	int block;          /* text block number on the page, 0-based */
 } ink_char;
 
 /* One outline (TOC) entry, depth-first order. */
@@ -39,7 +38,7 @@ typedef struct {
 
 /* One link on a page. */
 typedef struct {
-	float x0, y0, x1, y1; /* hot area in page space */
+	ink_rect r;         /* hot area in page space */
 	int external;       /* 1 = URL, 0 = inside the document */
 	int page;           /* internal target page (0-based), -1 if unresolved */
 	float x, y;         /* internal target point */
@@ -64,8 +63,6 @@ int ink_page_count(ink_doc *d);
 /* Writes the value of a metadata key (info:Title, info:Author, format, ...). Returns the
  * length needed including the terminator, 0 if the key is missing, -1 on error. */
 int ink_metadata(ink_doc *d, const char *key, char *buf, size_t size);
-/* Anti-aliasing bits 0..8 for graphics and text. */
-void ink_set_aa(ink_doc *d, int bits);
 
 int ink_page_bound(ink_doc *d, int page, ink_rect *out);
 
@@ -73,14 +70,15 @@ int ink_page_bound(ink_doc *d, int page, ink_rect *out);
 ink_list *ink_list_new(ink_doc *d, int page, ink_rect *bounds);
 void ink_list_drop(ink_doc *d, ink_list *list);
 
-/* Draws list with matrix m = {a, b, c, d, e, f} into an 8-bit gray buffer dst of w x h
- * bytes (stride w) that covers device pixels [x, x + w) x [y, y + h). The buffer is
- * cleared to white first. */
-int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w, int h, unsigned char *dst);
+/* Draws list with matrix m = {a, b, c, d, e, f} into an 8-bit gray buffer dst of h rows
+ * of w bytes, `stride` bytes apart (stride >= w), that covers device pixels
+ * [x, x + w) x [y, y + h). The area is cleared to white first; bytes between rows are
+ * left alone. */
+int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w, int h, int stride, unsigned char *dst);
 
-/* Structured text of a list. *out is malloc'ed (free with ink_free); *n characters. */
+/* Structured text of a list. *out is malloc'ed (free with ink_text_free); *n characters. */
 int ink_text(ink_doc *d, ink_list *list, ink_char **out, int *n);
-void ink_free(void *p);
+void ink_text_free(ink_char *chars, int n);
 
 int ink_outline(ink_doc *d, ink_outline_item **out, int *n);
 void ink_outline_free(ink_outline_item *items, int n);

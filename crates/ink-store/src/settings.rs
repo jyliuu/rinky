@@ -212,6 +212,9 @@ pub struct Settings {
     pub library_dirs: Vec<PathBuf>,
     /// UI language (`en`, `da`).
     pub language: String,
+    /// File format of highlight exports: `markdown`, `clippings` (Kindle's
+    /// `My Clippings.txt`) or `json`; see [`Settings::export_format`].
+    pub export_format: String,
     /// Reading defaults.
     pub reader: ReaderSettings,
     /// Device options.
@@ -226,11 +229,19 @@ pub struct Settings {
     pub plugins: toml::Table,
 }
 
+impl Settings {
+    /// [`Settings::export_format`] as a format; an unknown name gives Markdown.
+    pub fn export_format(&self) -> crate::export::ExportFormat {
+        crate::export::ExportFormat::from_name(&self.export_format).unwrap_or_default()
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             library_dirs: ink_platform::current().default_library_dirs(),
             language: "en".into(),
+            export_format: crate::export::ExportFormat::default().name().into(),
             reader: ReaderSettings::default(),
             device: DeviceSettings::default(),
             ui: crate::prefs::UiSettings::default(),
@@ -495,6 +506,16 @@ mod tests {
         s.reader.publisher_styles = false;
         let out = toml::to_string_pretty(&s).unwrap();
         assert_eq!(parse_settings(out.as_bytes()).unwrap().reader, s.reader);
+    }
+
+    #[test]
+    fn export_format_defaults_to_markdown_and_round_trips() {
+        use crate::export::ExportFormat;
+        assert_eq!(parse_settings(b"").unwrap().export_format(), ExportFormat::Markdown);
+        assert_eq!(parse_settings(b"export_format = \"nonsense\"\n").unwrap().export_format(), ExportFormat::Markdown);
+        let s = Settings { export_format: "clippings".into(), ..Default::default() };
+        let out = toml::to_string_pretty(&s).unwrap();
+        assert_eq!(parse_settings(out.as_bytes()).unwrap().export_format(), ExportFormat::Clippings);
     }
 
     #[test]

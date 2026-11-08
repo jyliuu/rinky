@@ -113,9 +113,4 @@ impl Library {
             })
             .collect()
     }
-
-    /// Entries for exactly `word` (ASCII case-insensitive, synonyms included).
-    pub fn lookup_exact(&self, word: &str) -> Vec<Hit> {
-        self.dicts.iter().flat_map(|d| Self::dict_hits(d, word)).collect()
-    }
 }

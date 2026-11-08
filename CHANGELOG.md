@@ -6,7 +6,46 @@ All notable changes to rinky are listed here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- The end of a book: turning past the last page shows a card with the book's title.
+  It marks the book as finished, takes a rating of one to five stars (a rating
+  imported from KOReader shows there too), suggests what to read next (the next book of the series,
+  or else the unfinished book opened last) and goes back to the library. Back, or
+  *Back to book*, returns to the last page. The card appears with one flash; taps on
+  it do not flash.
+- PDF, comic (CBZ) and XPS books have a **View** tab in *Reading settings* (Aa), in
+  place of the font and margin tabs that did nothing to them: fit the whole page or
+  the page width, read two-column papers one column at a time, darker contrast for
+  faint scans, two pages side by side, crop the white margins, and right to left for
+  manga, where a tap on the left or a swipe to the right turns to the next page. The
+  choices are kept for each book.
+- Highlights can be exported as Kindle clippings or JSON as well as Markdown. Choose
+  under Settings › KOReader import › Export format; the reader's and the library's
+  *Export highlights* use the same choice. Kindle clippings use the layout of a
+  Kindle's `My Clippings.txt`, so Readwise and similar tools read them; *Export all
+  highlights* then puts every book in one `exports/My Clippings.txt`. Over SSH,
+  `rinky export-highlights --format clippings|json` does the same.
+
 ### Changed
+- Books finish counting their pages sooner after opening and after a font-size change,
+  and rinky uses about 35 MB less memory while reading: each font is now read once and
+  shared, where the page counter read it again for itself.
+- AZW3 books whose cover page is an SVG around one picture (Calibre's usual cover)
+  open several times faster: the picture is decoded straight to its size on screen.
+- The library takes in new books about twice as fast: the cover thumbnail of each book
+  is made with much less work.
+- A book opened for the first time shows its first page without waiting for the
+  pages after it to be counted.
+- The library shows its books at once when rinky starts and reads the book folders
+  in the background; books added or removed meanwhile show up a moment later.
+- Reading settings (Aa): a tap on a control no longer redraws the whole sheet when the
+  finger goes down and again when it lifts, so the sheet answers taps sooner. The
+  sheet also opens faster.
+- PDF and comic pages draw about 10 % faster: rinky no longer runs colour management
+  for a gray screen. Gray pages look exactly as before; in colour pages, saturated
+  colours now come out darker (pure red is 77 of 255 instead of 129).
+- PDF and comic page turns are near instant when you rest on a page for a moment:
+  rinky draws the next page (or the previous one, after turning back) while you read.
 - Wi-Fi connects by itself more reliably and says what it is doing. rinky remembers
   that Wi-Fi was on and turns it on again when it starts and after the e-reader wakes
   up (on a Kobo, which turns Wi-Fi off to sleep, it stayed off until you turned it on
@@ -23,6 +62,9 @@ All notable changes to rinky are listed here. The format is based on
   a network or scanning no longer freezes the screen.
 
 ### Fixed
+- Reading settings (Aa): a preset or a font size step now also refreshes the preview
+  and the other controls it changes (the size, the preset chips, Justify), which
+  could stay showing the old values on the screen.
 - rinky said it was connected to a network it was only trying to join. It now counts
   Wi-Fi as connected only once the e-reader has an address on the network.
 - Kobo: a network joined later (after a wake, or on coming into range) got no
