@@ -266,8 +266,9 @@ pub enum LineHeight {
     Px(f32),
 }
 
-/// The computed style of an element (text nodes use their parent's).
-#[derive(Clone, Debug, PartialEq)]
+/// The computed style of an element (text nodes use their parent's). The `Default`
+/// values are the initial values of the properties [`ComputedStyle::root`] leaves.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ComputedStyle {
     /// `display`.
     pub display: Display,
@@ -344,39 +345,12 @@ impl ComputedStyle {
     pub fn root(font_px: f32) -> Self {
         ComputedStyle {
             display: Display::Block,
-            white_space: WhiteSpace::Normal,
-            float: 0,
-            clear: false,
             font_family: Arc::from(vec!["serif".to_string()]),
             font_size: font_px,
-            bold: false,
-            italic: false,
-            small_caps: false,
-            line_height: LineHeight::Normal,
-            text_align: TextAlign::Left,
             text_indent: Len::Px(0.0),
             margin: Edges::all(Len::Px(0.0)),
             padding: Edges::all(Len::Px(0.0)),
-            border: Edges::all(0.0),
-            width: Len::Auto,
-            height: Len::Auto,
-            max_width: Len::Auto,
-            max_height: Len::Auto,
-            break_before: PageBreak::Auto,
-            break_after: PageBreak::Auto,
-            avoid_break_inside: false,
-            vertical_align: VAlign::Baseline,
-            list_style: ListStyle::Disc,
-            list_inside: false,
-            text_transform: TextTransform::None,
-            underline: false,
-            line_through: false,
-            hyphens: Hyphens::Auto,
-            letter_spacing: 0.0,
-            word_spacing: 0.0,
-            hidden: false,
-            color: 0,
-            lang: None,
+            ..Default::default()
         }
     }
 
@@ -1386,6 +1360,21 @@ mod tests {
         let p = c.compute(E { tree: TREE, i: 2 }, &d);
         assert_eq!((p.margin.top, p.margin.right, p.padding.left), (Len::Px(10.0), Len::Px(12.0), Len::Px(14.0)));
         assert_eq!(p.border, Edges { top: 0.0, right: 0.0, bottom: 0.0, left: 4.0 }, "a width without a style draws nothing");
+    }
+
+    #[test]
+    fn root_initial_values() {
+        let r = ComputedStyle::root(20.0);
+        assert_eq!((r.display, r.white_space, r.float, r.clear), (Display::Block, WhiteSpace::Normal, 0, false));
+        assert_eq!((&*r.font_family, r.font_size), (&["serif".to_string()][..], 20.0));
+        assert_eq!((r.bold, r.italic, r.small_caps, r.line_height), (false, false, false, LineHeight::Normal));
+        assert_eq!((r.text_align, r.text_indent), (TextAlign::Left, Len::Px(0.0)));
+        assert_eq!((r.margin, r.padding, r.border), (Edges::all(Len::Px(0.0)), Edges::all(Len::Px(0.0)), Edges::all(0.0)));
+        assert_eq!((r.width, r.height, r.max_width, r.max_height), (Len::Auto, Len::Auto, Len::Auto, Len::Auto));
+        assert_eq!((r.break_before, r.break_after, r.avoid_break_inside), (PageBreak::Auto, PageBreak::Auto, false));
+        assert_eq!((r.vertical_align, r.list_style, r.list_inside), (VAlign::Baseline, ListStyle::Disc, false));
+        assert_eq!((r.text_transform, r.underline, r.line_through, r.hyphens), (TextTransform::None, false, false, Hyphens::Auto));
+        assert_eq!((r.letter_spacing, r.word_spacing, r.hidden, r.color, r.lang), (0.0, 0.0, false, 0, None));
     }
 
     #[test]
