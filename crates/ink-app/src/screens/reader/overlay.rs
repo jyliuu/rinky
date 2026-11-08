@@ -4,8 +4,9 @@
 //! background, which would erase the page, so overlays never remove widgets: closing an
 //! overlay drops its whole tree and the reader puts the page back from its buffer.
 
-use ink_device::Rect;
-use ink_ui::{Button, EventResult, Gesture, PaintCx, UiEvent, Widget, WidgetId, WidgetTree};
+use ink_device::{Rect, Size};
+use ink_ui::theme::space;
+use ink_ui::{AppBar, Button, EventResult, Gesture, Menu, PaintCx, UiEvent, Widget, WidgetId, WidgetTree};
 use std::collections::HashMap;
 
 /// Which overlay is open.
@@ -45,6 +46,34 @@ impl Overlay {
     /// An empty overlay.
     pub fn new(kind: OverlayKind) -> Self {
         Overlay { kind, tree: WidgetTree::new(), ids: HashMap::new(), buttons: Vec::new() }
+    }
+
+    /// An overlay over the page shown: a [`PageScrim`] on a `size` screen that reports
+    /// `tap` on a tap outside the overlay's widgets.
+    pub fn over_page(kind: OverlayKind, size: Size, tap: &str) -> Self {
+        let mut o = Overlay::new(kind);
+        o.tree.add(None, Box::new(PageScrim { action: tap.into() }), Rect::from_size(size));
+        o
+    }
+
+    /// Adds an app bar in `r` and records where its actions are.
+    pub fn app_bar(&mut self, parent: Option<WidgetId>, bar: AppBar, r: Rect) -> WidgetId {
+        for (a, ar) in bar.actions.iter().zip(bar.action_rects(r)) {
+            self.buttons.push((a.action.clone(), ar));
+        }
+        self.tree.add(parent, Box::new(bar), r)
+    }
+
+    /// Adds a [`Menu`] of `items` (label, action) under `key` at the right of a `size`
+    /// screen, its top at the y `top` gives for its height, and records its rows.
+    pub fn menu(&mut self, key: &'static str, items: Vec<(String, String)>, size: Size, top: impl FnOnce(u32) -> i32) {
+        let menu = Menu::new(items);
+        let w = 600u32.min(size.w.saturating_sub(48));
+        let r = Rect::new(size.w as i32 - w as i32 - space(3), top(menu.height()), w, menu.height());
+        for (i, (_, a)) in menu.items.iter().enumerate() {
+            self.buttons.push((a.clone(), Rect::new(r.x, r.y + (i as u32 * menu.row_h) as i32, r.w, menu.row_h)));
+        }
+        self.ids.insert(key, self.tree.add(None, Box::new(menu), r));
     }
 
     /// Adds a button and records where it is.

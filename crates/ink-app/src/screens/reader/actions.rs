@@ -22,11 +22,11 @@
 //! There is no hidden exit anywhere on the page: `exit` is an action like any other and
 //! asks first ("Exit to Kindle?") when `settings.ui.confirm_exit` is on.
 
-use super::overlay::{Overlay, OverlayKind, PageScrim};
+use super::overlay::{Overlay, OverlayKind};
 use super::ReaderScreen;
 use crate::router::{AppCtx, Transition};
 use crate::screens::settings::quick_light;
-use ink_device::{Point, Rect, Size};
+use ink_device::{Point, Size};
 use ink_store::prefs::{GestureMap, LONG_PRESS_ACTIONS};
 use ink_store::Settings;
 use ink_ui::{Direction, DoubleTapMode, Gesture};
@@ -303,8 +303,7 @@ impl ReaderScreen {
     /// Opens the "Exit to Kindle?" dialog (Cancel closes it, Exit leaves the app).
     fn confirm_exit(&mut self, cx: &mut AppCtx) {
         let size = cx.screen.size();
-        let mut o = Overlay::new(OverlayKind::Popup);
-        o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
+        let mut o = Overlay::over_page(OverlayKind::Popup, size, "close");
         let dialog = ink_ui::Dialog {
             title: format!("Exit to {}?", ink_platform::current().device_name()),
             body: format!("rinky closes and the {} home screen starts.", ink_platform::current().device_name()),

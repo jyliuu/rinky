@@ -15,7 +15,7 @@
 //! ticks, the return page), which the reader fills with
 //! `ReaderScreen::menu_overlay`.
 
-use super::overlay::{Bar, Overlay, OverlayKind, PageScrim, Rule};
+use super::overlay::{Bar, Overlay, OverlayKind, Rule};
 use crate::router::{AppCtx, Route, Transition};
 use ink_device::{Rect, RefreshClass, Size};
 use ink_doc::Position;
@@ -24,7 +24,7 @@ use ink_ui::bars::APP_BAR_H;
 use ink_ui::draw::{fill_round_rect, stroke_round_rect, Path};
 use ink_ui::theme::space;
 use ink_ui::widget::split_cols;
-use ink_ui::{AppBar, BarAction, Button, EventResult, Icon, Menu, PaintCx, Slider, TouchKind, UiEvent, Widget};
+use ink_ui::{AppBar, BarAction, Button, EventResult, Icon, PaintCx, Slider, TouchKind, UiEvent, Widget};
 
 /// Height of the top bar (the app bar alone: the menu shows no status bar; the page's
 /// status bar is under it).
@@ -123,9 +123,8 @@ pub fn build(info: &MenuInfo, plugins: &[String], size: Size) -> Overlay {
 /// menu entries (a row at the top of the bottom bar, at most [`PLUGIN_PILLS`] pills, the
 /// last one `plugin-more` when there are more; actions `plugin-menu:I`).
 pub fn build_with(info: &MenuInfo, extra: &MenuExtra, plugins: &[String], size: Size) -> Overlay {
-    let mut o = Overlay::new(OverlayKind::Menu);
+    let mut o = Overlay::over_page(OverlayKind::Menu, size, "close");
     let w = size.w;
-    o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
     // Top: the app bar, over the page's status bar.
     let top = o.tree.add(None, Box::new(Bar::new(Rule::None)), Rect::new(0, 0, w, TOP_H));
     let mut bar = AppBar::new(info.title.clone()).with_back();
@@ -292,15 +291,8 @@ impl Widget for PluginPill {
 
 /// The More menu: a [`Menu`] under the More button with [`MORE`]'s entries.
 pub fn build_more(size: Size) -> Overlay {
-    let mut o = Overlay::new(OverlayKind::Menu);
-    o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
-    let menu = Menu::new(MORE.iter().map(|(l, a)| (l.to_string(), a.to_string())).collect());
-    let mw = 600u32.min(size.w.saturating_sub(48));
-    let r = Rect::new(size.w as i32 - mw as i32 - space(3), space(3), mw, menu.height());
-    for (i, (_, a)) in MORE.iter().enumerate() {
-        o.buttons.push((a.to_string(), Rect::new(r.x, r.y + (i as u32 * menu.row_h) as i32, r.w, menu.row_h)));
-    }
-    o.ids.insert("more", o.tree.add(None, Box::new(menu), r));
+    let mut o = Overlay::over_page(OverlayKind::Menu, size, "close");
+    o.menu("more", MORE.iter().map(|(l, a)| (l.to_string(), a.to_string())).collect(), size, |_| space(3));
     o
 }
 
@@ -315,18 +307,11 @@ const PLUGIN_MORE_LABEL: &str = "More";
 /// standing on the plugin row, right-aligned; actions `plugin-menu:I` with I the index in
 /// `plugins`. `plugins` are all the entries, as given to [`build_with`].
 pub fn build_plugin_more(plugins: &[String], size: Size) -> Overlay {
-    let mut o = Overlay::new(OverlayKind::Menu);
-    o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
+    let mut o = Overlay::over_page(OverlayKind::Menu, size, "close");
     let first = (PLUGIN_PILLS - 1).min(plugins.len());
-    let items: Vec<(String, String)> = plugins.iter().enumerate().skip(first).map(|(i, l)| (l.clone(), format!("plugin-menu:{i}"))).collect();
-    let menu = Menu::new(items.clone());
-    let mw = 600u32.min(size.w.saturating_sub(48));
+    let items = plugins.iter().enumerate().skip(first).map(|(i, l)| (l.clone(), format!("plugin-menu:{i}"))).collect();
     let bottom = size.h.saturating_sub(BOTTOM_H + PLUGIN_ROW_H) as i32;
-    let r = Rect::new(size.w as i32 - mw as i32 - space(3), (bottom - menu.height() as i32 - space(1)).max(space(3)), mw, menu.height());
-    for (i, (_, a)) in items.iter().enumerate() {
-        o.buttons.push((a.clone(), Rect::new(r.x, r.y + (i as u32 * menu.row_h) as i32, r.w, menu.row_h)));
-    }
-    o.ids.insert("plugin-more", o.tree.add(None, Box::new(menu), r));
+    o.menu("plugin-more", items, size, |h| (bottom - h as i32 - space(1)).max(space(3)));
     o
 }
 

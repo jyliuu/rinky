@@ -133,8 +133,8 @@ fn subtitle(pct: f32, extra: &GotoExtra) -> String {
 /// Builds the panel for a screen of `size`.
 pub fn build_with(info: &GotoInfo, extra: &GotoExtra, size: Size) -> Overlay {
     let mut o = Overlay::new(OverlayKind::Goto);
-    let w = size.w;
     let root = o.tree.add(None, Box::new(Bar::new(Rule::None)), Rect::from_size(size));
+    let w = size.w;
     // Rounded down like the footer's percent (`footer::percent_text`).
     let pct = (info.percent.clamp(0.0, 1.0) * 100.0 + 1e-3).floor();
     let sub = subtitle(pct, extra);
@@ -144,11 +144,7 @@ pub fn build_with(info: &GotoInfo, extra: &GotoExtra, size: Size) -> Overlay {
     if tab == 2 && !extra.highlights.is_empty() {
         bar = bar.action(BarAction::text("Export", "export"));
     }
-    let bar_r = Rect::new(0, 0, w, APP_BAR_H);
-    for (a, r) in bar.actions.iter().zip(bar.action_rects(bar_r)) {
-        o.buttons.push((a.action.clone(), r));
-    }
-    o.tree.add(Some(root), Box::new(bar), bar_r);
+    o.app_bar(Some(root), bar, Rect::new(0, 0, w, APP_BAR_H));
     let mut tabs = Tabs::new(&TABS, "gtab");
     tabs.selected = tab;
     let tabs_r = Rect::new(0, APP_BAR_H as i32, w, TABS_H);

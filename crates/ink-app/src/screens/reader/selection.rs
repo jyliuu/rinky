@@ -31,7 +31,7 @@
 //! this session, in the current layout. Drawing saved highlights after a reopen needs a
 //! `Document` call that maps a position range to rectangles.
 
-use super::overlay::{Overlay, OverlayKind, PageScrim};
+use super::overlay::{Overlay, OverlayKind};
 use ink_device::{Canvas, Point, Rect, Size};
 use ink_doc::Selection;
 use ink_text::Style;
@@ -791,8 +791,7 @@ impl Widget for SelectionCard {
 /// row are listed after "More". `above`: the card stays above this y (the top of the
 /// dictionary card added next to it).
 pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, highlighted: bool, size: Size, above: Option<i32>) -> Overlay {
-    let mut o = Overlay::new(OverlayKind::Selection);
-    o.tree.add(None, Box::new(PageScrim { action: "sel-cancel".into() }), Rect::from_size(size));
+    let mut o = Overlay::over_page(OverlayKind::Selection, size, "sel-cancel");
     let anchor = bounds(&sel.rects).unwrap_or_default();
     let w = size.w.saturating_sub(48).min(CARD_W);
     let (tools, rest) = layout_tools(plugins, insightful, highlighted, w);
@@ -822,14 +821,10 @@ pub fn note_editor(quote: &str, size: Size) -> Overlay {
     use ink_ui::bars::APP_BAR_H;
     use ink_ui::{AppBar, BarAction, Keyboard, Label, TextInput};
     let mut o = Overlay::new(OverlayKind::Note);
-    let w = size.w;
     let root = o.tree.add(None, Box::new(Bar::new(Rule::None)), Rect::from_size(size));
+    let w = size.w;
     let bar = AppBar::new("Add note").action(BarAction::text("Save", "note-save")).action(BarAction::icon(Icon::Close, "close"));
-    let bar_r = Rect::new(0, 0, w, APP_BAR_H);
-    for (r, a) in bar.action_rects(bar_r).into_iter().zip(&bar.actions) {
-        o.buttons.push((a.action.clone(), r));
-    }
-    o.tree.add(Some(root), Box::new(bar), bar_r);
+    o.app_bar(Some(root), bar, Rect::new(0, 0, w, APP_BAR_H));
     let quote_r = Rect::new(32, APP_BAR_H as i32 + 24, w.saturating_sub(64), 120);
     o.tree.add(Some(root), Box::new(Label::left(format!("\u{201c}{quote}\u{201d}"), 34.0).styled(Style::Italic)), quote_r);
     let field_r = Rect::new(32, quote_r.bottom() + 16, w.saturating_sub(64), 110);

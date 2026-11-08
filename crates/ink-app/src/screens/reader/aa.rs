@@ -37,7 +37,7 @@
 
 use super::footer::{self, Edge};
 use super::stored_layout;
-use super::overlay::{Overlay, OverlayKind, PageScrim};
+use super::overlay::{Overlay, OverlayKind};
 use super::ReaderScreen;
 use crate::fonts::{self, BUILTIN};
 use crate::router::{AppCtx, Route, Transition};
@@ -1357,8 +1357,7 @@ pub fn preview_rect(o: &Overlay) -> Option<Rect> {
 /// Builds the sheet on tab `tab` (0 Text, 1 Layout, 2 Page).
 pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) -> Overlay {
     let tab = tab.min(TABS.len() - 1);
-    let mut o = Overlay::new(OverlayKind::Aa);
-    o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
+    let mut o = Overlay::over_page(OverlayKind::Aa, size, "close");
     let h = SHEET_H.min(size.h.saturating_sub(160));
     let frame = BottomSheet::frame(size, h);
     let sheet = o.tree.add(None, Box::new(BottomSheet { title: "Reading settings".into(), taken: false }), frame);

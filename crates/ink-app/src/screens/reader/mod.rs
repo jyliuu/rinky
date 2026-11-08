@@ -1038,8 +1038,7 @@ impl ReaderScreen {
         let size = cx.screen.size();
         let anchor = link.rect.unwrap_or_default();
         let popup = |title: String, text: String, spans: Vec<(String, Style)>, buttons: Vec<(String, String)>| {
-            let mut o = Overlay::new(overlay::OverlayKind::Popup);
-            o.tree.add(None, Box::new(overlay::PageScrim { action: "close".into() }), Rect::from_size(size));
+            let mut o = Overlay::over_page(overlay::OverlayKind::Popup, size, "close");
             // Height from the text length (about 17 px per character at the popup's
             // 34 px text), between 320 px and 60 % of the screen.
             let pw = (size.w - 48).min(1100);
