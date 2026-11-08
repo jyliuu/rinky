@@ -301,28 +301,32 @@ impl HtmlDocument {
         if !waited.is_zero() {
             ink_doc::timing::record("wait for paginators", waited);
         }
-        self.write_cache_if_complete();
+        self.write_map(false);
         Ok(())
     }
 
-    /// Writes the cache file once the map is complete, unless the background thread
-    /// wrote it or still runs (it writes the file when it finds the map complete).
-    fn write_cache_if_complete(&self) {
+    /// Writes the page map to the cache file unless it came from there or is written
+    /// already: when the document closes (`closing`) a partial map, so the next open goes
+    /// on from it; otherwise a complete map, unless the background thread wrote it or
+    /// still runs (it writes the file when it finds the map complete).
+    fn write_map(&self, closing: bool) {
         if self.cache_done.get() || self.cache_hit {
             return;
         }
         let Some(path) = &self.cache_path else { return };
-        let chapters = {
-            let m = self.shared.map.lock().unwrap();
+        let (chapters, known) = {
+            let m = self.shared.map.lock().unwrap_or_else(|e| e.into_inner());
+            let (known, n) = (m.chapters.iter().filter(|c| c.is_some()).count(), m.chapters.len());
             let worker_writes = self.worker.is_some() && (!m.finished || m.cache_written);
-            if worker_writes || !m.chapters.iter().all(|c| c.is_some()) {
+            let write = if closing { known > 0 && known < n } else { !worker_writes && known == n };
+            if !write {
                 return;
             }
-            m.chapters.clone()
+            (m.chapters.clone(), known)
         };
         self.cache_done.set(true);
         match paginate::write_cache(path, &chapters) {
-            Ok(()) => log::info!("ink-html: page map cached in {}", path.display()),
+            Ok(()) => log::info!("ink-html: page map ({known} of {} spine items) saved in {}", chapters.len(), path.display()),
             Err(e) => log::warn!("ink-html: cannot write page map {}: {e}", path.display()),
         }
     }
@@ -1635,21 +1639,7 @@ impl Drop for HtmlDocument {
         // open goes on from a partial map instead of paginating from the start.
         self.shared.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         self.save_positions();
-        if self.cache_done.get() || self.cache_hit {
-            return;
-        }
-        let Some(path) = &self.cache_path else { return };
-        let snapshot = {
-            let m = self.shared.map.lock().unwrap_or_else(|e| e.into_inner());
-            let known = m.chapters.iter().filter(|c| c.is_some()).count();
-            (known > 0 && known < m.chapters.len()).then(|| (m.chapters.clone(), known))
-        };
-        if let Some((chapters, known)) = snapshot {
-            match paginate::write_cache(path, &chapters) {
-                Ok(()) => log::info!("ink-html: partial page map ({known} of {} spine items) saved in {}", chapters.len(), path.display()),
-                Err(e) => log::warn!("ink-html: cannot write page map {}: {e}", path.display()),
-            }
-        }
+        self.write_map(true);
     }
 }
 
@@ -1940,6 +1930,33 @@ mod tests {
             HtmlChapter { path: "b.xhtml".into(), html: html("<p>The end.</p>") },
         ];
         HtmlDocument::new(Metadata::default(), chapters, Box::new(ink_doc::MemoryLoader::default())).unwrap()
+    }
+
+    /// The foreground writes only a complete map, unless the document closes: then a
+    /// partial one (and nothing when no chapter is known).
+    #[test]
+    fn page_map_written_complete_or_partial_on_close() {
+        let dir = std::env::temp_dir().join(format!("ink-html-write-map-{}", std::process::id()));
+        let path = dir.join("m.pagemap");
+        let mut doc = long_book();
+        doc.cache_path = Some(path.clone());
+        let pages = ChapterPages { keys: vec![(0, 0)], text_bytes: 1 };
+        *doc.shared.map.lock().unwrap() = MapState::new(2);
+        doc.write_map(true);
+        assert!(!path.exists(), "nothing known");
+        doc.shared.map.lock().unwrap().chapters[0] = Some(pages.clone());
+        doc.write_map(false);
+        assert!(!path.exists(), "partial map while open");
+        doc.write_map(true);
+        assert_eq!(paginate::read_cache(&path, 2), Some(vec![Some(pages.clone()), None]));
+        doc.cache_done.set(false);
+        doc.shared.map.lock().unwrap().chapters[1] = Some(pages.clone());
+        doc.write_map(true);
+        assert_eq!(paginate::read_cache(&path, 2), Some(vec![Some(pages.clone()), None]), "complete map not written on close");
+        doc.write_map(false);
+        assert_eq!(paginate::read_cache(&path, 2), Some(vec![Some(pages.clone()), Some(pages)]));
+        assert!(doc.cache_done.get());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two chapters whose inline `<svg>` wrappers have the same node id and size but show
