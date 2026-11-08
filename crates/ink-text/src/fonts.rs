@@ -282,14 +282,16 @@ pub struct Fonts {
     own: Vec<FaceId>,
     shaped: GlyphCache,
     /// Runs made by [`Fonts::shape`] by (style, size bits) and text: UI text is shaped
-    /// again on every paint. Emptied when it holds [`RUN_CACHE`] runs or a fallback face
-    /// comes in.
+    /// again on every paint. Emptied when the next run would take it past
+    /// [`RUN_CACHE_BYTES`] or a fallback face comes in.
     runs: FastMap<(Style, u32), FastMap<Box<str>, TextRun>>,
-    run_count: usize,
+    /// Text and glyph bytes of the kept runs.
+    run_bytes: usize,
 }
 
-/// Most runs [`Fonts::shape`] keeps.
-const RUN_CACHE: usize = 1024;
+/// Text and glyph bytes [`Fonts::shape`] keeps: a text field shapes its whole text on
+/// each keystroke, so a count of runs would not bound the memory.
+const RUN_CACHE_BYTES: usize = 1 << 20;
 
 /// Slot of the main face for `style` in the per-face arrays.
 fn index(style: Style) -> usize {
@@ -381,7 +383,7 @@ impl Fonts {
             own: Vec::new(),
             shaped: GlyphCache::new(GLYPH_CACHE_BYTES),
             runs: FastMap::default(),
-            run_count: 0,
+            run_bytes: 0,
         }
     }
 
@@ -475,7 +477,7 @@ impl Fonts {
         self.advance.clear();
         self.shaped.clear();
         self.runs.clear();
-        self.run_count = 0;
+        self.run_bytes = 0;
     }
 
     // ---- Faces ----
@@ -501,7 +503,7 @@ impl Fonts {
         // Earlier misses may now be found.
         self.fallback_for.retain(|_, v| v.is_some());
         self.runs.clear();
-        self.run_count = 0;
+        self.run_bytes = 0;
         (self.faces.len() - 1) as FaceId
     }
 
@@ -629,12 +631,13 @@ impl Fonts {
         }
         let key = (style, px.to_bits());
         let run = self.shape_with(style, px, text, &ShapeOptions::default());
-        if self.run_count >= RUN_CACHE {
+        let bytes = text.len() + run.glyphs.len() * std::mem::size_of::<Glyph>();
+        if self.run_bytes + bytes > RUN_CACHE_BYTES {
             self.runs.clear();
-            self.run_count = 0;
+            self.run_bytes = 0;
         }
         self.runs.entry(key).or_default().insert(text.into(), run.clone());
-        self.run_count += 1;
+        self.run_bytes += bytes;
         run
     }
 
@@ -1053,9 +1056,13 @@ mod tests {
         assert_eq!(f.shape_with(Style::Regular, 40.0, "Juliet", &ShapeOptions::default()), run);
         assert_ne!(f.shape(Style::Bold, 40.0, "Juliet"), run);
         assert_ne!(f.shape(Style::Regular, 41.0, "Juliet"), run);
-        for i in 0..RUN_CACHE + 10 {
-            f.shape(Style::Regular, 20.0, &i.to_string());
-            assert!(f.run_count <= RUN_CACHE);
+        // Typing into a text field shapes the whole text on each keystroke: 400 chars would
+        // keep 2.6 MB of runs under a bound by count.
+        let mut typed = String::new();
+        for i in 0..400 {
+            typed.push(char::from(b'a' + (i % 26) as u8));
+            f.shape(Style::Regular, 20.0, &typed);
+            assert!(f.run_bytes <= RUN_CACHE_BYTES, "{} bytes kept after {} chars", f.run_bytes, typed.len());
         }
     }
 
