@@ -12,9 +12,10 @@
 //! from 3 on are fallbacks ([`Fonts::add_fallback`], [`Fonts::load_fallbacks`]).
 
 use crate::face::{FaceData, FaceInfo};
+use crate::parsed;
 use crate::raster::{self, embolden_px, GlyphMask, Synth};
 use crate::{Style, TextError};
-use fontdue::{Font, FontSettings, Metrics};
+use fontdue::{Font, Metrics};
 use ink_device::{Canvas, Rect};
 use rustybuzz::ttf_parser::{GlyphId, Tag};
 use std::collections::HashMap;
@@ -332,10 +333,10 @@ fn proto_glyph(font: &Font, style: Style, c: char, px: f32, extra: u32) -> Proto
     (metrics, b.coverage)
 }
 
-/// The `fontdue` faces `[regular, bold, italic]`. Bytes given for more than one slot (UI
-/// fonts without a bold or italic face) are parsed once and shared.
-fn parse_all(faces: [&[u8]; 3]) -> Result<[Arc<Font>; 3], TextError> {
-    let parse = |bytes: &[u8]| Font::from_bytes(bytes, FontSettings::default()).map(Arc::new).map_err(|e| TextError::Font(e.to_string()));
+/// The `fontdue` faces `[regular, bold, italic]`, from `parse` (a lookup in the
+/// process-wide table of parsed faces, [`crate::parsed`]). Bytes given for more than one
+/// slot (UI fonts without a bold or italic face) are looked up once.
+fn parse_all<'a>(faces: [&'a [u8]; 3], parse: impl Fn(&'a [u8]) -> Result<Arc<Font>, TextError>) -> Result<[Arc<Font>; 3], TextError> {
     let r = parse(faces[0])?;
     let b = if faces[1] == faces[0] { r.clone() } else { parse(faces[1])? };
     let i = if faces[2] == faces[0] {
@@ -355,17 +356,19 @@ impl Fonts {
     }
 
     /// Faces from TTF/OTF bytes: `[regular, bold, italic]`. The bytes are copied and kept
-    /// for the rest of the program (the shaped path needs them).
+    /// for the rest of the program (the shaped path needs them). Bytes with the contents
+    /// of a face another `Fonts` holds share its parsed face.
     pub fn from_bytes(faces: [&[u8]; 3]) -> Result<Self, TextError> {
-        let fonts = parse_all(faces)?;
+        let fonts = parse_all(faces, parsed::parse_owned)?;
         let data = faces.iter().map(|f| FaceData::from_vec(f.to_vec(), 0)).collect::<Result<_, _>>()?;
         Ok(Fonts::from_parts(fonts, data))
     }
 
     /// Faces from bytes that live for the whole program (embedded or memory-mapped with
-    /// [`crate::face::map_file`]): `[regular, bold, italic]`. Nothing is copied.
+    /// [`crate::face::map_file`]): `[regular, bold, italic]`. Nothing is copied, and a
+    /// face another `Fonts` holds is not parsed again.
     pub fn from_static(faces: [&'static [u8]; 3]) -> Result<Self, TextError> {
-        let fonts = parse_all(faces)?;
+        let fonts = parse_all(faces, parsed::parse_static)?;
         let data = faces.iter().map(|f| FaceData::from_static(f, 0)).collect::<Result<_, _>>()?;
         Ok(Fonts::from_parts(fonts, data))
     }

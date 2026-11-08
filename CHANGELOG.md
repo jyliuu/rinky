@@ -25,6 +25,10 @@ All notable changes to rinky are listed here. The format is based on
   Kindle's `My Clippings.txt`, so Readwise and similar tools read them; *Export all
   highlights* then puts every book in one `exports/My Clippings.txt`. Over SSH,
   `rinky export-highlights --format clippings|json` does the same.
+### Changed
+- Books finish counting their pages sooner after opening and after a font-size change,
+  and rinky uses about 35 MB less memory while reading: each font is now read once and
+  shared, where the page counter read it again for itself.
 
 ## [0.5.3] - 2026-11-07
 
