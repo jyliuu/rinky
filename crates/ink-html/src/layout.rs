@@ -1798,38 +1798,24 @@ impl<'a, 'e> Flow<'a, 'e> {
     /// Lays out a table cell in its own flow (y from 0).
     fn cell_layout(&mut self, cell: NodeId, x: f32, w: f32) -> ChapterLayout {
         let st = self.st(cell);
-        let saved = (
-            std::mem::take(&mut self.out),
-            self.y,
-            self.margin,
-            self.neg_margin,
-            self.force_break,
-            self.keep_next,
-            self.first_line_pending,
-            self.marker.take(),
-            self.in_cell,
-        );
-        self.y = 0.0;
-        self.margin = 0.0;
-        self.neg_margin = 0.0;
-        self.first_line_pending = true;
-        self.in_cell = true;
         let (pad, b) = (st.padding.resolve(w), st.border);
         let (pl, pr, pt, pb) = (pad.left + b.left, pad.right + b.right, pad.top + b.top, pad.bottom + b.bottom);
-        self.y = pt;
+        // The flow state the cell's flow replaces, put back after it.
+        let saved = (
+            std::mem::take(&mut self.out),
+            std::mem::replace(&mut self.y, pt),
+            std::mem::take(&mut self.margin),
+            std::mem::take(&mut self.neg_margin),
+            self.force_break,
+            self.keep_next,
+            std::mem::replace(&mut self.first_line_pending, true),
+            self.marker.take(),
+            std::mem::replace(&mut self.in_cell, true),
+        );
         self.block_children(cell, x + pl, (w - pl - pr).max(10.0));
         self.y += pb;
-        let mut lay = std::mem::take(&mut self.out);
-        lay.height = self.y;
-        self.out = saved.0;
-        self.y = saved.1;
-        self.margin = saved.2;
-        self.neg_margin = saved.3;
-        self.force_break = saved.4;
-        self.keep_next = saved.5;
-        self.first_line_pending = saved.6;
-        self.marker = saved.7;
-        self.in_cell = saved.8;
+        let lay = ChapterLayout { height: self.y, ..std::mem::take(&mut self.out) };
+        (self.out, self.y, self.margin, self.neg_margin, self.force_break, self.keep_next, self.first_line_pending, self.marker, self.in_cell) = saved;
         lay
     }
 
