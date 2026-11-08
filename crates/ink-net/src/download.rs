@@ -844,6 +844,7 @@ mod tests {
         dl.save_meta(&PartMeta { url: dl.url.clone(), etag: Some("\"f2000\"".into()), last_modified: None, total: Some(2000) }).unwrap();
         let out = dl.run(&UreqClient::new(), &mut Hooks::default()).unwrap();
         assert_eq!(out.bytes, 2000);
+        assert_eq!(out.sha256, sha256_hex(&file_bytes(2000)), "the digest of the part read back");
         assert_eq!(std::fs::read(&dest).unwrap(), file_bytes(2000));
         assert_eq!(s.state.requests_to("/files/")[0].header("range"), Some("bytes=2000-"));
     }
