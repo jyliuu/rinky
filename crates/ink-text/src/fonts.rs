@@ -285,12 +285,12 @@ pub struct Fonts {
     /// again on every paint. Emptied when the next run would take it past
     /// [`RUN_CACHE_BYTES`] or a fallback face comes in.
     runs: FastMap<(Style, u32), FastMap<Box<str>, TextRun>>,
-    /// Text and glyph bytes of the kept runs.
+    /// Bytes of the kept runs: keys, runs, text and glyphs.
     run_bytes: usize,
 }
 
-/// Text and glyph bytes [`Fonts::shape`] keeps: a text field shapes its whole text on
-/// each keystroke, so a count of runs would not bound the memory.
+/// Bytes of runs [`Fonts::shape`] keeps: a text field shapes its whole text on each
+/// keystroke, so a count of runs would not bound the memory.
 const RUN_CACHE_BYTES: usize = 1 << 20;
 
 /// Slot of the main face for `style` in the per-face arrays.
@@ -637,7 +637,9 @@ impl Fonts {
         }
         let key = (style, px.to_bits());
         let run = self.shape_with(style, px, text, &ShapeOptions::default());
-        let bytes = text.len() + run.glyphs.len() * std::mem::size_of::<Glyph>();
+        // The key and run themselves count too: for a one-char label they outweigh the
+        // text and glyph bytes.
+        let bytes = std::mem::size_of::<(Box<str>, TextRun)>() + text.len() + run.glyphs.len() * std::mem::size_of::<Glyph>();
         if self.run_bytes + bytes > RUN_CACHE_BYTES {
             self.runs.clear();
             self.run_bytes = 0;
