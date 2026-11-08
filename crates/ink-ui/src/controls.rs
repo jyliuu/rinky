@@ -411,13 +411,7 @@ impl ProgressBar {
         let t = cx.theme;
         let line = 2.min(h as i32);
         match self.kind {
-            ProgressKind::Thick => {
-                let bw = t.border_px.max(2);
-                cx.canvas.fill_rect(bar.x, bar.y, bar.w as i32, bw, t.fg);
-                cx.canvas.fill_rect(bar.x, bar.bottom() - bw, bar.w as i32, bw, t.fg);
-                cx.canvas.fill_rect(bar.x, bar.y, bw, h as i32, t.fg);
-                cx.canvas.fill_rect(bar.right() - bw, bar.y, bw, h as i32, t.fg);
-            }
+            ProgressKind::Thick => cx.canvas.stroke_rect(bar, t.border_px.max(2), t.fg),
             ProgressKind::Thin => cx.canvas.fill_rect(bar.x, bar.y + (h as i32 - line) / 2, bar.w as i32, line, t.fg),
         }
         cx.canvas.fill_rect(bar.x, bar.y, done.min(bar.w) as i32, h as i32, t.fg);
