@@ -217,16 +217,12 @@ impl Drop for TestServer {
 pub fn server_tls_config() -> io::Result<Arc<rustls::ServerConfig>> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
-    let mut certs = Vec::new();
-    for item in ureq::tls::parse_pem(SERVER_CERT_PEM) {
-        if let ureq::tls::PemItem::Certificate(c) = item.map_err(|e| bad(e.to_string()))? {
-            certs.push(CertificateDer::from(c.der().to_vec()));
-        }
-    }
-    let mut key = None;
-    for item in ureq::tls::parse_pem(SERVER_KEY_PEM) {
-        if let ureq::tls::PemItem::PrivateKey(k) = item.map_err(|e| bad(e.to_string()))? {
-            key = Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(k.der().to_vec())));
+    let (mut certs, mut key) = (Vec::new(), None);
+    for item in ureq::tls::parse_pem(SERVER_CERT_PEM).chain(ureq::tls::parse_pem(SERVER_KEY_PEM)) {
+        match item.map_err(|e| bad(e.to_string()))? {
+            ureq::tls::PemItem::Certificate(c) => certs.push(CertificateDer::from(c.der().to_vec())),
+            ureq::tls::PemItem::PrivateKey(k) => key = Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(k.der().to_vec()))),
+            _ => {}
         }
     }
     let key = key.ok_or_else(|| bad("no key in test-server.key.pem".into()))?;
