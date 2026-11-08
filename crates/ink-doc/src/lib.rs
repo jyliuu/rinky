@@ -422,6 +422,14 @@ pub trait Document {
     /// content only; the reader adds headers, footers and overlays.
     fn render_page(&mut self, page: usize, canvas: &mut Canvas) -> Result<()>;
 
+    /// Does the slow part of a later `render_page(page)` now, within the document's own
+    /// page cache (the reader calls it while idle, for the page it expects next).
+    /// Returns true when work was done; false when `page` was ready already, is out of
+    /// range, or the document has nothing to prepare. Default: nothing.
+    fn prefetch_page(&mut self, _page: usize) -> bool {
+        false
+    }
+
     /// Position of the first character on `page`.
     fn position_of_page(&self, page: usize) -> Result<Position>;
 

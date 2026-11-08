@@ -41,6 +41,11 @@ All notable changes to rinky are listed here. The format is based on
 - Reading settings (Aa): a tap on a control no longer redraws the whole sheet when the
   finger goes down and again when it lifts, so the sheet answers taps sooner. The
   sheet also opens faster.
+- PDF and comic pages draw about 10 % faster: rinky no longer runs colour management
+  for a gray screen. Gray pages look exactly as before; in colour pages, saturated
+  colours now come out darker (pure red is 77 of 255 instead of 129).
+- PDF and comic page turns are near instant when you rest on a page for a moment:
+  rinky draws the next page (or the previous one, after turning back) while you read.
 
 ### Fixed
 - Reading settings (Aa): a preset or a font size step now also refreshes the preview

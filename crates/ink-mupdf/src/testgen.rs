@@ -84,6 +84,13 @@ impl PdfPage {
         let _ = writeln!(self.content, "{gray} g {x} {y} {w} {h} re f 0 g");
     }
 
+    /// A filled rectangle in DeviceRGB (`rgb` components 0 to 1).
+    pub fn rect_rgb(&mut self, x: f32, top: f32, w: f32, h: f32, rgb: [f32; 3]) {
+        let y = self.height - top - h;
+        let [r, g, b] = rgb;
+        let _ = writeln!(self.content, "{r} {g} {b} rg {x} {y} {w} {h} re f 0 g");
+    }
+
     /// A link over `[x0, top, x1, bottom]`.
     pub fn link(&mut self, area: [f32; 4], dest: PdfDest) {
         self.links.push((area, dest));
