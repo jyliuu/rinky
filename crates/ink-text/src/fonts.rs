@@ -291,12 +291,9 @@ pub struct Fonts {
 /// Most runs [`Fonts::shape`] keeps.
 const RUN_CACHE: usize = 1024;
 
+/// Slot of the main face for `style` in the per-face arrays.
 fn index(style: Style) -> usize {
-    match style {
-        Style::Regular => 0,
-        Style::Bold => 1,
-        Style::Italic | Style::BoldItalic => 2,
-    }
+    Fonts::main_face(style).0 as usize
 }
 
 /// True when `c` must have a glyph in the face that draws its cluster: not whitespace,
