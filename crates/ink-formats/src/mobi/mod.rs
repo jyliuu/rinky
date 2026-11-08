@@ -427,18 +427,12 @@ fn font_paths(res: &Resources) -> Vec<String> {
     v.into_iter().map(|r| r.path.clone()).collect()
 }
 
-/// Message for an encrypted book.
-fn refuse(m: &Mobi) -> Result<()> {
-    match m.drm() {
-        Some(s) => Err(DocError::Unsupported(crate::epub::drm_message(&s))),
-        None => Ok(()),
-    }
-}
-
-/// Converts a Mobipocket file (KF8 part preferred).
+/// Converts a Mobipocket file (KF8 part preferred). Encrypted books are refused.
 pub fn load(path: &Path) -> Result<Book> {
     let m = Mobi::open(path)?;
-    refuse(&m)?;
+    if let Some(scheme) = m.drm() {
+        return Err(DocError::Unsupported(crate::epub::drm_message(&scheme)));
+    }
     let mut info = m.info();
     if info.metadata.title.is_empty() {
         info.metadata.title = crate::title_from(path);
@@ -449,35 +443,25 @@ pub fn load(path: &Path) -> Result<Book> {
         let (chapters, toc) = crate::txt::convert_text(&text, &info.metadata.title);
         return Ok(Book { info, chapters, toc, page_list: Vec::new(), resources: Box::new(ink_doc::MemoryLoader::default()) });
     }
-    let (h, kf8) = match &m.kf8 {
-        Some(k) => (k.clone(), true),
-        None => (m.header.clone(), false),
-    };
-    let res = m.resources(&h);
+    let (h, kf8) = (m.main(), m.kf8.is_some());
+    let mut res = m.resources(h);
     info.metadata.cover = m.cover(&res).map(|r| r.path.clone());
     info.fonts = font_paths(&res);
-    let converted = if kf8 { kf8::convert(&m, &h, &res) } else { mobi6::convert(&m, &h, &res) };
+    let converted = if kf8 { kf8::convert(&m, h, &res) } else { mobi6::convert(&m, h, &res) };
     let (chapters, toc, files) = match converted {
         Ok(c) => c,
         // A broken KF8 part in a joint file: fall back to the MOBI 6 part.
         Err(e) if kf8 && !m.header.is_kf8() => {
             log::warn!("KF8 part unreadable ({e}); using the MOBI 6 part");
-            let res6 = m.resources(&m.header);
-            let c = mobi6::convert(&m, &m.header, &res6)?;
-            return Ok(Book {
-                info,
-                chapters: c.0,
-                toc: c.1,
-                page_list: Vec::new(),
-                resources: Box::new(MobiLoader::new(m.db.clone(), &res6, c.2)),
-            });
+            res = m.resources(&m.header);
+            mobi6::convert(&m, &m.header, &res)?
         }
         Err(e) => return Err(e),
     };
     if chapters.is_empty() {
         return Err(DocError::Format("MOBI: no text".into()));
     }
-    Ok(Book { info, chapters, toc, page_list: Vec::new(), resources: Box::new(MobiLoader::new(m.db.clone(), &res, files)) })
+    Ok(Book { info, chapters, toc, page_list: Vec::new(), resources: Box::new(MobiLoader::new(m.db, &res, files)) })
 }
 
 /// Metadata and cover of a Mobipocket file (also for DRM-protected books).
