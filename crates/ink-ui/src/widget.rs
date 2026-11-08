@@ -437,17 +437,6 @@ impl WidgetTree {
         self.node(id).map(|n| n.bounds)
     }
 
-    /// Moves or resizes a widget (marks it dirty; the old area is cleared).
-    pub fn set_bounds(&mut self, id: WidgetId, r: Rect) {
-        let Some(n) = self.nodes.get_mut(id.0).and_then(Option::as_mut) else { return };
-        if n.bounds != r && n.widget.adds_damage() {
-            self.exposed.push((n.bounds, n.widget.refresh_class()));
-        }
-        n.bounds = r;
-        n.mark(n.widget.refresh_class());
-        n.full = true;
-    }
-
     /// Marks a widget for a full repaint with at least `class`.
     pub fn mark_dirty(&mut self, id: WidgetId, class: RefreshClass) {
         if let Some(n) = self.node_mut(id) {
@@ -760,12 +749,6 @@ impl Button {
     /// With an icon.
     pub fn with_icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
-        self
-    }
-
-    /// With a look.
-    pub fn with_kind(mut self, kind: ButtonKind) -> Self {
-        self.kind = kind;
         self
     }
 
