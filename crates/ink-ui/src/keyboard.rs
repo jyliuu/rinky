@@ -80,12 +80,12 @@ pub struct KeySpec {
 }
 
 impl KeySpec {
-    fn ch(c: &str, alternates: &[&str]) -> Self {
+    fn ch(c: &str, alternates: Vec<String>) -> Self {
         KeySpec {
             label: c.into(),
             action: KeyAction::Char(c.into()),
             width: 2,
-            alternates: alternates.iter().map(|s| s.to_string()).collect(),
+            alternates,
             icon: None,
         }
     }
@@ -120,71 +120,25 @@ pub fn language_name(lang: &str) -> &'static str {
     }
 }
 
-fn alternates(lang: &str, key: &str) -> &'static [&'static str] {
-    match (lang, key) {
-        ("da", "a") => &["å", "æ", "à", "á", "â", "ä"],
-        ("da", "e") => &["é", "è", "ê", "ë"],
-        ("da", "o") => &["ø", "ö", "ó", "ô"],
-        ("da", "u") => &["ü", "ú"],
-        ("de", "a") => &["ä", "à", "á", "â"],
-        ("de", "o") => &["ö", "ó", "ô"],
-        ("de", "u") => &["ü", "ú", "ù", "û"],
-        ("de", "s") => &["ß"],
-        ("de", "e") => &["é", "è", "ê"],
-        ("fr", "e") => &["é", "è", "ê", "ë"],
-        ("fr", "a") => &["à", "â", "æ"],
-        ("fr", "c") => &["ç"],
-        ("fr", "u") => &["ù", "û", "ü"],
-        ("fr", "i") => &["î", "ï"],
-        ("fr", "o") => &["ô", "œ"],
-        ("fr", "y") => &["ÿ"],
-        ("es", "a") => &["á", "à", "ä", "â"],
-        ("es", "e") => &["é", "è", "ë", "ê"],
-        ("es", "i") => &["í", "ì", "ï"],
-        ("es", "o") => &["ó", "ò", "ö", "º"],
-        ("es", "u") => &["ú", "ü", "ù"],
-        ("es", "n") => &["ñ"],
-        ("es", "c") => &["ç"],
-        ("es", "?") => &["¿"],
-        ("es", "!") => &["¡"],
-        ("es", ".") => &["¿", "¡", "…"],
-        ("sv", "a") => &["à", "á", "æ"],
-        ("sv", "e") => &["é", "è", "ë"],
-        ("sv", "o") => &["ø", "ó", "ô"],
-        ("sv", "u") => &["ü", "ú"],
-        ("sv", "ö") => &["ø"],
-        ("sv", "ä") => &["æ"],
-        ("nb", "a") => &["ä", "à", "á"],
-        ("nb", "e") => &["é", "è", "ê"],
-        ("nb", "o") => &["ö", "ó", "ô"],
-        ("nb", "u") => &["ü", "ú"],
-        ("nb", "ø") => &["ö"],
-        ("nb", "æ") => &["ä"],
-        (_, "a") => &["à", "á", "â", "ä", "æ", "ã", "å", "ā"],
-        (_, "c") => &["ç", "ć", "č"],
-        (_, "e") => &["è", "é", "ê", "ë", "ē", "ę"],
-        (_, "i") => &["ì", "í", "î", "ï"],
-        (_, "n") => &["ñ", "ń"],
-        (_, "o") => &["ò", "ó", "ô", "ö", "õ", "ø", "œ"],
-        (_, "s") => &["ß", "ś", "š"],
-        (_, "u") => &["ù", "ú", "û", "ü", "ū"],
-        (_, "y") => &["ý", "ÿ"],
-        (_, "z") => &["ž", "ź", "ż"],
-        (_, "l") => &["ł"],
-        (_, "-") => &["–", "—", "·"],
-        (_, ".") => &["…"],
-        (_, "'") => &["’", "‘", "‚"],
-        (_, "\"") => &["“", "”", "„", "«", "»"],
-        (_, "?") => &["¿"],
-        (_, "!") => &["¡"],
-        (_, "€") => &["$", "£", "¥", "¢"],
-        (_, "%") => &["‰"],
-        (_, "0") => &["°"],
-        (_, "1") => &["¹", "½"],
-        (_, "2") => &["²"],
-        (_, "3") => &["³"],
-        _ => &[],
-    }
+/// Long-press alternates in the layouts' space-separated style: per language (`""`: for
+/// every language, after its own), `|`-separated groups of a key and its alternates.
+const ALTERNATES: [(&str, &str); 9] = [
+    ("da", "a å æ à á â ä|e é è ê ë|o ø ö ó ô|u ü ú"),
+    ("de", "a ä à á â|o ö ó ô|u ü ú ù û|s ß|e é è ê"),
+    ("fr", "e é è ê ë|a à â æ|c ç|u ù û ü|i î ï|o ô œ|y ÿ"),
+    ("es", "a á à ä â|e é è ë ê|i í ì ï|o ó ò ö º|u ú ü ù|n ñ|c ç|? ¿|! ¡|. ¿ ¡ …"),
+    ("sv", "a à á æ|e é è ë|o ø ó ô|u ü ú|ö ø|ä æ"),
+    ("nb", "a ä à á|e é è ê|o ö ó ô|u ü ú|ø ö|æ ä"),
+    ("", "a à á â ä æ ã å ā|c ç ć č|e è é ê ë ē ę|i ì í î ï|n ñ ń|o ò ó ô ö õ ø œ|s ß ś š|u ù ú û ü ū|y ý ÿ|z ž ź ż|l ł"),
+    ("", "- – — ·|. …|' ’ ‘ ‚|\" “ ” „ « »|? ¿|! ¡"),
+    ("", "€ $ £ ¥ ¢|% ‰|0 °|1 ¹ ½|2 ²|3 ³"),
+];
+
+/// The alternates of `key` on `lang`'s keyboard.
+fn alternates(lang: &str, key: &str) -> Vec<String> {
+    let mut groups = ALTERNATES.iter().filter(|(l, _)| *l == lang || l.is_empty()).flat_map(|(_, g)| g.split('|'));
+    let alternates = groups.find_map(|g| g.strip_prefix(key)?.strip_prefix(' '));
+    alternates.map_or_else(Vec::new, |a| a.split(' ').map(String::from).collect())
 }
 
 fn units(row: &[KeySpec]) -> u32 {
@@ -239,7 +193,7 @@ impl KeyboardLayout {
         let mut bottom = Self::bottom_row("?123", "symbols", ".", total);
         // The "." key keeps the language's punctuation alternates (Spanish ¿ ¡).
         if let Some(k) = bottom.iter_mut().find(|k| k.label == ".") {
-            k.alternates = alternates(lang, ".").iter().map(|s| s.to_string()).collect();
+            k.alternates = alternates(lang, ".");
         }
         Some(KeyboardLayout { name: lang.into(), rows: vec![r1, r2, r3, bottom] })
     }
@@ -914,6 +868,21 @@ mod tests {
         }
         assert_eq!(kb.layout.name, "en");
         assert!(kb.set_language("fr") && !kb.set_language("xx"));
+    }
+
+    #[test]
+    fn a_language_s_own_alternates_come_before_the_common_ones() {
+        let v = |lang, key| alternates(lang, key).join(" ");
+        assert_eq!(v("es", "."), "¿ ¡ …");
+        assert_eq!(v("en", "."), "…");
+        assert_eq!(v("da", "a"), "å æ à á â ä");
+        assert_eq!(v("de", "a"), "ä à á â");
+        assert_eq!(v("fr", "a"), "à â æ");
+        assert_eq!(v("en", "\""), "“ ” „ « »");
+        assert_eq!(v("sv", "ö"), "ø");
+        assert_eq!(v("", "3"), "³");
+        assert_eq!(v("en", "q"), "");
+        assert_eq!(v("en", "ab"), "");
     }
 
     #[test]
