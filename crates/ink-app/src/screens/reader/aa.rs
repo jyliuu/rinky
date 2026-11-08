@@ -1,4 +1,6 @@
-//! "Aa" panel: a bottom sheet with three tabs.
+//! "Aa" panel: a bottom sheet with three tabs for a reflowable book (Text, Layout,
+//! Page) and two for a fixed-layout one (View, Page; fonts and margins do nothing to a
+//! PDF or comic).
 //!
 //! - Text: presets (Compact, Standard, Large, Largest), font size (slider with a live
 //!   preview), the font family list (built-in font plus the installed families from
@@ -9,6 +11,12 @@
 //!   margins never move the bars ([`super::footer::text_layout`]).
 //! - Page: page turn wave on/off (the panel's hardware sweep), "Status bars...", full
 //!   refresh interval, night mode.
+//! - View (PDF, CBZ, XPS only): fit (whole page or page width), columns (two for
+//!   two-column papers), contrast, two pages side by side, crop margins and right to
+//!   left. The values are saved for this book; a book without its own takes the
+//!   document's defaults (`RINKY_FIXED`). [`fixed_view`] reads them from the sidecar
+//!   and [`apply_fixed`] writes an action into it; `ink_mupdf::FixedOptions::with_view`
+//!   maps the result onto the engine's options.
 //!
 //! Every numeric value is a slider row: caption and value, a minus button, the track and
 //! a plus button (104 px buttons). While a finger drags a track only the value and the
@@ -31,7 +39,9 @@
 //! negative: the book's own; Layout tab), `aa-weight:N` (darker text 0..=2; Text tab),
 //! `aa-preset:I`, `aa-font:NAME` (empty: the
 //! default family), `aa-anim:on|off`, `aa-night:on|off`, `aa-flash:N`, `aa-statusbars`,
-//! `aa-linkback`, `aa-global`, `close` (and the footer module's `aa-footer:NAME`,
+//! `aa-linkback`, `aa-global`, `close`, the View tab's `aa-fit:page|width`,
+//! `aa-columns:N`, `aa-contrast:F`, `aa-spreads:auto|always|never`, `aa-crop:on|off`,
+//! `aa-rtl:on|off` (and the footer module's `aa-footer:NAME`,
 //! `aa-header:NAME`). A tab tap reports `aa` (the reader builds the sheet again; the
 //! tab is remembered here).
 
@@ -42,7 +52,7 @@ use super::ReaderScreen;
 use crate::fonts::{self, BUILTIN};
 use crate::router::{AppCtx, Route, Transition};
 use ink_device::{Point, Rect, RefreshClass, Size};
-use ink_doc::LayoutSettings;
+use ink_doc::{Fit, FixedView, LayoutSettings, Spreads};
 use ink_store::settings::{INDENT_BOOK, WEIGHT_MAX};
 use ink_store::sidecar::BookSettings;
 use ink_store::Settings;
@@ -74,8 +84,52 @@ pub const WEIGHTS: [(u8, &str); 3] = [(0, "Normal"), (1, "Darker"), (2, "Darkest
 /// Portrait sheet height: the Layout tab (preview, four sliders, two option rows) and
 /// the "Use for all books" button fit in one full-width column.
 pub const SHEET_H: u32 = 1456;
-/// Tab titles.
+/// Tab titles (reflowable books; see [`tabs`]).
 pub const TABS: [&str; 3] = ["Text", "Layout", "Page"];
+/// Fit choices of the View tab (`aa-fit`; the sidecar's `zoom`).
+pub const FITS: [(&str, &str); 2] = [("page", "Whole page"), ("width", "Page width")];
+/// Column choices of the View tab (`aa-columns`).
+pub const COLUMNS: [(u8, &str); 2] = [(1, "One"), (2, "Two")];
+/// Contrast choices of the View tab (`aa-contrast`).
+pub const CONTRASTS: [(f32, &str); 4] = [(1.0, "Normal"), (1.25, "More"), (1.5, "High"), (2.0, "Highest")];
+/// Two-page spread choices of the View tab (`aa-spreads`): `auto` is comic books in
+/// landscape.
+pub const SPREADS: [(&str, &str); 3] = [("never", "Off"), ("auto", "Auto"), ("always", "On")];
+
+/// What a tab of the sheet holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    /// Presets, font size, font, justify, hyphenation, weight.
+    Text,
+    /// Line spacing, margins, paragraphs.
+    Layout,
+    /// Page turn wave, status bars, refresh, night mode.
+    Page,
+    /// Fixed-layout view options.
+    View,
+}
+
+impl Tab {
+    /// The tab's title.
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Text => TABS[0],
+            Tab::Layout => TABS[1],
+            Tab::Page => TABS[2],
+            Tab::View => "View",
+        }
+    }
+}
+
+/// The tabs of the sheet: Text, Layout and Page for a reflowable book, View and Page for
+/// a `fixed` layout one.
+pub fn tabs(fixed: bool) -> &'static [Tab] {
+    if fixed {
+        &[Tab::View, Tab::Page]
+    } else {
+        &[Tab::Text, Tab::Layout, Tab::Page]
+    }
+}
 /// Full refresh choices (`reader.flash_every`; 0 = never).
 pub const FLASHES: [(u32, &str); 4] = [(0, "Never"), (4, "4 pages"), (8, "8 pages"), (16, "16 pages")];
 /// Time from the last layout change to the relayout.
@@ -162,6 +216,9 @@ pub struct AaExtras {
     /// Room the top and bottom status bars take from their screen edges
     /// ([`footer::bar_reserve`]), for the live preview.
     pub bars: (f32, f32),
+    /// The view of a fixed-layout book (the sheet shows the View tab); `None` for a
+    /// reflowable one.
+    pub fixed: Option<FixedView>,
 }
 
 impl Default for AaExtras {
@@ -176,6 +233,7 @@ impl Default for AaExtras {
             flash_every: 8,
             link_return: None,
             bars: (0.0, 0.0),
+            fixed: None,
         }
     }
 }
@@ -268,6 +326,13 @@ impl Shown {
 
     /// Records the effect of an Aa action.
     pub fn apply(&mut self, action: &str) {
+        if let Some(v) = self.extras.fixed.as_mut() {
+            let mut b = BookSettings::default();
+            if apply_fixed(action, &mut b) {
+                *v = fixed_view(*v, &b);
+                return;
+            }
+        }
         let Some((name, value)) = action.split_once(':') else { return };
         let num = value.parse::<f32>().ok().filter(|v| v.is_finite());
         let on = value == "on";
@@ -445,6 +510,9 @@ pub fn stored_book_layout(settings: &Settings, book: &BookSettings, w: u32, h: u
 /// layout `l`). Returns false for an action that is not a book layout setting (the
 /// Page-tab actions: see [`apply_global`] and the footer module).
 pub fn apply(action: &str, l: &LayoutSettings, book: &mut BookSettings) -> bool {
+    if apply_fixed(action, book) {
+        return true;
+    }
     let Some((name, value)) = action.split_once(':') else { return false };
     let num = value.parse::<f32>().ok().filter(|v| v.is_finite());
     let on = value == "on";
@@ -473,6 +541,78 @@ pub fn apply(action: &str, l: &LayoutSettings, book: &mut BookSettings) -> bool 
             book.hyphenation = Some(p.hyph);
         }
         ("aa-font", _) => book.font_family = (!value.trim().is_empty()).then(|| value.trim().to_string()),
+        _ => return false,
+    }
+    true
+}
+
+/// The sidecar name of a fit ([`FITS`]).
+fn fit_name(f: Fit) -> &'static str {
+    match f {
+        Fit::Page => "page",
+        Fit::Width => "width",
+    }
+}
+
+/// The sidecar name of a spread mode ([`SPREADS`]).
+fn spreads_name(s: Spreads) -> &'static str {
+    match s {
+        Spreads::Auto => "auto",
+        Spreads::Always => "always",
+        Spreads::Never => "never",
+    }
+}
+
+/// The view of a fixed-layout book: `base` (the document's own, whose defaults come
+/// from `RINKY_FIXED`) with the book's choices from its sidecar on top. Values the
+/// reader does not know (a zoom factor in `zoom`, an unknown spread mode) are ignored.
+pub fn fixed_view(base: FixedView, book: &BookSettings) -> FixedView {
+    let mut v = base;
+    match book.zoom.as_deref() {
+        Some("page") => v.fit = Fit::Page,
+        Some("width") => v.fit = Fit::Width,
+        _ => {}
+    }
+    if let Some(c) = book.crop_auto {
+        v.crop_margins = c;
+    }
+    if let Some(n) = book.columns {
+        v.columns = n.clamp(1, 4);
+    }
+    if let Some(c) = book.contrast.filter(|c| c.is_finite()) {
+        v.contrast = c.clamp(0.2, 4.0);
+    }
+    match book.spreads.as_deref() {
+        Some("auto") => v.spreads = Spreads::Auto,
+        Some("always") => v.spreads = Spreads::Always,
+        Some("never") => v.spreads = Spreads::Never,
+        _ => {}
+    }
+    if let Some(r) = book.rtl {
+        v.rtl = r;
+    }
+    v
+}
+
+/// Applies a View-tab action (`aa-fit`, `aa-columns`, `aa-contrast`, `aa-spreads`,
+/// `aa-crop`, `aa-rtl`) to the book's settings. Returns false for anything else or a
+/// value out of range.
+pub fn apply_fixed(action: &str, book: &mut BookSettings) -> bool {
+    let Some((name, value)) = action.split_once(':') else { return false };
+    let on = value == "on";
+    match name {
+        "aa-fit" if FITS.iter().any(|(v, _)| *v == value) => book.zoom = Some(value.into()),
+        "aa-columns" => match value.parse::<u8>() {
+            Ok(n) if (1..=4).contains(&n) => book.columns = Some(n),
+            _ => return false,
+        },
+        "aa-contrast" => match value.parse::<f32>() {
+            Ok(c) if (0.2..=4.0).contains(&c) => book.contrast = Some(c),
+            _ => return false,
+        },
+        "aa-spreads" if SPREADS.iter().any(|(v, _)| *v == value) => book.spreads = Some(value.into()),
+        "aa-crop" => book.crop_auto = Some(on),
+        "aa-rtl" => book.rtl = Some(on),
         _ => return false,
     }
     true
@@ -529,12 +669,15 @@ impl ReaderScreen {
         extras.wave_supported = cx.services.info.page_wave;
         extras.families = fonts::picker_names();
         extras.link_return = self.link_return_page().map(|p| p + 1);
+        // The view the book will have (a relayout may still be pending).
+        extras.fixed = self.doc.as_deref().and_then(|d| d.fixed_view()).map(|v| fixed_view(v, &self.book_settings));
         let size = cx.screen.size();
         // The values the book will have (a relayout may still be pending), as stored.
         let layout = stored_book_layout(settings, &self.book_settings, size.w, size.h);
+        let list = tabs(extras.fixed.is_some());
         log::info!(
-            "aa: sheet tab {} ({} px, spacing {}, margins {}/{}/{}, font {:?}, {} families, link return {:?})",
-            TABS[current_tab().min(TABS.len() - 1)],
+            "aa: sheet tab {} ({} px, spacing {}, margins {}/{}/{}, font {:?}, {} families, link return {:?}, view {:?})",
+            list[current_tab().min(list.len() - 1)].title(),
             layout.font_px,
             layout.line_spacing,
             layout.margin_left,
@@ -542,7 +685,8 @@ impl ReaderScreen {
             layout.margin_bottom,
             layout.font_family,
             extras.families.len(),
-            extras.link_return
+            extras.link_return,
+            extras.fixed
         );
         let o = build_with(&layout, &extras, size);
         self.open_overlay(o, cx);
@@ -672,6 +816,12 @@ enum Field {
     Night,
     Wave,
     Flash,
+    Fit,
+    Columns,
+    Contrast,
+    Spreads,
+    Crop,
+    Rtl,
 }
 
 /// The ink-ui control inside a [`Control`].
@@ -718,10 +868,13 @@ impl Control {
     fn sync(&mut self) {
         let s = self.shown.borrow();
         let e = &s.extras;
+        let v = e.fixed.unwrap_or_default();
         if let Inner::Toggle(t) = &mut self.inner {
             t.on = match self.field {
                 Field::Night => e.night,
                 Field::Wave => e.wave,
+                Field::Crop => v.crop_margins,
+                Field::Rtl => v.rtl,
                 Field::Hyph => s.hyph,
                 Field::Publisher => s.publisher,
                 _ => s.justify,
@@ -733,7 +886,11 @@ impl Control {
             Field::Flash => FLASHES.iter().position(|(n, _)| *n == e.flash_every),
             Field::ParaSpace => PARA_SPACINGS.iter().position(|(v, _)| (*v - s.para_space).abs() < 0.01),
             Field::Indent => INDENTS.iter().position(|(v, _)| (*v - s.indent).abs() < 0.01),
-            Field::Weight => WEIGHTS.iter().position(|(v, _)| *v == s.weight),
+            Field::Weight => WEIGHTS.iter().position(|(w, _)| *w == s.weight),
+            Field::Fit => FITS.iter().position(|(f, _)| *f == fit_name(v.fit)),
+            Field::Columns => COLUMNS.iter().position(|(n, _)| *n == v.columns),
+            Field::Contrast => CONTRASTS.iter().position(|(c, _)| (*c - v.contrast).abs() < 0.01),
+            Field::Spreads => SPREADS.iter().position(|(m, _)| *m == spreads_name(v.spreads)),
             _ => None,
         };
         self.inner.select(sel);
@@ -766,7 +923,7 @@ impl Widget for Control {
 }
 
 /// The tab row: a tap on another tab remembers it and reports `aa` (build again).
-struct TabRow(Tabs);
+struct TabRow(Tabs, &'static [Tab]);
 
 impl Widget for TabRow {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
@@ -777,7 +934,7 @@ impl Widget for TabRow {
         match self.0.event(ev, b) {
             EventResult::Action(_) => {
                 TAB.with(|t| t.set(self.0.selected));
-                log::info!("aa: tab {}", TABS[self.0.selected.min(TABS.len() - 1)]);
+                log::info!("aa: tab {}", self.1[self.0.selected.min(self.1.len() - 1)].title());
                 EventResult::Action("aa".into())
             }
             EventResult::Ignored if matches!(ev, UiEvent::Gesture(_)) => EventResult::Handled,
@@ -1263,7 +1420,7 @@ fn seg(options: &[&str]) -> Inner {
 }
 
 /// The rows of tab `tab`.
-fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
+fn rows(tab: Tab, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
     let screen_w = size.w;
     let s = shown.borrow().clone();
     let ctl = |f, inner, values: Vec<String>| -> Box<dyn Widget> { Box::new(Control::new(f, inner, values, shown)) };
@@ -1275,7 +1432,7 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
     }
     let pick = |f, (inner, values): (Inner, Vec<String>)| ctl(f, inner, values);
     match tab {
-        0 => {
+        Tab::Text => {
             let preset_names: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
             let mut families = s.extras.families.clone();
             if families.is_empty() {
@@ -1305,12 +1462,30 @@ fn rows(tab: usize, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
                 },
             ]
         }
-        1 => vec![
+        Tab::Layout => vec![
             Row::one("sliders", None, SliderPanel::height(4, PREVIEW_H), Box::new(SliderPanel::new(vec![1, 2, 3, 4], shown, screen_w))),
             Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, pick(Field::ParaSpace, choice(&PARA_SPACINGS, "aa-pspace"))),
             Row::one("indent", Some("First-line indent"), CONTROL_H, pick(Field::Indent, choice(&INDENTS, "aa-indent"))),
         ],
-        _ => [
+        Tab::View => {
+            let v = s.extras.fixed.unwrap_or_default();
+            vec![
+                Row::one("fit", Some("Fit"), CONTROL_H, pick(Field::Fit, choice(&FITS, "aa-fit"))),
+                Row::one("columns", Some("Columns"), CONTROL_H, pick(Field::Columns, choice(&COLUMNS, "aa-columns"))),
+                Row::one("contrast", Some("Contrast"), CONTROL_H, pick(Field::Contrast, choice(&CONTRASTS, "aa-contrast"))),
+                Row::one("spreads", Some("Two pages side by side"), CONTROL_H, pick(Field::Spreads, choice(&SPREADS, "aa-spreads"))),
+                Row {
+                    caption: None,
+                    h: CONTROL_H,
+                    stack_narrow: true,
+                    widgets: vec![
+                        (Some("crop"), toggle(Field::Crop, "Crop margins", v.crop_margins, "aa-crop")),
+                        (Some("rtl"), toggle(Field::Rtl, "Right to left", v.rtl, "aa-rtl")),
+                    ],
+                },
+            ]
+        }
+        Tab::Page => [
             s.extras.wave_supported.then(|| Row::one("wave", None, CONTROL_H, toggle(Field::Wave, "Page turn wave", s.extras.wave, "aa-anim"))),
             Some(Row::one("statusbars", None, CONTROL_H, Box::new(Button::new("Status bars…", "aa-statusbars")))),
             Some(Row::one("flash", Some("Full refresh every"), CONTROL_H, pick(Field::Flash, choice(&FLASHES, "aa-flash")))),
@@ -1354,9 +1529,11 @@ pub fn preview_rect(o: &Overlay) -> Option<Rect> {
     Some(SliderPanel::areas(b, n).0)
 }
 
-/// Builds the sheet on tab `tab` (0 Text, 1 Layout, 2 Page).
+/// Builds the sheet on tab `tab` of [`tabs`] (0 Text, 1 Layout, 2 Page; for a
+/// fixed-layout book, `extras.fixed` set: 0 View, 1 Page).
 pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) -> Overlay {
-    let tab = tab.min(TABS.len() - 1);
+    let list = tabs(extras.fixed.is_some());
+    let tab = tab.min(list.len() - 1);
     let mut o = Overlay::new(OverlayKind::Aa);
     o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
     let h = SHEET_H.min(size.h.saturating_sub(160));
@@ -1371,17 +1548,19 @@ pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) 
         o.ids.insert("linkback", id);
     }
     let c = BottomSheet::content(frame);
-    let mut tabs = Tabs::new(&TABS, "aa-tab");
-    tabs.selected = tab;
+    let titles: Vec<&str> = list.iter().map(|t| t.title()).collect();
+    let mut tab_row = Tabs::new(&titles, "aa-tab");
+    tab_row.selected = tab;
     let tabs_r = Rect::new(c.x, c.y - 8, c.w, CONTROL_H);
-    for (i, r) in tabs.cells(tabs_r).into_iter().enumerate() {
+    for (i, r) in tab_row.cells(tabs_r).into_iter().enumerate() {
         o.buttons.push((format!("aa-tab:{i}"), r));
     }
-    o.tree.add(Some(sheet), Box::new(TabRow(tabs)), tabs_r);
+    o.tree.add(Some(sheet), Box::new(TabRow(tab_row, list)), tabs_r);
     let shown = Rc::new(RefCell::new(Shown::new(l, extras)));
-    let mut rows = rows(tab, &shown, size);
-    // "Use for all books" under the Text and Layout values (Page values are global).
-    let global = tab < 2;
+    let mut rows = rows(list[tab], &shown, size);
+    // "Use for all books" under the Text and Layout values (Page values are global, View
+    // values are this book's over the document's defaults).
+    let global = matches!(list[tab], Tab::Text | Tab::Layout);
     let body = Rect::new(c.x, tabs_r.bottom() + 24, c.w, (c.bottom() - tabs_r.bottom() - 24).max(0) as u32);
     let global_h = if global { CONTROL_H + GAP } else { 0 };
     let area = Rect::new(body.x, body.y, body.w, body.h.saturating_sub(global_h));
@@ -1511,12 +1690,14 @@ mod tests {
     #[test]
     fn sheet_fits_and_targets_are_large() {
         let extras = AaExtras { families: (0..9).map(|i| format!("Family {i}")).collect(), link_return: Some(12), ..AaExtras::default() };
+        let fixed = AaExtras { fixed: Some(FixedView::default()), ..extras.clone() };
         for size in [Size::new(1272, 1696), Size::new(1696, 1272)] {
-            for tab in 0..3 {
-                let o = build_tab(&LayoutSettings::for_screen(size.w, size.h), &extras, tab, size);
-                let keys: &[&str] = match tab {
-                    0 => &["preset", "size", "font", "justify", "hyph", "publisher", "weight", "global"],
-                    1 => &["sliders", "pspace", "indent", "global"],
+            for (tab, extras) in [(0, &extras), (1, &extras), (2, &extras), (0, &fixed)] {
+                let o = build_tab(&LayoutSettings::for_screen(size.w, size.h), extras, tab, size);
+                let keys: &[&str] = match (tab, extras.fixed.is_some()) {
+                    (0, true) => &["fit", "columns", "contrast", "spreads", "crop", "rtl"],
+                    (0, _) => &["preset", "size", "font", "justify", "hyph", "publisher", "weight", "global"],
+                    (1, _) => &["sliders", "pspace", "indent", "global"],
                     _ => &["statusbars", "flash", "night"],
                 };
                 let mut seen: Vec<Rect> = Vec::new();
@@ -1536,6 +1717,61 @@ mod tests {
                 assert!(back.right() < size.w as i32 / 2 - 220 && back.h >= 96, "{back:?} clear of the title");
             }
         }
+    }
+
+    /// View-tab actions land in the book's sidecar values, and [`fixed_view`] puts them
+    /// over the document's defaults, keeping the defaults the book did not change.
+    #[test]
+    fn fixed_view_actions_reach_the_book_and_keep_the_defaults() {
+        let l = LayoutSettings::for_screen(1272, 1696);
+        let mut b = BookSettings::default();
+        // The defaults (RINKY_FIXED) as the document reports them.
+        let base = FixedView { contrast: 1.5, spreads: Spreads::Never, ..FixedView::default() };
+        assert_eq!(fixed_view(base, &b), base, "a book without its own values shows the defaults");
+        for a in ["aa-fit:width", "aa-columns:2", "aa-crop:on", "aa-rtl:on"] {
+            assert!(apply(a, &l, &mut b), "{a}");
+        }
+        for a in ["aa-fit:height", "aa-columns:9", "aa-contrast:x", "aa-contrast:NaN", "aa-spreads:sometimes"] {
+            assert!(!apply(a, &l, &mut b), "{a} is refused");
+        }
+        assert_eq!((b.zoom.as_deref(), b.columns, b.crop_auto, b.rtl, b.contrast, b.spreads.as_deref()), (Some("width"), Some(2), Some(true), Some(true), None, None));
+        let v = fixed_view(base, &b);
+        assert_eq!(v, FixedView { fit: Fit::Width, columns: 2, crop_margins: true, rtl: true, ..base });
+        assert!(apply("aa-contrast:1.25", &l, &mut b) && apply("aa-spreads:always", &l, &mut b));
+        assert_eq!((fixed_view(base, &b).contrast, fixed_view(base, &b).spreads), (1.25, Spreads::Always));
+        // A zoom factor another reader wrote is not a fit: the default stays.
+        assert_eq!(fixed_view(base, &BookSettings { zoom: Some("1.5".into()), ..Default::default() }).fit, Fit::Page);
+        // The sheet records the same actions in its shown values.
+        let mut shown = Shown::new(&l, &AaExtras { fixed: Some(base), ..AaExtras::default() });
+        shown.apply("aa-columns:2");
+        shown.apply("aa-rtl:on");
+        assert_eq!(shown.extras.fixed.map(|v| (v.columns, v.rtl)), Some((2, true)));
+    }
+
+    /// A fixed-layout book's sheet has View and Page tabs; a reflowable book's sheet has
+    /// no View tab.
+    #[test]
+    fn view_tab_only_for_fixed_layout_books() {
+        let size = Size::new(1272, 1696);
+        let l = LayoutSettings::for_screen(size.w, size.h);
+        let fixed = AaExtras { fixed: Some(FixedView::default()), ..AaExtras::default() };
+        let titles = |o: &Overlay| o.buttons.iter().filter(|(a, _)| a.starts_with("aa-tab:")).count();
+        let view = build_tab(&l, &fixed, 0, size);
+        assert_eq!(titles(&view), 2);
+        for key in ["fit", "columns", "contrast", "spreads", "crop", "rtl"] {
+            assert!(view.ids.contains_key(key), "{key}");
+        }
+        assert!(!view.ids.contains_key("size") && !view.ids.contains_key("global"), "no font size or 'Use for all books' for a PDF");
+        // Tab 1 is Page; a tab index past the end (Page of a reflowable book) is Page too.
+        for tab in [1, 2] {
+            assert!(build_tab(&l, &fixed, tab, size).ids.contains_key("night"));
+        }
+        for tab in 0..3 {
+            let o = build_tab(&l, &AaExtras::default(), tab, size);
+            assert_eq!(titles(&o), 3);
+            assert!(!o.ids.contains_key("fit") && !o.ids.contains_key("rtl"), "tab {tab}");
+        }
+        assert_eq!(tabs(true).iter().map(|t| t.title()).collect::<Vec<_>>(), ["View", "Page"]);
     }
 
     /// A drag on a slider reports the preview and the dragged row as damage, each once,
