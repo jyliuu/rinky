@@ -1007,20 +1007,23 @@ impl<'a, 'e> Flow<'a, 'e> {
         let keep_spaces = ws.keeps_spaces();
         let keep_nl = ws.keeps_newlines();
         let tt = st.text_transform;
-        let mut prev_alpha = out.text.chars().last().is_some_and(|c| c.is_alphanumeric());
+        let capitalize = tt == TextTransform::Capitalize;
+        // The last char of the collected text, kept here instead of decoded again for
+        // every char.
+        let mut last = out.text.chars().last();
+        let mut prev_alpha = last.is_some_and(|c| c.is_alphanumeric());
+        out.text.reserve(t.len());
         for (i, c) in t.chars().enumerate() {
             let i = i as u32;
             if c == '\n' && keep_nl {
                 out.push('\n', seg, i);
+                last = Some('\n');
                 prev_alpha = false;
                 continue;
             }
             let c = if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c };
-            if c == ' ' && !keep_spaces {
-                let last = out.text.chars().last();
-                if matches!(last, None | Some(' ') | Some('\n')) {
-                    continue;
-                }
+            if c == ' ' && !keep_spaces && matches!(last, None | Some(' ') | Some('\n')) {
+                continue;
             }
             let mut shown = match tt {
                 TextTransform::Upper => c.to_uppercase().next().unwrap_or(c),
@@ -1039,8 +1042,11 @@ impl<'a, 'e> Flow<'a, 'e> {
                     shown = shown.to_uppercase().next().unwrap_or(shown);
                 }
             }
-            prev_alpha = c.is_alphanumeric();
+            if capitalize {
+                prev_alpha = c.is_alphanumeric();
+            }
             out.push(shown, seg, i);
+            last = Some(shown);
         }
     }
 
@@ -1195,7 +1201,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         let para_first_slice = self.out.slices.len();
         if text.len() <= GIANT_PARAGRAPH {
-            let src: Vec<CharSrc> = src.iter().collect();
+            let mut chars = Vec::with_capacity(src.n);
+            chars.extend(src.iter());
+            let src = chars;
             self.lay_lines(owner, &text, &src, &segs, x, w);
         } else {
             let mut src_iter = src.iter();
