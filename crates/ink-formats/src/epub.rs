@@ -816,6 +816,9 @@ const MAX_HEAD: usize = 256 * 1024;
 /// background paginator and the first page do not wait for each other.
 struct LazySpine {
     file: std::path::PathBuf,
+    /// [`file_id`] of `file` when the book was opened: another handle is opened only on
+    /// that same file (`None`: no other handle).
+    id: Option<FileId>,
     obfuscated: HashMap<String, Obfuscation>,
     /// Path of each spine item (empty: not in the manifest).
     paths: Vec<String>,
@@ -836,12 +839,27 @@ impl LazySpine {
         let obfuscated = loader.obfuscated.clone();
         let (handles, inflate) = (Mutex::new(vec![loader]), Mutex::new(flate2::Decompress::new(false)));
         let returned = std::sync::Condvar::new();
-        LazySpine { file: file.to_path_buf(), obfuscated, paths: paths.to_vec(), sizes, handles, returned, inflate }
+        let id = std::fs::metadata(file).ok().map(|m| file_id(&m));
+        LazySpine { file: file.to_path_buf(), id, obfuscated, paths: paths.to_vec(), sizes, handles, returned, inflate }
+    }
+
+    /// Another handle on the file, refused when the file at its path is not the one the
+    /// book was opened from any more (replaced or written over while the book is open):
+    /// its spine items would not match the rest of the book.
+    fn reopen(&self) -> Result<ZipLoader<File>> {
+        let file = File::open(&self.file)?;
+        if self.id.is_none() || self.id != Some(file_id(&file.metadata()?)) {
+            return Err(DocError::Format("changed since the book was opened".into()));
+        }
+        let zip = ZipArchive::new(file).map_err(|e| DocError::Format(format!("not a zip: {e}")))?;
+        let mut l = ZipLoader::new(zip);
+        l.obfuscated = self.obfuscated.clone();
+        Ok(l)
     }
 
     /// Runs `f` with a handle on the file: an idle one, else a newly opened one, else
-    /// (the file cannot be opened again, e.g. no file descriptors left) the next one
-    /// another thread gives back. A spine item is never read as empty for want of a
+    /// (the file cannot be opened again, e.g. no file descriptors left, or it changed)
+    /// the next one another thread gives back. A spine item is never read as empty for want of a
     /// handle: it would stay empty.
     fn with_handle<T>(&self, f: impl FnOnce(&ZipLoader<File>) -> T) -> T {
         /// Gives the handle back when dropped, also when `f` panics.
@@ -862,11 +880,8 @@ impl LazySpine {
         if let Some(l) = self.handles.lock().unwrap_or_else(|e| e.into_inner()).pop() {
             return l;
         }
-        match open_archive(&self.file) {
-            Ok(mut l) => {
-                l.obfuscated = self.obfuscated.clone();
-                return l;
-            }
+        match self.reopen() {
+            Ok(l) => return l,
             Err(e) => log::warn!("epub: another handle on {}: {e}", self.file.display()),
         }
         let mut idle = self.handles.lock().unwrap_or_else(|e| e.into_inner());
@@ -877,6 +892,14 @@ impl LazySpine {
             idle = self.returned.wait(idle).unwrap_or_else(|e| e.into_inner());
         }
     }
+}
+
+/// Size and modification time of a file: what tells it apart from a file written in
+/// its place. (Not the inode: the Kindle's FUSE user store need not keep it.)
+type FileId = (u64, Option<std::time::SystemTime>);
+
+fn file_id(m: &std::fs::Metadata) -> FileId {
+    (m.len(), m.modified().ok())
 }
 
 impl ink_html::book::SpineSource for LazySpine {
@@ -1288,6 +1311,33 @@ mod tests {
             });
             assert_eq!(reader.join().unwrap(), want);
         });
+    }
+
+    #[test]
+    fn a_replaced_file_is_not_read_for_spine_items() {
+        use ink_html::book::SpineSource;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        let dir = std::env::temp_dir().join(format!("ink-epub-replaced-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("book.epub");
+        std::fs::copy(root.join("juliet.epub"), &path).unwrap();
+        let (loader, pkg, _) = prepare(&path, None).unwrap();
+        let spine = LazySpine::new(&path, loader, &spine_paths(&pkg));
+        let want = spine.read(1);
+        assert!(!want.is_empty());
+        // Another book written in its place while this one is open.
+        std::fs::copy(root.join("synthetic.epub"), dir.join("new.epub")).unwrap();
+        std::fs::rename(dir.join("new.epub"), &path).unwrap();
+        std::thread::scope(|s| {
+            let reader = spine.with_handle(|_| {
+                let h = s.spawn(|| spine.read(1));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                assert!(!h.is_finished(), "read from the replaced file");
+                h
+            });
+            assert_eq!(reader.join().unwrap(), want);
+        });
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
