@@ -137,17 +137,9 @@ pub fn build_with(info: &MenuInfo, extra: &MenuExtra, plugins: &[String], size: 
     }
     let bar_r = Rect::new(0, 0, w, APP_BAR_H);
     o.buttons.push(("back".into(), AppBar::back_rect(bar_r)));
-    let rects = bar.action_rects(bar_r);
-    for ((_, action, _), r) in TOOLS.iter().zip(&rects) {
-        if r.w > 0 {
-            o.buttons.push((action.to_string(), *r));
-        }
-    }
-    let bar_id = o.tree.add(Some(top), Box::new(bar), bar_r);
-    if info.bookmarked {
-        if let Some(r) = TOOLS.iter().position(|t| t.1 == "bookmark").map(|i| rects[i]).filter(|r| r.w > 0) {
-            o.ids.insert("marked", o.tree.add(Some(bar_id), Box::new(Marked), r));
-        }
+    let bar_id = o.app_bar(Some(top), bar, bar_r);
+    if let Some(r) = o.button_rect("bookmark").filter(|_| info.bookmarked) {
+        o.ids.insert("marked", o.tree.add(Some(bar_id), Box::new(Marked), r));
     }
     // Bottom: progress row, scrubber, then the dock of plugin entries.
     let extra_h = if plugins.is_empty() { 0 } else { PLUGIN_ROW_H };

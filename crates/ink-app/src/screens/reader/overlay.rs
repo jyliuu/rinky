@@ -56,9 +56,9 @@ impl Overlay {
         o
     }
 
-    /// Adds an app bar in `r` and records where its actions are.
+    /// Adds an app bar in `r` and records where its actions are (those it has room for).
     pub fn app_bar(&mut self, parent: Option<WidgetId>, bar: AppBar, r: Rect) -> WidgetId {
-        for (a, ar) in bar.actions.iter().zip(bar.action_rects(r)) {
+        for (a, ar) in bar.actions.iter().zip(bar.action_rects(r)).filter(|(_, ar)| ar.w > 0) {
             self.buttons.push((a.action.clone(), ar));
         }
         self.tree.add(parent, Box::new(bar), r)
