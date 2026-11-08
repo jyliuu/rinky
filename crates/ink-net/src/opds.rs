@@ -288,25 +288,20 @@ pub fn decode_entities(s: &str) -> String {
 /// [`decode_entities`] of `s`, appended to `out`.
 fn push_decoded(out: &mut String, s: &str) {
     let mut rest = s;
+    let mut utf8 = [0; 4];
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
         let end = rest[1..].find(|c: char| c == ';' || c == '&' || c.is_whitespace()).map(|j| j + 1);
-        let decoded = end.filter(|&e| rest.as_bytes().get(e) == Some(&b';') && e <= 12).filter(|&e| {
-            let name = &rest[1..e];
-            match name.strip_prefix('#') {
-                Some(num) => {
-                    let v = match num.strip_prefix(['x', 'X']) {
-                        Some(h) => u32::from_str_radix(h, 16).ok(),
-                        None => num.parse().ok(),
-                    };
-                    v.and_then(char::from_u32).map(|c| out.push(c)).is_some()
-                }
-                None => named_entity(name).map(|t| out.push_str(t)).is_some(),
-            }
-        });
+        let decoded = match end.filter(|&e| rest.as_bytes().get(e) == Some(&b';') && e <= 12) {
+            Some(e) => entity(&rest[1..e], &mut utf8).map(|text| (e, text)),
+            None => None,
+        };
         match decoded {
-            Some(end) => rest = &rest[end + 1..],
+            Some((end, text)) => {
+                out.push_str(text);
+                rest = &rest[end + 1..];
+            }
             None => {
                 out.push('&');
                 rest = &rest[1..];
@@ -314,6 +309,20 @@ fn push_decoded(out: &mut String, s: &str) {
         }
     }
     out.push_str(rest);
+}
+
+/// The text of the character reference `&name;`, encoded into `utf8` when numeric.
+fn entity<'a>(name: &str, utf8: &'a mut [u8; 4]) -> Option<&'a str> {
+    match name.strip_prefix('#') {
+        Some(num) => {
+            let v = match num.strip_prefix(['x', 'X']) {
+                Some(h) => u32::from_str_radix(h, 16).ok(),
+                None => num.parse().ok(),
+            };
+            Some(&*char::from_u32(v?)?.encode_utf8(utf8))
+        }
+        None => named_entity(name),
+    }
 }
 
 fn named_entity(name: &str) -> Option<&'static str> {
