@@ -106,7 +106,16 @@ pub struct App {
     net_shown: Option<ink_device::NetStatus>,
     /// The network last connected to and when the connection ended.
     net_lost: Option<(String, Instant)>,
+    /// "No saved network found" was told since Wi-Fi last connected or went off (it
+    /// is told once, not after every wake while no saved network is around).
+    net_none_told: bool,
+    /// The last "Couldn't connect" told and when (the automatic joins retry a failed
+    /// network every 10 minutes; one toast per [`FAILED_QUIET`]).
+    net_failed_told: Option<(String, Instant)>,
 }
+
+/// A failed join of the same network is told again only after this long.
+pub const FAILED_QUIET: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// A connection back to the same network this soon after it ended gets no toast.
 pub const RECONNECT_QUIET: std::time::Duration = std::time::Duration::from_secs(30);
@@ -318,6 +327,8 @@ impl App {
             revealed_part: false,
             net_shown: None,
             net_lost: None,
+            net_none_told: false,
+            net_failed_told: None,
         }
     }
 
@@ -335,9 +346,26 @@ impl App {
             }
             _ => false,
         };
-        if let Some(text) = network_toast(self.net_shown.as_ref(), e).filter(|_| awake && !blip) {
+        // Told already: no saved network around (until a connection or Wi-Fi off), or
+        // the same network failing again within the hour.
+        let repeat = match e {
+            ink_device::NetEvent::Status(ink_device::NetStatus::NoNetwork) => self.net_none_told,
+            ink_device::NetEvent::JoinFailed(essid) => {
+                self.net_failed_told.as_ref().is_some_and(|(f, at)| f == essid && now.duration_since(*at) < FAILED_QUIET)
+            }
+            _ => false,
+        };
+        if let Some(text) = network_toast(self.net_shown.as_ref(), e).filter(|_| awake && !blip && !repeat) {
             log::info!("wifi: toast {text:?}");
             crate::export::toast(&mut self.plugins, text);
+            match e {
+                ink_device::NetEvent::Status(ink_device::NetStatus::NoNetwork) => self.net_none_told = true,
+                ink_device::NetEvent::JoinFailed(essid) => self.net_failed_told = Some((essid.clone(), now)),
+                _ => {}
+            }
+        }
+        if let ink_device::NetEvent::Status(ink_device::NetStatus::Connected { .. } | ink_device::NetStatus::Off) = e {
+            self.net_none_told = false;
         }
         if let ink_device::NetEvent::Status(s) = e {
             if let Some(was) = self.net_shown.as_ref().and_then(|s| s.connected_to()) {
@@ -350,7 +378,7 @@ impl App {
         if let ink_device::NetEvent::WasOn(on) = e {
             if self.settings.device.wifi_was_on != *on {
                 log::info!("wifi: was on {on} (kept in the settings)");
-                let mut s = self.settings.clone();
+                let mut s = self.settings_update.take().unwrap_or_else(|| self.settings.clone());
                 s.device.wifi_was_on = *on;
                 self.settings_update = Some(s);
                 self.take_settings_update();
@@ -798,8 +826,27 @@ mod network_tests {
         app.network_event(&NetEvent::Status(home.clone()));
         app.network_event(&NetEvent::Status(NetStatus::Connecting { essid: None }));
         assert_eq!(app.net_lost.as_ref().map(|(e, _)| e.as_str()), Some("Home"));
-        app.network_event(&NetEvent::Status(home));
+        app.network_event(&NetEvent::Status(home.clone()));
         assert_eq!(app.net_shown.as_ref().and_then(NetStatus::connected_to), Some("Home"));
+        // "No saved network found" once, not after every wake; again after a connection.
+        let searching = NetStatus::Connecting { essid: None };
+        assert!(!app.net_none_told);
+        app.network_event(&NetEvent::Status(searching.clone()));
+        app.network_event(&NetEvent::Status(NetStatus::NoNetwork));
+        assert!(app.net_none_told, "told");
+        app.network_event(&NetEvent::Status(home.clone()));
+        assert!(!app.net_none_told, "a connection: told again next time");
+        app.network_event(&NetEvent::Status(searching.clone()));
+        app.network_event(&NetEvent::Status(NetStatus::NoNetwork));
+        assert!(app.net_none_told);
+        app.network_event(&NetEvent::Status(NetStatus::Off));
+        assert!(!app.net_none_told, "Wi-Fi off: told again after it is turned on");
+        // A failed join is told once an hour per network.
+        app.network_event(&NetEvent::JoinFailed("Cafe".into()));
+        let told = app.net_failed_told.clone();
+        assert_eq!(told.as_ref().map(|(e, _)| e.as_str()), Some("Cafe"));
+        app.network_event(&NetEvent::JoinFailed("Cafe".into()));
+        assert_eq!(app.net_failed_told, told, "the second failure is not told");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

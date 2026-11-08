@@ -13,8 +13,9 @@ All notable changes to rinky are listed here. The format is based on
   again). It looks for a saved network at once after a wake or turning Wi-Fi on,
   then less often while none is found.
 - A short message tells you when Wi-Fi connects ("Connected to Home"), when joining a
-  network fails ("Couldn't connect to Home") and when no saved network is in range
-  after a wake or start ("No saved network found").
+  network fails ("Couldn't connect to Home", once an hour for the same network) and
+  when no saved network is in range after a wake or start ("No saved network found",
+  once until Wi-Fi connects or is turned off).
 - The Wi-Fi icon in the status bars changes as soon as the connection does, and has
   three looks: connected, connecting, and off or not connected (before, it showed
   nothing unless connected). Settings › Wi-Fi and the control center's Wi-Fi button

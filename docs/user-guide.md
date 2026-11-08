@@ -251,8 +251,9 @@ yourself stays off. On a Kindle, airplane mode turns Wi-Fi off, and leaving it t
 Wi-Fi on again only when it was on before.
 
 A short message says "Connected to *network*" when Wi-Fi connects, "Couldn't connect
-to *network*" when joining fails, and "No saved network found" when none is in range
-after a wake or start. The Wi-Fi icon of the status bars shows arcs when connected,
+to *network*" when joining fails (once an hour for the same network), and "No saved
+network found" when none is in range after a wake or start (once, until Wi-Fi
+connects or is turned off). The Wi-Fi icon of the status bars shows arcs when connected,
 dashed arcs while connecting, and struck-through arcs when Wi-Fi is off or not
 connected. rinky counts Wi-Fi as connected only when the e-reader has an address on
 the network.
