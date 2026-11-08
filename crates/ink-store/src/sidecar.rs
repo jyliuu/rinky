@@ -371,53 +371,14 @@ fn parse_state(b: &[u8]) -> std::result::Result<BookState, String> {
     serde_json::from_slice(b).map_err(|e| e.to_string())
 }
 
-/// JSON keys of the typed fields of [`BookState`] (a key in [`BookState::extra`] with one
-/// of these names would be written twice; `save` drops it). Checked by a test against
-/// the serialized struct.
-pub(crate) const BOOK_STATE_FIELDS: &[&str] = &[
-    "version",
-    "md5",
-    "position",
-    "page",
-    "pages",
-    "percent",
-    "status",
-    "rating",
-    "review",
-    "highlights",
-    "bookmarks",
-    "last_opened",
-    "settings",
-    "plugins",
-    "imported_from",
-];
-
-/// JSON keys of the typed fields of [`BookSettings`] (see [`BOOK_STATE_FIELDS`]).
-pub(crate) const BOOK_SETTINGS_FIELDS: &[&str] = &[
-    "font_px",
-    "font_family",
-    "line_spacing",
-    "margin_x",
-    "margin_top",
-    "margin_bottom",
-    "margin_version",
-    "paragraph_spacing",
-    "paragraph_indent",
-    "font_weight",
-    "justify",
-    "hyphenation",
-    "language",
-    "publisher_styles",
-    "embedded_fonts",
-    "rotation",
-    "night_mode",
-    "flash_every",
-    "zoom",
-    "crop",
-    "contrast",
-    "footer",
-    "header",
-];
+/// True if `key` names a typed field of `T` rather than a key its flattened `extra`
+/// keeps: a key in `extra` with such a name would be written twice (serde refuses
+/// duplicate fields), so `save` drops it. Asked of `T` itself: the key alone, set to
+/// `null`, is read into a field or refused by one, or lands in `extra`.
+fn is_field<T: serde::de::DeserializeOwned>(key: &str, extra: impl Fn(&T) -> &Map<String, Value>) -> bool {
+    let probe = Value::Object(Map::from_iter([(key.to_string(), Value::Null)]));
+    serde_json::from_value::<T>(probe).map_or(true, |t| !extra(&t).contains_key(key))
+}
 
 fn finite(v: Option<f32>) -> Option<f32> {
     v.filter(|x| x.is_finite())
@@ -533,7 +494,7 @@ impl BookState {
         s.version = Self::VERSION;
         s.percent = finite(s.percent);
         let shallow = |_: &String, v: &mut Value| value_depth(v) <= MAX_VALUE_DEPTH;
-        s.extra.retain(|k, v| !BOOK_STATE_FIELDS.contains(&k.as_str()) && shallow(k, v));
+        s.extra.retain(|k, v| !is_field::<BookState>(k, |s| &s.extra) && shallow(k, v));
         s.plugins.retain(|name, p| match p.as_object_mut() {
             Some(values) => {
                 values.retain(shallow);
@@ -545,7 +506,7 @@ impl BookState {
             h.quads.retain(Quad::is_finite);
         }
         let st = &mut s.settings;
-        st.extra.retain(|k, v| !BOOK_SETTINGS_FIELDS.contains(&k.as_str()) && shallow(k, v));
+        st.extra.retain(|k, v| !is_field::<BookSettings>(k, |s| &s.extra) && shallow(k, v));
         if st.crop.is_some_and(|c| c.iter().any(|v| !v.is_finite())) {
             st.crop = None;
         }
@@ -673,16 +634,11 @@ mod tests {
     }
 
     #[test]
-    fn field_lists_match_the_structs() {
+    fn typed_fields_are_told_from_extra_keys() {
         let keys = |v: serde_json::Value| {
             let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
             k.sort();
             k
-        };
-        let sorted = |l: &[&str]| {
-            let mut v: Vec<String> = l.iter().map(|s| s.to_string()).collect();
-            v.sort();
-            v
         };
         let full_settings = BookSettings {
             font_px: Some(1.0),
@@ -710,7 +666,7 @@ mod tests {
             header: Some(crate::settings::HeaderStyle::Chapter),
             extra: Map::new(),
         };
-        assert_eq!(keys(serde_json::to_value(&full_settings).unwrap()), sorted(BOOK_SETTINGS_FIELDS));
+        assert!(keys(serde_json::to_value(&full_settings).unwrap()).iter().all(|k| is_field::<BookSettings>(k, |s| &s.extra)));
         let mut full = BookState {
             version: 2,
             md5: Some("m".into()),
@@ -728,7 +684,10 @@ mod tests {
         full.plugins.insert("p".into(), serde_json::json!(1));
         full.highlights.push(Highlight::default());
         full.bookmarks.push(Bookmark::default());
-        assert_eq!(keys(serde_json::to_value(&full).unwrap()), sorted(BOOK_STATE_FIELDS));
+        assert!(keys(serde_json::to_value(&full).unwrap()).iter().all(|k| is_field::<BookState>(k, |s| &s.extra)));
+        for (key, of_state, of_settings) in [("font_px", false, true), ("version", true, false), ("highlight", false, false), ("", false, false)] {
+            assert_eq!((is_field::<BookState>(key, |s| &s.extra), is_field::<BookSettings>(key, |s| &s.extra)), (of_state, of_settings), "{key}");
+        }
     }
 
     #[test]
