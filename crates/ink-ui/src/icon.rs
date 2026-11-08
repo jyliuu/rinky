@@ -7,9 +7,24 @@ use crate::UiEvent;
 use ink_device::{Canvas, Rect, RefreshClass};
 use std::f32::consts::PI;
 
-/// The icon set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Icon {
+/// Defines [`Icon`] with the variants listed (each after its doc comment) and
+/// [`Icon::ALL`] in the same order.
+macro_rules! icons {
+    ($($(#[$doc:meta])* $name:ident,)*) => {
+        /// The icon set.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Icon {
+            $($(#[$doc])* $name,)*
+        }
+
+        impl Icon {
+            /// Every icon (for the gallery).
+            pub const ALL: [Icon; [$(Icon::$name),*].len()] = [$(Icon::$name),*];
+        }
+    };
+}
+
+icons! {
     /// Chevron pointing left.
     Back,
     /// Chevron pointing right.
@@ -103,55 +118,6 @@ pub enum Icon {
 }
 
 impl Icon {
-    /// Every icon (for the gallery).
-    pub const ALL: [Icon; 45] = [
-        Icon::Back,
-        Icon::Forward,
-        Icon::Up,
-        Icon::Down,
-        Icon::Close,
-        Icon::Menu,
-        Icon::Search,
-        Icon::Settings,
-        Icon::Home,
-        Icon::Bookmark,
-        Icon::Font,
-        Icon::Light,
-        Icon::Night,
-        Icon::Rotate,
-        Icon::Wifi,
-        Icon::Battery,
-        Icon::Check,
-        Icon::Plus,
-        Icon::Minus,
-        Icon::Shift,
-        Icon::ShiftLocked,
-        Icon::Backspace,
-        Icon::Enter,
-        Icon::Globe,
-        Icon::KeyboardHide,
-        Icon::Star,
-        Icon::Info,
-        Icon::Trash,
-        Icon::Book,
-        Icon::Library,
-        Icon::Grid,
-        Icon::ListView,
-        Icon::Chart,
-        Icon::Chat,
-        Icon::Toc,
-        Icon::Sort,
-        Icon::Filter,
-        Icon::More,
-        Icon::Folder,
-        Icon::Download,
-        Icon::Sync,
-        Icon::Clock,
-        Icon::Usb,
-        Icon::Terminal,
-        Icon::Sparkle,
-    ];
-
     /// The icon's path scaled into the square centred in `r`.
     pub fn path(self, r: Rect) -> Path {
         let side = r.w.min(r.h) as f32;
