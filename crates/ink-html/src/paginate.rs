@@ -485,16 +485,18 @@ pub fn read_cache(path: &Path, n: usize) -> Option<Vec<Option<ChapterPages>>> {
 }
 
 /// Number of background pagination threads: `RINKY_PAGINATE_THREADS` when set
-/// (1-8), else the cores minus one for the UI thread, at most 2. The PW12 has four
-/// Cortex-A53 cores; each thread holds one chapter's DOM and layout (about 50 MB for a
-/// 36 000-word chapter on the host), so a third thread costs more memory than it saves
-/// time (big36: 1 thread 720 ms / 255 MB, 2: 430 ms / 309 MB, 3: 310 ms / 354 MB).
+/// (1-8), else one per core, at most 2: one on a one-core device, both cores of a
+/// two-core one. The threads run at nice 10 ([`lower_priority`]), so the UI thread still
+/// gets a core as soon as it needs one. Each thread holds one chapter's DOM and slices
+/// (the page map is laid out without draw items, and the parsed font faces are
+/// shared), so the second thread costs little memory (big36 on the host: 1 thread
+/// 247 ms / 88 MB peak RSS, 2 threads 165 ms / 89 MB).
 pub fn worker_threads() -> usize {
     if let Some(n) = std::env::var("RINKY_PAGINATE_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
         return n.clamp(1, 8);
     }
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    cores.saturating_sub(1).clamp(1, 2)
+    cores.clamp(1, 2)
 }
 
 /// Lowers the calling thread's scheduling priority (nice 10 on Linux) so page turns on
