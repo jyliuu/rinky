@@ -189,9 +189,8 @@ fn env_mb(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(default)
 }
 
-fn letter() -> FRect {
-    FRect::new(0.0, 0.0, 612.0, 792.0)
-}
+/// The page size used when MuPDF reports none (US Letter).
+const LETTER: FRect = FRect::new(0.0, 0.0, 612.0, 792.0);
 
 /// `Ok` when page or screen `i` is below `n`, else [`DocError::PageOutOfRange`].
 fn in_range(i: usize, n: usize) -> Result<()> {
@@ -274,14 +273,8 @@ impl Inner {
         if let Some(b) = self.bounds.get(&page) {
             return *b;
         }
-        let b = match self.raw.page_bound(page) {
-            Ok(b) if !b.is_empty() && b.is_finite() => b,
-            Ok(_) => letter(),
-            Err(e) => {
-                log::warn!("mupdf: {e}; using letter size");
-                letter()
-            }
-        };
+        let b = self.raw.page_bound(page).inspect_err(|e| log::warn!("mupdf: {e}; using letter size")).ok();
+        let b = b.filter(|b| !b.is_empty() && b.is_finite()).unwrap_or(LETTER);
         self.bounds.insert(page, b);
         b
     }
@@ -311,18 +304,13 @@ impl Inner {
     fn analyse(&mut self, page: usize, opts: &FixedOptions) -> PageGeom {
         let b = self.bound(page);
         let cols = opts.columns.max(1) as usize;
-        let g = if !opts.crop_margins && cols == 1 {
-            PageGeom { content: b, regions: vec![b] }
-        } else {
-            match self.small(page) {
-                Ok((img, k, b)) => analyze_geom(&img, k, b, opts.crop_margins, cols),
-                Err(e) => {
-                    log::warn!("mupdf: cannot analyse page {page}: {e}");
-                    PageGeom { content: b, regions: split_even(b, cols) }
-                }
-            }
-        };
-        g
+        if !opts.crop_margins && cols == 1 {
+            return PageGeom { content: b, regions: vec![b] };
+        }
+        self.small(page).map(|(img, k, b)| analyze_geom(&img, k, b, opts.crop_margins, cols)).unwrap_or_else(|e| {
+            log::warn!("mupdf: cannot analyse page {page}: {e}");
+            PageGeom { content: b, regions: split_even(b, cols) }
+        })
     }
 
     fn text(&mut self, page: usize) -> Result<PageText> {
@@ -580,13 +568,10 @@ impl MupdfDocument {
             language: raw.metadata("info:Language"),
             ..Default::default()
         };
-        let outline = match raw.outline() {
-            Ok(o) => o,
-            Err(e) => {
-                log::warn!("mupdf: {e}");
-                Vec::new()
-            }
-        };
+        let outline = raw.outline().unwrap_or_else(|e| {
+            log::warn!("mupdf: {e}");
+            Vec::new()
+        });
         let cache = env_mb("INK_MUPDF_CACHE_MB", DEFAULT_CACHE_MB) << 20;
         let opts = opts.normalized();
         let mut doc = MupdfDocument {
@@ -1096,12 +1081,8 @@ impl Document for MupdfDocument {
         }
         for page in 0..self.pages {
             // A page MuPDF cannot load has no hits; the rest of the document still counts.
-            let text = match self.page_text(page) {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!("mupdf: search skips page {page}: {e}");
-                    continue;
-                }
+            let Ok(text) = self.page_text(page).inspect_err(|e| log::warn!("mupdf: search skips page {page}: {e}")) else {
+                continue;
             };
             for m in text.find(query, 40) {
                 let rects = text.rects(m.chars.clone());
@@ -1130,13 +1111,10 @@ impl Document for MupdfDocument {
         let mut next = page + 1;
         while out.chars().count() < chars && next < self.pages && next <= page + 3 {
             // The page of `pos` must load; a damaged page after it is skipped.
-            let more = match self.page_text(next) {
-                Ok(t) => t.plain(),
-                Err(e) => {
-                    log::warn!("mupdf: read_around skips page {next}: {e}");
-                    String::new()
-                }
-            };
+            let more = self.page_text(next).map(|t| t.plain()).unwrap_or_else(|e| {
+                log::warn!("mupdf: read_around skips page {next}: {e}");
+                String::new()
+            });
             if !more.is_empty() {
                 out.push(' ');
                 out.push_str(&more);
