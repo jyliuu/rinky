@@ -569,10 +569,6 @@ impl StyleContext {
 
 /// Element data the cascade reads beyond selector matching.
 pub trait StyledElement: SelectorElement {
-    /// The `style` attribute.
-    fn style_attr(&self) -> Option<&str> {
-        self.attr("style")
-    }
     /// Presentational hints (`align`, `width`, `height`, `valign`, `<font size>`) as declarations.
     fn hints(&self) -> Vec<Declaration> {
         let mut out = Vec::new();
@@ -669,7 +665,7 @@ impl Cascade {
         let mut extra: Vec<(Origin, u32, u32, Declaration)> = Vec::new();
         if self.publisher {
             extra.extend(e.hints().into_iter().map(|d| (Origin::Hint, 0, 0, d)));
-            if let Some(s) = e.style_attr() {
+            if let Some(s) = e.attr("style") {
                 extra.extend(css::parse_declarations(s).into_iter().enumerate().map(|(i, d)| (Origin::Inline, u32::MAX, i as u32, d)));
             }
         } else if matches!(e.local_name(), "img" | "image" | "svg") {
@@ -941,26 +937,17 @@ impl Cascade {
                 }
             }
             "width" | "height" | "max-width" | "max-height" => {
-                let l = match kw.as_deref() {
-                    Some("none") => Some(Len::Auto),
-                    _ => v.first().and_then(|t| self.len(t, font)),
+                let l = if kw.as_deref() == Some("none") { Some(Len::Auto) } else { v.first().and_then(|t| self.len(t, font)) };
+                let slot = match d.name.as_str() {
+                    "width" => &mut s.width,
+                    "height" => &mut s.height,
+                    "max-width" => &mut s.max_width,
+                    _ => &mut s.max_height,
                 };
-                if let Some(l) = l {
-                    match d.name.as_str() {
-                        "width" => s.width = l,
-                        "height" => s.height = l,
-                        "max-width" => s.max_width = l,
-                        _ => s.max_height = l,
-                    }
-                }
+                set(slot, l);
             }
             "page-break-before" | "break-before" | "page-break-after" | "break-after" => {
-                let b = kw.as_deref().and_then(PageBreak::from_keyword).unwrap_or_default();
-                if d.name.ends_with("before") {
-                    s.break_before = b;
-                } else {
-                    s.break_after = b;
-                }
+                *if d.name.ends_with("before") { &mut s.break_before } else { &mut s.break_after } = kw.as_deref().and_then(PageBreak::from_keyword).unwrap_or_default();
             }
             "page-break-inside" | "break-inside" => s.avoid_break_inside = matches!(kw.as_deref(), Some("avoid" | "avoid-page")),
             "vertical-align" => {
