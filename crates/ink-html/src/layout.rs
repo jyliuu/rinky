@@ -654,26 +654,23 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut box_w = (w - ml - mr).max(10.0);
         let image = is_image(self.dom.name(id));
         let is_table = st.display == Display::Table;
-        if let Len::Px(_) | Len::Pct(_) = st.width {
-            if !image {
-                let want = st.width.resolve(w, box_w) + if is_table { 0.0 } else { pl + pr + b.left + b.right };
-                let want = want.min(box_w);
-                if st.margin.left.is_auto() && st.margin.right.is_auto() {
-                    box_x += (box_w - want) / 2.0;
-                } else if st.margin.left.is_auto() {
-                    box_x += box_w - want;
-                }
-                box_w = want;
+        if !st.width.is_auto() && !image {
+            let want = st.width.resolve(w, box_w) + if is_table { 0.0 } else { pl + pr + b.left + b.right };
+            let want = want.min(box_w);
+            if st.margin.left.is_auto() && st.margin.right.is_auto() {
+                box_x += (box_w - want) / 2.0;
+            } else if st.margin.left.is_auto() {
+                box_x += box_w - want;
             }
+            box_w = want;
         }
-        if let Len::Px(_) | Len::Pct(_) = st.max_width {
-            let mw = st.max_width.resolve(w, box_w);
-            if mw < box_w && !image {
-                if st.margin.left.is_auto() && st.margin.right.is_auto() {
-                    box_x += (box_w - mw) / 2.0;
-                }
-                box_w = mw;
+        // An `auto` maximum resolves to the box width: no change.
+        let mw = st.max_width.resolve(w, box_w);
+        if mw < box_w && !image {
+            if st.margin.left.is_auto() && st.margin.right.is_auto() {
+                box_x += (box_w - mw) / 2.0;
             }
+            box_w = mw;
         }
         self.add_margin(mt);
         let framed_top = b.top > 0.0 || pt > 0.0;
