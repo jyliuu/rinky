@@ -123,21 +123,12 @@ pub fn resolve(base: &str, reference: &str) -> String {
         return compose(r.scheme, r.authority, &remove_dot_segments(r.path), r.query, r.fragment);
     }
     let b = parse(base);
-    let (authority, path, query);
-    if r.authority.is_some() {
-        authority = r.authority;
-        path = remove_dot_segments(r.path);
-        query = r.query;
-    } else {
-        authority = b.authority;
-        if r.path.is_empty() {
-            path = b.path.to_string();
-            query = r.query.or(b.query);
-        } else {
-            path = if r.path.starts_with('/') { remove_dot_segments(r.path) } else { remove_dot_segments(&merge(&b, r.path)) };
-            query = r.query;
-        }
-    }
+    let (authority, path, query) = match (r.authority, r.path) {
+        (Some(_), p) => (r.authority, remove_dot_segments(p), r.query),
+        (None, "") => (b.authority, b.path.to_string(), r.query.or(b.query)),
+        (None, p) if p.starts_with('/') => (b.authority, remove_dot_segments(p), r.query),
+        (None, p) => (b.authority, remove_dot_segments(&merge(&b, p)), r.query),
+    };
     compose(b.scheme, authority, &path, query, r.fragment)
 }
 
