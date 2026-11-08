@@ -33,7 +33,7 @@ static PLACEHOLDER: &[u8] = include_bytes!("../fonts/Placeholder.ttf");
 pub type FamilyId = u16;
 
 /// A face request resolved to a family and style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FaceKey {
     /// Family.
     pub family: FamilyId,

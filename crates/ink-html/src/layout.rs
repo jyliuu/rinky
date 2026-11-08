@@ -26,7 +26,7 @@ use std::sync::Arc;
 pub const NO_LINK: u32 = u32::MAX;
 
 /// A run of text drawn at one position.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextRun {
     /// Left edge (page pixels).
     pub x: f32,
@@ -1485,26 +1485,10 @@ impl<'a, 'e> Flow<'a, 'e> {
                     self.out.items.extend(border_rects(Edges::all(t), mx, sz, y, y + sz, sz).map(Draw::Rect));
                 }
             } else {
-                self.out.items.push(Draw::Text(TextRun {
-                    x: mx,
-                    baseline,
-                    face,
-                    px: st.font_size,
-                    text: m,
-                    width: mw,
-                    node: NONE,
-                    start: 0,
-                    len: 0,
-                    link: NO_LINK,
-                    underline: false,
-                    strike: false,
-                    gray: 0,
-                    letter_spacing: 0.0,
-                    deco_w: mw,
-                    line_top: top,
-                    line_bottom: bottom,
-                    hyphenated: false,
-                }));
+                // Black, undecorated, outside the DOM text and links.
+                let (px, node, link) = (st.font_size, NONE, NO_LINK);
+                let run = TextRun { x: mx, baseline, face, px, text: m, width: mw, node, link, deco_w: mw, line_top: top, line_bottom: bottom, ..Default::default() };
+                self.out.items.push(Draw::Text(run));
             }
             if !outside {
                 x0 += mw + gap;
