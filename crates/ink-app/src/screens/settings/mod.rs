@@ -247,7 +247,7 @@ pub fn register(reg: &mut ScreenRegistry) {
         }
         Ok(Box::new(screen))
     });
-    reg.register("quicklight", |_| Ok(Box::new(quick_light::QuickLightScreen::default())));
+    reg.register("quicklight", |_| Ok(Box::new(quick_light::ControlCenterScreen::default())));
 }
 
 pub use page::{app_bar_rect, content_rect, STATUS_H};
@@ -1198,7 +1198,7 @@ impl SettingsScreen {
 
     /// The Light page: a slider row for the brightness and one for the warmth.
     fn build_light(&mut self, cx: &mut AppCtx, content: Rect) {
-        self.add_rows(light_rows(&QuickLight::from_services(&cx.services)), content);
+        self.add_rows(light_rows(&QuickLight::read(&*cx.services.light)), content);
     }
 
     fn build_sleep(&mut self, cx: &mut AppCtx, content: Rect) {

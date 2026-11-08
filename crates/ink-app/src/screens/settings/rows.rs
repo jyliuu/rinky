@@ -16,7 +16,7 @@
 //! ([`Row::choice`]), links to sub-pages ([`Row::nav`]), actions ([`Row::item`]),
 //! ordered items ([`Trail::Order`]) and sliders ([`Row::slider`]).
 
-use ink_device::{Canvas, Point, Rect, RefreshClass};
+use ink_device::{Point, Rect, RefreshClass};
 use ink_text::Style;
 use ink_ui::draw::{stroke_round_rect, Path};
 use ink_ui::theme::space;
@@ -622,20 +622,15 @@ impl Widget for SettingsList {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         let started = std::time::Instant::now();
         self.scroll = self.scroll.clamp(0, self.max_scroll(b));
+        // Only whole rows are painted (see `visible`): icons and switches ignore the text
+        // clip, and a cut row would draw them outside `b` and every update rect.
         let rows = self.visible(b);
-        // Icons, switches and chevrons ignore the text clip: a row cut by the top or
-        // bottom edge would draw them over the app bar or the status line, outside every
-        // update rect (the ghost book icon and second switch in the 2026-11-01 photo).
-        // Keep the canvas outside `b` as it was.
-        let reach = rows.iter().fold(b, |u, (_, r)| u.union(r)).intersect(&cx.canvas.bounds());
-        let kept = KeptStrips::save(cx.canvas, b, reach);
         for (k, (i, r)) in rows.iter().enumerate() {
             let row = &self.rows[*i];
             // A divider above an item that follows another item of the same section.
             let divider = k > 0 && row.kind == Kind::Item && self.rows[rows[k - 1].0].kind == Kind::Item;
             SettingsList::paint_row(cx, *r, row, self.pressed == Some(*i), divider);
         }
-        kept.restore(cx.canvas);
         if let Some((track, _)) = self.scrollbar(b) {
             // The shared bar in black and white only (its DU look): a list jump is one
             // DU update, which shows no gray track.
@@ -755,34 +750,6 @@ impl Widget for SettingsList {
         }
         let rows = self.visible(b);
         Some(rows.into_iter().filter(|(i, _)| changed.contains(i)).map(|(_, r)| r.intersect(&b)).collect())
-    }
-}
-
-/// Full-width canvas rows above and below a widget's rect `b`, as far as `reach` goes:
-/// saved before painting rows that may stick out of `b`, put back after.
-struct KeptStrips {
-    above: (i32, Vec<u8>),
-    below: (i32, Vec<u8>),
-}
-
-impl KeptStrips {
-    fn save(canvas: &Canvas, b: Rect, reach: Rect) -> Self {
-        let w = canvas.width;
-        let rows = |y0: i32, y1: i32| -> (i32, Vec<u8>) {
-            if y1 <= y0 {
-                return (y0, Vec::new());
-            }
-            (y0, canvas.pixels[y0 as usize * w..y1 as usize * w].to_vec())
-        };
-        KeptStrips { above: rows(reach.y, b.y.min(reach.bottom())), below: rows(b.bottom().max(reach.y), reach.bottom()) }
-    }
-
-    fn restore(self, canvas: &mut Canvas) {
-        let w = canvas.width;
-        for (y, px) in [self.above, self.below] {
-            let i = y as usize * w;
-            canvas.pixels[i..i + px.len()].copy_from_slice(&px);
-        }
     }
 }
 

@@ -34,7 +34,7 @@
 use super::{advanced, current_settings, edit_settings};
 use super::popup::{self, Anchor, PopupCatcher, SettingsPopup};
 use crate::screens::common::paint_cx;
-use crate::router::{AppCtx, Route, Services, Transition};
+use crate::router::{AppCtx, Route, Transition};
 use ink_device::clock::DateTime;
 use ink_device::light::{AmberMode, AmberSchedule, AmberScheduler, DayTime};
 use ink_device::{Clock, Light, Rect, RefreshClass, Rotation, Size};
@@ -124,11 +124,6 @@ impl QuickLight {
             brightness: slider("Brightness", light.brightness_range(), light.brightness(), BRIGHTNESS),
             warmth: slider("Warmth", light.warmth_range(), light.warmth(), WARMTH),
         }
-    }
-
-    /// Same as [`QuickLight::read`] for the services of a screen context.
-    pub fn from_services(s: &Services) -> Self {
-        QuickLight::read(&*s.light)
     }
 }
 
@@ -549,8 +544,6 @@ pub fn picker_area(l: &Layout) -> Rect {
 pub enum Glyph {
     /// An icon of the set.
     Icon(Icon),
-    /// Airplane seen from above.
-    Airplane,
     /// Circle half black, half white (night mode).
     Contrast,
     /// Filled sun (warmth).
@@ -566,32 +559,6 @@ impl Glyph {
         let p = |x: f32, y: f32| (ox + x * s, oy + y * s);
         match self {
             Glyph::Icon(i) => cx.icon(i, r, side, value),
-            Glyph::Airplane => {
-                let pts: Vec<(f32, f32)> = [
-                    (12.0, 1.5),
-                    (13.6, 3.5),
-                    (13.6, 9.0),
-                    (22.5, 14.0),
-                    (22.5, 16.2),
-                    (13.6, 13.6),
-                    (13.6, 18.6),
-                    (16.5, 20.6),
-                    (16.5, 22.5),
-                    (12.0, 21.2),
-                    (7.5, 22.5),
-                    (7.5, 20.6),
-                    (10.4, 18.6),
-                    (10.4, 13.6),
-                    (1.5, 16.2),
-                    (1.5, 14.0),
-                    (10.4, 9.0),
-                    (10.4, 3.5),
-                ]
-                .iter()
-                .map(|&(x, y)| p(x, y))
-                .collect();
-                Path::new().polygon(&pts).fill(cx.canvas, value);
-            }
             Glyph::Contrast => {
                 let (cx0, cy0) = p(12.0, 12.0);
                 let rad = 9.5 * s;
@@ -1037,9 +1004,6 @@ const SLOW_TICK: Duration = Duration::from_secs(30);
 /// server's address after USB networking goes off).
 const PLUGIN_POLL: Duration = Duration::from_secs(2);
 
-/// The old name of [`ControlCenterScreen`].
-pub type QuickLightScreen = ControlCenterScreen;
-
 fn on_off(on: bool) -> &'static str {
     if on {
         "On"
@@ -1139,7 +1103,7 @@ impl ControlCenterScreen {
         let now = cx.services.clock.local_now();
         self.minute = Some((now.hour, now.minute));
         let header = tree.add(None, Box::new(Header::read(&now, &*cx.services.battery)), lay.header);
-        let q = QuickLight::from_services(&cx.services);
+        let q = QuickLight::read(&*cx.services.light);
         let mut slider = |s: Option<Slider>, icon: Rect, r: Rect, glyph: Glyph, missing: &str| match s {
             Some(s) => {
                 tree.add(None, Box::new(GlyphView(glyph)), icon);

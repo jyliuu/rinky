@@ -134,14 +134,6 @@ impl SettingsPopup {
         self.list.layout(area).into_iter().find(|(i, _)| self.list.rows[*i].action == action).map(|(_, r)| Rect::new(r.x, r.y - self.list.scroll, r.w, r.h))
     }
 
-    /// New rows (and the same title): the whole popup repaints.
-    pub fn set_rows(&mut self, rows: Vec<Row>) {
-        let scroll = self.list.scroll;
-        self.list = SettingsList::new(rows);
-        self.list.scroll = scroll;
-        self.fresh = true;
-    }
-
     /// A new note line: the whole popup repaints when it changed.
     pub fn set_note(&mut self, note: String) {
         if self.note != note {
