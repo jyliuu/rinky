@@ -192,8 +192,48 @@ impl Path {
         }
         let local: Vec<Vec<(f32, f32)>> =
             self.contours.iter().map(|c| c.iter().map(|p| (p.0 - b.x as f32, p.1 - b.y as f32)).collect()).collect();
-        let cov = fill_contours(b.w as usize, b.h as usize, &local);
-        blend(canvas, b, &cov, value);
+        COVERAGE.with_borrow_mut(|cache| blend(canvas, b, cache.get(b.w as usize, b.h as usize, local), value));
+    }
+}
+
+/// Bytes of coverage the per-thread [`CoverageCache`] keeps.
+const COVERAGE_BUDGET: usize = 4 << 20;
+
+thread_local! {
+    static COVERAGE: std::cell::RefCell<CoverageCache> = std::cell::RefCell::default();
+}
+
+/// The coverage of recently filled paths, by their exact local contours. Widgets repaint
+/// the same shapes at the same places frame after frame (key outlines, buttons, panels),
+/// and `fill_contours` is a pure function: a bit-identical input gets its earlier output.
+#[derive(Default)]
+struct CoverageCache {
+    /// (key, coverage), least recently used first. The key holds the size, each
+    /// contour's length and the bits of every point.
+    entries: Vec<(Vec<u32>, Vec<u8>)>,
+    bytes: usize,
+}
+
+impl CoverageCache {
+    fn get(&mut self, w: usize, h: usize, contours: Vec<Vec<(f32, f32)>>) -> &[u8] {
+        let mut key = vec![w as u32, h as u32];
+        for c in &contours {
+            key.push(c.len() as u32);
+            key.extend(c.iter().flat_map(|p| [p.0.to_bits(), p.1.to_bits()]));
+        }
+        let entry = match self.entries.iter().position(|e| e.0 == key) {
+            Some(i) => self.entries.remove(i),
+            None => {
+                let cov = fill_contours(w, h, &contours);
+                self.bytes += cov.len();
+                (key, cov)
+            }
+        };
+        while self.bytes > COVERAGE_BUDGET && !self.entries.is_empty() {
+            self.bytes -= self.entries.remove(0).1.len();
+        }
+        self.entries.push(entry);
+        &self.entries.last().expect("just pushed").1
     }
 }
 
@@ -350,6 +390,25 @@ mod tests {
 
     fn dark(c: &Canvas) -> usize {
         c.pixels.iter().filter(|v| **v < 128).count()
+    }
+
+    #[test]
+    fn a_repeated_fill_reuses_its_coverage_and_draws_the_same() {
+        let shape = |x: f32| {
+            let mut p = Path::new();
+            p.round_rect_outline(x, 30.5, 70.0, 40.0, 9.0, 3.0);
+            p
+        };
+        let (mut a, mut b) = (Canvas::new(200, 120), Canvas::new(200, 120));
+        shape(20.0).fill(&mut a, 0);
+        let cached = COVERAGE.with_borrow(|c| c.entries.len());
+        shape(20.0).fill(&mut b, 0);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.len()), cached, "the second fill is a hit");
+        assert_eq!(a.pixels, b.pixels);
+        // Another place is another key; the old entry stays usable.
+        shape(90.0).fill(&mut a, 0);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.len()), cached + 1);
+        assert_eq!(COVERAGE.with_borrow(|c| c.entries.iter().map(|e| e.1.len()).sum::<usize>()), COVERAGE.with_borrow(|c| c.bytes));
     }
 
     #[test]
