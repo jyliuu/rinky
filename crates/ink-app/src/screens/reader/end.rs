@@ -128,8 +128,31 @@ fn card_height(info: &EndInfo) -> u32 {
     2 * PAD as u32 + CAPTION_H + title + author + space(3) as u32 + BUTTON_H + space(4) as u32 + CAPTION_H + STAR + space(5) as u32 + next + BUTTON_H
 }
 
+/// What fits on a screen `h` pixels high: on a short screen (a 6" panel turned to
+/// landscape) the suggestion loses its progress bar, then the title its last lines, then
+/// the card its suggestion, so that the buttons stay on the screen.
+fn fit(info: &EndInfo, h: u32) -> EndInfo {
+    let mut info = info.clone();
+    while card_height(&info) > h {
+        if let Some(n) = info.next.as_mut().filter(|n| n.progress.is_some()) {
+            n.progress = None;
+        } else if info.title.len() > 1 {
+            info.title.pop();
+            if let Some(last) = info.title.last_mut() {
+                last.push('…');
+            }
+        } else if info.next.is_some() {
+            info.next = None;
+        } else {
+            break;
+        }
+    }
+    info
+}
+
 /// Builds the card for a screen of `size`.
 pub fn build(info: &EndInfo, size: Size) -> Overlay {
+    let info = &fit(info, size.h);
     let mut o = Overlay::new(OverlayKind::End);
     o.tree.add(None, Box::new(PageScrim { action: "close".into() }), Rect::from_size(size));
     let w = card_width(size);
@@ -348,6 +371,21 @@ mod tests {
                 assert!(r.h >= 96, "{a} is a touch target");
             }
         }
+        // A three-line title on a 6" panel turned to landscape: still every button on it.
+        let long = EndInfo { title: vec!["A title".into(), "of three".into(), "lines".into()], ..info.clone() };
+        for size in [Size::new(1448, 1072), Size::new(1024, 758)] {
+            let o = build(&long, size);
+            let card = o.tree.bounds(o.ids["card"]).unwrap();
+            for a in ["end-finished", "end-star:1", "end-star:5", "end-library", "close"] {
+                let r = o.button_rect(a).unwrap_or_else(|| panic!("{a}"));
+                assert!(r.y >= card.y && r.bottom() <= card.bottom() && card.bottom() <= size.h as i32, "{a} on {size:?}: {r:?} in {card:?}");
+            }
+            if let Some(r) = o.button_rect("end-next") {
+                assert!(r.bottom() <= card.bottom(), "end-next on {size:?}");
+            }
+        }
+        assert_eq!(fit(&long, 1072).next.unwrap().progress, None, "the progress bar goes first");
+        assert_eq!(fit(&long, 1696), long, "nothing is left out where it fits");
         let o = build(&EndInfo { next: None, ..info }, Size::new(1272, 1696));
         assert!(o.button_rect("end-next").is_none());
     }
