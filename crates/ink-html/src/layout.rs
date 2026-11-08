@@ -858,33 +858,21 @@ impl<'a, 'e> Flow<'a, 'e> {
         let aspect = ih / iw;
         let mut dw = iw * scale;
         let mut dh = ih * scale;
-        match (st.width, st.height) {
-            (Len::Px(_) | Len::Pct(_), Len::Px(_) | Len::Pct(_)) => {
-                dw = st.width.resolve(w, dw);
-                dh = st.height.resolve(max_h, dh);
-            }
-            (Len::Px(_) | Len::Pct(_), _) => {
-                dw = st.width.resolve(w, dw);
-                dh = dw * aspect;
-            }
-            (_, Len::Px(_) | Len::Pct(_)) => {
-                dh = st.height.resolve(max_h, dh);
-                dw = dh / aspect;
-            }
-            _ => {}
+        let (dw0, dh0) = (st.width.resolve(w, dw), st.height.resolve(max_h, dh));
+        // A size given on one axis only keeps the aspect ratio.
+        match (st.width.is_auto(), st.height.is_auto()) {
+            (false, false) => (dw, dh) = (dw0, dh0),
+            (false, true) => (dw, dh) = (dw0, dw0 * aspect),
+            (true, false) => (dw, dh) = (dh0 / aspect, dh0),
+            (true, true) => {}
         }
-        let max_w = match st.max_width {
-            Len::Auto => w,
-            m => m.resolve(w, w).min(w),
-        };
+        // `auto` maxima resolve to the available size.
+        let max_w = st.max_width.resolve(w, w).min(w);
         if dw > max_w {
             dh *= max_w / dw;
             dw = max_w;
         }
-        let max_hh = match st.max_height {
-            Len::Auto => max_h,
-            m => m.resolve(max_h, max_h).min(max_h),
-        };
+        let max_hh = st.max_height.resolve(max_h, max_h).min(max_h);
         if dh > max_hh {
             dw *= max_hh / dh;
             dh = max_hh;
@@ -1134,11 +1122,7 @@ impl<'a, 'e> Flow<'a, 'e> {
 
     /// Width of the bytes `start..end` of a paragraph.
     fn width(&mut self, p: &Para, start: usize, end: usize) -> f32 {
-        let mut total = 0.0;
-        for r in p.runs(start, end) {
-            total += self.run_width(p, r);
-        }
-        total
+        p.runs(start, end).map(|r| self.run_width(p, r)).sum()
     }
 
     /// Lays out an inline run as one paragraph owned by block `owner`.
