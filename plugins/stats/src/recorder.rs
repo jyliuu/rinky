@@ -188,8 +188,13 @@ impl StatsPlugin {
         self.send(cx, Cmd::Pages(recs));
     }
 
-    /// Writes what is buffered, ends the session and waits for the worker.
-    fn end(&mut self, cx: &mut HostCtx, now: u64) {
+    /// Writes what is buffered, ends the session and waits for the worker; nothing
+    /// without a book.
+    fn end(&mut self, cx: &mut HostCtx) {
+        if self.cur.is_none() {
+            return;
+        }
+        let now = (self.clock)();
         self.close_page(now);
         self.flush(cx);
         if self.tx.is_none() {
@@ -215,11 +220,9 @@ impl Plugin for StatsPlugin {
     }
 
     fn on_book_open(&mut self, cx: &mut HostCtx) -> Result<()> {
+        self.end(cx);
+        self.cur = None;
         let now = (self.clock)();
-        if self.cur.is_some() {
-            self.end(cx, now);
-            self.cur = None;
-        }
         let doc = cx.document()?;
         let Some(md5) = doc.book_id() else {
             log::info!("stats: book without an id, not recorded");
@@ -259,10 +262,7 @@ impl Plugin for StatsPlugin {
     }
 
     fn on_suspend(&mut self, cx: &mut HostCtx) -> Result<()> {
-        if self.cur.is_some() {
-            let now = (self.clock)();
-            self.end(cx, now);
-        }
+        self.end(cx);
         Ok(())
     }
 
@@ -280,11 +280,8 @@ impl Plugin for StatsPlugin {
     }
 
     fn on_close(&mut self, cx: &mut HostCtx) -> Result<()> {
-        if self.cur.is_some() {
-            let now = (self.clock)();
-            self.end(cx, now);
-            self.cur = None;
-        }
+        self.end(cx);
+        self.cur = None;
         Ok(())
     }
 }
