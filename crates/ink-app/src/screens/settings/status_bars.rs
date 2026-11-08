@@ -1,4 +1,4 @@
-//! Status bars page of the settings screen (owner: the `statusbar` builder): a live
+//! Status bars page of the settings screen: a live
 //! preview of both bars at the top, a Top / Bottom switch, the text size slider of the
 //! chosen bar, then its rows: on/off switch, the widgets of the left, centre and right
 //! slots (a tap opens Move / Remove; "Add widget" opens a picker), the progress bar style,

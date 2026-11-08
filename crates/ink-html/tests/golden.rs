@@ -15,7 +15,7 @@
 //! - `INK_GOLDEN_DIR` reads goldens from another directory (used to prove that a
 //!   1-pixel change fails).
 //!
-//! Owner: the `html` agent. Add a case by adding a line to `CASES` and running
+//! Add a case by adding a line to `CASES` and running
 //! `scripts/golden-update.sh`.
 
 use ink_device::Canvas;

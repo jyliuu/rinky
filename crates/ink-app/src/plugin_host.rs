@@ -1,4 +1,4 @@
-//! Glue between the app and `ink-plugin` (owner: the `plugin` agent).
+//! Glue between the app and `ink-plugin`.
 //!
 //! [`PluginHost`] owns the [`PluginManager`] with the compiled-in Rust plugins and the
 //! Lua plugins found in `<RINKY_HOME>/plugins/<name>/` (`plugin.toml` + `main.lua`),
