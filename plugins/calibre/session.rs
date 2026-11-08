@@ -5,7 +5,7 @@
 //! The stream must have a short read timeout (about 1 s): reads that time out are how the
 //! session sees the cancel flag and the idle limit.
 
-use crate::cache::Cache;
+use crate::cache::{write_json, Cache};
 use crate::protocol::{self, op, Frame, FrameError};
 use ink_plugin::serde_json::{self, json, Value};
 use std::io::{ErrorKind, Read, Write};
@@ -279,7 +279,7 @@ impl<S: Read + Write> Session<'_, S> {
                 if let Some(n) = self.drive_info().get("device_name").cloned() {
                     drive["device_name"] = n;
                 }
-                if let Err(e) = write_json(&self.cfg.drive_file, &drive) {
+                if let Err(e) = serde_json::to_vec_pretty(&drive).map_err(std::io::Error::other).and_then(|d| write_json(&self.cfg.drive_file, d)) {
                     log::warn!("calibre: cannot save {}: {e}", self.cfg.drive_file.display());
                 }
                 self.send(op::OK, &json!({}))
@@ -534,15 +534,6 @@ fn remove_empty_parents(file: &Path, root: &Path) {
         }
         d = dir.parent();
     }
-}
-
-fn write_json(path: &Path, v: &Value) -> std::io::Result<()> {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(v).map_err(std::io::Error::other)?)?;
-    std::fs::rename(tmp, path)
 }
 
 /// A JSON value shortened for the debug log.
