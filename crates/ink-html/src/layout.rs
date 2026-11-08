@@ -548,7 +548,6 @@ impl<'a, 'e> Flow<'a, 'e> {
         book_lang: Option<String>,
         stop: Option<StopAt>,
     ) -> (ChapterLayout, bool) {
-        let dir_end = chapter_path.rfind('/').map(|i| i + 1).unwrap_or(0);
         let mut has_block_desc = vec![false; dom.nodes.len()];
         // Post-order: an element has block descendants if a child is block-level or has some.
         for &n in dom.preorder.iter().rev() {
@@ -565,7 +564,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             p,
             dom,
             styles,
-            chapter_dir: &chapter_path[..dir_end],
+            chapter_dir: crate::book::dir_of(chapter_path),
             chapter_path,
             book_lang,
             out: ChapterLayout::default(),

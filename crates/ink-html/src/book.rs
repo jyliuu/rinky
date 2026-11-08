@@ -67,11 +67,9 @@ impl std::fmt::Debug for Book {
     }
 }
 
-fn dir_of(path: &str) -> String {
-    match path.rfind('/') {
-        Some(i) => path[..=i].to_string(),
-        None => String::new(),
-    }
+/// The directory part of a book path, with its trailing `/` (empty for none).
+pub(crate) fn dir_of(path: &str) -> &str {
+    path.rfind('/').map_or("", |i| &path[..=i])
 }
 
 /// Byte offset of the first `<body` (any case) in `html`, or its length. Steps from `<`
@@ -301,7 +299,7 @@ impl Book {
                     fragment += 1;
                     Some(fragment)
                 };
-                ChapterSrc { dir: dir_of(&path), path, html, fragment: frag }
+                ChapterSrc { dir: dir_of(&path).to_string(), path, html, fragment: frag }
             })
             .collect();
         let mut sheets: HashMap<String, Arc<Stylesheet>> = HashMap::new();
@@ -343,7 +341,7 @@ impl Book {
             let sheet = css::parse_stylesheet(&String::from_utf8_lossy(&bytes));
             let dir = dir_of(&path);
             for imp in &sheet.imports {
-                todo.push(resolve_href(&dir, imp));
+                todo.push(resolve_href(dir, imp));
             }
             sheets.insert(path, Arc::new(sheet));
         }
@@ -352,7 +350,7 @@ impl Book {
         let mut linked: Vec<(&String, &Arc<Stylesheet>)> = sheets.iter().collect();
         linked.sort_by_key(|(path, _)| *path);
         let mut font_faces: Vec<(String, FontFaceRule)> =
-            linked.into_iter().flat_map(|(path, sheet)| sheet.font_faces.iter().map(|ff| (dir_of(path), ff.clone()))).collect();
+            linked.into_iter().flat_map(|(path, sheet)| sheet.font_faces.iter().map(|ff| (dir_of(path).to_string(), ff.clone()))).collect();
         font_faces.extend(inline_faces);
         for (dir, ff) in &font_faces {
             for src in &ff.sources {
@@ -440,7 +438,7 @@ impl Book {
         };
         let dir = dir_of(path);
         for imp in &sheet.imports {
-            self.add_sheet_path(rs, &resolve_href(&dir, imp), added);
+            self.add_sheet_path(rs, &resolve_href(dir, imp), added);
         }
         rs.add_sheet(&sheet, Origin::Author);
     }

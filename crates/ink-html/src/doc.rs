@@ -1127,8 +1127,8 @@ impl Document for HtmlDocument {
                     crate::images::decode_scaled(markup.as_bytes(), w, h, Some(res))
                 } else {
                     let bytes = resources.read(src).ok()?;
-                    let dir = src.rfind('/').map(|i| src[..=i].to_string()).unwrap_or_default();
-                    let res = if crate::images::is_svg(&bytes) { Some(svg_resolver(resources.as_ref(), &dir, &String::from_utf8_lossy(&bytes))) } else { None };
+                    let dir = crate::book::dir_of(src);
+                    let res = if crate::images::is_svg(&bytes) { Some(svg_resolver(resources.as_ref(), dir, &String::from_utf8_lossy(&bytes))) } else { None };
                     crate::images::decode_scaled(&bytes, w, h, res)
                 }
             })
