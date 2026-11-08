@@ -195,6 +195,26 @@ pub fn extension_for(media_type: &str) -> &'static str {
     }
 }
 
+/// Languages by English name (Gutenberg `Language:` headers, lowercase) and by Windows
+/// primary language id (the low byte of the MOBI locale field), with their codes.
+pub const LANGUAGES: [(&str, u32, &str); 15] = [
+    ("english", 9, "en"),
+    ("german", 7, "de"),
+    ("french", 12, "fr"),
+    ("spanish", 10, "es"),
+    ("italian", 16, "it"),
+    ("danish", 6, "da"),
+    ("dutch", 19, "nl"),
+    ("russian", 25, "ru"),
+    ("portuguese", 22, "pt"),
+    ("swedish", 29, "sv"),
+    ("norwegian", 20, "no"),
+    ("finnish", 11, "fi"),
+    ("polish", 21, "pl"),
+    ("chinese", 4, "zh"),
+    ("japanese", 17, "ja"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
