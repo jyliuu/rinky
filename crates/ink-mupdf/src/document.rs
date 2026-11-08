@@ -193,6 +193,15 @@ fn letter() -> FRect {
     FRect::new(0.0, 0.0, 612.0, 792.0)
 }
 
+/// `Ok` when page or screen `i` is below `n`, else [`DocError::PageOutOfRange`].
+fn in_range(i: usize, n: usize) -> Result<()> {
+    if i < n {
+        Ok(())
+    } else {
+        Err(DocError::PageOutOfRange(i))
+    }
+}
+
 /// Tiles needed along one axis for content `ratio` screens long (2 % slack), at most
 /// [`MAX_TILES_AXIS`]. An infinite ratio needs the most; NaN (broken geometry) one.
 fn tiles(ratio: f32) -> usize {
@@ -785,35 +794,27 @@ impl MupdfDocument {
 
     /// Size of document page `page` in points (after its own `/Rotate`).
     pub fn page_bounds(&self, page: usize) -> Result<FRect> {
-        if page >= self.pages {
-            return Err(DocError::PageOutOfRange(page));
-        }
+        in_range(page, self.pages)?;
         Ok(self.inner.borrow_mut().bound(page))
     }
 
     /// The crop box of `page` (the whole page when crop is off).
     pub fn content_box(&self, page: usize) -> Result<FRect> {
-        if page >= self.pages {
-            return Err(DocError::PageOutOfRange(page));
-        }
+        in_range(page, self.pages)?;
         let opts = self.opts;
         Ok(self.inner.borrow_mut().geom(page, &opts).content)
     }
 
     /// The column regions of `page` (one region when columns are off).
     pub fn columns(&self, page: usize) -> Result<Vec<FRect>> {
-        if page >= self.pages {
-            return Err(DocError::PageOutOfRange(page));
-        }
+        in_range(page, self.pages)?;
         let opts = self.opts;
         Ok(self.inner.borrow_mut().geom(page, &opts).regions.clone())
     }
 
     /// The text of document page `page`.
     pub fn page_text(&self, page: usize) -> Result<PageText> {
-        if page >= self.pages {
-            return Err(DocError::PageOutOfRange(page));
-        }
+        in_range(page, self.pages)?;
         self.inner.borrow_mut().text(page)
     }
 
@@ -931,9 +932,7 @@ impl MupdfDocument {
     /// (it typically comes from a 0/0 in gesture code). The zoom is clamped to
     /// [`FREE_ZOOM_RANGE`] and the pan to +-[`MAX_PAN`] pixels.
     pub fn render_page_at(&self, page: usize, spec: &RenderSpec, canvas: &mut Canvas) -> Result<()> {
-        if page >= self.pages {
-            return Err(DocError::PageOutOfRange(page));
-        }
+        in_range(page, self.pages)?;
         if !(spec.zoom.is_finite() && spec.zoom > 0.0 && spec.x.is_finite() && spec.y.is_finite()) {
             return Err(DocError::Format(format!(
                 "render_page_at: zoom {} and pan ({}, {}) must be finite, zoom above 0",
@@ -1056,9 +1055,7 @@ impl Document for MupdfDocument {
     }
 
     fn render_page(&mut self, page: usize, canvas: &mut Canvas) -> Result<()> {
-        if page >= self.screens() {
-            return Err(DocError::PageOutOfRange(page));
-        }
+        in_range(page, self.screens())?;
         let (w, h) = (self.layout.width as usize, self.layout.height as usize);
         self.with_screen(page, |px| {
             if canvas.width == w && canvas.height == h {
@@ -1076,9 +1073,7 @@ impl Document for MupdfDocument {
     }
 
     fn position_of_page(&self, page: usize) -> Result<Position> {
-        if page >= self.screens() {
-            return Err(DocError::PageOutOfRange(page));
-        }
+        in_range(page, self.screens())?;
         if self.plan.per_page() > 1 {
             // The tile's cell: page_of maps its centre back to this very tile, also when
             // tiles overlap or a short page repeats the same view on several tiles.
@@ -1221,9 +1216,7 @@ impl Document for MupdfDocument {
     }
 
     fn select(&mut self, page: usize, from: Point, to: Point) -> Result<Option<Selection>> {
-        if page >= self.screens() {
-            return Err(DocError::PageOutOfRange(page));
-        }
+        in_range(page, self.screens())?;
         let pieces = self.pieces(page);
         let (fx, fy) = (from.x as f32, from.y as f32);
         let Some(piece) = pieces
