@@ -71,6 +71,22 @@ fn take_request() -> Option<Request> {
     REQUEST.lock().ok().and_then(|mut q| q.take())
 }
 
+thread_local! {
+    /// Books the reader opened by itself ("Open next" on the end card), with the time.
+    /// Screens run on the app loop's thread (tests: each on its own).
+    static OPENED: std::cell::RefCell<Vec<(PathBuf, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tells the library that the reader opened `path` now: when the library is shown next,
+/// the book counts as opened then, and its progress is read from its sidecar.
+pub fn note_opened(path: &std::path::Path) {
+    OPENED.with(|v| v.borrow_mut().push((path.to_path_buf(), model::now())));
+}
+
+fn take_opened() -> Vec<(PathBuf, u64)> {
+    OPENED.with(|v| std::mem::take(&mut *v.borrow_mut()))
+}
+
 /// Registers the library for [`Route::Library`]. The factory does no IO.
 pub fn register(reg: &mut ScreenRegistry) {
     reg.register("library", |_| Ok(Box::new(LibraryScreen::new())));
@@ -1075,6 +1091,15 @@ impl AppScreen for LibraryScreen {
             Some(lib) => {
                 if let Some(p) = self.opened.take() {
                     lib.refresh_state(&p);
+                    lib.save();
+                }
+                // Books the reader went on to ("Open next"): opened then, read since.
+                let more = take_opened();
+                for (p, t) in &more {
+                    lib.record_open_at(p, *t);
+                    lib.refresh_state(p);
+                }
+                if !more.is_empty() {
                     lib.save();
                 }
                 if self.dirs != cx.settings.library_dirs {

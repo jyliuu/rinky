@@ -493,6 +493,31 @@ fn home_lists_books_then_shows_continue_reading_after_the_reader() {
 }
 
 #[test]
+fn a_book_the_reader_opened_next_counts_as_opened_back_in_the_library() {
+    let (dir, paths) = books("opened-next", &["juliet.epub", "formats/sample.fb2"]);
+    let mut h = Harness::new("opened-next", &dir, paths);
+    let (j, fb2) = (dir.join("juliet.epub"), dir.join("sample.fb2"));
+    h.tap(|x| *x == Hit::Book(j.clone()));
+    assert_eq!(h.pushed(), vec![Route::Reader(j.clone())]);
+    // Opened a while ago (the test runs within one second).
+    h.screen.lib.as_mut().unwrap().index.get_mut(&j).unwrap().last_opened = Some(1);
+    // The reader finished Juliet and went on to the FB2 from its end card; that book
+    // saved a position before the reader closed.
+    BookState { status: ReadingStatus::Complete, percent: Some(1.0), ..Default::default() }.save(&j).unwrap();
+    crate::screens::library::note_opened(&fb2);
+    BookState { position: Some("/body/DocFragment[2].0".into()), percent: Some(0.1), ..Default::default() }.save(&fb2).unwrap();
+    let p = providers();
+    h.screen.on_enter(&mut cx!(h, p)).unwrap();
+    let lib = h.screen.library().unwrap();
+    assert_eq!(lib.index.get(&j).unwrap().status, ReadingStatus::Complete);
+    let b = lib.index.get(&fb2).unwrap();
+    assert_eq!((b.status, b.percent), (ReadingStatus::Reading, Some(0.1)));
+    assert!(b.last_opened.is_some());
+    assert_eq!(lib.current().map(|b| b.path.clone()), Some(fb2), "the book read last is the current one");
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn home_empty_state_offers_a_rescan() {
     let (dir, paths) = books("home-empty", &[]);
     let h = Harness::new("home-empty", &dir, paths);

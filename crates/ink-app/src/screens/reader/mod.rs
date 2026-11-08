@@ -24,6 +24,7 @@
 
 pub mod aa;
 pub mod actions;
+pub mod end;
 pub mod footer;
 pub mod goto;
 pub mod light_gestures;
@@ -673,6 +674,8 @@ pub struct ReaderScreen {
     /// class is `Change::Jump` (REAGL; GC16 per the user's "full refresh every N pages"),
     /// not a flash of its own.
     jumped: bool,
+    /// What the end card shows while it is open ([`end`]).
+    end: Option<end::EndInfo>,
 }
 
 /// The sidecar gets the position once the page has rested this long. Page turns do no
@@ -743,6 +746,7 @@ impl ReaderScreen {
             position_unsaved: None,
             turned: false,
             jumped: false,
+            end: None,
         }
     }
 
@@ -784,6 +788,11 @@ impl ReaderScreen {
         let Some(doc) = self.doc.as_ref() else { return };
         let total = doc.page_count().pages as i64;
         let next = (self.page as i64 + step).clamp(0, (total - 1).max(0)) as usize;
+        // Past the last page: the end card (title, finished, rating, what next).
+        if step > 0 && next == self.page && self.overlay.is_none() && self.bridge.is_none() && self.at_book_end() {
+            self.open_end(cx);
+            return;
+        }
         self.bridge = None;
         if next != self.page {
             self.page = next;
@@ -1815,6 +1824,7 @@ impl ReaderScreen {
         if let Some(d) = self.dict_card.take() {
             self.dict_cancel.push(d);
         }
+        self.end = None;
         if let Some(o) = self.overlay.take() {
             self.swallow_gestures = true;
             if full {
@@ -1837,6 +1847,11 @@ impl ReaderScreen {
         let index = arg.parse::<usize>().ok();
         match name {
             "close" => self.close_overlay(),
+            _ if name.starts_with("end-") => {
+                if let Some(t) = self.end_action(name, arg, cx) {
+                    return Ok(t);
+                }
+            }
             actions::EXIT_CONFIRMED => return Ok(Transition::Exit),
             "back" => return Ok(Transition::Pop),
             "page" => {
@@ -1957,6 +1972,8 @@ impl ReaderScreen {
             UiEvent::Key(k) if k.pressed => match k.key {
                 Key::Power => return Ok(Transition::Exit),
                 Key::Back | Key::Menu => self.close_overlay(),
+                // The end card: the previous-page key goes back to the last page.
+                Key::PagePrev if o.kind == overlay::OverlayKind::End => self.close_overlay(),
                 _ if page_below => return self.handle_reading(ev, cx),
                 _ => {}
             },

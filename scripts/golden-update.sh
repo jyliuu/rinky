@@ -8,6 +8,9 @@
 #   - settings page and popup: crates/ink-app/tests/golden/settings-*.png
 #                                             (crates/ink-app/tests/settings_golden.rs;
 #                                              day and night, changed pixels black)
+#   - reader end card: crates/ink-app/tests/golden/end-card*.png
+#                                             (crates/ink-app/tests/end_card_golden.rs;
+#                                              changed pixels black)
 #   scripts/golden-update.sh [DIFF_DIR]      default DIFF_DIR: target/golden-diff
 # DIFF_DIR must be new or empty (e.g. out/evidence/<key>/golden-diff): a directory
 # that holds other files is refused before anything runs, never emptied. Only the
@@ -31,6 +34,7 @@ export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)} INK_GO
 cargo test -p ink-html --test golden -- --nocapture golden_pages
 cargo test -p ink-app --test footer_golden -- --nocapture footer_band_goldens
 cargo test -p ink-app --test settings_golden -- --nocapture settings_component_goldens
+cargo test -p ink-app --test end_card_golden -- --nocapture end_card_goldens
 echo "diff images:"
 ls "$OUT"/*.diff.png 2>/dev/null || echo "  (none: no existing golden changed)"
 echo "golden files changed in git:"
