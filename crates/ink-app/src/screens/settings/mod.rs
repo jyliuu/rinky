@@ -247,7 +247,7 @@ pub fn register(reg: &mut ScreenRegistry) {
         }
         Ok(Box::new(screen))
     });
-    reg.register("quicklight", |_| Ok(Box::new(quick_light::QuickLightScreen::default())));
+    reg.register("quicklight", |_| Ok(Box::new(quick_light::ControlCenterScreen::default())));
 }
 
 pub use page::{app_bar_rect, content_rect, STATUS_H};
@@ -1198,7 +1198,7 @@ impl SettingsScreen {
 
     /// The Light page: a slider row for the brightness and one for the warmth.
     fn build_light(&mut self, cx: &mut AppCtx, content: Rect) {
-        self.add_rows(light_rows(&QuickLight::from_services(&cx.services)), content);
+        self.add_rows(light_rows(&QuickLight::read(&*cx.services.light)), content);
     }
 
     fn build_sleep(&mut self, cx: &mut AppCtx, content: Rect) {
@@ -1852,18 +1852,11 @@ impl SettingsScreen {
                 self.set_status(if on { "Justified text" } else { "Ragged right text" });
             }
             "nav" => {
-                let Some((name, op)) = order::split(arg) else { return Ok(Transition::None) };
-                let mut items = crate::plugin_entries::nav_chosen(current_settings(cx), cx.plugins);
+                let items = crate::plugin_entries::nav_chosen(current_settings(cx), cx.plugins);
                 let extra = crate::plugin_entries::nav_choices(cx.plugins);
                 let list = crate::plugin_entries::merged(ink_store::prefs::NAV_ITEMS, &extra);
-                match order::apply(&mut items, &list, name, op, NAV_MIN, NAV_MAX) {
-                    Ok(text) => {
-                        log::info!("settings: navigation bar {items:?}");
-                        edit_settings(cx, |s| s.ui.nav_items = items);
-                        self.status_text = text;
-                    }
-                    Err(text) => self.status_text = text,
-                }
+                let Some(reply) = order::page_action(a, "nav", &list, items, (NAV_MIN, NAV_MAX), cx, |s, v| s.ui.nav_items = v) else { return Ok(Transition::None) };
+                self.status_text = reply.status.unwrap_or_default();
                 // The switch flipped in the list even when refused: build it again.
                 self.rebuild = Some(RefreshClass::Gl16);
             }

@@ -366,8 +366,7 @@ impl Library {
     /// Marks a book opened now (before the reader is pushed).
     pub fn record_open(&mut self, path: &Path) {
         if self.index.record_open(path, now()) {
-            self.unsaved = true;
-            self.save();
+            self.save_changed();
         }
     }
 
@@ -388,6 +387,11 @@ impl Library {
             }
             Err(e) => log::warn!("library: cannot load state of {}: {e}", path.display()),
         }
+        self.save_changed();
+    }
+
+    /// Marks the index changed and saves it.
+    fn save_changed(&mut self) {
         self.unsaved = true;
         self.save();
     }
@@ -466,32 +470,28 @@ impl Library {
         }
         self.pending.retain(|p| p != path);
         self.index.remove(path);
-        self.unsaved = true;
-        self.save();
+        self.save_changed();
         Ok(())
     }
 
     /// Creates a collection.
     pub fn create_collection(&mut self, name: &str) -> Result<(), String> {
         self.index.create_collection(name, now()).map_err(|e| e.to_string())?;
-        self.unsaved = true;
-        self.save();
+        self.save_changed();
         Ok(())
     }
 
     /// Renames a collection.
     pub fn rename_collection(&mut self, old: &str, new: &str) -> Result<(), String> {
         self.index.rename_collection(old, new.trim()).map_err(|e| e.to_string())?;
-        self.unsaved = true;
-        self.save();
+        self.save_changed();
         Ok(())
     }
 
     /// Deletes a collection (its books stay).
     pub fn delete_collection(&mut self, name: &str) {
         if self.index.delete_collection(name) {
-            self.unsaved = true;
-            self.save();
+            self.save_changed();
         }
     }
 
@@ -511,8 +511,7 @@ impl Library {
                 }
             }
         };
-        self.unsaved = true;
-        self.save();
+        self.save_changed();
         now_in
     }
 
@@ -555,8 +554,7 @@ impl Library {
                 Err(e) => r.errors.push(format!("{}: {e}", db.display())),
             }
         }
-        self.unsaved = true;
-        self.save();
+        self.save_changed();
         r
     }
 }

@@ -2,7 +2,7 @@
 //! of an [`AppCtx`], an enabled pill button, and how a tap or swipe reads.
 
 use crate::router::AppCtx;
-use ink_device::{Point, Rect};
+use ink_device::{Key, Point, Rect};
 use ink_ui::{paint_button, ButtonKind, Gesture, Icon, PaintCx, UiEvent};
 
 /// The paint context of `cx` (its canvas, fonts and theme).
@@ -20,6 +20,30 @@ pub(crate) fn tap_pos(ev: &UiEvent) -> Option<Point> {
     match ev {
         UiEvent::Gesture(Gesture::Tap { pos } | Gesture::LongPress { pos, .. }) => Some(*pos),
         _ => None,
+    }
+}
+
+/// What an event asks of a screen that records its tap targets.
+pub(crate) enum Input<H> {
+    /// Leave the app.
+    Quit,
+    /// A key went down.
+    Key(Key),
+    /// A swipe: +1 next, -1 previous ([`swipe_step`]).
+    Swipe(i32),
+    /// A tap or long press on a target.
+    Hit(H),
+}
+
+/// Reads `ev` for a screen whose tap targets are `hits`; `None`: nothing to do.
+pub(crate) fn input<H: Clone>(ev: &UiEvent, hits: &[(Rect, H)]) -> Option<Input<H>> {
+    match ev {
+        UiEvent::Quit => Some(Input::Quit),
+        UiEvent::Key(k) => k.pressed.then_some(Input::Key(k.key)),
+        _ => swipe_step(ev).map(Input::Swipe).or_else(|| {
+            let pos = tap_pos(ev)?;
+            hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, h)| Input::Hit(h.clone()))
+        }),
     }
 }
 
