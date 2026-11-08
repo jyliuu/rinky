@@ -229,6 +229,20 @@ pub fn export_entry(paths: &Paths, entry: &BookEntry, loc: &Locator) -> Result<O
     write_export(paths, &stem, &entry.title, &entry.authors, &state, loc)
 }
 
+/// Adds ` (<suffix>)` to every name that equals another one (ignoring case), when
+/// `suffix` of its index gives one.
+fn disambiguate(names: &mut [String], suffix: impl Fn(usize) -> Option<String>) {
+    let mut tally: HashMap<String, usize> = HashMap::new();
+    for n in names.iter() {
+        *tally.entry(n.to_lowercase()).or_default() += 1;
+    }
+    for (i, n) in names.iter_mut().enumerate() {
+        if let Some(s) = (tally[&n.to_lowercase()] > 1).then(|| suffix(i)).flatten() {
+            *n = format!("{n} ({s})");
+        }
+    }
+}
+
 /// What [`export_all`] did.
 #[derive(Debug, Default)]
 pub struct ExportReport {
@@ -256,35 +270,14 @@ pub fn export_all(paths: &Paths, index: &LibraryIndex) -> ExportReport {
             Err(e) => report.failed.push((b.path.clone(), e.to_string())),
         }
     }
-    // How many of `names` equal each one, ignoring case.
-    let counts = |names: &[String]| {
-        let mut tally: HashMap<String, usize> = HashMap::new();
-        for n in names {
-            *tally.entry(n.to_lowercase()).or_default() += 1;
-        }
-        names.iter().map(|n| tally[&n.to_lowercase()]).collect::<Vec<_>>()
-    };
-    let stems: Vec<String> = loaded.iter().map(|(b, _)| sanitize_file_name(&b.title, &file_stem_of(&b.path))).collect();
-    let with_format: Vec<String> =
-        loaded.iter().zip(&stems).zip(counts(&stems)).map(|(((b, _), s), n)| if n > 1 { format!("{s} ({})", b.format) } else { s.clone() }).collect();
-    let final_names: Vec<String> = loaded
-        .iter()
-        .zip(&with_format)
-        .zip(counts(&with_format))
-        .map(|(((b, _), s), n)| {
-            if n < 2 {
-                return s.clone();
-            }
-            let md5 = b.md5.clone().or_else(|| crate::partial_md5(&b.path).ok()).unwrap_or_default();
-            let id: String = md5.chars().take(6).collect();
-            if id.is_empty() {
-                s.clone()
-            } else {
-                format!("{s} ({id})")
-            }
-        })
-        .collect();
-    for ((b, state), stem) in loaded.iter().zip(&final_names) {
+    let mut stems: Vec<String> = loaded.iter().map(|(b, _)| sanitize_file_name(&b.title, &file_stem_of(&b.path))).collect();
+    disambiguate(&mut stems, |i| Some(loaded[i].0.format.clone()));
+    disambiguate(&mut stems, |i| {
+        let b = loaded[i].0;
+        let md5 = b.md5.clone().or_else(|| crate::partial_md5(&b.path).ok()).unwrap_or_default();
+        Some(md5.chars().take(6).collect::<String>()).filter(|id| !id.is_empty())
+    });
+    for ((b, state), stem) in loaded.iter().zip(&stems) {
         match write_export(paths, stem, &b.title, &b.authors, state, &Locator::none()) {
             Ok(Some(p)) => report.written.push(p),
             Ok(None) => report.empty += 1,
