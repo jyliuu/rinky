@@ -247,8 +247,20 @@ impl Canvas {
 
     /// Writes an 8-bit grayscale PNG.
     pub fn save_png(&self, path: &Path) -> std::io::Result<()> {
+        self.write_png(path, png::Compression::Balanced)
+    }
+
+    /// Writes an 8-bit grayscale PNG with the png crate's fast deflate: several times
+    /// quicker than [`Canvas::save_png`] for a somewhat bigger file, for images written
+    /// often and kept only as a cache (library cover thumbnails).
+    pub fn save_png_fast(&self, path: &Path) -> std::io::Result<()> {
+        self.write_png(path, png::Compression::Fast)
+    }
+
+    fn write_png(&self, path: &Path, compression: png::Compression) -> std::io::Result<()> {
         let file = BufWriter::new(File::create(path)?);
         let mut enc = png::Encoder::new(file, self.width as u32, self.height as u32);
+        enc.set_compression(compression);
         enc.set_color(png::ColorType::Grayscale);
         enc.set_depth(png::BitDepth::Eight);
         let mut w = enc.write_header().map_err(std::io::Error::other)?;
@@ -319,6 +331,9 @@ mod tests {
         let path = dir.join("c.png");
         c.save_png(&path).unwrap();
         assert_eq!(Canvas::load_png(&path).unwrap(), c);
+        let fast = dir.join("fast.png");
+        c.save_png_fast(&fast).unwrap();
+        assert_eq!(Canvas::load_png(&fast).unwrap(), c);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
