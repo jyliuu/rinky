@@ -331,24 +331,73 @@ fn axis_weights(src: u32, dst: u32) -> Vec<(u32, Vec<i32>)> {
         .collect()
 }
 
+/// The weights of [`axis_weights`] (for a source `src` wide) as one flat array with the
+/// same number of taps per output pixel: the window start of each output, the tap
+/// count, and the weights, zero where the original window does not reach.
+fn padded_weights(ws: &[(u32, Vec<i32>)], src: u32) -> (Vec<u32>, usize, Vec<i32>) {
+    let taps = ws.iter().map(|(_, w)| w.len()).max().unwrap_or(1).min(src as usize);
+    let mut starts = Vec::with_capacity(ws.len());
+    let mut flat = vec![0; ws.len() * taps];
+    for ((lo, w), out) in ws.iter().zip(flat.chunks_exact_mut(taps)) {
+        // Move the window left when it would run past the end of the row.
+        let start = (*lo).min(src - taps as u32);
+        let at = (lo - start) as usize;
+        out[at..at + w.len()].copy_from_slice(w);
+        starts.push(start);
+    }
+    (starts, taps, flat)
+}
+
+/// One row of the horizontal pass of [`resize_gray`] with `N` taps per output pixel
+/// (a fixed count the compiler unrolls).
+fn horizontal<const N: usize>(row: &[u8], out: &mut [u16], starts: &[u32], flat: &[i32]) {
+    for ((o, &lo), ws) in out.iter_mut().zip(starts).zip(flat.as_chunks::<N>().0) {
+        let px: &[u8; N] = row[lo as usize..][..N].try_into().expect("N taps");
+        let mut acc = 0i32;
+        for k in 0..N {
+            acc += px[k] as i32 * ws[k];
+        }
+        *o = to_8_8(acc);
+    }
+}
+
+/// A horizontal sum (weights in 1/16384) rounded to 8.8 fixed point.
+fn to_8_8(acc: i32) -> u16 {
+    ((acc + (1 << 5)) >> 6).clamp(0, 255 << 8) as u16
+}
+
 /// Separable bilinear / area resize of a gray image in fixed point.
 pub fn resize_gray(src: &GrayImage, w: u32, h: u32) -> GrayImage {
     let (sw, sh) = src.dimensions();
+    if sw == 0 || sh == 0 {
+        return GrayImage::from_pixel(w, h, image::Luma([255]));
+    }
     let xs = axis_weights(sw, w);
     let ys = axis_weights(sh, h);
     let s = src.as_raw();
     // Horizontal pass: sh rows of w values (x 16384 scale kept as u16 after rounding).
+    // Every output pixel reads the same number of source pixels (its weights padded
+    // with zeros), a constant up to 8 taps, so the compiler unrolls the inner loop; the
+    // sums, and so the result, are the same.
+    let (starts, taps, flat) = padded_weights(&xs, sw);
     let mut tmp = vec![0u16; (w * sh) as usize];
     for y in 0..sh as usize {
         let row = &s[y * sw as usize..(y + 1) * sw as usize];
         let out = &mut tmp[y * w as usize..(y + 1) * w as usize];
-        for (o, (lo, ws)) in out.iter_mut().zip(&xs) {
-            let mut acc = 0i32;
-            for (k, wt) in ws.iter().enumerate() {
-                acc += row[*lo as usize + k] as i32 * wt;
+        match taps {
+            2 => horizontal::<2>(row, out, &starts, &flat),
+            3 => horizontal::<3>(row, out, &starts, &flat),
+            4 => horizontal::<4>(row, out, &starts, &flat),
+            5 => horizontal::<5>(row, out, &starts, &flat),
+            6 => horizontal::<6>(row, out, &starts, &flat),
+            7 => horizontal::<7>(row, out, &starts, &flat),
+            8 => horizontal::<8>(row, out, &starts, &flat),
+            _ => {
+                for ((o, &lo), ws) in out.iter_mut().zip(&starts).zip(flat.chunks_exact(taps)) {
+                    let px = &row[lo as usize..lo as usize + taps];
+                    *o = to_8_8(px.iter().zip(ws).map(|(&p, &wt)| p as i32 * wt).sum());
+                }
             }
-            // 8.8 fixed point.
-            *o = ((acc + (1 << 5)) >> 6).clamp(0, 255 << 8) as u16;
         }
     }
     // Vertical pass, row by row: each source row is added into one accumulator row
@@ -641,7 +690,18 @@ mod tests {
     #[test]
     fn resize_gray_matches_the_reference_byte_for_byte() {
         let mut seed = 12345u32;
-        for &(sw, sh, w, h) in &[(600, 900, 267, 400), (1200, 1800, 300, 400), (37, 53, 80, 110), (1000, 10, 7, 3), (5, 700, 5, 9), (3000, 2000, 1272, 848)] {
+        let sizes = [
+            (600, 900, 267, 400),
+            (1200, 1800, 300, 400),
+            (37, 53, 80, 110),
+            (1000, 10, 7, 3),
+            (5, 700, 5, 9),
+            (3000, 2000, 1272, 848),
+            (800, 1104, 290, 400),
+            (3, 4, 1, 1),
+            (9, 9, 4, 4),
+        ];
+        for (sw, sh, w, h) in sizes {
             let px: Vec<u8> = (0..sw * sh)
                 .map(|i| {
                     seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
@@ -800,6 +860,9 @@ mod tests {
         }
         let one = GrayImage::from_pixel(1, 1, image::Luma([9]));
         assert!(resize_gray(&one, 5, 3).pixels().all(|p| p.0[0] == 9));
+        // An empty source gives white paper, not a panic.
+        let empty = resize_gray(&GrayImage::new(0, 0), 5, 3);
+        assert!(empty.dimensions() == (5, 3) && empty.pixels().all(|p| p.0[0] == 255));
         // Halving averages alternating 0/255 columns to mid gray (inside the image; at the
         // borders the filter is cut and renormalized).
         let stripes = GrayImage::from_fn(64, 4, |x, _| image::Luma([if x % 2 == 0 { 0 } else { 255 }]));
