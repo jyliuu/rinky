@@ -836,23 +836,19 @@ impl Plugin for SshPlugin {
                 }
                 "port" => {
                     let port = Self::port(cx);
-                    cx.ui()?.input(IN_PORT, "SSH port (1-65535)", &port.to_string());
-                    Ok(())
+                    cx.input(IN_PORT, "SSH port (1-65535)", &port.to_string())
                 }
                 "no_password" if cx.setting_bool("no_password", false) => {
                     Self::set(cx, "no_password", json!(false));
                     self.restart_if_running(cx, "Login without password is off");
                     self.show_menu(cx)
                 }
-                "no_password" => {
-                    cx.ui()?.dialog(
-                        DLG_NO_PASSWORD,
-                        "Login without password",
-                        "Anyone who can reach the Kindle over Wi-Fi or USB gets a root shell, with any password or none. Turn it on only to add your key, and off again afterwards.",
-                        &[("Cancel", "cancel"), ("Turn on", "on")],
-                    );
-                    Ok(())
-                }
+                "no_password" => cx.dialog(
+                    DLG_NO_PASSWORD,
+                    "Login without password",
+                    "Anyone who can reach the Kindle over Wi-Fi or USB gets a root shell, with any password or none. Turn it on only to add your key, and off again afterwards.",
+                    &[("Cancel", "cancel"), ("Turn on", "on")],
+                ),
                 "autostart" => {
                     let on = !cx.setting_bool("autostart", false);
                     Self::set(cx, "autostart", json!(on));
@@ -861,8 +857,7 @@ impl Plugin for SshPlugin {
                 "help" => {
                     let port = self.server.as_ref().map_or_else(|| Self::port(cx), |s| s.port);
                     let md = self.help_markdown(port);
-                    cx.ui()?.view_markdown(VIEW_HELP, "How to log in", &md);
-                    Ok(())
+                    cx.view_markdown(VIEW_HELP, "How to log in", &md)
                 }
                 _ => Ok(()),
             },

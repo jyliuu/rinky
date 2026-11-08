@@ -268,7 +268,7 @@ impl InsightfulPlugin {
         let md = format!(":::back {}\n{md}", chat::LINK_CHATS);
         let title = self.view_title();
         self.questions = q;
-        cx.ui()?.view_markdown(VIEWER, &title, &md);
+        cx.view_markdown(VIEWER, &title, &md)?;
         self.viewer_open = true;
         self.list = false;
         self.fresh = false;
@@ -288,7 +288,7 @@ impl InsightfulPlugin {
     /// True (after a toast) while another chat's answer is being written.
     fn busy(&self, cx: &mut HostCtx) -> Result<bool> {
         if self.run.is_some() {
-            cx.ui()?.toast(BUSY);
+            cx.toast(BUSY)?;
         }
         Ok(self.run.is_some())
     }
@@ -426,7 +426,7 @@ impl InsightfulPlugin {
     /// A toast when a run ends while its chat is not on screen.
     fn notify_if_hidden(&mut self, cx: &mut HostCtx, id: &str, text: &str) -> Result<()> {
         if !self.viewer_open || self.list || self.chat.as_deref() != Some(id) {
-            cx.ui()?.toast(text);
+            cx.toast(text)?;
         }
         Ok(())
     }
@@ -689,7 +689,7 @@ impl InsightfulPlugin {
         let Some(b) = self.book.as_ref() else { return Ok(()) };
         let book = if b.title.is_empty() { "Book".to_string() } else { b.title.clone() };
         let md = chat::render_list(&b.chats);
-        cx.ui()?.view_markdown(VIEWER, &format!("Insightful chats\n{book}"), &md);
+        cx.view_markdown(VIEWER, &format!("Insightful chats\n{book}"), &md)?;
         self.viewer_open = true;
         self.list = true;
         self.fresh = false;
@@ -712,7 +712,7 @@ impl InsightfulPlugin {
         }
         md.push_str(&format!("\n\n:::\n:::input {LINK_ASK} | {}", chat::ASK_PLACEHOLDER));
         md = format!(":::back {}\n{md}", chat::LINK_CHATS);
-        cx.ui()?.view_markdown(VIEWER, &self.view_title(), &md);
+        cx.view_markdown(VIEWER, &self.view_title(), &md)?;
         self.viewer_open = true;
         self.list = false;
         self.fresh = true;
@@ -726,8 +726,7 @@ impl InsightfulPlugin {
         for (label, action, icon) in rows {
             md.push_str(&format!(":::row {action} | {icon}\n{label}\n"));
         }
-        cx.ui()?.view_markdown(id, title, &md);
-        Ok(())
+        cx.view_markdown(id, title, &md)
     }
 
     fn provider_menu(&mut self, cx: &mut HostCtx) -> Result<()> {
@@ -808,8 +807,7 @@ impl InsightfulPlugin {
         match cx.start_request(models::request(&url, &p.api_key, p.timeout), StreamMode::Whole { limit: models::BODY_LIMIT }) {
             Ok(request) => {
                 self.models_req = Some(ModelFetch { request, provider, query, status: 0 });
-                cx.ui()?.toast("Loading models…");
-                Ok(())
+                cx.toast("Loading models…")
             }
             Err(e) => {
                 log::warn!("insightful: model list for {provider}: {e}");
@@ -882,8 +880,7 @@ impl InsightfulPlugin {
         self.config = Some(c);
         let used = model.unwrap_or(&default);
         log::info!("insightful: {provider} model set to {used}");
-        cx.ui()?.toast(&format!("Insightful uses {used}"));
-        Ok(())
+        cx.toast(&format!("Insightful uses {used}"))
     }
 }
 
@@ -972,7 +969,7 @@ impl Plugin for InsightfulPlugin {
                 } else if result == LINK_ASK {
                     // A fresh chat's first question starts it; later ones follow up.
                     if self.fresh || self.run.is_none() {
-                        cx.ui()?.input(if self.fresh { INPUT_ASK } else { INPUT_FOLLOWUP }, chat::ASK_PLACEHOLDER, "");
+                        cx.input(if self.fresh { INPUT_ASK } else { INPUT_FOLLOWUP }, chat::ASK_PLACEHOLDER, "")?;
                     }
                 } else if result == LINK_NEW {
                     self.pending_sel = None;
@@ -992,7 +989,7 @@ impl Plugin for InsightfulPlugin {
                     let title = self.book.as_ref().and_then(|b| b.chats.get(cid)).map(|c| c.title.clone()).unwrap_or_default();
                     self.delete_target = Some(cid.to_string());
                     let body = format!("{title}\n\nThe deleted chat cannot be recovered.");
-                    cx.ui()?.dialog(DIALOG_DELETE, "Delete this chat?", &body, &[("Cancel", "cancel"), ("Delete", "delete")]);
+                    cx.dialog(DIALOG_DELETE, "Delete this chat?", &body, &[("Cancel", "cancel"), ("Delete", "delete")])?;
                 } else if result.starts_with(HOLD) {
                     // Other held links do what a tap does not.
                 } else if result == LINK_RETRY {
@@ -1000,7 +997,7 @@ impl Plugin for InsightfulPlugin {
                         self.begin_run(cx)?;
                     }
                 } else if !result.is_empty() {
-                    cx.ui()?.toast(&format!("Link: {result}"));
+                    cx.toast(&format!("Link: {result}"))?;
                 }
                 Ok(())
             }
@@ -1012,15 +1009,14 @@ impl Plugin for InsightfulPlugin {
             DIALOG_DELETE => {
                 if let (Some(cid), "delete") = (self.delete_target.take(), result) {
                     if self.run.is_some() && self.chat.as_deref() == Some(cid.as_str()) {
-                        cx.ui()?.toast("That chat is still answering");
-                        return Ok(());
+                        return cx.toast("That chat is still answering");
                     }
                     let ok = self.book.as_mut().is_some_and(|b| b.chats.delete(&cid));
                     if self.chat.as_deref() == Some(cid.as_str()) {
                         self.chat = None;
                     }
                     self.save();
-                    cx.ui()?.toast(if ok { "Chat deleted" } else { "Chat not found" });
+                    cx.toast(if ok { "Chat deleted" } else { "Chat not found" })?;
                     if self.viewer_open && self.list {
                         self.show_list(cx)?;
                     }
@@ -1041,8 +1037,7 @@ impl Plugin for InsightfulPlugin {
                 } else {
                     "Continue the current chat for highlighted actions by default in other books?"
                 };
-                cx.ui()?.dialog(DIALOG_DEFAULT, "Insightful", text, &[("Cancel", "cancel"), ("OK", "ok")]);
-                Ok(())
+                cx.dialog(DIALOG_DEFAULT, "Insightful", text, &[("Cancel", "cancel"), ("OK", "ok")])
             }
             MENU_BOOK if !result.is_empty() && result != "closed" && !result.starts_with(HOLD) => self.on_action(cx, result),
             DIALOG_DEFAULT if result == "ok" => {
@@ -1064,14 +1059,10 @@ impl Plugin for InsightfulPlugin {
             MENU_SETTINGS if result == "provider" => self.provider_menu(cx),
             MENU_SETTINGS if result == "model" => self.model_menu(cx),
             MENU_MODEL if result == "list" => self.fetch_models(cx, None),
-            MENU_MODEL if result == "search" => {
-                cx.ui()?.input(INPUT_SEARCH, "Search models (name or ID)", "");
-                Ok(())
-            }
+            MENU_MODEL if result == "search" => cx.input(INPUT_SEARCH, "Search models (name or ID)", ""),
             MENU_MODEL if result == "enter" => {
                 let current = self.model_profile().map(|p| p.model).unwrap_or_default();
-                cx.ui()?.input(INPUT_MODEL, "Exact model ID", &current);
-                Ok(())
+                cx.input(INPUT_MODEL, "Exact model ID", &current)
             }
             MENU_MODEL if result == "default" => {
                 let Some(provider) = self.model_provider.clone() else { return Ok(()) };
@@ -1084,8 +1075,7 @@ impl Plugin for InsightfulPlugin {
             INPUT_SEARCH if !result.trim().is_empty() => self.fetch_models(cx, Some(result.trim().to_string())),
             MENU_PROVIDER if !result.is_empty() => {
                 cx.storage()?.set("provider", json!(result))?;
-                cx.ui()?.toast(&format!("Insightful uses {result}"));
-                Ok(())
+                cx.toast(&format!("Insightful uses {result}"))
             }
             _ => Ok(()),
         }
@@ -1117,8 +1107,7 @@ impl Plugin for InsightfulPlugin {
 
 /// A dialog with an OK button.
 fn notice(cx: &mut HostCtx, id: u32, title: &str, body: &str) -> Result<()> {
-    cx.ui()?.dialog(id, title, body, &[("OK", "ok")]);
-    Ok(())
+    cx.dialog(id, title, body, &[("OK", "ok")])
 }
 
 /// The token totals over all books in `path`; zero when missing or unreadable.

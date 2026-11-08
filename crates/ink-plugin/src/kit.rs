@@ -46,6 +46,31 @@ impl HostCtx<'_> {
         self.ui()?.request(UiRequest::Menu { id, title: title.into(), items });
         Ok(())
     }
+
+    /// A toast ([`UiHost::toast`](crate::UiHost::toast)). Needs the `ui` permission.
+    pub fn toast(&mut self, text: &str) -> Result<()> {
+        self.ui()?.toast(text);
+        Ok(())
+    }
+
+    /// Keyboard input ([`UiHost::input`](crate::UiHost::input)). Needs the `ui` permission.
+    pub fn input(&mut self, id: u32, prompt: &str, initial: &str) -> Result<()> {
+        self.ui()?.input(id, prompt, initial);
+        Ok(())
+    }
+
+    /// A dialog ([`UiHost::dialog`](crate::UiHost::dialog)). Needs the `ui` permission.
+    pub fn dialog(&mut self, id: u32, title: &str, body: &str, buttons: &[(&str, &str)]) -> Result<()> {
+        self.ui()?.dialog(id, title, body, buttons);
+        Ok(())
+    }
+
+    /// The Markdown viewer ([`UiHost::view_markdown`](crate::UiHost::view_markdown)).
+    /// Needs the `ui` permission.
+    pub fn view_markdown(&mut self, id: u32, title: &str, markdown: &str) -> Result<()> {
+        self.ui()?.view_markdown(id, title, markdown);
+        Ok(())
+    }
 }
 
 /// A request in flight: what it is for, and its status and content type once the
@@ -207,6 +232,23 @@ mod tests {
         let mut cx = HostCtx::new(&mut ui, &mut st, &[]);
         assert_eq!((cx.setting("on"), cx.setting_bool("on", false)), (None, false));
         assert!(matches!(cx.menu(5, "V", [("a", "a")]), Err(PluginError::Permission(_))));
+    }
+
+    #[test]
+    fn ui_shortcuts_queue_requests_and_need_the_permission() {
+        let (mut ui, mut st) = (UiQueue::default(), MemoryStorage::default());
+        let perms = [Permission::Ui];
+        let mut cx = HostCtx::new(&mut ui, &mut st, &perms);
+        cx.toast("t").unwrap();
+        cx.input(1, "p", "i").unwrap();
+        cx.dialog(2, "d", "b", &[("OK", "ok")]).unwrap();
+        cx.view_markdown(3, "v", "*m*").unwrap();
+        let ids: Vec<Option<u32>> = ui.0.iter().map(UiRequest::id).collect();
+        assert_eq!(ids, [None, Some(1), Some(2), Some(3)]);
+        assert_eq!(ui.0[0], UiRequest::Toast { text: "t".into() });
+        let mut cx = HostCtx::new(&mut ui, &mut st, &[]);
+        assert!(matches!(cx.toast("t"), Err(PluginError::Permission(_))));
+        assert!(matches!(cx.view_markdown(3, "v", "m"), Err(PluginError::Permission(_))));
     }
 
     #[test]

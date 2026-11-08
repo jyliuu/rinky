@@ -272,8 +272,7 @@ impl WikipediaPlugin {
     fn lookup(&mut self, cx: &mut HostCtx, text: &str) -> Result<()> {
         let query = api::clean_query(text);
         if query.is_empty() {
-            cx.ui()?.toast("Select a word to look up");
-            return Ok(());
+            return cx.toast("Select a word to look up");
         }
         let langs = Self::languages(cx);
         log::info!("wikipedia: lookup {query:?} in {langs:?}");
@@ -306,7 +305,7 @@ impl WikipediaPlugin {
             }
             return self.show_card(cx);
         }
-        cx.ui()?.toast(toast);
+        cx.toast(toast)?;
         self.start(cx, Job::Summary { lang: i, title })
     }
 
@@ -322,11 +321,11 @@ impl WikipediaPlugin {
         match &s.pages[s.shown] {
             Some(Page::Found(sum)) => {
                 let (title, body) = summary_card(sum, lang, page, pages);
-                cx.ui()?.dialog(ID_CARD, &title, &body, &CARD_BUTTONS);
+                cx.dialog(ID_CARD, &title, &body, &CARD_BUTTONS)?;
             }
             _ => {
                 let (title, body) = missing_card(&s.query, lang, page, pages);
-                cx.ui()?.dialog(ID_CARD, &title, &body, &MISSING_BUTTONS);
+                cx.dialog(ID_CARD, &title, &body, &MISSING_BUTTONS)?;
             }
         }
         Ok(())
@@ -338,18 +337,15 @@ impl WikipediaPlugin {
         let msg = net_message(raw);
         log::warn!("wikipedia: request failed: {raw} -> {msg:?}");
         match job {
-            Job::Article { save: false, .. } if self.view_open => {
-                cx.ui()?.view_markdown(ID_VIEW, "Wikipedia", &format!(":::top\n\n{}\n", api::md_escape(&msg)));
-            }
-            Job::Article { .. } => cx.ui()?.toast(&msg),
+            Job::Article { save: false, .. } if self.view_open => cx.view_markdown(ID_VIEW, "Wikipedia", &format!(":::top\n\n{}\n", api::md_escape(&msg))),
+            Job::Article { .. } => cx.toast(&msg),
             _ => {
                 let Some(s) = self.session.as_ref() else { return Ok(()) };
                 let (page, pages, lang) = (s.shown + 1, s.langs.len(), &s.langs[s.shown]);
                 let body = format!("{msg}\n— {}", footer(lang, page, pages));
-                cx.ui()?.dialog(ID_CARD, &s.query, &body, &RETRY_BUTTONS);
+                cx.dialog(ID_CARD, &s.query, &body, &RETRY_BUTTONS)
             }
         }
-        Ok(())
     }
 
     fn turn(&mut self, cx: &mut HostCtx, step: isize) -> Result<()> {
@@ -431,7 +427,7 @@ impl WikipediaPlugin {
                 if save {
                     self.save_article(cx, &l, &sum, &text, &url)?;
                 } else if self.view_open {
-                    cx.ui()?.view_markdown(ID_VIEW, &sum.title, &api::article_markdown(&text, Some(&url)));
+                    cx.view_markdown(ID_VIEW, &sum.title, &api::article_markdown(&text, Some(&url)))?;
                 }
                 self.full = Some(FullText { lang: l, title: sum.title, text, });
                 Ok(())
@@ -446,13 +442,13 @@ impl WikipediaPlugin {
         match write_new(&dir, &name, html.as_bytes()) {
             Ok(true) => {
                 log::info!("wikipedia: saved {}", dir.join(&name).display());
-                cx.ui()?.toast(&format!("Saved “{}” to the library", sum.title));
+                cx.toast(&format!("Saved “{}” to the library", sum.title))?;
                 cx.ui()?.rescan_library();
             }
-            Ok(false) => cx.ui()?.toast(&format!("“{}” is already saved", sum.title)),
+            Ok(false) => cx.toast(&format!("“{}” is already saved", sum.title))?,
             Err(e) => {
                 log::warn!("wikipedia: cannot save {}: {e}", dir.join(&name).display());
-                cx.ui()?.toast(&format!("Cannot save the article: {e}"));
+                cx.toast(&format!("Cannot save the article: {e}"))?;
             }
         }
         Ok(())
@@ -470,7 +466,7 @@ impl WikipediaPlugin {
     fn full_view(&mut self, cx: &mut HostCtx) -> Result<()> {
         let Some((lang, sum)) = self.shown_summary() else { return Ok(()) };
         self.view_open = true;
-        cx.ui()?.view_markdown(ID_VIEW, &sum.title, "*Loading the article…*");
+        cx.view_markdown(ID_VIEW, &sum.title, "*Loading the article…*")?;
         self.start(cx, Job::Article { lang, sum, save: false })
     }
 
@@ -480,7 +476,7 @@ impl WikipediaPlugin {
         if let Some(text) = self.full.as_ref().filter(|f| f.lang == l && f.title == sum.title).map(|f| f.text.clone()) {
             return self.save_article(cx, &l, &sum, &text, &page_url(&sum, &l));
         }
-        cx.ui()?.toast(&format!("Saving “{}”…", api::cut_at(&sum.title, 30)));
+        cx.toast(&format!("Saving “{}”…", api::cut_at(&sum.title, 30)))?;
         self.start(cx, Job::Article { lang, sum, save: true })
     }
 
@@ -503,7 +499,7 @@ impl WikipediaPlugin {
             cx.storage()?.set("language", json!(l))?;
             log::info!("wikipedia: language {l}");
         } else {
-            cx.ui()?.toast(&format!("“{}” is not a language code (examples: en, de, da)", api::cut_at(text.trim(), 20)));
+            cx.toast(&format!("“{}” is not a language code (examples: en, de, da)", api::cut_at(text.trim(), 20)))?;
         }
         self.show_settings(cx)
     }
@@ -523,7 +519,7 @@ impl WikipediaPlugin {
             cx.storage()?.set("languages", json!(out))?;
             log::info!("wikipedia: extra languages {out:?}");
         } else {
-            cx.ui()?.toast(&format!("Not a language code: {}", api::cut_at(&bad.join(", "), 30)));
+            cx.toast(&format!("Not a language code: {}", api::cut_at(&bad.join(", "), 30)))?;
         }
         self.show_settings(cx)
     }
@@ -560,16 +556,10 @@ impl Plugin for WikipediaPlugin {
                 let sel = cx.document().ok().and_then(|d| d.selection());
                 match sel {
                     Some(sel) => self.lookup(cx, &sel.text),
-                    None => {
-                        cx.ui()?.toast("Select a word to look up");
-                        Ok(())
-                    }
+                    None => cx.toast("Select a word to look up"),
                 }
             }
-            ACTION_TYPE => {
-                cx.ui()?.input(ID_INPUT, "Search Wikipedia", "");
-                Ok(())
-            }
+            ACTION_TYPE => cx.input(ID_INPUT, "Search Wikipedia", ""),
             a if a.strip_prefix("settings:") == Some(SETTINGS_PAGE) => self.show_settings(cx),
             _ => Ok(()),
         }
@@ -606,13 +596,11 @@ impl Plugin for WikipediaPlugin {
             (ID_INPUT, text) if !text.trim().is_empty() => self.lookup(cx, text),
             (ID_SET, "lang") => {
                 let cur = Self::language(cx);
-                cx.ui()?.input(ID_LANG, "Wikipedia language code (en, de, da, fr)", &cur);
-                Ok(())
+                cx.input(ID_LANG, "Wikipedia language code (en, de, da, fr)", &cur)
             }
             (ID_SET, "extra") => {
                 let cur = Self::extra_languages(cx).join(" ");
-                cx.ui()?.input(ID_EXTRA, "Extra languages to swipe between (de fr)", &cur);
-                Ok(())
+                cx.input(ID_EXTRA, "Extra languages to swipe between (de fr)", &cur)
             }
             (ID_SET, "clear") => {
                 cx.storage()?.set("languages", json!([]))?;

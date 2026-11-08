@@ -172,11 +172,11 @@ impl UsbNetPlugin {
                     cx.storage()?.set("mtp_udc", json!(udc))?;
                 }
                 self.refresh();
-                cx.ui()?.toast(&format!("USB network on: {KINDLE_IP}"));
+                cx.toast(&format!("USB network on: {KINDLE_IP}"))?;
             }
             Err(e) => {
                 self.refresh();
-                cx.ui()?.toast(&format!("USB network: {e}"));
+                cx.toast(&format!("USB network: {e}"))?;
                 self.error = Some(e);
             }
         }
@@ -194,10 +194,10 @@ impl UsbNetPlugin {
                 if mtp.is_some() {
                     cx.storage()?.set("mtp_udc", Value::Null)?;
                 }
-                cx.ui()?.toast("USB network off");
+                cx.toast("USB network off")?;
             }
             Err(e) => {
-                cx.ui()?.toast(&format!("USB network: {e}"));
+                cx.toast(&format!("USB network: {e}"))?;
                 self.error = Some(e);
             }
         }
@@ -270,7 +270,7 @@ impl Plugin for UsbNetPlugin {
                 cx.storage()?.set("autostart", json!(auto))?;
                 self.show_menu(cx)?;
             }
-            (MENU, "help") => cx.ui()?.view_markdown(HELP, "How to connect a computer", HELP_TEXT),
+            (MENU, "help") => cx.view_markdown(HELP, "How to connect a computer", HELP_TEXT)?,
             // Back from the help page: the settings page again.
             (HELP, "closed") => self.show_menu(cx)?,
             _ => {}

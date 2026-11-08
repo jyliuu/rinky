@@ -274,7 +274,7 @@ impl KoSyncPlugin {
     fn pull_now(&mut self, cx: &mut HostCtx, manual: bool) -> Result<()> {
         let Some(account) = Self::account(cx) else {
             if manual {
-                cx.ui()?.toast("Progress sync: log in first (Settings, Plugins, Progress sync)");
+                cx.toast("Progress sync: log in first (Settings, Plugins, Progress sync)")?;
             }
             return Ok(());
         };
@@ -336,16 +336,16 @@ impl KoSyncPlugin {
         match pick {
             "server" => {
                 let cur = Self::setting(cx, "server").unwrap_or_else(|| kosync::DEFAULT_SERVER.to_string());
-                cx.ui()?.input(IN_SERVER, "Sync server URL", &cur);
+                cx.input(IN_SERVER, "Sync server URL", &cur)?;
             }
             "user" => {
                 let cur = Self::setting(cx, "user").unwrap_or_default();
-                cx.ui()?.input(IN_USER, "User name", &cur);
+                cx.input(IN_USER, "User name", &cur)?;
             }
-            "password" => cx.ui()?.input(IN_PASS, "Password (only its MD5 is stored)", ""),
+            "password" => cx.input(IN_PASS, "Password (only its MD5 is stored)", "")?,
             "login" | "register" => {
                 let Some(account) = Self::account(cx) else {
-                    cx.ui()?.toast("Set the user name and the password first");
+                    cx.toast("Set the user name and the password first")?;
                     return self.show_menu(cx);
                 };
                 let (req, call, toast) = if pick == "login" {
@@ -354,7 +354,7 @@ impl KoSyncPlugin {
                     (build(&account, |c| c.register())?, Call::Register, "Registering...")
                 };
                 self.start(cx, req, call)?;
-                cx.ui()?.toast(toast);
+                cx.toast(toast)?;
             }
             "auto" => {
                 let on = !Self::auto_sync(cx);
@@ -363,7 +363,7 @@ impl KoSyncPlugin {
             }
             "logout" => {
                 cx.storage()?.set("userkey", Value::Null)?;
-                cx.ui()?.toast("Logged out");
+                cx.toast("Logged out")?;
                 self.show_menu(cx)?;
             }
             _ => {}
@@ -383,17 +383,17 @@ impl KoSyncPlugin {
             Call::Auth => match check(&[200]) {
                 Ok(v) if matches!(v.get("authorized").and_then(|a| a.as_str()), Some("OK") | None) => {
                     let user = Self::setting(cx, "user").unwrap_or_default();
-                    cx.ui()?.toast(&format!("Logged in as {user}"));
+                    cx.toast(&format!("Logged in as {user}"))?;
                     self.drain_next(cx)?;
                 }
-                Ok(v) => cx.ui()?.toast(&format!("Login refused: {v}")),
-                Err(NetError::Unauthorized(_)) => cx.ui()?.toast("Login failed: wrong user name or password"),
-                Err(e) => cx.ui()?.toast(&format!("Login failed: {e}")),
+                Ok(v) => cx.toast(&format!("Login refused: {v}"))?,
+                Err(NetError::Unauthorized(_)) => cx.toast("Login failed: wrong user name or password")?,
+                Err(e) => cx.toast(&format!("Login failed: {e}"))?,
             },
             Call::Register => match check(&[201]) {
-                Ok(_) => cx.ui()?.toast("Account registered; you are logged in"),
-                Err(NetError::Server { status: 402, .. }) => cx.ui()?.toast("That user name is taken"),
-                Err(e) => cx.ui()?.toast(&format!("Registration failed: {e}")),
+                Ok(_) => cx.toast("Account registered; you are logged in")?,
+                Err(NetError::Server { status: 402, .. }) => cx.toast("That user name is taken")?,
+                Err(e) => cx.toast(&format!("Registration failed: {e}"))?,
             },
             Call::Push { progress, manual } => match check(&[200, 202]) {
                 Ok(_) => {
@@ -403,7 +403,7 @@ impl KoSyncPlugin {
                         b.synced = Some(progress.progress.clone());
                     }
                     if manual {
-                        cx.ui()?.toast("Progress sent to the sync server");
+                        cx.toast("Progress sent to the sync server")?;
                     }
                     self.drain_next(cx)?;
                 }
@@ -416,7 +416,7 @@ impl KoSyncPlugin {
                         Self::drop_queued(cx, &progress.document)?;
                     }
                     if manual || matches!(e, NetError::Unauthorized(_)) {
-                        cx.ui()?.toast(&format!("Progress sync: {e}"));
+                        cx.toast(&format!("Progress sync: {e}"))?;
                     }
                 }
             },
@@ -446,7 +446,7 @@ impl KoSyncPlugin {
                     Err(e) => {
                         log::warn!("kosync: pull failed: {e}");
                         if manual || matches!(e, NetError::Unauthorized(_)) {
-                            cx.ui()?.toast(&format!("Progress sync: {e}"));
+                            cx.toast(&format!("Progress sync: {e}"))?;
                         }
                         return Ok(());
                     }
@@ -467,7 +467,7 @@ impl KoSyncPlugin {
                                     r.percentage * 100.0,
                                     pct * 100.0
                                 );
-                                cx.ui()?.dialog(JUMP, "Progress sync", &body, &[("No", "no"), ("Jump", "jump")]);
+                                cx.dialog(JUMP, "Progress sync", &body, &[("No", "no"), ("Jump", "jump")])?;
                             }
                             None => log::warn!("kosync: cannot read remote progress {:?}", r.progress),
                         }
@@ -484,7 +484,7 @@ impl KoSyncPlugin {
                             }
                         }
                         if manual {
-                            cx.ui()?.toast("Progress is in sync");
+                            cx.toast("Progress is in sync")?;
                         }
                     }
                 }

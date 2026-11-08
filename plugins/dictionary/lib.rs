@@ -495,8 +495,7 @@ impl DictionaryPlugin {
         let dir = self.library(cx)?.dir.clone();
         if self.order.is_empty() {
             let body = format!("No dictionaries found. Copy StarDict dictionaries (.ifo, .idx, .dict.dz) to {}/<name>/.", dir.display());
-            cx.ui()?.dialog(0, "Dictionaries", &body, &[("OK", "ok")]);
-            return Ok(());
+            return cx.dialog(0, "Dictionaries", &body, &[("OK", "ok")]);
         }
         let items = self.order.iter().enumerate().map(|(i, (name, title, on))| (format!("{}. {title}\t{}", i + 1, if *on { "on" } else { "off" }), name.as_str()));
         cx.menu(ID_DICTS, "Dictionaries", items)
@@ -558,8 +557,7 @@ impl DictionaryPlugin {
         let r = lib.lookup(text);
         log::info!("dictionary: lookup {:?} -> form {:?}, {} hits", r.query, r.form, r.hits.len());
         if r.query.is_empty() {
-            cx.ui()?.toast("Select a word to look up");
-            return Ok(());
+            return cx.toast("Select a word to look up");
         }
         if ndicts == 0 {
             self.last = None;
@@ -570,8 +568,7 @@ impl DictionaryPlugin {
             } else {
                 "All dictionaries are turned off. Turn one on in Settings → Dictionaries.\n— No dictionary turned on".to_string()
             };
-            cx.ui()?.dialog(ID_POPUP, &r.query, &body, &[("Close", "close")]);
-            return Ok(());
+            return cx.dialog(ID_POPUP, &r.query, &body, &[("Close", "close")]);
         }
         // Recorded once a dictionary exists, found or not.
         if let Some(book) = from_book.clone() {
@@ -582,8 +579,7 @@ impl DictionaryPlugin {
         let Some((title, body)) = popup_page(&r, 0) else {
             self.last = None;
             let body = format!("No definition found for “{}”.\n— {}", r.query, searched(ndicts));
-            cx.ui()?.dialog(ID_POPUP, &r.query, &body, &[("Close", "close")]);
-            return Ok(());
+            return cx.dialog(ID_POPUP, &r.query, &body, &[("Close", "close")]);
         };
         let pages = dict_names(&r).len();
         self.last = Some(Last { word: vocab_word(&r, book.as_ref()).expect("a hit"), result: r, shown: 0 });
@@ -591,8 +587,7 @@ impl DictionaryPlugin {
             self.add_word(cx, false)?;
         }
         log::debug!("dictionary: card {title:?}, {pages} dictionary page(s)");
-        cx.ui()?.dialog(ID_POPUP, &title, &body, &POPUP_BUTTONS);
-        Ok(())
+        cx.dialog(ID_POPUP, &title, &body, &POPUP_BUTTONS)
     }
 
     /// Shows the next (`step` 1) or previous (`step` -1) dictionary page of the last
@@ -608,15 +603,14 @@ impl DictionaryPlugin {
         l.shown = (l.shown as isize + step).rem_euclid(n as isize) as usize;
         let Some((title, body)) = popup_page(&l.result, l.shown) else { return Ok(()) };
         log::info!("dictionary: card page {} -> {} of {n} ({})", from + 1, l.shown + 1, dict_names(&l.result)[l.shown]);
-        cx.ui()?.dialog(ID_POPUP, &title, &body, &POPUP_BUTTONS);
-        Ok(())
+        cx.dialog(ID_POPUP, &title, &body, &POPUP_BUTTONS)
     }
 
     /// The full view of the last lookup on dictionary page `tab` (see
     /// [`full_markdown_tab`]); nothing without a lookup.
     fn full_view(&self, cx: &mut HostCtx, tab: usize) -> Result<()> {
         if let Some(l) = &self.last {
-            cx.ui()?.view_markdown(ID_VIEW, &l.word.word, &format!(":::emphasis\n{}", full_markdown_tab(&l.result, tab)));
+            cx.view_markdown(ID_VIEW, &l.word.word, &format!(":::emphasis\n{}", full_markdown_tab(&l.result, tab)))?;
         }
         Ok(())
     }
@@ -627,7 +621,7 @@ impl DictionaryPlugin {
         let Some(w) = self.last.as_ref().map(|l| l.word.clone()) else { return Ok(()) };
         let path = Self::setting_path(cx, "vocab_db", "vocabulary.sqlite3")?;
         if toast {
-            cx.ui()?.toast(&format!("Added “{}” to vocabulary", w.word));
+            cx.toast(&format!("Added “{}” to vocabulary", w.word))?;
         }
         let now = ink_store::now_secs();
         self.spawn(move || {
@@ -677,17 +671,13 @@ impl Plugin for DictionaryPlugin {
             ACTION_LOOKUP => {
                 let doc = cx.document()?;
                 let Some(sel) = doc.selection() else {
-                    cx.ui()?.toast("Select a word to look up");
-                    return Ok(());
+                    return cx.toast("Select a word to look up");
                 };
                 let context = doc.read_around(&sel.start, 200).ok().map(|s| squeeze(&s));
                 let snap = BookRef::of(doc, context);
                 self.lookup(cx, &sel.text, Some(snap))
             }
-            ACTION_TYPE => {
-                cx.ui()?.input(ID_INPUT, "Look up a word", "");
-                Ok(())
-            }
+            ACTION_TYPE => cx.input(ID_INPUT, "Look up a word", ""),
             a if a.strip_prefix("settings:") == Some(SETTINGS_PAGE) => self.show_dicts(cx),
             _ => Ok(()),
         }
