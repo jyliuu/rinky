@@ -795,15 +795,16 @@ impl Cascade {
                 _ => return None,
             },
             Tok::Pct(p) => parent.font_size * p / 100.0,
-            Tok::Dim(_, u) if u == "em" || u == "ex" || u == "ch" => match self.len(t, parent.font_size)? {
-                Len::Px(v) => v,
-                _ => return None,
-            },
-            _ => match self.len(t, parent.font_size)? {
-                Len::Px(v) => v,
-                _ => return None,
-            },
+            _ => self.px(t, parent.font_size)?,
         })
+    }
+
+    /// A length in device px (not a percentage or `auto`).
+    fn px(&self, t: &Tok, font: f32) -> Option<f32> {
+        match self.len(t, font)? {
+            Len::Px(v) => Some(v),
+            _ => None,
+        }
     }
 
     fn edges(&self, v: &[Tok], font: f32) -> Option<Edges<Len>> {
@@ -822,10 +823,7 @@ impl Cascade {
                 "thick" => Some(5.0 * self.ctx.px_scale()),
                 _ => None,
             },
-            _ => match self.len(t, font)? {
-                Len::Px(v) => Some(v.max(0.0)),
-                _ => None,
-            },
+            _ => self.px(t, font).map(|v| v.max(0.0)),
         }
     }
 
@@ -1028,13 +1026,7 @@ impl Cascade {
             }
             "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens" | "adobe-hyphenate" => set(&mut s.hyphens, kw.as_deref().and_then(Hyphens::from_keyword)),
             "letter-spacing" | "word-spacing" => {
-                let px = match kw.as_deref() {
-                    Some("normal") => Some(0.0),
-                    _ => match v.first().and_then(|t| self.len(t, font)) {
-                        Some(Len::Px(p)) => Some(p),
-                        _ => None,
-                    },
-                };
+                let px = if kw.as_deref() == Some("normal") { Some(0.0) } else { v.first().and_then(|t| self.px(t, font)) };
                 if let Some(p) = px {
                     if d.name == "letter-spacing" {
                         s.letter_spacing = p.clamp(-font * 0.2, font);
@@ -1054,10 +1046,7 @@ impl Cascade {
             Tok::Ident(k) if k.eq_ignore_ascii_case("normal") => return Some(LineHeight::Normal),
             Tok::Num(n) => *n,
             Tok::Pct(p) => p / 100.0,
-            t => match self.len(t, font)? {
-                Len::Px(px) => px / font.max(1.0),
-                _ => return None,
-            },
+            t => self.px(t, font)? / font.max(1.0),
         };
         // At most 20 lines' worth (hostile values: 1e39, NaN).
         (!f.is_nan()).then_some(LineHeight::Factor(f.clamp(0.0, 20.0)))
