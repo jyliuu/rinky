@@ -29,6 +29,7 @@ The main choices behind the layout:
 | Sleep, screensaver, cover sensor, kernel suspend | ink-device | `sleep.rs`, `screensaver.rs`, `events.rs`, `ereader/system.rs` |
 | Kindle system services through `lipc` | ink-device | `lipc.rs`, `ereader/kindle.rs` |
 | Kobo light, battery, Wi-Fi without Nickel | ink-device | `ereader/kobo/` |
+| Wi-Fi decisions: auto-join, restore after wake, "connected" (address on the link) | ink-device | `netman.rs` (state machine, worker thread; backends in `ereader/kindle.rs`, `ereader/kobo/`) |
 | Undoing device changes after a crash | ink-device | `journal.rs` (`rinky device restore`) |
 | Host window and headless backends; scripted input | ink-device | `sim.rs`, `headless.rs`, `script.rs` |
 | Kindle or Kobo, and the paths that follow from it | ink-platform | `lib.rs` (`Platform`, `install_root`, `font_dirs`) |
@@ -331,7 +332,9 @@ again, as KOReader's `koreader.sh` does.
 There is no lipc on a Kobo. `ereader/kobo/` drives the frontlight and warmth through
 sysfs, reads the battery from `power_supply`, and runs Wi-Fi with `wpa_supplicant` on
 Nickel's own configuration, as KOReader's scripts do. Suspend writes
-`state-extended` before `mem`, with Wi-Fi off first. The framebuffer boots at 16 or
+`state-extended` before `mem`, with Wi-Fi off first; the network worker
+(`netman.rs`) turns it on again after the wake when it was on, and runs DHCP
+whenever `wpa_supplicant` is associated without an address. The framebuffer boots at 16 or
 32 bpp and is switched to 8 bpp gray while rinky runs. Touch panels of the "snow" kind
 never send `TRACKING_ID -1`; `BTN_TOUCH 0` ends the contact. USB storage stays
 Nickel's. Background and the models not yet supported: `docs/kobo-port.md`.
