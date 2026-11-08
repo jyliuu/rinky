@@ -537,7 +537,7 @@ impl Plugin for CalibrePlugin {
                 self.connect(cx)
             }
             IN_DIR => {
-                let full = |t: &str| Some(json!(t.trim_end_matches('/'))).filter(|_| t.starts_with('/'));
+                let full = |t: &str| t.starts_with('/').then(|| json!(t.trim_end_matches('/')));
                 cx.set_from_input("books_dir", result, |t| full(t).ok_or_else(|| "The books folder must be a full path, for example /mnt/us/Books".into()))?;
                 self.show_menu(cx)
             }

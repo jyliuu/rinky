@@ -208,7 +208,7 @@ fn page_position<'a>(page: usize, rects: impl IntoIterator<Item = &'a FRect>) ->
 /// The position of a TOC or link target point: a zero-size quad, none for the top-left
 /// corner (the target is the whole page).
 fn target_position(page: usize, x: f32, y: f32) -> Position {
-    page_position(page, Some(&FRect::new(x, y, x, y)).filter(|_| x > 0.0 || y > 0.0))
+    page_position(page, (x > 0.0 || y > 0.0).then_some(&FRect::new(x, y, x, y)))
 }
 
 /// Tiles needed along one axis for content `ratio` screens long (2 % slack), at most
