@@ -437,7 +437,10 @@ pub fn widget_piece(name: &str, info: &FooterInfo) -> Option<Piece> {
         "wifi" => info.device.wifi.filter(|on| *on).map(|_| Piece::Icon(Icon::Wifi, String::new())),
         "frontlight" => info.device.light.map(|l| Piece::Icon(Icon::Light, l.to_string())),
         "page" => (info.total > 0).then(|| Piece::Text((info.page + 1).to_string(), Style::Regular)),
-        "page_of_total" => (info.total > 0).then(|| Piece::Text(format!("{} / {}", info.page + 1, info.total_estimate.map_or_else(|| info.total.to_string(), about)), Style::Regular)),
+        "page_of_total" => (info.total > 0).then(|| {
+            let total = info.total_estimate.map_or_else(|| info.total.to_string(), about);
+            Piece::Text(format!("{} / {}", info.page + 1, total), Style::Regular)
+        }),
         "percent" => Some(Piece::Text(percent_text(info.progress), Style::Bold)),
         "chapter_title" => info.chapter_title.clone().and_then(text),
         "book_title" => text(info.book_title.clone()),
