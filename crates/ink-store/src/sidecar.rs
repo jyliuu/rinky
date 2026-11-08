@@ -29,7 +29,7 @@
 //! `rinky.json`, then the prototype's `BOOK.rinky` position, then the defaults
 //! are used.
 
-use crate::{load_recovering, os_bytes, os_from_bytes, save_with_backup, LoadSource, Result, StoreError};
+use crate::{load_recovering, os_bytes, os_from_bytes, save_with_backup, LoadSource, Recovered, Result, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::ffi::{OsStr, OsString};
@@ -467,12 +467,15 @@ impl BookState {
     /// moved aside and listed in the report. Only I/O errors (not bad content) are
     /// errors: also a `.sdr` that is a file, or a sidecar that is a directory.
     pub fn load_report(book: &Path) -> Result<LoadReport> {
-        let path = sidecar_path(book);
-        let r = load_recovering(&path, parse_state)?;
+        // Every file but the prototype's is in the `.sdr` folder. A book no reader has saved
+        // has none, and its files are not looked for one by one (each look is a round trip
+        // on the Kindle's FUSE store).
+        let sdr = !std::fs::metadata(sidecar_dir(book)).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        let r = if sdr { load_recovering(&sidecar_path(book), parse_state)? } else { Recovered::default() };
         let (state, source) = match (r.value, r.source) {
             (Some(s), LoadSource::Primary | LoadSource::Temp) => (s, StateSource::Sidecar),
             (Some(s), _) => (s, StateSource::Backup),
-            (None, _) => match shared_sidecar(book) {
+            (None, _) => match sdr.then(|| shared_sidecar(book)).flatten() {
                 Some(s) => (s, StateSource::SharedSidecar),
                 None => match legacy_position(book) {
                     Some(p) => (BookState { position: Some(p), ..BookState::default() }, StateSource::Legacy),
@@ -787,6 +790,23 @@ mod tests {
         let mut names: Vec<String> = std::fs::read_dir(sidecar_dir(&epub)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, ["rinky.epub.json", "rinky.json", "rinky.pdf.json"]);
+    }
+
+    /// Without a `.sdr` folder only the prototype's file is read; a `.sdr` that is a file
+    /// is still an error, and an empty folder gives the defaults.
+    #[test]
+    fn a_missing_or_odd_sdr_folder() {
+        let dir = TempDir::new("sidecar-sdr");
+        let book = dir.path().join("s.epub");
+        std::fs::write(dir.path().join("s.epub.rinky"), "1 2 3").unwrap();
+        assert_eq!(BookState::load_report(&book).unwrap().source, StateSource::Legacy);
+        std::fs::write(sidecar_dir(&book), b"not a folder").unwrap();
+        assert!(BookState::load(&book).is_err());
+        std::fs::remove_file(sidecar_dir(&book)).unwrap();
+        std::fs::remove_file(dir.path().join("s.epub.rinky")).unwrap();
+        std::fs::create_dir(sidecar_dir(&book)).unwrap();
+        let r = BookState::load_report(&book).unwrap();
+        assert_eq!((r.state, r.source), (BookState::default(), StateSource::Default));
     }
 
     #[test]

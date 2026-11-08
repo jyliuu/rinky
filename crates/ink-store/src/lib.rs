@@ -201,7 +201,7 @@ pub fn backup_path(path: &Path) -> PathBuf {
 pub const BACKUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Where a recovered state file came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LoadSource {
     /// The file itself.
     Primary,
@@ -212,6 +212,7 @@ pub enum LoadSource {
     /// Its `.old` backup (the file was missing or did not parse).
     Backup,
     /// Neither existed or parsed.
+    #[default]
     Missing,
 }
 
@@ -289,7 +290,7 @@ fn newest_temp_copy<T>(path: &Path, not_before: Option<SystemTime>, parse: &impl
 }
 
 /// Result of [`load_recovering`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Recovered<T> {
     /// The parsed value, if any file parsed.
     pub value: Option<T>,
