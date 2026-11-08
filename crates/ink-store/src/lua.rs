@@ -278,10 +278,8 @@ pub fn parse(input: &[u8]) -> Result<Value, LuaError> {
     if p.s.starts_with(b"\xEF\xBB\xBF") {
         p.i = 3;
     }
-    if p.s[p.i..].starts_with(b"#") {
-        while p.i < p.s.len() && p.s[p.i] != b'\n' {
-            p.i += 1;
-        }
+    if p.peek() == Some(b'#') {
+        p.skip_while(|c| c != b'\n');
     }
     p.skip_space()?;
     if p.peek_word() == Some(b"return") {
@@ -326,6 +324,11 @@ struct Parser<'a> {
     values: usize,
 }
 
+/// Lua's white space.
+fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\r' | b'\n' | b'\x0b' | b'\x0c')
+}
+
 fn is_ident_start(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_'
 }
@@ -351,33 +354,29 @@ impl Parser<'_> {
 
     /// The identifier starting at the cursor, if any.
     fn peek_word(&self) -> Option<&[u8]> {
-        let start = self.i;
-        if !self.peek().is_some_and(is_ident_start) {
-            return None;
+        let rest = self.s.get(self.i..)?;
+        let n = rest.iter().take_while(|&&c| is_ident(c)).count();
+        self.peek().is_some_and(is_ident_start).then(|| &rest[..n])
+    }
+
+    /// Moves the cursor past the bytes that satisfy `keep`.
+    fn skip_while(&mut self, keep: impl Fn(u8) -> bool) {
+        while self.peek().is_some_and(&keep) {
+            self.i += 1;
         }
-        let mut end = start;
-        while end < self.s.len() && is_ident(self.s[end]) {
-            end += 1;
-        }
-        Some(&self.s[start..end])
     }
 
     /// Skips white space and comments.
     fn skip_space(&mut self) -> Result<(), LuaError> {
         loop {
             match self.peek() {
-                Some(b' ' | b'\t' | b'\r' | b'\n' | b'\x0b' | b'\x0c') => self.i += 1,
+                Some(c) if is_space(c) => self.i += 1,
                 Some(b'-') if self.peek_at(1) == Some(b'-') => {
                     self.i += 2;
                     if let Some(level) = self.long_bracket_level() {
                         self.long_body(level, "comment")?;
                     } else {
-                        while let Some(c) = self.peek() {
-                            if c == b'\n' {
-                                break;
-                            }
-                            self.i += 1;
-                        }
+                        self.skip_while(|c| c != b'\n');
                     }
                 }
                 _ => return Ok(()),
@@ -632,9 +631,7 @@ impl Parser<'_> {
             }
             b'z' => {
                 self.i += 1;
-                while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n' | b'\x0b' | b'\x0c')) {
-                    self.i += 1;
-                }
+                self.skip_while(is_space);
             }
             b'u' => {
                 self.i += 1;
@@ -718,14 +715,10 @@ impl Parser<'_> {
             };
             self.skip_space()?;
             let v = self.value()?;
-            let key = match key {
-                Some(k) => k,
-                None => {
-                    let k = Key::Int(next_pos);
-                    next_pos += 1;
-                    k
-                }
-            };
+            let key = key.unwrap_or_else(|| {
+                next_pos += 1;
+                Key::Int(next_pos - 1)
+            });
             if v != Value::Nil {
                 t.entries.push((key, v));
             }
