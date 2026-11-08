@@ -291,23 +291,11 @@ impl Shown {
 
     /// Value of slider `i` of [`SLIDERS`].
     pub fn get(&self, i: usize) -> f32 {
-        match i {
-            0 => self.font_px,
-            1 => self.spacing,
-            2 => self.margin,
-            3 => self.margin_top,
-            _ => self.margin_bottom,
-        }
+        [self.font_px, self.spacing, self.margin, self.margin_top, self.margin_bottom][i.min(4)]
     }
 
     fn set(&mut self, i: usize, v: f32) {
-        match i {
-            0 => self.font_px = v,
-            1 => self.spacing = v,
-            2 => self.margin = v,
-            3 => self.margin_top = v,
-            _ => self.margin_bottom = v,
-        }
+        *[&mut self.font_px, &mut self.spacing, &mut self.margin, &mut self.margin_top, &mut self.margin_bottom][i.min(4)] = v;
     }
 }
 
@@ -379,40 +367,18 @@ pub fn book_layout(settings: &Settings, book: &BookSettings, w: u32, h: u32) -> 
 /// [`book_layout`] with the margins as stored (what the sheet shows and saves).
 pub fn stored_book_layout(settings: &Settings, book: &BookSettings, w: u32, h: u32) -> LayoutSettings {
     let mut l = stored_layout(settings, w, h);
-    if let Some(v) = book.font_px {
-        l.font_px = v;
-    }
-    if let Some(v) = book.line_spacing {
-        l.line_spacing = v;
-    }
-    if let Some(v) = book.margin_x {
-        l.margin_left = v;
-        l.margin_right = v;
-    }
-    if let Some(v) = book.margin_top {
-        l.margin_top = v;
-    }
-    if let Some(v) = book.margin_bottom {
-        l.margin_bottom = v;
-    }
-    if let Some(v) = book.justify {
-        l.justify = v;
-    }
-    if let Some(v) = book.hyphenation {
-        l.hyphenate = v;
-    }
-    if let Some(v) = book.publisher_styles {
-        l.publisher_styles = v;
-    }
-    if let Some(v) = book.paragraph_spacing {
-        l.paragraph_spacing = v;
-    }
-    if let Some(v) = book.paragraph_indent {
-        l.paragraph_indent = super::indent_em(v);
-    }
-    if let Some(v) = book.font_weight {
-        l.embolden = v.min(WEIGHT_MAX);
-    }
+    l.font_px = book.font_px.unwrap_or(l.font_px);
+    l.line_spacing = book.line_spacing.unwrap_or(l.line_spacing);
+    l.margin_left = book.margin_x.unwrap_or(l.margin_left);
+    l.margin_right = book.margin_x.unwrap_or(l.margin_right);
+    l.margin_top = book.margin_top.unwrap_or(l.margin_top);
+    l.margin_bottom = book.margin_bottom.unwrap_or(l.margin_bottom);
+    l.justify = book.justify.unwrap_or(l.justify);
+    l.hyphenate = book.hyphenation.unwrap_or(l.hyphenate);
+    l.publisher_styles = book.publisher_styles.unwrap_or(l.publisher_styles);
+    l.paragraph_spacing = book.paragraph_spacing.unwrap_or(l.paragraph_spacing);
+    l.paragraph_indent = book.paragraph_indent.map_or(l.paragraph_indent, super::indent_em);
+    l.embolden = book.font_weight.map_or(l.embolden, |v| v.min(WEIGHT_MAX));
     l.font_family = match book.font_family.as_deref() {
         Some(f) => family_value(f),
         None => {
