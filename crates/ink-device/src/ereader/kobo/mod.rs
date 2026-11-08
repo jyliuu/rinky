@@ -72,6 +72,8 @@ pub(crate) fn ntx_io(cmd: libc::c_ulong, arg: libc::c_int) -> Result<()> {
 pub fn suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(String)) -> Result<Resume> {
     // Always: stop() waits for a radio start in progress (the network worker), which
     // the interface flags do not show yet, and does nothing when the radio is off.
+    // From here to the wake no start runs (a command the worker had queued).
+    wifi::hold_off(true);
     if wifi::is_up() {
         log("wifi: turning off before suspend".into());
     }
@@ -89,6 +91,7 @@ pub fn suspend(sys: &SysRoot, rtc_wake: Option<Duration>, log: &mut dyn FnMut(St
     if r.is_ok() {
         std::thread::sleep(Duration::from_millis(100));
     }
+    wifi::hold_off(false);
     r
 }
 
@@ -129,7 +132,7 @@ impl NetBackend for KoboNet {
     }
 
     fn prepare(&mut self) -> Result<()> {
-        wifi::start()
+        wifi::prepare()
     }
 
     fn probe(&mut self) -> Probe {

@@ -332,8 +332,9 @@ again, as KOReader's `koreader.sh` does.
 There is no lipc on a Kobo. `ereader/kobo/` drives the frontlight and warmth through
 sysfs, reads the battery from `power_supply`, and runs Wi-Fi with `wpa_supplicant` on
 Nickel's own configuration, as KOReader's scripts do. Suspend writes
-`state-extended` before `mem`, with Wi-Fi off first; the network worker
-(`netman.rs`) turns it on again after the wake when it was on, and runs DHCP
+`state-extended` before `mem`, with Wi-Fi off first (and no radio start allowed
+until the wake: `wifi::hold_off`); the network worker (`netman.rs`) turns it on
+again after the wake when it was on, and runs DHCP
 whenever `wpa_supplicant` is associated without an address. The framebuffer boots at 16 or
 32 bpp and is switched to 8 bpp gray while rinky runs. Touch panels of the "snow" kind
 never send `TRACKING_ID -1`; `BTN_TOUCH 0` ends the contact. USB storage stays

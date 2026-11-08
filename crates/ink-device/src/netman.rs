@@ -421,9 +421,20 @@ impl NetMachine {
         };
         if let Err(e) = r {
             log::warn!("net: radio on: {e}");
+            if self.was_on {
+                // Not now (a Kobo refuses while it suspends): the next wake tries again.
+                return self.down();
+            }
             return self.off();
         }
         self.start(now);
+    }
+
+    /// The radio is off without the user's word: a wake turns it on again.
+    fn down(&mut self) {
+        self.state = State::Down;
+        (self.next_probe, self.next_look) = (None, None);
+        self.publish(NetStatus::Off);
     }
 
     fn joining(&mut self, essid: String, now: Instant) {
@@ -447,9 +458,7 @@ impl NetMachine {
     fn after_probe(&mut self, p: Probe, now: Instant, b: &mut dyn NetBackend) {
         self.associated = p.associated;
         if !p.radio {
-            self.state = State::Down;
-            (self.next_probe, self.next_look) = (None, None);
-            return self.publish(NetStatus::Off);
+            return self.down();
         }
         if p.address {
             let essid = p.essid.unwrap_or_default();
@@ -1019,6 +1028,49 @@ mod tests {
         m.handle(Cmd::Awake(false), t + s(102), &mut b);
         m.handle(Cmd::Awake(true), t + s(200), &mut b);
         assert!(b.calls.is_empty(), "off stays off: {:?}", b.calls);
+    }
+
+    /// The radio cannot come on at a wake (a Kobo refuses while a new suspend began):
+    /// Wi-Fi stays wanted, and the next wake tries again.
+    #[test]
+    fn a_radio_that_cannot_come_on_at_a_wake_is_tried_again_at_the_next() {
+        struct Refuses(Fake, bool);
+        impl NetBackend for Refuses {
+            fn radio_on(&mut self) -> bool {
+                self.0.radio_on()
+            }
+            fn set_radio(&mut self, on: bool) -> Result<()> {
+                if on && self.1 {
+                    self.0.calls.push("refused".into());
+                    return Err(DeviceError::Backend("suspending".into()));
+                }
+                self.0.set_radio(on)
+            }
+            fn probe(&mut self) -> Probe {
+                self.0.probe()
+            }
+            fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
+                self.0.scan()
+            }
+            fn join(&mut self, essid: &str, password: Option<&str>) -> Result<()> {
+                self.0.join(essid, password)
+            }
+        }
+        let (mut m, t) = (NetMachine::new(), Instant::now());
+        let mut b = Refuses(Fake { radio: true, probe: connected("Home"), ..Fake::default() }, false);
+        m.handle(Cmd::Boot { restore: true }, t, &mut b);
+        m.handle(Cmd::Awake(false), t + s(1), &mut b);
+        b.0.radio = false;
+        b.1 = true;
+        let ev = m.handle(Cmd::Awake(true), t + s(100), &mut b);
+        assert_eq!(status(&ev), [NetStatus::Off]);
+        assert!(m.was_on() && !ev.contains(&NetEvent::WasOn(false)));
+        assert_eq!(m.deadline(), None, "nothing runs with the radio off");
+        m.handle(Cmd::Awake(false), t + s(101), &mut b);
+        b.1 = false;
+        b.0.calls.clear();
+        m.handle(Cmd::Awake(true), t + s(200), &mut b);
+        assert_eq!(b.0.calls[0], "radio true", "{:?}", b.0.calls);
     }
 
     #[test]

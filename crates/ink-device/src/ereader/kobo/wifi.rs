@@ -36,6 +36,23 @@ static STATE: Mutex<Option<(Instant, WifiState)>> = Mutex::new(None);
 const STATE_FOR: Duration = Duration::from_secs(10);
 /// The radio is being turned on ([`start_in_background`]).
 static STARTING: AtomicBool = AtomicBool::new(false);
+/// The device is suspending ([`hold_off`]): [`start`] refuses.
+static HELD_OFF: AtomicBool = AtomicBool::new(false);
+
+/// While `held` (from before the Wi-Fi is turned off for a suspend until the wake),
+/// [`start`] and [`prepare`] fail at once: the network worker may still run a command
+/// queued before the suspend (a wake, the user's on), and must not power the radio
+/// again after the suspend turned it off.
+pub fn hold_off(held: bool) {
+    HELD_OFF.store(held, Ordering::SeqCst);
+}
+
+fn check_held_off() -> Result<()> {
+    if HELD_OFF.load(Ordering::SeqCst) {
+        return Err(DeviceError::Backend("Wi-Fi: not while suspending".into()));
+    }
+    Ok(())
+}
 
 fn changed() {
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -222,6 +239,7 @@ fn wpa_running() -> bool {
 /// it was done already (a radio left on by Nickel).
 pub fn start() -> Result<()> {
     let _g = lock();
+    check_held_off()?;
     changed();
     let e = env();
     log::info!("wifi: on ({} on {}, {})", e.module, e.interface, e.platform);
@@ -265,6 +283,26 @@ pub fn start() -> Result<()> {
     }
     pause(if e.module == "moal" { 2000 } else { 1000 });
     run("ifconfig", &[&e.interface, "up"])?;
+    start_wpa(e)
+}
+
+/// The radio was found on at start-up (the interface up): starts `wpa_supplicant` when
+/// it is not running, without powering the radio or loading the driver again (on
+/// MediaTek that pokes the chip, which could drop a connection Nickel left).
+pub fn prepare() -> Result<()> {
+    let g = lock();
+    check_held_off()?;
+    changed();
+    let e = env();
+    if !iface_up() {
+        drop(g);
+        return start();
+    }
+    start_wpa(e)
+}
+
+/// Starts `wpa_supplicant` on the interface unless it runs.
+fn start_wpa(e: &WifiEnv) -> Result<()> {
     if !wpa_running() {
         let driver = if matches!(e.module.as_str(), "moal" | "wlan_drv_gen4m") { "nl80211" } else { "wext" };
         let (conf, extra): (&str, &[&str]) =
@@ -353,6 +391,7 @@ fn release_ip(e: &WifiEnv) {
 /// turned off meanwhile (before a suspend), and a DHCP client would stay behind.
 pub fn obtain_ip() -> Result<()> {
     changed();
+    check_held_off()?;
     if !iface_up() {
         return Err(DeviceError::Backend("DHCP: the interface is down".into()));
     }
