@@ -6,6 +6,7 @@
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::borrow::Cow;
 
 /// One node of the tree.
 #[derive(Clone, Debug, PartialEq)]
@@ -21,8 +22,6 @@ pub enum Node {
 pub struct Element {
     /// Local name (`section` for `fb:section`).
     pub name: String,
-    /// Prefix of the qualified name, if any (`epub` for `epub:type`-style element names).
-    pub prefix: Option<String>,
     /// Attributes: (local name, qualified name, value).
     pub attrs: Vec<Attr>,
     /// Children in order.
@@ -253,16 +252,16 @@ pub fn html_entity(name: &str) -> Option<&'static str> {
     CHARS.get(start..start + c.len_utf8())
 }
 
-fn qname_parts(raw: &[u8]) -> (Option<String>, String) {
-    let s = String::from_utf8_lossy(raw);
-    match s.split_once(':') {
-        Some((p, l)) => (Some(p.to_string()), l.to_string()),
-        None => (None, s.into_owned()),
+/// The local name of a qualified element name: after the first `:`.
+pub(crate) fn local_name(raw: &[u8]) -> Cow<'_, str> {
+    match String::from_utf8_lossy(raw) {
+        Cow::Borrowed(s) => Cow::Borrowed(s.split_once(':').map_or(s, |(_, l)| l)),
+        Cow::Owned(s) => Cow::Owned(s.split_once(':').map_or(s.as_str(), |(_, l)| l).to_string()),
     }
 }
 
 fn element_of(e: &BytesStart) -> Element {
-    let (prefix, name) = qname_parts(e.name().as_ref());
+    let name = local_name(e.name().as_ref()).into_owned();
     let mut attrs = Vec::new();
     for a in e.attributes().with_checks(false).flatten() {
         let qname = String::from_utf8_lossy(a.key.as_ref()).into_owned();
@@ -273,7 +272,7 @@ fn element_of(e: &BytesStart) -> Element {
         };
         attrs.push(Attr { local, qname, value });
     }
-    Element { name, prefix, attrs, children: Vec::new() }
+    Element { name, attrs, children: Vec::new() }
 }
 
 /// Deepest element nesting kept by [`parse`] (and accepted by [`is_well_formed`]).
@@ -326,7 +325,8 @@ pub fn parse(xml: &str) -> Result<Element, String> {
                     skipped -= 1;
                     continue;
                 }
-                let (_, name) = qname_parts(e.name().as_ref());
+                let q = e.name();
+                let name = local_name(q.as_ref());
                 // Close up to the matching open element (tolerates unclosed children).
                 // The search is bounded by MAX_DEPTH.
                 if let Some(pos) = stack.iter().rposition(|el| el.name == name) {
