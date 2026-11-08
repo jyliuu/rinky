@@ -784,13 +784,11 @@ fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
         rel,
         mime: v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         title: v.get("title").and_then(json_str),
-        length: None,
         indirect,
-        facet_group: None,
-        active_facet: false,
         count: props.and_then(|p| p.get("numberOfItems")).and_then(|n| n.as_u64()),
         price,
         templated,
+        ..Default::default()
     })
 }
 
