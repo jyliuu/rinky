@@ -46,7 +46,7 @@ use ink_doc::{
     DocError, DocKind, Document, Link, LinkTarget, LayoutSettings, Metadata, PageCount, PagePosition, Position,
     Result, SearchHit, Selection, TocEntry,
 };
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -181,7 +181,8 @@ pub struct MupdfDocument {
     path: PathBuf,
     kind: FileKind,
     meta: Metadata,
-    outline: Vec<RawOutline>,
+    /// Read on first use: opening for metadata or a cover (the library) never needs it.
+    outline: OnceCell<Vec<RawOutline>>,
     pages: usize,
     layout: LayoutSettings,
     opts: FixedOptions,
@@ -586,17 +587,13 @@ impl MupdfDocument {
             language: raw.metadata("info:Language"),
             ..Default::default()
         };
-        let outline = raw.outline().unwrap_or_else(|e| {
-            log::warn!("mupdf: {e}");
-            Vec::new()
-        });
         let cache = env_mb("INK_MUPDF_CACHE_MB", DEFAULT_CACHE_MB) << 20;
         let opts = opts.normalized();
         let mut doc = MupdfDocument {
             path: path.to_path_buf(),
             kind,
             meta,
-            outline,
+            outline: OnceCell::new(),
             pages,
             layout: LayoutSettings::for_screen(1272, 1696),
             opts,
@@ -797,9 +794,14 @@ impl MupdfDocument {
         self.inner.borrow_mut().text(page)
     }
 
-    /// Raw outline entries (document pages).
+    /// Raw outline entries (document pages), read from the file on the first call.
     pub fn outline(&self) -> &[RawOutline] {
-        &self.outline
+        self.outline.get_or_init(|| {
+            self.inner.borrow_mut().raw.outline().unwrap_or_else(|e| {
+                log::warn!("mupdf: {e}");
+                Vec::new()
+            })
+        })
     }
 
     /// Bytes held by the rendered-screen cache and its cap.
@@ -1059,7 +1061,7 @@ impl Document for MupdfDocument {
     }
 
     fn toc(&self) -> Vec<TocEntry> {
-        self.outline
+        self.outline()
             .iter()
             .filter_map(|o| {
                 let page = o.page?;
