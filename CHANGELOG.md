@@ -46,6 +46,8 @@ All notable changes to rinky are listed here. The format is based on
   colours now come out darker (pure red is 77 of 255 instead of 129).
 - PDF and comic page turns are near instant when you rest on a page for a moment:
   rinky draws the next page (or the previous one, after turning back) while you read.
+- On Kindles with 512 MB of memory, scanned PDFs and comics take about 20 MB less
+  memory while reading, with no slower page turns.
 
 ### Fixed
 - Reading settings (Aa): a preset or a font size step now also refreshes the preview

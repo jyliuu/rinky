@@ -32,7 +32,8 @@
 //! - rendered screens: [`ByteCache`], default 16 MiB (`INK_MUPDF_CACHE_MB`);
 //! - page text: 4 MiB;
 //! - display lists: the last 4 pages;
-//! - MuPDF's own store (fonts, decoded images): 48 MiB (`INK_MUPDF_STORE_MB`);
+//! - MuPDF's own store (fonts, decoded images): a sixteenth of the device's memory,
+//!   24 to 48 MiB, 48 MiB where the memory is not known (`INK_MUPDF_STORE_MB`);
 //! - page bounds, crop boxes and column cuts: small per-page maps.
 
 use crate::analyze::{self, Gray};
@@ -50,8 +51,11 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// MuPDF store cap (fonts, images) unless `INK_MUPDF_STORE_MB` says otherwise.
+/// Largest MuPDF store cap (fonts, images) unless `INK_MUPDF_STORE_MB` says otherwise;
+/// also the cap where the device memory is not known (see [`default_store_mb`]).
 pub const DEFAULT_STORE_MB: usize = 48;
+/// Smallest default MuPDF store cap.
+pub const MIN_STORE_MB: usize = 24;
 /// Rendered-screen cache cap unless `INK_MUPDF_CACHE_MB` says otherwise.
 pub const DEFAULT_CACHE_MB: usize = 16;
 /// Page text cache cap.
@@ -182,6 +186,19 @@ pub struct MupdfDocument {
     selection: Option<Selection>,
     lut: Option<Box<[u8; 256]>>,
     inner: RefCell<Inner>,
+}
+
+/// The default MuPDF store cap for a device with `mem_total_kib` of memory (`MemTotal`;
+/// `None` when unknown, as on a Mac): a sixteenth of it, between [`MIN_STORE_MB`] and
+/// [`DEFAULT_STORE_MB`]. A 512 MB Kindle gets about 30 MiB, a 1 GB one 48 MiB. Pages are
+/// drawn no slower with a smaller store: a scanned page's image is decoded again for
+/// each new page or tile whatever the cap, and turning back finds the rendered screen
+/// in the screen cache.
+pub fn default_store_mb(mem_total_kib: Option<u64>) -> usize {
+    match mem_total_kib {
+        Some(kib) => usize::try_from(kib / 1024 / 16).unwrap_or(usize::MAX).clamp(MIN_STORE_MB, DEFAULT_STORE_MB),
+        None => DEFAULT_STORE_MB,
+    }
 }
 
 fn env_mb(name: &str, default: usize) -> usize {
@@ -546,7 +563,8 @@ impl MupdfDocument {
     /// Opens an encrypted document with `password` (an empty password is always tried).
     pub fn open_with_password(path: &Path, opts: FixedOptions, password: Option<&str>) -> Result<Self> {
         // At least 1 MiB: 0 would make the shim fall back to MuPDF's 256 MiB default.
-        let store = env_mb("INK_MUPDF_STORE_MB", DEFAULT_STORE_MB).max(1) << 20;
+        let mem_total = ink_device::trace::meminfo().map(|(total, _)| total);
+        let store = env_mb("INK_MUPDF_STORE_MB", default_store_mb(mem_total)).max(1) << 20;
         // A missing file is DocError::NotFound from here.
         let mut raw = RawDoc::open(path, store, DISPLAY_LISTS)?;
         if raw.needs_password() && !raw.authenticate("") && !password.is_some_and(|p| raw.authenticate(p)) {
@@ -1205,6 +1223,16 @@ impl Document for MupdfDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_cap_follows_the_device_memory() {
+        // MemTotal of a 512 MB Kindle, the 1 GB emulator, a small and a large machine.
+        assert_eq!(default_store_mb(Some(498_000)), 30);
+        assert_eq!(default_store_mb(Some(979_900)), DEFAULT_STORE_MB);
+        assert_eq!(default_store_mb(Some(256_000)), MIN_STORE_MB);
+        assert_eq!(default_store_mb(Some(16 << 20)), DEFAULT_STORE_MB);
+        assert_eq!(default_store_mb(None), DEFAULT_STORE_MB);
+    }
 
     #[test]
     fn spread_pages_pair_up_after_the_cover() {
