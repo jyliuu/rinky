@@ -2617,11 +2617,6 @@ impl InputBox {
     pub fn docked_height() -> u32 {
         INPUT_H as u32 + Keyboard::preferred_height(4) + ink_ui::keyboard::BOTTOM_MARGIN
     }
-
-    /// Takes what changed since the last call: `None` for the whole panel.
-    fn take_damage(&mut self) -> Option<Vec<Rect>> {
-        self.damage.replace(Vec::new())
-    }
 }
 
 impl Widget for InputBox {
@@ -2733,14 +2728,6 @@ impl Kind {
 
     fn modal(&self) -> bool {
         !matches!(self, Kind::Toast(_))
-    }
-
-    /// Answer when the user backs out.
-    fn cancel_result(&self) -> &'static str {
-        match self {
-            Kind::Viewer(_) => "closed",
-            _ => "",
-        }
     }
 
     /// Where a scrolling layer is (a viewer's page and scroll, a menu's scroll): a
@@ -3140,7 +3127,7 @@ impl PluginUi {
         let back = matches!(ev, UiEvent::Key(k) if k.pressed && matches!(k.key, ink_device::Key::Back | ink_device::Key::Home));
         let outside = gesture_pos(ev).is_some_and(|p| !l.rect.contains(p));
         let result = if back {
-            Some(l.kind.cancel_result().to_string())
+            Some(if matches!(l.kind, Kind::Viewer(_)) { "closed" } else { "" }.to_string())
         } else if outside {
             // A tap outside a menu or a card cancels it; dialogs, viewers and the
             // keyboard stay.
@@ -3167,15 +3154,16 @@ impl PluginUi {
                     "input:edit" | "input:keys" => {
                         // Gray-preserving GL16 on the changed key faces (and the field
                         // when the text changed), not the whole panel.
-                        let mut rects = match &mut l.kind {
-                            Kind::Input(i) => i.take_damage(),
+                        // `None`: the whole panel changed.
+                        let rects = match &mut l.kind {
+                            Kind::Input(i) => i.damage.replace(Vec::new()).map(|mut r| {
+                                if a == "input:edit" {
+                                    r.push(i.parts(lr).0);
+                                }
+                                r
+                            }),
                             _ => None,
                         };
-                        if a == "input:edit" {
-                            if let (Some(r), Kind::Input(i)) = (rects.as_mut(), &l.kind) {
-                                r.push(i.parts(lr).0);
-                            }
-                        }
                         match rects {
                             Some(r) => l.refresh_parts(r),
                             None => l.partial = None,
