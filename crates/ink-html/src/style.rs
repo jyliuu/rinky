@@ -691,16 +691,8 @@ impl Cascade {
         self.gather(e, |decls| {
             for (_, d) in decls {
                 match d.name.as_str() {
-                    "display" => {
-                        if let Some(v) = parse_display(&d.value) {
-                            s.display = v;
-                        }
-                    }
-                    "white-space" => {
-                        if let Some(v) = parse_white_space(&d.value, parent_ws) {
-                            s.white_space = v;
-                        }
-                    }
+                    "display" => set(&mut s.display, parse_display(&d.value)),
+                    "white-space" => set(&mut s.white_space, parse_white_space(&d.value, parent_ws)),
                     "float" => s.float = matches!(ident(&d.value).as_deref(), Some("left" | "right")),
                     _ => {}
                 }
@@ -727,18 +719,8 @@ impl Cascade {
         // Pass 1: font size (everything in em depends on it).
         for (_, d) in decls {
             match d.name.as_str() {
-                "font-size" => {
-                    if let Some(v) = self.font_size(&d.value, parent) {
-                        s.font_size = v;
-                    }
-                }
-                "font" => {
-                    if let Some(sz) = font_shorthand_size(&d.value) {
-                        if let Some(v) = self.font_size(&sz, parent) {
-                            s.font_size = v;
-                        }
-                    }
-                }
+                "font-size" => set(&mut s.font_size, self.font_size(&d.value, parent)),
+                "font" => set(&mut s.font_size, font_shorthand_size(&d.value).and_then(|sz| self.font_size(&sz, parent))),
                 _ => {}
             }
         }
@@ -879,16 +861,8 @@ impl Cascade {
             return;
         }
         match d.name.as_str() {
-            "display" => {
-                if let Some(x) = parse_display(v) {
-                    s.display = x;
-                }
-            }
-            "white-space" => {
-                if let Some(x) = parse_white_space(v, parent.white_space) {
-                    s.white_space = x;
-                }
-            }
+            "display" => set(&mut s.display, parse_display(v)),
+            "white-space" => set(&mut s.white_space, parse_white_space(v, parent.white_space)),
             "float" => {
                 s.float = match kw.as_deref() {
                     Some("left") => -1,
@@ -897,12 +871,7 @@ impl Cascade {
                 }
             }
             "clear" => s.clear = matches!(kw.as_deref(), Some("left" | "right" | "both")),
-            "font-family" => {
-                let f = css::family_names(v);
-                if !f.is_empty() {
-                    s.font_family = Arc::from(f);
-                }
-            }
+            "font-family" => set(&mut s.font_family, family(v)),
             "font-weight" => {
                 if let Some(w) = css::parse_weight(v) {
                     s.bold = match kw.as_deref() {
@@ -939,44 +908,19 @@ impl Cascade {
                 // size
                 i += 1;
                 if i < v.len() && v[i] == Tok::Slash {
-                    if let Some(lh) = self.line_height(&v[i + 1..i + 2], font) {
-                        s.line_height = lh;
-                    }
+                    set(&mut s.line_height, self.line_height(&v[i + 1..i + 2], font));
                     i += 2;
                 }
                 if i < v.len() {
-                    let f = css::family_names(&v[i..]);
-                    if !f.is_empty() {
-                        s.font_family = Arc::from(f);
-                    }
+                    set(&mut s.font_family, family(&v[i..]));
                 }
             }
             "font-size" => {}
-            "line-height" => {
-                if let Some(lh) = self.line_height(v, font) {
-                    s.line_height = lh;
-                }
-            }
-            "text-align" => {
-                if let Some(a) = kw.as_deref().and_then(TextAlign::from_keyword) {
-                    s.text_align = a;
-                }
-            }
-            "text-indent" => {
-                if let Some(l) = v.first().and_then(|t| self.len(t, font)) {
-                    s.text_indent = l;
-                }
-            }
-            "margin" => {
-                if let Some(e) = self.edges(v, font) {
-                    s.margin = e;
-                }
-            }
-            "padding" => {
-                if let Some(e) = self.edges(v, font) {
-                    s.padding = e;
-                }
-            }
+            "line-height" => set(&mut s.line_height, self.line_height(v, font)),
+            "text-align" => set(&mut s.text_align, kw.as_deref().and_then(TextAlign::from_keyword)),
+            "text-indent" => set(&mut s.text_indent, v.first().and_then(|t| self.len(t, font))),
+            "margin" => set(&mut s.margin, self.edges(v, font)),
+            "padding" => set(&mut s.padding, self.edges(v, font)),
             "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "padding-top" | "padding-right" | "padding-bottom"
             | "padding-left" | "margin-block-start" | "margin-block-end" | "margin-inline-start" | "margin-inline-end"
             | "padding-inline-start" => {
@@ -1082,11 +1026,7 @@ impl Cascade {
                     }
                 }
             }
-            "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens" | "adobe-hyphenate" => {
-                if let Some(h) = kw.as_deref().and_then(Hyphens::from_keyword) {
-                    s.hyphens = h;
-                }
-            }
+            "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens" | "adobe-hyphenate" => set(&mut s.hyphens, kw.as_deref().and_then(Hyphens::from_keyword)),
             "letter-spacing" | "word-spacing" => {
                 let px = match kw.as_deref() {
                     Some("normal") => Some(0.0),
@@ -1104,11 +1044,7 @@ impl Cascade {
                 }
             }
             "visibility" => s.hidden = matches!(kw.as_deref(), Some("hidden" | "collapse")),
-            "color" => {
-                if let Some(g) = parse_color(v) {
-                    s.color = g;
-                }
-            }
+            "color" => set(&mut s.color, parse_color(v)),
             _ => {}
         }
     }
@@ -1136,6 +1072,20 @@ fn image_display(name: &str, d: Display) -> Display {
     } else {
         d
     }
+}
+
+/// Sets `slot` to `v` when there is one (a declaration with an invalid value is
+/// ignored).
+fn set<T>(slot: &mut T, v: Option<T>) {
+    if let Some(v) = v {
+        *slot = v;
+    }
+}
+
+/// The family list of a `font-family` value, `None` when it names none.
+fn family(v: &[Tok]) -> Option<Arc<[String]>> {
+    let f = css::family_names(v);
+    (!f.is_empty()).then(|| Arc::from(f))
 }
 
 fn ident(v: &[Tok]) -> Option<String> {
