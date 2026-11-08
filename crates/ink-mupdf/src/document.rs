@@ -656,59 +656,53 @@ impl MupdfDocument {
         Setup { opts: self.opts, plan: self.plan, w: self.layout.width as f32, h: self.layout.height as f32, pages: self.pages }
     }
 
-    fn spreads_active(&self) -> bool {
-        let landscape = self.layout.width > self.layout.height;
-        let simple = self.opts.fit == Fit::Page && self.opts.zoom <= 1.0 && self.opts.columns <= 1;
-        simple
-            && match self.opts.spreads {
-                Spreads::Never => false,
-                Spreads::Always => true,
-                Spreads::Auto => landscape && self.kind == FileKind::Cbz,
-            }
+    fn replan(&mut self) {
+        let o = self.opts;
+        // Fit page, no zoom, one column: whole pages, one per screen or two side by side.
+        let whole = o.fit == Fit::Page && o.zoom <= 1.0 && o.columns <= 1;
+        let landscape_cbz = self.layout.width > self.layout.height && self.kind == FileKind::Cbz;
+        let (cols, cap) = (o.columns.max(1) as usize, tile_cap(self.pages));
+        self.plan = if whole && (o.spreads == Spreads::Always || o.spreads == Spreads::Auto && landscape_cbz) {
+            Plan::Spread { cover_alone: o.cover_alone, rtl: o.rtl }
+        } else if whole || cols > cap {
+            // `cols > cap`: so many pages that even one tile per column would pass
+            // MAX_SCREENS; show whole (cropped) pages.
+            Plan::Tiles { cols: 1, nx: 1, ny: 1 }
+        } else {
+            self.tile_plan(cols, cap)
+        };
     }
 
-    fn replan(&mut self) {
-        self.plan = if self.spreads_active() {
-            Plan::Spread { cover_alone: self.opts.cover_alone, rtl: self.opts.rtl }
-        } else {
-            let cols = self.opts.columns.max(1) as usize;
-            let cap = tile_cap(self.pages);
-            if (self.opts.fit == Fit::Page && self.opts.zoom <= 1.0 && cols == 1) || cols > cap {
-                // `cols > cap`: so many pages that even one tile per column would pass
-                // MAX_SCREENS; show whole (cropped) pages.
-                Plan::Tiles { cols: 1, nx: 1, ny: 1 }
-            } else {
-                let (w, h) = (self.layout.width as f32, self.layout.height as f32);
-                let rot = Matrix::rotate(self.opts.rotate as i32);
-                let mut samples = vec![0, 1, self.pages / 2];
-                samples.retain(|&p| p < self.pages);
-                samples.dedup();
-                // Screens needed across and down by the widest/tallest sampled column.
-                let (mut fx, mut fy) = (0.0f32, 0.0f32);
-                let mut inner = self.inner.borrow_mut();
-                for p in samples {
-                    let g = inner.geom(p, &self.opts);
-                    for r in g.regions.iter().take(cols) {
-                        let rr = rot.map_rect(r);
-                        let (rw, rh) = (rr.w().max(1.0), rr.h().max(1.0));
-                        let s = fit_scale(self.opts.fit, w, h, rw, rh) * self.opts.zoom;
-                        fx = fx.max(rw * s / w);
-                        fy = fy.max(rh * s / h);
-                    }
-                }
-                let (fx, fy) = (fx.min(MAX_TILES_AXIS as f32), fy.min(MAX_TILES_AXIS as f32));
-                // Too many tiles for one page: shrink the zoom by 10 % steps until they fit
-                // (pieces() then scales every page down to the tile grid).
-                let (mut nx, mut ny) = (tiles(fx), tiles(fy));
-                let mut m = 1.0f32;
-                while cols * nx * ny > cap && (nx > 1 || ny > 1) {
-                    m *= 0.9;
-                    nx = tiles(fx * m);
-                    ny = tiles(fy * m);
-                }
-                Plan::Tiles { cols, nx, ny }
+    /// The tile grid for `cols` columns and at most `cap` tiles per page.
+    fn tile_plan(&self, cols: usize, cap: usize) -> Plan {
+        let (o, w, h) = (self.opts, self.layout.width as f32, self.layout.height as f32);
+        let rot = Matrix::rotate(o.rotate as i32);
+        let mut samples = vec![0, 1, self.pages / 2];
+        samples.retain(|&p| p < self.pages);
+        samples.dedup();
+        // Screens needed across and down by the widest/tallest sampled column.
+        let (mut fx, mut fy) = (0.0f32, 0.0f32);
+        let mut inner = self.inner.borrow_mut();
+        for p in samples {
+            for r in inner.geom(p, &o).regions.iter().take(cols) {
+                let rr = rot.map_rect(r);
+                let (rw, rh) = (rr.w().max(1.0), rr.h().max(1.0));
+                let s = fit_scale(o.fit, w, h, rw, rh) * o.zoom;
+                fx = fx.max(rw * s / w);
+                fy = fy.max(rh * s / h);
             }
-        };
+        }
+        let (fx, fy) = (fx.min(MAX_TILES_AXIS as f32), fy.min(MAX_TILES_AXIS as f32));
+        // Too many tiles for one page: shrink the zoom by 10 % steps until they fit
+        // (pieces() then scales every page down to the tile grid).
+        let (mut nx, mut ny) = (tiles(fx), tiles(fy));
+        let mut m = 1.0f32;
+        while cols * nx * ny > cap && (nx > 1 || ny > 1) {
+            m *= 0.9;
+            nx = tiles(fx * m);
+            ny = tiles(fy * m);
+        }
+        Plan::Tiles { cols, nx, ny }
     }
 
     /// Number of screens for the current layout and options.
