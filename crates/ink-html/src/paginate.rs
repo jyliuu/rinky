@@ -107,8 +107,6 @@ pub struct MapState {
     pub claims: Vec<Claim>,
     /// Set when every chapter is known.
     pub complete: bool,
-    /// Layout generation the map belongs to.
-    pub generation: u64,
     /// The background threads have finished (map complete and the cache file written,
     /// or cancelled).
     pub finished: bool,
@@ -525,7 +523,6 @@ const EVICT_BYTES: usize = 256 * 1024;
 pub struct Worker {
     /// Shared state.
     pub shared: Arc<Shared>,
-    handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// Work the last background thread runs on the shared state when it ends.
@@ -569,7 +566,6 @@ impl Worker {
             m.claims.resize(n, Claim::Free);
         }
         log::info!("ink-html: background pagination of {} spine items on {threads} threads", book.chapters.len());
-        let mut handles = Vec::with_capacity(threads);
         for t in 0..threads {
             let (book, params, fonts, sh, interest) = (book.clone(), params.clone(), fonts.clone(), shared.clone(), interest.clone());
             // Every thread gets the path: whichever ends last writes the file (when the
@@ -587,20 +583,11 @@ impl Worker {
                     lower_priority();
                     paginate_claimed(&book, &params, &fonts, &sh, &interest);
                 });
-            match spawned {
-                Ok(h) => handles.push(h),
-                Err(e) => log::warn!("ink-html: cannot start paginator thread {t}: {e}"),
+            if let Err(e) = spawned {
+                log::warn!("ink-html: cannot start paginator thread {t}: {e}");
             }
         }
-        Worker { shared, handles }
-    }
-
-    /// Stops the threads (waits for the chapters in progress).
-    pub fn stop(&mut self) {
-        self.shared.cancel.store(true, Ordering::Relaxed);
-        for h in self.handles.drain(..) {
-            let _ = h.join();
-        }
+        Worker { shared }
     }
 
     /// Waits until the threads have finished (map complete, cache file written) or

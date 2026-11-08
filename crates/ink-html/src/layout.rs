@@ -160,8 +160,6 @@ pub struct ChapterLayout {
 /// What a chapter layout depends on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
-    /// Page width.
-    pub page_w: f32,
     /// Page content height.
     pub content_h: f32,
     /// Left margin.
@@ -177,7 +175,7 @@ impl Params {
     pub fn new(s: &LayoutSettings) -> Self {
         let content_w = (s.width as f32 - s.margin_left - s.margin_right).max(50.0);
         let content_h = (s.height as f32 - s.margin_top - s.margin_bottom).max(50.0);
-        Params { page_w: s.width as f32, content_h, left: s.margin_left, content_w, settings: s.clone() }
+        Params { content_h, left: s.margin_left, content_w, settings: s.clone() }
     }
 }
 

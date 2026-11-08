@@ -65,7 +65,6 @@ pub struct HtmlDocument {
     cache_done: Cell<bool>,
     font_sources: FontSources,
     fonts: RefCell<FontBook>,
-    legacy_fonts: Option<ink_text::Fonts>,
     laid: RefCell<HashMap<usize, Arc<LaidOut>>>,
     flats: RefCell<HashMap<usize, Arc<FlatText>>>,
     images: RefCell<ImageCache>,
@@ -136,7 +135,6 @@ impl HtmlDocument {
             cache_done: Cell::new(false),
             font_sources,
             fonts,
-            legacy_fonts: None,
             laid: RefCell::new(HashMap::new()),
             flats: RefCell::new(HashMap::new()),
             images: RefCell::new(ImageCache::default()),
@@ -170,11 +168,6 @@ impl HtmlDocument {
         self.book.chapters.iter().filter(|c| !crate::v1::blocks::parse_xhtml(&c.html).is_empty()).count()
     }
 
-    /// Number of DocFragments (spine items with a content file).
-    pub fn fragment_count(&self) -> usize {
-        self.book.fragments as usize
-    }
-
     /// Path inside the book of spine item `i`.
     pub fn chapter_path(&self, i: usize) -> Option<&str> {
         self.book.chapters.get(i).map(|c| c.path.as_str())
@@ -188,11 +181,6 @@ impl HtmlDocument {
     /// The shared book data (DOMs, stylesheets).
     pub fn book(&self) -> &Arc<Book> {
         &self.book
-    }
-
-    /// Noto Serif faces for drawing UI next to the page (kept from phase 0).
-    pub fn fonts_mut(&mut self) -> &mut ink_text::Fonts {
-        self.legacy_fonts.get_or_insert_with(ink_text::Fonts::load)
     }
 
     /// Adds the system font family `name` (searched in the Kindle font directories and
