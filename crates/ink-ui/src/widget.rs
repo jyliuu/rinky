@@ -146,8 +146,7 @@ impl<'a> PaintCx<'a> {
         if run.width <= max {
             return run;
         }
-        let cut = self.cut_to_fit(text, run.px, style, max);
-        self.fonts.shape(style, run.px, &cut)
+        self.cut_to_fit(text, &run, style, max).1
     }
 
     /// Like [`PaintCx::draw_text_end`], but also nothing is drawn outside `clip` (for
@@ -196,39 +195,67 @@ impl<'a> PaintCx<'a> {
 
     /// `text` shortened with "…" to fit `max` pixels, cut at a grapheme boundary.
     ///
-    /// The cut is found by galloping then bisecting over grapheme boundaries, so it costs
-    /// a few shapings of prefixes about as long as the result (a 2000-char text cut to
-    /// one line shapes about 12 short prefixes, not 2000 ever shorter copies).
+    /// The cut is found by galloping then bisecting over grapheme boundaries from where
+    /// the shaped `text` says it is, so it usually costs two shapings of prefixes about as
+    /// long as the result (a 2000-char text cut to one line does not shape 2000 ever
+    /// shorter copies).
     pub fn ellipsize(&mut self, text: &str, px: f32, style: Style, max: f32) -> String {
-        if self.fonts.shaped_width(style, px, text) <= max {
+        let run = self.fonts.shape(style, px, text);
+        if run.width <= max {
             return text.to_string();
         }
-        self.cut_to_fit(text, px, style, max)
+        self.cut_to_fit(text, &run, style, max).0
     }
 
-    /// [`PaintCx::ellipsize`] of a `text` known to be wider than `max`.
-    fn cut_to_fit(&mut self, text: &str, px: f32, style: Style, max: f32) -> String {
+    /// [`PaintCx::ellipsize`] of a `text` (shaped: `run`) known to be wider than `max`,
+    /// with its shaped run.
+    fn cut_to_fit(&mut self, text: &str, run: &ink_text::TextRun, style: Style, max: f32) -> (String, ink_text::TextRun) {
         use unicode_segmentation::UnicodeSegmentation;
         // Candidate cuts: ends of the proper prefixes, shortest first.
         let ends: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).filter(|i| *i > 0).collect();
+        // The last candidate whose glyphs end left of `max` less about an ellipsis.
+        let room = max - run.px * 0.75;
+        let over = run.glyphs.iter().find(|g| g.x + g.advance > room).map_or(text.len(), |g| g.cluster);
+        let guess = ends.partition_point(|e| *e <= over).saturating_sub(1);
         let cand = |k: usize| format!("{}…", text[..ends[k]].trim_end());
-        let mut fits = |k: usize| self.fonts.shaped_width(style, px, &cand(k)) <= max;
-        if ends.is_empty() || !fits(0) {
-            return "…".into();
-        }
-        // Widths grow with the prefix: find the last k that fits. `lo` fits, `hi` does not
-        // (or is past the end).
-        let n = ends.len();
-        let (mut lo, mut step) = (0usize, 1usize);
-        let mut hi = n;
-        while lo + step < n {
-            if fits(lo + step) {
-                lo += step;
-                step *= 2;
-            } else {
-                hi = lo + step;
-                break;
+        // The candidate that fits last, shaped (see below: it is the cut).
+        let mut fit = None;
+        let mut fits = |k: usize| {
+            let c = cand(k);
+            let r = self.fonts.shape(style, run.px, &c);
+            let ok = r.width <= max;
+            if ok {
+                fit = Some((c, r));
             }
+            ok
+        };
+        // Widths grow with the prefix: find the last k that fits. `lo` fits, `hi` does not
+        // (or is past the end); `lo` only moves to a candidate that fits.
+        let n = ends.len();
+        let (mut lo, mut hi, mut step) = (guess, n, 1usize);
+        if n == 0 {
+            return ("…".into(), self.fonts.shape(style, run.px, "…"));
+        } else if fits(guess) {
+            while lo + step < n {
+                if fits(lo + step) {
+                    lo += step;
+                    step *= 2;
+                } else {
+                    hi = lo + step;
+                    break;
+                }
+            }
+        } else {
+            hi = guess;
+            lo = loop {
+                let k = hi.saturating_sub(step);
+                if fits(k) {
+                    break k;
+                } else if k == 0 {
+                    return ("…".into(), self.fonts.shape(style, run.px, "…"));
+                }
+                (hi, step) = (k, step * 2);
+            };
         }
         while hi - lo > 1 {
             let mid = lo + (hi - lo) / 2;
@@ -238,7 +265,7 @@ impl<'a> PaintCx<'a> {
                 hi = mid;
             }
         }
-        cand(lo)
+        fit.expect("lo fits")
     }
 
     /// Draws an icon centred in `r` (a square of `side`, at most as large as `r`).
