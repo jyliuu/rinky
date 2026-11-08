@@ -654,11 +654,6 @@ impl InsightfulPlugin {
         Ok(())
     }
 
-    fn open_chats(&mut self, cx: &mut HostCtx) -> Result<()> {
-        self.ensure(cx)?;
-        self.show_list(cx)
-    }
-
     /// Opens the chat last used in this book (the one open before, else the most recently
     /// changed); a toast when the book has no chats.
     fn open_last_chat(&mut self, cx: &mut HostCtx) -> Result<()> {
@@ -919,7 +914,7 @@ impl Plugin for InsightfulPlugin {
             "ask" => self.open_from_highlight(cx, None),
             "ask_book" | "new_chat" => self.fresh_chat(cx),
             "book_menu" => self.book_sheet(cx),
-            "chats" => self.open_chats(cx),
+            "chats" => self.ensure(cx).and_then(|()| self.show_list(cx)),
             "last_chat" => self.open_last_chat(cx),
             "stats" => Self::sheet(cx, MENU_STATS, "Statistics", &[("General", "general", "info"), ("Current book", "book", "book"), ("All books", "all", "library")]),
             "gestures" => notice(cx, 0, "Gesture shortcuts", "Open Settings, then Gestures. Assign Insightful: show current chat or Insightful: show chats to a corner, swipe, or other gesture."),

@@ -652,7 +652,7 @@ impl SshPlugin {
             } else {
                 addrs.iter().map(|(l, ip)| format!("{ip}:{} ({l})", s.port)).collect::<Vec<_>>().join(", ")
             };
-            format!("Running on {at} · {}", keys_text(s.keys))
+            format!("Running on {at} · {} key{}", s.keys, if s.keys == 1 { "" } else { "s" })
         } else if let Some(f) = &self.failure {
             f.message.clone()
         } else {
@@ -761,13 +761,6 @@ fn on_off(b: bool) -> &'static str {
         "on"
     } else {
         "off"
-    }
-}
-
-fn keys_text(n: usize) -> String {
-    match n {
-        1 => "1 key".into(),
-        n => format!("{n} keys"),
     }
 }
 
