@@ -190,6 +190,18 @@ pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::r
     serde_json::from_slice(bytes).map_err(|e| e.to_string())
 }
 
+/// Runs the SQLite query `sql` with `params` and collects `row` of every result row.
+pub(crate) fn query_all<T, C: FromIterator<T>>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    row: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+) -> Result<C> {
+    let mut st = conn.prepare_cached(sql)?;
+    let rows = st.query_map(params, row)?;
+    Ok(rows.collect::<rusqlite::Result<C>>()?)
+}
+
 /// `path` with `suffix` appended to its file name (`a.json` + `.old` = `a.json.old`).
 pub(crate) fn with_suffix(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
     let mut s = path.as_os_str().to_owned();

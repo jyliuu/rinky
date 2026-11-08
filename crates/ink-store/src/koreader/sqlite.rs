@@ -164,9 +164,7 @@ fn has_table(conn: &Connection, name: &str) -> Result<bool> {
 
 fn columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
     // `table` is one of this module's constants, never input.
-    let mut st = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
-    let cols = st.query_map([], |r| r.get::<_, String>(1))?.collect::<std::result::Result<HashSet<_>, _>>()?;
-    Ok(cols)
+    crate::query_all(conn, &format!("PRAGMA table_info(\"{table}\")"), [], |r| r.get::<_, String>(1))
 }
 
 /// `t.col`, or `NULL` when the column does not exist.
@@ -223,26 +221,22 @@ pub fn read_statistics_db(db: &Path, scratch: Option<&Path>) -> Result<KoStatist
     let bc = columns(&conn, "book")?;
     let fields = ["title", "authors", "md5", "pages", "last_open", "notes", "highlights", "series", "language", "total_read_time", "total_read_pages"];
     let sql = format!("SELECT b.id, {} FROM book b ORDER BY b.id", col_list(&bc, "b", &fields));
-    let mut st = conn.prepare(&sql)?;
-    out.books = st
-        .query_map([], |r| {
-            Ok(KoStatsBook {
-                id: r.get(0)?,
-                title: opt_text(r, 1)?.unwrap_or_default(),
-                authors: opt_text(r, 2)?.unwrap_or_default(),
-                md5: opt_text(r, 3)?.filter(|s| !s.is_empty()),
-                pages: opt_i64(r, 4)?,
-                last_open: opt_i64(r, 5)?,
-                notes: opt_i64(r, 6)?,
-                highlights: opt_i64(r, 7)?,
-                series: opt_text(r, 8)?.filter(|s| !s.is_empty() && s != "N/A"),
-                language: opt_text(r, 9)?.filter(|s| !s.is_empty() && s != "N/A"),
-                total_read_time: opt_i64(r, 10)?,
-                total_read_pages: opt_i64(r, 11)?,
-            })
-        })?
-        .collect::<std::result::Result<_, _>>()?;
-    drop(st);
+    out.books = crate::query_all(&conn, &sql, [], |r| {
+        Ok(KoStatsBook {
+            id: r.get(0)?,
+            title: opt_text(r, 1)?.unwrap_or_default(),
+            authors: opt_text(r, 2)?.unwrap_or_default(),
+            md5: opt_text(r, 3)?.filter(|s| !s.is_empty()),
+            pages: opt_i64(r, 4)?,
+            last_open: opt_i64(r, 5)?,
+            notes: opt_i64(r, 6)?,
+            highlights: opt_i64(r, 7)?,
+            series: opt_text(r, 8)?.filter(|s| !s.is_empty() && s != "N/A"),
+            language: opt_text(r, 9)?.filter(|s| !s.is_empty() && s != "N/A"),
+            total_read_time: opt_i64(r, 10)?,
+            total_read_pages: opt_i64(r, 11)?,
+        })
+    })?;
 
     // Before 2020-10: `page_stat(id_book, page, start_time, period)`, no page count.
     let table = if has_table(&conn, "page_stat_data")? {
@@ -259,19 +253,16 @@ pub fn read_statistics_db(db: &Path, scratch: Option<&Path>) -> Result<KoStatist
         "SELECT p.id_book, b.md5, p.page, p.start_time, {dur}, {total} FROM {table} p \
          LEFT JOIN book b ON b.id = p.id_book ORDER BY p.start_time, p.id_book, p.page"
     );
-    let mut st = conn.prepare(&sql)?;
-    out.pages = st
-        .query_map([], |r| {
-            Ok(KoPageStat {
-                book_id: opt_i64(r, 0)?.unwrap_or(0),
-                md5: opt_text(r, 1)?.unwrap_or_default(),
-                page: clamp_u32(opt_i64(r, 2)?),
-                start_time: opt_i64(r, 3)?.unwrap_or(0).max(0) as u64,
-                duration: clamp_u32(opt_i64(r, 4)?),
-                total_pages: clamp_u32(opt_i64(r, 5)?),
-            })
-        })?
-        .collect::<std::result::Result<_, _>>()?;
+    out.pages = crate::query_all(&conn, &sql, [], |r| {
+        Ok(KoPageStat {
+            book_id: opt_i64(r, 0)?.unwrap_or(0),
+            md5: opt_text(r, 1)?.unwrap_or_default(),
+            page: clamp_u32(opt_i64(r, 2)?),
+            start_time: opt_i64(r, 3)?.unwrap_or(0).max(0) as u64,
+            duration: clamp_u32(opt_i64(r, 4)?),
+            total_pages: clamp_u32(opt_i64(r, 5)?),
+        })
+    })?;
     Ok(out)
 }
 
@@ -296,24 +287,20 @@ pub fn read_vocabulary(db: &Path, scratch: Option<&Path>) -> Result<Vec<KoVocabW
     };
     let fields = ["create_time", "review_time", "due_time", "review_count", "streak_count", "prev_context", "next_context", "highlight"];
     let sql = format!("SELECT v.word, {title}, {} FROM vocabulary v ORDER BY {}, v.word", col_list(&vc, "v", &fields), col(&vc, "v", "create_time"));
-    let mut st = conn.prepare(&sql)?;
-    let words = st
-        .query_map([], |r| {
-            Ok(KoVocabWord {
-                word: opt_text(r, 0)?.unwrap_or_default(),
-                title: opt_text(r, 1)?,
-                create_time: opt_i64(r, 2)?.unwrap_or(0),
-                review_time: opt_i64(r, 3)?,
-                due_time: opt_i64(r, 4)?.unwrap_or(0),
-                review_count: opt_i64(r, 5)?.unwrap_or(0),
-                streak_count: opt_i64(r, 6)?.unwrap_or(0),
-                prev_context: opt_text(r, 7)?,
-                next_context: opt_text(r, 8)?,
-                highlight: opt_text(r, 9)?,
-            })
-        })?
-        .collect::<std::result::Result<_, _>>()?;
-    Ok(words)
+    crate::query_all(&conn, &sql, [], |r| {
+        Ok(KoVocabWord {
+            word: opt_text(r, 0)?.unwrap_or_default(),
+            title: opt_text(r, 1)?,
+            create_time: opt_i64(r, 2)?.unwrap_or(0),
+            review_time: opt_i64(r, 3)?,
+            due_time: opt_i64(r, 4)?.unwrap_or(0),
+            review_count: opt_i64(r, 5)?.unwrap_or(0),
+            streak_count: opt_i64(r, 6)?.unwrap_or(0),
+            prev_context: opt_text(r, 7)?,
+            next_context: opt_text(r, 8)?,
+            highlight: opt_text(r, 9)?,
+        })
+    })
 }
 
 /// Schema statements copied from KOReader (`plugins/statistics.koplugin/main.lua`,
