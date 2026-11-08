@@ -4,7 +4,7 @@
 #![allow(missing_docs)]
 
 use crate::geom::FRect;
-use std::os::raw::{c_char, c_float, c_int, c_uchar, c_void};
+use std::os::raw::{c_char, c_float, c_int, c_uchar};
 
 /// Opaque `ink_doc`.
 #[repr(C)]
@@ -71,7 +71,7 @@ extern "C" {
         dst: *mut c_uchar,
     ) -> c_int;
     pub fn ink_text(d: *mut InkDoc, list: *mut InkList, out: *mut *mut InkChar, n: *mut c_int) -> c_int;
-    pub fn ink_free(p: *mut c_void);
+    pub fn ink_text_free(chars: *mut InkChar, n: c_int);
     pub fn ink_outline(d: *mut InkDoc, out: *mut *mut InkOutlineItem, n: *mut c_int) -> c_int;
     pub fn ink_outline_free(items: *mut InkOutlineItem, n: c_int);
     pub fn ink_links(d: *mut InkDoc, page: c_int, out: *mut *mut InkLinkItem, n: *mut c_int) -> c_int;

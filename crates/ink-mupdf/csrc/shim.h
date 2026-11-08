@@ -76,9 +76,9 @@ void ink_list_drop(ink_doc *d, ink_list *list);
  * cleared to white first. */
 int ink_render(ink_doc *d, ink_list *list, const float m[6], int x, int y, int w, int h, unsigned char *dst);
 
-/* Structured text of a list. *out is malloc'ed (free with ink_free); *n characters. */
+/* Structured text of a list. *out is malloc'ed (free with ink_text_free); *n characters. */
 int ink_text(ink_doc *d, ink_list *list, ink_char **out, int *n);
-void ink_free(void *p);
+void ink_text_free(ink_char *chars, int n);
 
 int ink_outline(ink_doc *d, ink_outline_item **out, int *n);
 void ink_outline_free(ink_outline_item *items, int n);

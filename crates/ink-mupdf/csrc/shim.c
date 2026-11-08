@@ -324,9 +324,10 @@ int ink_text(ink_doc *d, ink_list *list, ink_char **out, int *n)
 	return 0;
 }
 
-void ink_free(void *p)
+void ink_text_free(ink_char *chars, int n)
 {
-	free(p);
+	(void)n;
+	free(chars);
 }
 
 static char *dup_str(const char *s)
