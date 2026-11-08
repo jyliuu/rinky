@@ -132,8 +132,17 @@ pub struct KoSyncPlugin {
 }
 
 impl Default for KoSyncPlugin {
+    /// The plugin with the system clock.
     fn default() -> Self {
-        Self::new()
+        KoSyncPlugin {
+            manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]),
+            clock: Box::new(now_secs),
+            inflight: Requests::default(),
+            book: None,
+            last_push_at: 0,
+            offer: None,
+            draining: false,
+        }
     }
 }
 
@@ -146,19 +155,6 @@ fn failed(e: impl std::fmt::Display) -> PluginError {
 }
 
 impl KoSyncPlugin {
-    /// The plugin with the system clock.
-    pub fn new() -> Self {
-        KoSyncPlugin {
-            manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]),
-            clock: Box::new(now_secs),
-            inflight: Requests::default(),
-            book: None,
-            last_push_at: 0,
-            offer: None,
-            draining: false,
-        }
-    }
-
     /// Uses `clock` (seconds) instead of the system clock (tests).
     pub fn with_clock(mut self, clock: impl Fn() -> u64 + 'static) -> Self {
         self.clock = Box::new(clock);

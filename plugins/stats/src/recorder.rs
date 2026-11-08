@@ -119,23 +119,19 @@ pub struct StatsPlugin {
 }
 
 impl Default for StatsPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StatsPlugin {
     /// The plugin as compiled into the app: wall clock, database next to the plugin
     /// folder (`<root>/statistics.sqlite3`, found from the data directory).
-    pub fn new() -> Self {
+    fn default() -> Self {
         let mut manifest = PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Storage]);
         manifest.description = "Reading statistics: time per page, book and day".into();
         StatsPlugin { manifest, clock: Box::new(crate::unix_now), db_path: None, tx: None, cur: None }
     }
+}
 
+impl StatsPlugin {
     /// A plugin writing to `db_path` with `clock` (tests).
     pub fn with(db_path: PathBuf, clock: ClockFn) -> Self {
-        StatsPlugin { db_path: Some(db_path), clock, ..Self::new() }
+        StatsPlugin { db_path: Some(db_path), clock, ..Self::default() }
     }
 
     fn send(&mut self, cx: &mut HostCtx, cmd: Cmd) {

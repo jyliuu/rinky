@@ -128,14 +128,8 @@ pub struct InsightfulPlugin {
 }
 
 impl Default for InsightfulPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl InsightfulPlugin {
     /// The plugin with default settings.
-    pub fn new() -> InsightfulPlugin {
+    fn default() -> Self {
         let mut manifest = PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]);
         manifest.description = "AI reading companion: explain, examples, context, people, questions about the book".into();
         InsightfulPlugin {
@@ -162,7 +156,9 @@ impl InsightfulPlugin {
             batch_interval: Duration::from_millis(1200),
         }
     }
+}
 
+impl InsightfulPlugin {
     /// True while a request runs.
     pub fn running(&self) -> bool {
         self.run.is_some()

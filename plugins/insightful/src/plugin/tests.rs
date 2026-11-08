@@ -49,9 +49,7 @@ impl Env {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::write(dir.join("data/insightful.toml"), toml).unwrap();
         let client = Arc::new(CannedClient::seq(answers));
-        let mut plugin = InsightfulPlugin::new();
-        plugin.koreader_config = dir.join("no-configuration.lua");
-        plugin.batch_interval = Duration::from_secs(3600);
+        let mut plugin = InsightfulPlugin { koreader_config: dir.join("no-configuration.lua"), batch_interval: Duration::from_secs(3600), ..InsightfulPlugin::default() };
         let mut registry = ink_plugin::Registry::default();
         plugin.on_load(&mut Registrar { plugin: NAME, registry: &mut registry }).unwrap();
         assert_eq!(registry.selection_actions.len(), 1, "one popup button (the popup shows 3 for all plugins)");

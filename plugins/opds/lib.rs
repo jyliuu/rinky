@@ -120,18 +120,8 @@ pub struct OpdsPlugin {
 }
 
 impl Default for OpdsPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn failed(e: impl std::fmt::Display) -> PluginError {
-    PluginError::Failed(e.to_string())
-}
-
-impl OpdsPlugin {
     /// The plugin.
-    pub fn new() -> Self {
+    fn default() -> Self {
         OpdsPlugin {
             manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Ui, Permission::Storage, Permission::Network]),
             inflight: Requests::default(),
@@ -141,7 +131,13 @@ impl OpdsPlugin {
             new_url: None,
         }
     }
+}
 
+fn failed(e: impl std::fmt::Display) -> PluginError {
+    PluginError::Failed(e.to_string())
+}
+
+impl OpdsPlugin {
     /// The saved catalogs.
     pub fn catalogs(cx: &mut HostCtx) -> Vec<Catalog> {
         let Some(Value::Array(list)) = cx.setting("catalogs") else { return Vec::new() };

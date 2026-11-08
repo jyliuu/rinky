@@ -224,14 +224,8 @@ pub struct CalibrePlugin {
 }
 
 impl Default for CalibrePlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CalibrePlugin {
     /// The plugin.
-    pub fn new() -> Self {
+    fn default() -> Self {
         CalibrePlugin {
             manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Ui, Permission::Storage, Permission::Network]),
             conn: None,
@@ -241,7 +235,9 @@ impl CalibrePlugin {
             menu_status: None,
         }
     }
+}
 
+impl CalibrePlugin {
     /// The connection state.
     pub fn status(&self) -> &Status {
         &self.status

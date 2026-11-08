@@ -82,7 +82,7 @@ impl Env {
         let root = TempDir::new(&format!("wikipedia-{tag}"));
         let mut st = MemoryStorage { dir: root.join("plugins/wikipedia/data"), ..MemoryStorage::default() };
         st.settings.insert("save_dir".into(), json!(root.join("Books").to_str().unwrap()));
-        Env { p: WikipediaPlugin::new(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: FakeBook::titled("A Book"), root }
+        Env { p: WikipediaPlugin::default(), ui: UiQueue::default(), st, jobs: FakeJobs::default(), book: FakeBook::titled("A Book"), root }
     }
 
     fn call(&mut self, f: impl FnOnce(&mut WikipediaPlugin, &mut HostCtx) -> Result<()>) {
@@ -149,7 +149,7 @@ fn labels(b: &[(String, String)]) -> Vec<&str> {
 
 #[test]
 fn registers_the_entries() {
-    let mut p = WikipediaPlugin::new();
+    let mut p = WikipediaPlugin::default();
     let mut reg = Registry::default();
     p.on_load(&mut Registrar { plugin: NAME, registry: &mut reg }).unwrap();
     assert!(reg.selection_actions.iter().any(|a| a.id == ACTION_LOOKUP && a.label == "Wikipedia"));
@@ -352,7 +352,7 @@ fn selection_to_card_and_cache() {
     assert!(cache.exists());
     assert_eq!(Cache::load(&cache).len(), 1);
     // The same word again (a new plugin, as after a restart): no request, the card at once.
-    e.p = WikipediaPlugin::new();
+    e.p = WikipediaPlugin::default();
     e.ui.0.clear();
     e.select("Mutiny on the Bounty");
     assert_eq!(e.jobs.reqs.len(), 1, "answered from the cache");

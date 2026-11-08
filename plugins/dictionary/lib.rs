@@ -106,8 +106,9 @@ pub struct DictionaryPlugin {
 }
 
 impl Default for DictionaryPlugin {
+    /// A plugin with nothing loaded; dictionaries open on the first lookup.
     fn default() -> Self {
-        Self::new()
+        DictionaryPlugin { manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage]), lib: None, off: Vec::new(), order: Vec::new(), editing: None, last: None, writers: Vec::new() }
     }
 }
 
@@ -430,11 +431,6 @@ fn vocab_word(r: &LookupResult, book: Option<&BookRef>) -> Option<ink_stats::Loo
 }
 
 impl DictionaryPlugin {
-    /// A plugin with nothing loaded; dictionaries open on the first lookup.
-    pub fn new() -> Self {
-        DictionaryPlugin { manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage]), lib: None, off: Vec::new(), order: Vec::new(), editing: None, last: None, writers: Vec::new() }
-    }
-
     /// Waits until every lookup has been written to the database (tests).
     pub fn wait_recorded(&mut self) {
         for h in self.writers.drain(..) {

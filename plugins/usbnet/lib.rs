@@ -109,17 +109,13 @@ pub struct UsbNetPlugin {
 }
 
 impl Default for UsbNetPlugin {
+    /// The plugin on the real device.
     fn default() -> Self {
-        Self::new()
+        Self::with_gadget(UsbNet::system())
     }
 }
 
 impl UsbNetPlugin {
-    /// The plugin on the real device.
-    pub fn new() -> Self {
-        Self::with_gadget(UsbNet::system())
-    }
-
     /// The plugin with this gadget (tests use a fake configfs).
     pub fn with_gadget(net: UsbNet) -> Self {
         UsbNetPlugin { manifest: PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Ui, Permission::Storage]), net, on: None, error: None, started: false }

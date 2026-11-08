@@ -25,7 +25,7 @@ impl Env {
         let mut store = MemoryStorage { dir: root.join("data"), ..Default::default() };
         store.settings.insert("download_dir".into(), json!(books.to_str().unwrap()));
         Env {
-            plugin: OpdsPlugin::new(),
+            plugin: OpdsPlugin::default(),
             ui: UiQueue::default(),
             store,
             worker: NetWorker::new(Arc::new(UreqClient::new())),

@@ -407,17 +407,13 @@ pub struct SshPlugin {
 }
 
 impl Default for SshPlugin {
+    /// The plugin with the Kindle's paths.
     fn default() -> Self {
-        Self::new()
+        Self::with_system(Paths::kindle(), Box::new(RealSystem))
     }
 }
 
 impl SshPlugin {
-    /// The plugin with the Kindle's paths.
-    pub fn new() -> Self {
-        Self::with_system(Paths::kindle(), Box::new(RealSystem))
-    }
-
     /// The plugin with other paths and a fake [`System`] (tests).
     pub fn with_system(paths: Paths, sys: Box<dyn System>) -> Self {
         SshPlugin {

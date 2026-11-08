@@ -114,8 +114,11 @@ pub struct WikipediaPlugin {
 }
 
 impl Default for WikipediaPlugin {
+    /// A plugin with nothing loaded.
     fn default() -> Self {
-        Self::new()
+        let mut manifest = PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]);
+        manifest.hosts = vec!["wikipedia.org".to_string()];
+        WikipediaPlugin { manifest, cache: None, cache_path: None, session: None, running: Requests::default(), view_open: false, full: None }
     }
 }
 
@@ -172,13 +175,6 @@ fn request(url: String, total: u64) -> Request {
 }
 
 impl WikipediaPlugin {
-    /// A plugin with nothing loaded.
-    pub fn new() -> Self {
-        let mut manifest = PluginManifest::new(NAME, env!("CARGO_PKG_VERSION"), &[Permission::Document, Permission::Ui, Permission::Storage, Permission::Network]);
-        manifest.hosts = vec!["wikipedia.org".to_string()];
-        WikipediaPlugin { manifest, cache: None, cache_path: None, session: None, running: Requests::default(), view_open: false, full: None }
-    }
-
     // ---- settings ----
 
     fn language(cx: &mut HostCtx) -> String {
