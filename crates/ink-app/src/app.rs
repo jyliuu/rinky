@@ -179,11 +179,7 @@ impl EarlyEdgeSwipe {
 fn describe(ev: &UiEvent) -> String {
     let mut s = format!("{ev:?}");
     if s.len() > 160 {
-        let mut cut = 160;
-        while !s.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        s.truncate(cut);
+        s.truncate(s.floor_char_boundary(160));
         s.push_str("...");
     }
     s
@@ -302,6 +298,34 @@ impl App {
         self.battery_log.note(now, state, awake);
     }
 
+    /// True while the device is awake (not going to sleep or asleep).
+    fn awake(&self) -> bool {
+        self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake
+    }
+
+    /// What the app itself does on a power event, before the screens see it: battery
+    /// samples, the repaint after a wake, network scans, and forgetting what the panel
+    /// showed when the screensaver or a resume changed it behind the app's back.
+    fn on_power(&mut self, p: &PowerEvent) {
+        match p {
+            PowerEvent::GoingToScreenSaver => self.note_battery(false),
+            PowerEvent::OutOfScreenSaver => {
+                self.note_battery(true);
+                self.repaint_after_wake = true;
+                // Carried somewhere else while asleep: look for networks there.
+                self.device.wifi.look_for_networks();
+            }
+            // The charge dropped a point: when it did tells the rate best.
+            PowerEvent::BatteryLevel(_) if self.awake() => self.note_battery(true),
+            // wifid lost the connection: look for a saved network in range.
+            PowerEvent::WifiState(s) if !matches!(s.as_str(), "CONNECTED" | "PENDING") => self.device.wifi.look_for_networks(),
+            _ => {}
+        }
+        if matches!(p, PowerEvent::GoingToScreenSaver | PowerEvent::OutOfScreenSaver | PowerEvent::Resuming) {
+            *self.shown.borrow_mut() = None;
+        }
+    }
+
     /// Runs until a screen exits or the input ends.
     pub fn run(&mut self, start: Route) -> anyhow::Result<()> {
         ink_device::trace::set_stop_listener(true);
@@ -375,41 +399,19 @@ impl App {
                 let from = self.stack.last().map_or("(none)", |s| s.name());
                 log::info!("screen: {from} -> (exit) (signal {})", ink_device::trace::signal_name(sig));
                 crate::logging::set_exit_reason(format!("signal {}", ink_device::trace::signal_name(sig)), true);
-                while !self.stack.is_empty() {
-                    self.exit_top(&providers);
-                }
+                self.exit_all(&providers);
                 return Ok(());
             }
             let events = self.edge.filter(events, self.canvas.height as i32);
-            if self.battery_log.due() && self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake {
+            if self.battery_log.due() && self.awake() {
                 self.note_battery(true);
             }
             for ev in events {
                 crate::perf::input_seen();
-                if let UiEvent::Gesture(g) = &ev {
-                    log::info!("gesture: {g:?}");
-                }
                 match &ev {
-                    UiEvent::Power(PowerEvent::GoingToScreenSaver) => self.note_battery(false),
-                    UiEvent::Power(PowerEvent::OutOfScreenSaver) => self.note_battery(true),
-                    // The charge dropped a point: when it did tells the rate best.
-                    UiEvent::Power(PowerEvent::BatteryLevel(_)) if self.device.power.sleep_state() == ink_device::sleep::SleepState::Awake => {
-                        self.note_battery(true);
-                    }
-                    // wifid lost the connection: look for a saved network in range.
-                    UiEvent::Power(PowerEvent::WifiState(s)) if !matches!(s.as_str(), "CONNECTED" | "PENDING") => {
-                        self.device.wifi.look_for_networks();
-                    }
+                    UiEvent::Gesture(g) => log::info!("gesture: {g:?}"),
+                    UiEvent::Power(p) => self.on_power(p),
                     _ => {}
-                }
-                if matches!(ev, UiEvent::Power(PowerEvent::OutOfScreenSaver)) {
-                    self.repaint_after_wake = true;
-                    // Carried somewhere else while asleep: look for networks there.
-                    self.device.wifi.look_for_networks();
-                }
-                if matches!(ev, UiEvent::Power(PowerEvent::GoingToScreenSaver | PowerEvent::OutOfScreenSaver | PowerEvent::Resuming)) {
-                    // The screensaver (or a resume) changed the panel behind the app's back.
-                    *self.shown.borrow_mut() = None;
                 }
                 // A swipe down from the top edge opens the quick light panel over any
                 // screen (screens::settings::quick_light) but the reader, which maps it with
@@ -461,6 +463,12 @@ impl App {
             Route::Reader(p) => format!("open book {:?}: tap -> first page", p.file_name().unwrap_or_default()),
             r => format!("screen {}: tap -> first frame", r.kind()),
         };
+        self.span_from_event(name);
+    }
+
+    /// Starts the span `name` that ends after the next paint, timed from the events being
+    /// handled.
+    fn span_from_event(&mut self, name: String) {
         self.pending_span = Some(Span::since(name, self.busy_since.unwrap_or_else(Instant::now)));
     }
 
@@ -559,6 +567,13 @@ impl App {
         }
     }
 
+    /// Closes every screen, top first (each runs its `on_exit`).
+    fn exit_all(&mut self, providers: &[&dyn Provider]) {
+        while !self.stack.is_empty() {
+            self.exit_top(providers);
+        }
+    }
+
     /// Applies a transition caused by `ev`; returns false when the app should stop.
     /// Logs `screen: A -> B (cause)` and records the exit reason.
     fn apply(&mut self, t: Transition, providers: &[&dyn Provider], ev: Option<&UiEvent>) -> anyhow::Result<bool> {
@@ -591,21 +606,20 @@ impl App {
                 self.below.push((self.device.screen.night_mode(), self.epoch));
                 self.stack.push(s);
                 self.recognizer.reset();
-                // After on_enter: a panel screen knows its rect only once laid out.
-                let entered = self.enter_top(providers);
-                if entered.is_ok() {
-                    self.mark_full_screen_top();
-                }
-                if let Err(e) = entered {
-                    // A screen that cannot start must not end the app: drop it and go
-                    // back to the screen below (which repaints in its on_enter).
-                    log::error!("cannot enter {r:?}: {e:#}");
-                    self.stack.pop();
-                    self.below.pop();
-                    if self.stack.is_empty() {
-                        return Err(e);
+                match self.enter_top(providers) {
+                    // After on_enter: a panel screen knows its rect only once laid out.
+                    Ok(()) => self.mark_full_screen_top(),
+                    Err(e) => {
+                        // A screen that cannot start must not end the app: drop it and go
+                        // back to the screen below (which repaints in its on_enter).
+                        log::error!("cannot enter {r:?}: {e:#}");
+                        self.stack.pop();
+                        self.below.pop();
+                        if self.stack.is_empty() {
+                            return Err(e);
+                        }
+                        self.enter_top(providers)?;
                     }
-                    self.enter_top(providers)?;
                 }
             }
             Transition::Replace(r) => {
@@ -620,7 +634,7 @@ impl App {
             Transition::Pop => {
                 if let Some(below) = self.stack.len().checked_sub(2).and_then(|i| self.stack.get(i)) {
                     let name = format!("screen {}: back -> first frame", below.name());
-                    self.pending_span = Some(Span::since(name, self.busy_since.unwrap_or_else(Instant::now)));
+                    self.span_from_event(name);
                 }
                 // What the popped screen covered; all of it when the night mode changed
                 // or the canvas below stopped holding the screen below (`epoch`).
@@ -637,9 +651,7 @@ impl App {
                 self.reveal_top(providers, exposed)?;
             }
             Transition::Exit => {
-                while !self.stack.is_empty() {
-                    self.exit_top(providers);
-                }
+                self.exit_all(providers);
                 return Ok(false);
             }
         }

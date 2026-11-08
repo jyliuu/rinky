@@ -123,9 +123,9 @@ impl CardDialog {
     /// Every action the card reports by a tap with its rectangle in the card `b`
     /// (prefixed): the close button, then the pill buttons.
     pub fn action_rects(&self, b: Rect) -> Vec<(String, Rect)> {
-        let mut v: Vec<(String, Rect)> = self.close.iter().map(|a| (format!("{}{a}", self.prefix), Self::close_rect(b))).collect();
-        v.extend(self.button_rects(b).into_iter().zip(&self.buttons).map(|(r, (_, a))| (format!("{}{a}", self.prefix), r)));
-        v
+        let close = self.close.iter().map(|a| (a, Self::close_rect(b)));
+        let buttons = self.buttons.iter().map(|(_, a)| a).zip(self.button_rects(b));
+        close.chain(buttons).map(|(a, r)| (format!("{}{a}", self.prefix), r)).collect()
     }
 
     fn report(&self, action: &str) -> EventResult {
@@ -227,7 +227,7 @@ impl Widget for CardDialog {
             y += SUB_H;
         }
         y += space(2);
-        for line in self.lines.clone() {
+        for line in &self.lines {
             if !line.marker.is_empty() {
                 cx.text_left(Rect::new(x, y, line.indent.max(1) as u32, LINE_H as u32), &line.marker, t.body.px, ink_text::Style::Bold, t.fg);
             }
@@ -245,27 +245,19 @@ impl Widget for CardDialog {
             cx.text_left(Rect::new(x, y, w, FOOT_H as u32), &f, t.caption.px, t.caption.style, t.muted);
         }
         let n = self.buttons.len();
-        for (i, (r, (label, _))) in self.button_rects(b).into_iter().zip(self.buttons.clone()).enumerate() {
+        for (i, (r, (label, _))) in self.button_rects(b).into_iter().zip(&self.buttons).enumerate() {
             let kind = if n > 1 && i + 1 == n { ButtonKind::Filled } else { ButtonKind::Outlined };
-            paint_button(cx, r, &label, None, kind, true, false);
+            paint_button(cx, r, label, None, kind, true, false);
         }
     }
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         match ev {
-            UiEvent::Gesture(Gesture::Tap { pos }) => {
-                if let Some(a) = &self.close {
-                    if Self::close_rect(b).contains(*pos) {
-                        return self.report(a);
-                    }
-                }
-                for (r, (_, action)) in self.button_rects(b).into_iter().zip(&self.buttons) {
-                    if r.contains(*pos) {
-                        return self.report(action);
-                    }
-                }
-                EventResult::Handled
-            }
+            // The close button and the pill buttons report their (prefixed) action.
+            UiEvent::Gesture(Gesture::Tap { pos }) => match self.action_rects(b).into_iter().find(|(_, r)| r.contains(*pos)) {
+                Some((action, _)) => EventResult::Action(action),
+                None => EventResult::Handled,
+            },
             // A paged card: swipe left for the next page, right for the previous one.
             UiEvent::Gesture(Gesture::Swipe { dir: Direction::Left, .. }) if self.pages.is_some() => self.report("next"),
             UiEvent::Gesture(Gesture::Swipe { dir: Direction::Right, .. }) if self.pages.is_some() => self.report("prev"),

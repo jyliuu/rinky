@@ -319,9 +319,7 @@ pub fn add_fallback_chain(fonts: &mut Fonts, chain: &[UiFallback], builtin: bool
 
 /// The embedded Noto Sans UI fonts with the UI fallback faces.
 pub fn builtin_ui_fonts() -> Fonts {
-    let mut f = Fonts::from_static([UI_REGULAR, UI_REGULAR, UI_REGULAR]).expect("embedded UI font");
-    add_ui_fallbacks(&mut f, false);
-    f
+    family_fonts("", false).expect("embedded UI font")
 }
 
 /// The UI family `name` with its bold and italic faces, for UI text whose emphasis
@@ -329,31 +327,37 @@ pub fn builtin_ui_fonts() -> Fonts {
 /// both ([`ui_picker_names`]); a face missing from one chosen before is its regular
 /// face. Falls back to the built-in family.
 pub fn emphasis_fonts(name: &str) -> Fonts {
-    let built_in = || {
-        let mut f = Fonts::from_static([UI_REGULAR, UI_BOLD, UI_ITALIC]).expect("embedded UI font");
-        add_ui_fallbacks(&mut f, false);
-        f
-    };
+    family_fonts(name, true).unwrap_or_else(|| family_fonts("", true).expect("embedded UI font"))
+}
+
+/// Fonts of UI family `name` (empty or [`UI_BUILTIN`]: the embedded Noto Sans;
+/// [`BUILTIN`]: the embedded Noto Serif) with the UI fallback faces
+/// ([`add_ui_fallbacks`]). With `emphasis` the bold slot holds the family's bold face;
+/// without, bold text is drawn in the regular face (light titles), and so is italic
+/// text in Noto Sans. A missing bold or italic face is the regular one. `None` when the
+/// family is not installed or does not parse.
+fn family_fonts(name: &str, emphasis: bool) -> Option<Fonts> {
     let name = name.trim();
-    if name.is_empty() || name.eq_ignore_ascii_case(UI_BUILTIN) {
-        built_in()
+    let (faces, noto_serif) = if name.is_empty() || name.eq_ignore_ascii_case(UI_BUILTIN) {
+        (if emphasis { [UI_REGULAR, UI_BOLD, UI_ITALIC] } else { [UI_REGULAR; 3] }, false)
     } else if name.eq_ignore_ascii_case(BUILTIN) {
         let face = ink_text::embedded_font_bytes;
-        let mut f = Fonts::from_static([face(Style::Regular), face(Style::Bold), face(Style::Italic)]).expect("embedded font");
-        add_ui_fallbacks(&mut f, true);
-        f
+        ([face(Style::Regular), face(if emphasis { Style::Bold } else { Style::Regular }), face(Style::Italic)], true)
     } else {
-        let faces = registry::installed_family(name).and_then(|fam| {
-            let map = |f: Option<&FaceRef>| f.and_then(|f| ink_text::face::map_file(&f.path).ok());
-            let r = map(fam.regular())?;
-            Some([r, map(fam.face(true, false)).unwrap_or(r), map(fam.face(false, true)).unwrap_or(r)])
-        });
-        match faces.map(Fonts::from_static) {
-            Some(Ok(mut f)) => {
-                add_ui_fallbacks(&mut f, false);
-                f
-            }
-            _ => built_in(),
+        let fam = registry::installed_family(name)?;
+        let map = |f: Option<&FaceRef>| f.and_then(|f| ink_text::face::map_file(&f.path).ok());
+        let r = map(fam.regular())?;
+        let b = if emphasis { map(fam.face(true, false)).unwrap_or(r) } else { r };
+        ([r, b, map(fam.face(false, true)).unwrap_or(r)], false)
+    };
+    match Fonts::from_static(faces) {
+        Ok(mut f) => {
+            add_ui_fallbacks(&mut f, noto_serif);
+            Some(f)
+        }
+        Err(e) => {
+            log::warn!("fonts: UI font '{name}': {e}");
+            None
         }
     }
 }
@@ -366,35 +370,10 @@ pub fn ui_family() -> String {
 
 static UI_FAMILY: Mutex<String> = Mutex::new(String::new());
 
-/// UI fonts for family `name` (empty or [`UI_BUILTIN`]: the embedded Noto Sans;
-/// [`BUILTIN`]: the embedded Noto Serif), with the UI fallback faces
-/// ([`add_ui_fallbacks`]). Bold text uses the regular face (light titles), and so does
-/// italic text when the family has no italic. `None` when the family is not installed or
-/// does not parse.
+/// UI fonts for family `name` (see [`family_fonts`]): bold text uses the regular face
+/// (light titles). `None` when the family is not installed or does not parse.
 pub fn ui_fonts(name: &str) -> Option<Fonts> {
-    if name.trim().is_empty() || name.trim().eq_ignore_ascii_case(UI_BUILTIN) {
-        return Some(builtin_ui_fonts());
-    }
-    if name.trim().eq_ignore_ascii_case(BUILTIN) {
-        let (r, i) = (ink_text::embedded_font_bytes(Style::Regular), ink_text::embedded_font_bytes(Style::Italic));
-        let mut f = Fonts::from_static([r, r, i]).expect("embedded font");
-        add_ui_fallbacks(&mut f, true);
-        return Some(f);
-    }
-    let fam = registry::installed_family(name)?;
-    let map = |f: Option<&FaceRef>| f.and_then(|f| ink_text::face::map_file(&f.path).ok());
-    let r = map(fam.regular())?;
-    let i = map(fam.face(false, true)).unwrap_or(r);
-    match Fonts::from_static([r, r, i]) {
-        Ok(mut f) => {
-            add_ui_fallbacks(&mut f, false);
-            Some(f)
-        }
-        Err(e) => {
-            log::warn!("fonts: UI font '{name}': {e}");
-            None
-        }
-    }
+    family_fonts(name, false)
 }
 
 fn load_ui_now(name: &str, generation: u64) {
