@@ -551,27 +551,20 @@ impl SshPlugin {
     /// Adds the firewall rule when missing; true when this call added it.
     fn open_firewall(&mut self, port: u16) -> bool {
         let ipt = self.paths.iptables_program();
-        match self.sys.run(&ipt, &firewall_args("-C", port)) {
-            Ok(true) => false,
-            Ok(false) => match self.sys.run(&ipt, &firewall_args("-A", port)) {
-                Ok(true) => {
-                    log::info!("ssh: firewall: accepting tcp port {port}");
-                    true
-                }
-                Ok(false) => {
-                    log::warn!("ssh: iptables could not add the rule for port {port}");
-                    false
-                }
-                Err(e) => {
-                    log::warn!("ssh: iptables: {e}");
-                    false
-                }
-            },
+        let added = match self.sys.run(&ipt, &firewall_args("-C", port)) {
+            Ok(true) => return false,
+            Ok(false) => self.sys.run(&ipt, &firewall_args("-A", port)),
             Err(e) => {
                 log::warn!("ssh: iptables not available ({e}); not changing the firewall");
-                false
+                return false;
             }
+        };
+        match &added {
+            Ok(true) => log::info!("ssh: firewall: accepting tcp port {port}"),
+            Ok(false) => log::warn!("ssh: iptables could not add the rule for port {port}"),
+            Err(e) => log::warn!("ssh: iptables: {e}"),
         }
+        matches!(added, Ok(true))
     }
 
     fn close_firewall(&mut self, port: u16) {
