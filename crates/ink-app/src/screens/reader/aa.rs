@@ -31,11 +31,11 @@
 //! negative: the book's own; Layout tab), `aa-weight:N` (darker text 0..=2; Text tab),
 //! `aa-preset:I`, `aa-font:NAME` (empty: the
 //! default family), `aa-anim:on|off`, `aa-night:on|off`, `aa-flash:N`, `aa-statusbars`,
-//! `aa-linkback`, `aa-global`, `close` (and the footer module's `aa-footer:NAME`,
-//! `aa-header:NAME`). A tab tap reports `aa` (the reader builds the sheet again; the
-//! tab is remembered here).
+//! `aa-linkback`, `aa-global`, `close`. A tab tap reports `aa` (the reader builds the
+//! sheet again; the tab is remembered here).
 
-use super::footer::{self, Edge};
+use super::footer;
+#[cfg(test)] use super::footer::Edge;
 use super::stored_layout;
 use super::overlay::{Overlay, OverlayKind};
 use super::ReaderScreen;
@@ -145,10 +145,6 @@ fn take_relayout(now: bool) -> bool {
 pub struct AaExtras {
     /// Font families of the list (the built-in one first); empty: built-in only.
     pub families: Vec<String>,
-    /// Footer style name (footer module).
-    pub footer: String,
-    /// Header style name (footer module).
-    pub header: String,
     /// Page turn wave (`reader.page_animation`: `on` / `off`).
     pub wave: bool,
     /// The panel can sweep a page turn (the toggle is shown).
@@ -159,37 +155,27 @@ pub struct AaExtras {
     pub flash_every: u32,
     /// 1-based page a followed link came from ("Back to p. N"), if any.
     pub link_return: Option<usize>,
-    /// Room the top and bottom status bars take from their screen edges
-    /// ([`footer::bar_reserve`]), for the live preview.
-    pub bars: (f32, f32),
 }
 
 impl Default for AaExtras {
     fn default() -> Self {
         AaExtras {
             families: Vec::new(),
-            footer: "full".into(),
-            header: "none".into(),
             wave: true,
             wave_supported: true,
             night: false,
             flash_every: 8,
             link_return: None,
-            bars: (0.0, 0.0),
         }
     }
 }
 
 impl AaExtras {
-    /// Night mode, refresh interval and the global footer and header
-    /// from `settings` (the reader puts the book's own footer and header over them).
+    /// Night mode, refresh interval and page turn wave from `settings`.
     pub fn from_settings(settings: &Settings) -> Self {
         AaExtras {
             night: settings.device.night_mode,
             flash_every: settings.reader.flash_every,
-            footer: settings.reader.footer.as_str().into(),
-            header: settings.reader.header.as_str().into(),
-            bars: (footer::bar_reserve(&settings.status_bars, Edge::Top), footer::bar_reserve(&settings.status_bars, Edge::Bottom)),
             wave: ink_store::prefs::page_animation_on(&settings.reader.page_animation),
             ..AaExtras::default()
         }
@@ -290,8 +276,6 @@ impl Shown {
                 }
             }
             ("aa-font", _) => self.font = family_value(value),
-            ("aa-footer", _) => self.extras.footer = value.into(),
-            ("aa-header", _) => self.extras.header = value.into(),
             ("aa-anim", _) => self.extras.wave = on,
             ("aa-night", _) => self.extras.night = on,
             ("aa-flash", Some(v)) => self.extras.flash_every = v as u32,
@@ -443,7 +427,7 @@ pub fn stored_book_layout(settings: &Settings, book: &BookSettings, w: u32, h: u
 
 /// Applies one Aa action to `book` (the book's overrides, starting from the shown
 /// layout `l`). Returns false for an action that is not a book layout setting (the
-/// Page-tab actions: see [`apply_global`] and the footer module).
+/// Page-tab actions: see [`apply_global`]).
 pub fn apply(action: &str, l: &LayoutSettings, book: &mut BookSettings) -> bool {
     let Some((name, value)) = action.split_once(':') else { return false };
     let num = value.parse::<f32>().ok().filter(|v| v.is_finite());
