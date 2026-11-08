@@ -700,20 +700,12 @@ fn legacy_annotations(bookmarks: Option<&Table>, highlights: Option<&Table>, pag
             if used[i] || h.get("pos0").is_none() || is_marked() {
                 continue;
             }
-            let mut bm = Table::default();
-            let set = |bm: &mut Table, k: &str, v: Option<&Value>| {
-                if let Some(v) = v {
-                    bm.entries.push((lua::Key::Str(k.into()), v.clone()));
-                }
-            };
-            set(&mut bm, "datetime", h.get("datetime"));
-            set(&mut bm, "notes", h.get("text"));
-            set(&mut bm, "pos0", h.get("pos0"));
-            set(&mut bm, "pos1", h.get("pos1"));
-            set(&mut bm, "chapter", h.get("chapter"));
-            bm.entries.push((lua::Key::Str("highlighted".into()), Value::Bool(true)));
+            // The bookmark KOReader made of such a highlight (`pos0` is set: checked above).
             let page_v = if paging { Value::Int(*page) } else { h.get("pos0").cloned().unwrap_or(Value::Nil) };
-            bm.entries.push((lua::Key::Str("page".into()), page_v));
+            let copied = [("datetime", "datetime"), ("notes", "text"), ("pos0", "pos0"), ("pos1", "pos1"), ("chapter", "chapter")];
+            let fields = copied.map(|(to, from)| (to, h.get(from).cloned()));
+            let extra = [("highlighted", Some(Value::Bool(true))), ("page", Some(page_v))];
+            let bm = Table { entries: fields.into_iter().chain(extra).filter_map(|(k, v)| Some((lua::Key::Str(k.into()), v?))).collect() };
             mark(&mut marked, &bm);
             items.push((Cow::Owned(bm), Some(h)));
         }
