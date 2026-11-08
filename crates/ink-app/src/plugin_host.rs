@@ -1376,7 +1376,15 @@ enum BoxKind {
 
 impl BoxKind {
     /// The word after `:::` that starts each kind of block.
-    const WORDS: [(&str, BoxKind); 7] = [("", Self::Plain), ("you", Self::You), ("answer", Self::Answer), ("action", Self::Action), ("chips", Self::Chip), ("card", Self::Card), ("row", Self::Row)];
+    const WORDS: [(&str, BoxKind); 7] = [
+        ("", Self::Plain),
+        ("you", Self::You),
+        ("answer", Self::Answer),
+        ("action", Self::Action),
+        ("chips", Self::Chip),
+        ("card", Self::Card),
+        ("row", Self::Row),
+    ];
 }
 
 /// A `:::` block: kind, its two `|`-separated arguments, its Markdown.
@@ -2435,13 +2443,13 @@ impl Widget for MarkdownView {
         // page counter above it, or the page counter.
         let label = format!("{} / {}", self.page + 1, self.page_count());
         if self.sheet {
-        } else if let Some((_, placeholder)) = &self.input {
+        } else if self.dock > 0 || self.input.is_some() {
             let bar_top = b.bottom() - if self.dock > 0 { self.dock as i32 } else { INPUT_H };
             if self.page_count() > 1 {
                 let band = Rect::new(b.x, bar_top - COUNTER_H, b.w, COUNTER_H as u32);
                 cx.text_centered(band, &label, t.caption.px, Style::Regular, fg);
             }
-            if self.dock == 0 {
+            if let (0, Some((_, placeholder))) = (self.dock, &self.input) {
                 // An unsent draft shows instead of the placeholder.
                 let (text, color) = match self.draft.as_deref().filter(|d| !d.trim().is_empty()) {
                     Some(d) => (d, fg),
