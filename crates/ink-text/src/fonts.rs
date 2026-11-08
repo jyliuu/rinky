@@ -238,6 +238,31 @@ impl GlyphCache {
 /// Metrics and coverage of a prototype-path glyph.
 type ProtoGlyph = (Metrics, Vec<u8>);
 
+/// Prototype-path glyphs of one style, size and extra weight: ASCII by index, other
+/// chars hashed. A line is drawn in one style and size, so it hashes that key once
+/// and finds most of its glyphs without hashing.
+#[derive(Default)]
+struct ProtoGlyphs {
+    ascii: Vec<Option<ProtoGlyph>>,
+    other: HashMap<char, ProtoGlyph>,
+}
+
+impl ProtoGlyphs {
+    fn get_or_insert(&mut self, c: char, make: impl FnOnce() -> ProtoGlyph) -> &ProtoGlyph {
+        if !c.is_ascii() {
+            return self.other.entry(c).or_insert_with(make);
+        }
+        if self.ascii.is_empty() {
+            self.ascii.resize_with(128, || None);
+        }
+        self.ascii[c as usize].get_or_insert_with(make)
+    }
+
+    fn len(&self) -> usize {
+        self.ascii.iter().flatten().count() + self.other.len()
+    }
+}
+
 /// Default byte budget of the shaped glyph cache.
 pub const GLYPH_CACHE_BYTES: usize = 8 << 20;
 
@@ -247,9 +272,8 @@ pub struct Fonts {
     /// Per main face: it has a legacy `kern` table, the only kerning `fontdue` reads.
     kern: [bool; 3],
     advance: FastMap<(Style, char, u32), f32>,
-    /// The default hasher on purpose: with [`FastMap`] this map made drawing a line on
-    /// the prototype path slower (26 -> 32 us for 108 glyphs, host release build).
-    glyphs: HashMap<(Style, char, u32, u32), ProtoGlyph>,
+    /// Prototype-path glyphs by (style, size bits, extra weight).
+    glyphs: FastMap<(Style, u32, u32), ProtoGlyphs>,
     faces: Vec<FaceData>,
     /// First fallback face with a glyph for a char (`None`: no face has it).
     fallback_for: FastMap<char, Option<FaceId>>,
@@ -270,6 +294,33 @@ fn index(style: Style) -> usize {
 /// a control, a zero-width (non-)joiner or a variation selector.
 fn needs_glyph(c: char) -> bool {
     !(c.is_whitespace() || c.is_control() || matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}'))
+}
+
+/// Pair kerning of `font` before `c` on the prototype path (0 at the start of the text).
+/// A face without a `kern` table (`has_kern` false; all embedded faces: Noto kerns in
+/// `GPOS`) skips the two char lookups `fontdue` makes for every pair.
+fn kern(font: &Font, has_kern: bool, prev: Option<char>, c: char, px: f32) -> f32 {
+    match prev {
+        Some(p) if has_kern => font.horizontal_kern(p, c, px).unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Rasterizes a prototype-path glyph ([`Fonts::glyph_extra`]).
+fn proto_glyph(font: &Font, style: Style, c: char, px: f32, extra: u32) -> ProtoGlyph {
+    let (m, mask) = font.rasterize(c, px);
+    let mut k = extra;
+    if style == Style::BoldItalic {
+        k += embolden_px(px);
+    }
+    if k == 0 {
+        return (m, mask);
+    }
+    let g = GlyphMask { width: m.width, height: m.height, left: m.xmin, top: 0, coverage: mask };
+    let b = raster::embolden(&g, k);
+    let advance_width = if style == Style::BoldItalic { m.advance_width + embolden_px(px) as f32 } else { m.advance_width };
+    let metrics = Metrics { width: b.width, height: b.height, advance_width, ..m };
+    (metrics, b.coverage)
 }
 
 /// The `fontdue` faces `[regular, bold, italic]`.
@@ -313,7 +364,7 @@ impl Fonts {
             fonts,
             kern,
             advance: FastMap::default(),
-            glyphs: HashMap::new(),
+            glyphs: FastMap::default(),
             faces,
             fallback_for: FastMap::default(),
             own: Vec::new(),
@@ -327,17 +378,6 @@ impl Fonts {
     }
 
     // ---- Prototype path (exact math; golden pages depend on it) ----
-
-    /// Pair kerning before `c` on the prototype path (0 at the start of the text). A
-    /// face without a `kern` table (all embedded faces: Noto kerns in `GPOS`) skips the
-    /// two char lookups `fontdue` makes for every pair.
-    fn kern(&self, style: Style, prev: Option<char>, c: char, px: f32) -> f32 {
-        let i = index(style);
-        match prev {
-            Some(p) if self.kern[i] => self.fonts[i].horizontal_kern(p, c, px).unwrap_or(0.0),
-            _ => 0.0,
-        }
-    }
 
     /// Advance width of `c` at `px` pixels per em (cached). Bold italic adds the
     /// synthetic bold widening.
@@ -359,7 +399,7 @@ impl Fonts {
         let mut w = 0.0;
         let mut prev: Option<char> = None;
         for c in text.chars() {
-            w += self.kern(style, prev, c, px);
+            w += kern(&self.fonts[index(style)], self.kern[index(style)], prev, c, px);
             w += self.advance(style, c, px);
             prev = Some(c);
         }
@@ -384,21 +424,7 @@ impl Fonts {
     /// the same, so the line breaks do not move.
     pub fn glyph_extra(&mut self, style: Style, c: char, px: f32, extra: u32) -> &(Metrics, Vec<u8>) {
         let font = &self.fonts[index(style)];
-        self.glyphs.entry((style, c, px.to_bits(), extra)).or_insert_with(|| {
-            let (m, mask) = font.rasterize(c, px);
-            let mut k = extra;
-            if style == Style::BoldItalic {
-                k += embolden_px(px);
-            }
-            if k == 0 {
-                return (m, mask);
-            }
-            let g = GlyphMask { width: m.width, height: m.height, left: m.xmin, top: 0, coverage: mask };
-            let b = raster::embolden(&g, k);
-            let advance_width = if style == Style::BoldItalic { m.advance_width + embolden_px(px) as f32 } else { m.advance_width };
-            let metrics = Metrics { width: b.width, height: b.height, advance_width, ..m };
-            (metrics, b.coverage)
-        })
+        self.glyphs.entry((style, px.to_bits(), extra)).or_default().get_or_insert(c, || proto_glyph(font, style, c, px, extra))
     }
 
     /// Draws `text` with its left edge at `x` and baseline at `baseline`.
@@ -412,9 +438,11 @@ impl Fonts {
     pub fn draw_text_extra(&mut self, canvas: &mut Canvas, style: Style, px: f32, x: f32, baseline: f32, text: &str, extra: u32) -> f32 {
         let mut pen = x;
         let mut prev: Option<char> = None;
+        let (font, has_kern) = (&self.fonts[index(style)], self.kern[index(style)]);
+        let glyphs = self.glyphs.entry((style, px.to_bits(), extra)).or_default();
         for c in text.chars() {
-            pen += self.kern(style, prev, c, px);
-            let (m, mask) = self.glyph_extra(style, c, px, extra);
+            pen += kern(font, has_kern, prev, c, px);
+            let (m, mask) = glyphs.get_or_insert(c, || proto_glyph(font, style, c, px, extra));
             let gx = (pen + m.xmin as f32).round() as i32;
             let gy = (baseline - (m.height as i32 + m.ymin) as f32).round() as i32;
             canvas.draw_mask(gx, gy, m.width, m.height, mask);
@@ -426,7 +454,7 @@ impl Fonts {
 
     /// Number of cached glyph bitmaps of both paths (for memory checks).
     pub fn cached_glyphs(&self) -> usize {
-        self.glyphs.len() + self.shaped.map.len()
+        self.glyphs.values().map(ProtoGlyphs::len).sum::<usize>() + self.shaped.map.len()
     }
 
     /// Bytes held by the shaped glyph cache.
