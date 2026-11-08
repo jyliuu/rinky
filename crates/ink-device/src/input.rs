@@ -236,23 +236,6 @@ pub fn wait_step(caller: Option<Instant>, deadline: Instant, now: Instant, polle
     WaitStep::Poll(end.saturating_duration_since(now))
 }
 
-/// An [`Input`] fed from a list, for unit tests.
-#[derive(Default)]
-pub struct QueueInput {
-    /// Events returned in order; `Quit` is returned once the queue is empty.
-    pub events: std::collections::VecDeque<InputEvent>,
-}
-
-impl Input for QueueInput {
-    fn next_event(&mut self, _timeout: Option<Duration>) -> Result<Option<InputEvent>> {
-        Ok(Some(self.events.pop_front().unwrap_or(InputEvent::Quit)))
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
