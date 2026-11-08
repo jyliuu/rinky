@@ -313,6 +313,13 @@ fn cache_keeps_fifty_and_survives_a_restart() {
     c.save(&path).unwrap();
     let mut back = Cache::load(&path);
     assert_eq!(back, c);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("\"description\"") && !text.contains("\"url\"") && !text.contains("null"), "absent fields are left out: {text}");
+    let mut one = Cache::default();
+    one.put("da", "q", &Summary { title: "T".into(), description: Some("D".into()), url: Some("https://da.wikipedia.org/wiki/T".into()), kind: "standard".into(), ..Summary::default() });
+    one.save(&path).unwrap();
+    assert_eq!(Cache::load(&path), one);
+    assert!(std::fs::read_to_string(&path).unwrap().contains("\"description\":\"D\""));
     assert_eq!(back.get("en", "Other  words").unwrap().extract, "new");
     // A damaged file is an empty cache.
     std::fs::write(&path, "{ not json").unwrap();

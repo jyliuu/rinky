@@ -13,7 +13,7 @@
 
 use ink_net::url::encode_component;
 pub use ink_plugin::kit::{cut_at, md_escape, squeeze};
-use ink_plugin::serde_json::{json, Map, Value};
+use ink_plugin::serde_json::{json, Value};
 use std::path::Path;
 
 /// Summaries kept in the cache file.
@@ -96,17 +96,18 @@ fn nonempty(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// The summary in `v` (a REST answer or a cache entry, whose page type is under
+/// `kind`); `None` without a title.
+fn summary_of(v: &Value, url: Option<String>, kind: &str) -> Option<Summary> {
+    let title = nonempty(v, "title")?;
+    Some(Summary { title, description: nonempty(v, "description"), extract: nonempty(v, "extract").unwrap_or_default(), url, kind: nonempty(v, kind).unwrap_or_else(|| "standard".into()) })
+}
+
 /// Parses a REST summary body.
 pub fn parse_summary(body: &[u8]) -> Result<Summary, String> {
     let v: Value = ink_plugin::serde_json::from_slice(body).map_err(|e| format!("bad summary JSON: {e}"))?;
-    let title = nonempty(&v, "title").ok_or("the summary has no title")?;
-    Ok(Summary {
-        title,
-        description: nonempty(&v, "description"),
-        extract: nonempty(&v, "extract").unwrap_or_default(),
-        url: v.pointer("/content_urls/desktop/page").and_then(Value::as_str).map(str::to_string),
-        kind: nonempty(&v, "type").unwrap_or_else(|| "standard".into()),
-    })
+    let url = v.pointer("/content_urls/desktop/page").and_then(Value::as_str).map(str::to_string);
+    Ok(summary_of(&v, url, "type").ok_or("the summary has no title")?)
 }
 
 /// Parses a search API body into `(title, plain snippet)`, best match first.
@@ -297,14 +298,7 @@ impl Cache {
                     .filter_map(|e| {
                         let lang = nonempty(e, "lang").filter(|l| valid_lang(l))?;
                         let key = nonempty(e, "key")?;
-                        let s = Summary {
-                            title: nonempty(e, "title")?,
-                            description: nonempty(e, "description"),
-                            extract: nonempty(e, "extract").unwrap_or_default(),
-                            url: nonempty(e, "url"),
-                            kind: nonempty(e, "kind").unwrap_or_else(|| "standard".into()),
-                        };
-                        Some((lang, key, s))
+                        Some((lang, key, summary_of(e, nonempty(e, "url"), "kind")?))
                     })
                     .take(CACHE_SIZE)
                     .collect()
@@ -319,19 +313,10 @@ impl Cache {
             .entries
             .iter()
             .map(|(lang, key, s)| {
-                let mut m = Map::new();
-                m.insert("lang".into(), json!(lang));
-                m.insert("key".into(), json!(key));
-                m.insert("title".into(), json!(s.title));
-                if let Some(d) = &s.description {
-                    m.insert("description".into(), json!(d));
-                }
-                m.insert("extract".into(), json!(s.extract));
-                if let Some(u) = &s.url {
-                    m.insert("url".into(), json!(u));
-                }
-                m.insert("kind".into(), json!(s.kind));
-                Value::Object(m)
+                let mut m = json!({"lang": lang, "key": key, "title": s.title, "description": s.description, "extract": s.extract, "url": s.url, "kind": s.kind});
+                // No description or address: the key is left out.
+                m.as_object_mut().expect("object").retain(|_, v| !v.is_null());
+                m
             })
             .collect();
         let part = path.with_extension("json.part");
