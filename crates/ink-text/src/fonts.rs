@@ -918,7 +918,9 @@ mod tests {
     #[test]
     fn vmetrics_are_fontdues_to_the_bit() {
         let sans = |name: &str| std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts/ui").join(name)).unwrap();
-        let faces = [REGULAR.to_vec(), BOLD.to_vec(), ITALIC.to_vec(), sans("NotoSans-Regular.ttf"), sans("NotoSans-Bold.ttf"), sans("NotoSans-Italic.ttf"), std::fs::read(test_font()).unwrap()];
+        let mut faces = vec![REGULAR.to_vec(), BOLD.to_vec(), ITALIC.to_vec()];
+        faces.extend(["NotoSans-Regular.ttf", "NotoSans-Bold.ttf", "NotoSans-Italic.ttf"].map(sans));
+        faces.push(std::fs::read(test_font()).unwrap());
         let sizes = (4..=800).map(|q| q as f32 / 4.0).chain([0.0, 13.37, 31.9, 44.0 * 0.9, 1e-3, 1234.5]);
         let sizes: Vec<f32> = sizes.collect();
         for bytes in &faces {
