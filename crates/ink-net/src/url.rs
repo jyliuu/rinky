@@ -107,23 +107,13 @@ fn merge(base: &Parts<'_>, rel_path: &str) -> String {
 }
 
 fn compose(scheme: Option<&str>, authority: Option<&str>, path: &str, query: Option<&str>, fragment: Option<&str>) -> String {
-    let mut s = String::new();
-    if let Some(sc) = scheme {
-        s.push_str(sc);
-        s.push(':');
-    }
-    if let Some(a) = authority {
-        s.push_str("//");
-        s.push_str(a);
-    }
-    s.push_str(path);
-    if let Some(q) = query {
-        s.push('?');
-        s.push_str(q);
-    }
-    if let Some(f) = fragment {
-        s.push('#');
-        s.push_str(f);
+    // Each component with the delimiters around it (RFC 3986 section 5.3).
+    let parts = [(scheme, "", ":"), (authority, "//", ""), (Some(path), "", ""), (query, "?", ""), (fragment, "#", "")];
+    let mut s = String::with_capacity(parts.iter().map(|(p, a, b)| p.map_or(0, |p| a.len() + p.len() + b.len())).sum());
+    for (part, before, after) in parts {
+        if let Some(p) = part {
+            s.extend([before, p, after]);
+        }
     }
     s
 }
