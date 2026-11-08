@@ -353,11 +353,14 @@ pub fn layout_chapter_until(book: &Book, i: usize, params: &Params, env: &mut En
     out
 }
 
-/// Lays out and paginates chapter `i` for the page map.
+/// Lays out and paginates chapter `i` for the page map (slices only: the page starts
+/// are those of [`layout_chapter`]'s pages). Records the same [`ink_doc::timing`] steps.
 pub fn chapter_pages(book: &Book, i: usize, params: &Params, env: &mut Env) -> ChapterPages {
-    let lay = layout_chapter(book, i, params, env);
+    let (ch, styles, t) = styled_chapter(book, i, params);
+    let lay = Flow::layout_slices(env, params, &ch.dom, &styles, &book.chapters[i].path, book.meta.language.clone());
+    step("chapter layout", t);
     let pages = paginate(&lay, params.content_h);
-    let text_bytes = chapter_text_bytes(&book.chapter(i).dom);
+    let text_bytes = chapter_text_bytes(&ch.dom);
     ChapterPages { keys: pages.iter().map(|p| p.key).collect(), text_bytes }
 }
 
@@ -411,7 +414,7 @@ pub fn resolve_interest(book: &Book, i: usize, keys: &[(u32, u32)], interest: &I
 /// size is not the foreground's layout.
 fn with_shared_env<R>(book: &Book, fonts: &mut crate::fonts::FontBook, f: impl FnOnce(&mut Env) -> R) -> (R, bool) {
     let mut known = true;
-    let loader = book.loader.as_deref().map(|l| l as &dyn ink_doc::ResourceLoader);
+    let loader = book.size_loader();
     let mut size = |p: &str| {
         let s = book.image_size(p, loader);
         known &= s.is_some();
@@ -482,16 +485,18 @@ pub fn read_cache(path: &Path, n: usize) -> Option<Vec<Option<ChapterPages>>> {
 }
 
 /// Number of background pagination threads: `RINKY_PAGINATE_THREADS` when set
-/// (1-8), else the cores minus one for the UI thread, at most 2. The PW12 has four
-/// Cortex-A53 cores; each thread holds one chapter's DOM and layout (about 50 MB for a
-/// 36 000-word chapter on the host), so a third thread costs more memory than it saves
-/// time (big36: 1 thread 720 ms / 255 MB, 2: 430 ms / 309 MB, 3: 310 ms / 354 MB).
+/// (1-8), else one per core, at most 2: one on a one-core device, both cores of a
+/// two-core one. The threads run at nice 10 ([`lower_priority`]), so the UI thread still
+/// gets a core as soon as it needs one. Each thread holds one chapter's DOM and slices
+/// (the page map is laid out without draw items, and the parsed font faces are
+/// shared), so the second thread costs little memory (big36 on the host: 1 thread
+/// 247 ms / 88 MB peak RSS, 2 threads 165 ms / 89 MB).
 pub fn worker_threads() -> usize {
     if let Some(n) = std::env::var("RINKY_PAGINATE_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
         return n.clamp(1, 8);
     }
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    cores.saturating_sub(1).clamp(1, 2)
+    cores.clamp(1, 2)
 }
 
 /// Lowers the calling thread's scheduling priority (nice 10 on Linux) so page turns on
@@ -632,7 +637,7 @@ fn paginate_claimed(book: &Book, params: &Params, fonts: &crate::fonts::FontSour
         }
         sh.changed.notify_all();
         // Keep memory flat on big books: drop the DOMs only this thread parsed.
-        if !was_parsed && (n > 40 || book.chapters[i].html.len() > EVICT_BYTES) {
+        if !was_parsed && (n > 40 || book.chapters[i].src_len() > EVICT_BYTES) {
             book.evict_chapter(i);
         }
     }

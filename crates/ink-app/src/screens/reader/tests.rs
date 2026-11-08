@@ -2139,3 +2139,74 @@ fn prefetch_waits_for_no_input_no_finger_and_no_overlay() {
     assert!(!h.prefetch(1), "page 2 was drawn ahead");
     let _ = std::fs::remove_dir_all(src.parent().unwrap());
 }
+
+impl Harness {
+    /// The sharp page after a zoom preview is due: backdates the timer and delivers it.
+    fn rest_for_sharp(&mut self) {
+        let at = self.reader.sharp_at.as_mut().expect("a zoom preview is shown");
+        *at -= ZOOM_SETTLE;
+        assert!(self.reader.timeout().is_some_and(|t| t.is_zero()));
+        let p = providers();
+        self.handle_event(&UiEvent::Timer(0), &p);
+        self.paint();
+    }
+}
+
+/// A zoom step on a comic shows the page shown before, scaled, in one GL16 update; a
+/// second step before the sharp page scales it again; once no input came for
+/// `ZOOM_SETTLE` the sharp page follows in one more GL16 update, the same as a page
+/// drawn without a preview.
+#[test]
+fn zoom_shows_a_scaled_preview_then_the_sharp_page() {
+    let mut h = Harness::generated("zoom-preview", "comic.cbz", &ink_mupdf::testgen::fixture_cbz(6));
+    h.reader.go_to_page(2);
+    h.paint();
+    let page = h.probe.panel().clone();
+    let n = h.probe.updates().len();
+    assert!(h.reader.zoom_step(1));
+    h.paint();
+    let ups = &h.probe.updates()[n..];
+    assert_eq!(ups.len(), 1, "{ups:?}");
+    assert_eq!(ups[0].class, RefreshClass::Gl16);
+    assert!(h.reader.sharp_at.is_some() && h.reader.prefetch_at.is_none());
+    assert_ne!(h.probe.panel().pixels, page.pixels, "the preview is zoomed");
+    // A second step: the preview scales the sharp page shown before the first.
+    assert!(h.reader.zoom_step(1));
+    h.paint();
+    assert_eq!(h.probe.updates().len(), n + 2);
+    let preview = h.probe.panel().clone();
+    // Input moves the sharp page on; the timer then draws it.
+    h.key(Key::Other(0));
+    assert!(h.reader.sharp_at.is_some_and(|d| d > Instant::now()));
+    assert_eq!(h.probe.updates().len(), n + 2, "no update before the gesture settled");
+    h.rest_for_sharp();
+    let ups = &h.probe.updates()[n + 2..];
+    assert_eq!(ups.len(), 1, "{ups:?}");
+    assert_eq!(ups[0].class, RefreshClass::Gl16);
+    assert!(h.reader.sharp_at.is_none() && h.reader.prefetch_at.is_some());
+    let sharp = h.probe.panel().clone();
+    assert_ne!(sharp.pixels, preview.pixels, "the sharp page replaced the preview");
+    let shown = h.reader.page();
+    h.reader.go_to_page(0);
+    h.paint();
+    h.reader.go_to_page(shown);
+    h.paint();
+    assert_eq!(h.probe.panel().pixels, sharp.pixels);
+}
+
+/// The search hit bar leaves the page in use, so a zoom under it shows the preview and
+/// then the sharp page, as without the bar.
+#[test]
+fn zoom_under_the_hit_bar_sharpens_too() {
+    let mut h = Harness::generated("zoom-hits", "comic.cbz", &ink_mupdf::testgen::fixture_cbz(6));
+    h.reader.go_to_page(2);
+    h.paint();
+    h.reader.overlay = Some(search::hit_bar(0, 3, h.dev.screen.size()));
+    h.paint();
+    assert!(h.reader.zoom_step(1));
+    h.paint();
+    assert!(h.reader.preview_shown.is_some(), "the zoom shows a preview");
+    h.rest_for_sharp();
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Hits));
+    assert!(h.reader.sharp_at.is_none() && h.reader.preview_shown.is_none(), "the sharp page came");
+}

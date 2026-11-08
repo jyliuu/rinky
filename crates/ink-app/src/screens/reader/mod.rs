@@ -689,6 +689,14 @@ pub struct ReaderScreen {
     prefetch_at: Option<Instant>,
     /// A finger is on the panel (a touch went down and has not lifted yet).
     touching: bool,
+    /// A zoom step asks for a preview: the next paint shows the page shown before,
+    /// scaled ([`Document::render_zoom_preview`]), instead of waiting for the render.
+    zoom_preview: bool,
+    /// The page shown is a zoom preview: the sharp page is drawn once no input came for
+    /// [`ZOOM_SETTLE`] (no finger down, no overlay).
+    sharp_at: Option<Instant>,
+    /// The page number of the zoom preview on screen, until the sharp page replaced it.
+    preview_shown: Option<usize>,
 }
 
 /// The sidecar gets the position once the page has rested this long. Page turns do no
@@ -701,6 +709,10 @@ pub const POSITION_SAVE_MAX: Duration = Duration::from_secs(10);
 /// (PDF and CBZ pages take most of a second on the Kindle). Short against reading a
 /// page, long enough that a quick second tap is read first.
 pub const PREFETCH_IDLE: Duration = Duration::from_millis(250);
+/// A zoom preview on screen, the fingers lifted and no input for this long: the sharp
+/// page is drawn. Short, as a comic page takes only a few hundred ms to draw on the
+/// Kindle; a second pinch that starts in time scales the preview again first.
+pub const ZOOM_SETTLE: Duration = Duration::from_millis(150);
 
 impl ReaderScreen {
     /// A reader for `path` (opened in `on_enter`).
@@ -767,6 +779,9 @@ impl ReaderScreen {
             turn_dir: 1,
             prefetch_at: None,
             touching: false,
+            zoom_preview: false,
+            sharp_at: None,
+            preview_shown: None,
         }
     }
 
@@ -957,6 +972,14 @@ impl ReaderScreen {
     /// would); the timer comes back once both are gone.
     fn prefetch_due(&self) -> Option<Instant> {
         self.prefetch_at.filter(|_| !self.touching && self.overlay.is_none())
+    }
+
+    /// When the sharp page replaces a zoom preview: like [`ReaderScreen::prefetch_due`],
+    /// not while a finger is down or an overlay is open. The search hit bar leaves the
+    /// page in use (a pinch under it zooms), so it does not hold the sharp page back.
+    fn sharp_due(&self) -> Option<Instant> {
+        let page_free = self.overlay.as_ref().is_none_or(|o| o.kind == overlay::OverlayKind::Hits);
+        self.sharp_at.filter(|_| !self.touching && page_free)
     }
 
     /// Draws the page after the one shown, in the direction of the last turn, into the
@@ -2162,6 +2185,9 @@ impl ReaderScreen {
         self.forget_page_numbers();
         self.session_hl.clear();
         self.rerender = true;
+        // The zoomed page is a new page for plugins and the position, preview or not.
+        self.zoom_preview = true;
+        self.preview_shown = None;
         self.dirty = Some(RefreshClass::Gl16);
         true
     }
@@ -2344,6 +2370,17 @@ impl AppScreen for ReaderScreen {
             UiEvent::Timer(_) if self.prefetch_due().is_some_and(|d| Instant::now() >= d) => self.prefetch_next(),
             _ => {}
         }
+        // A zoom preview on screen: input moves the sharp page on, the timer draws it.
+        match ev {
+            UiEvent::Touch(_) | UiEvent::Gesture(_) | UiEvent::Key(_) => {
+                self.sharp_at = self.sharp_at.map(|_| Instant::now() + ZOOM_SETTLE);
+            }
+            UiEvent::Timer(_) if self.sharp_due().is_some_and(|d| Instant::now() >= d) => {
+                self.sharp_at = None;
+                self.raise_dirty(RefreshClass::Gl16);
+            }
+            _ => {}
+        }
         // Plugin dialogs, menus, viewers and keyboards got the event first in the app
         // loop (plugin_host::hooks::app_handle).
         let t = if self.overlay.is_some() {
@@ -2399,9 +2436,12 @@ impl AppScreen for ReaderScreen {
         let counting = (self.counting_shown && !self.status_bars_hidden && self.overlay.is_none()).then_some(COUNTING_POLL);
         // The next page drawn ahead once the shown one rested.
         let prefetch = self.prefetch_due().map(|d| d.saturating_duration_since(Instant::now()));
+        // The sharp page after a zoom preview.
+        let sharp = self.sharp_due().map(|d| d.saturating_duration_since(Instant::now()));
         let expiry = self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout());
-        // aa: debounce; statusbar: minute tick; position save; selection edge; page count; prefetch
-        expiry.into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting).chain(prefetch).min()
+        // aa: debounce; statusbar: minute tick; position save; selection edge; page count; prefetch; zoom
+        let timers = expiry.into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting);
+        timers.chain(prefetch).chain(sharp).min()
     }
 }
 
@@ -2624,7 +2664,9 @@ impl ReaderScreen {
                 if let Some(doc) = self.doc.as_deref_mut() {
                     let t_plugins = Instant::now();
                     doc.set_current_page(self.page);
-                    if !self.plugins_pending {
+                    // The sharp page after its zoom preview is no new page for plugins.
+                    let sharpened = self.preview_shown == Some(self.page);
+                    if !self.plugins_pending && !sharpened {
                         cx.plugins.page_change(doc, self.page);
                     }
                     plugins_ms = t_plugins.elapsed().as_millis() as u64;
@@ -2647,6 +2689,7 @@ impl ReaderScreen {
                 _ => false,
             };
             let mut save = false;
+            let mut preview = false;
             if !restored {
                 let t_draw = Instant::now();
                 match self.bridge {
@@ -2662,7 +2705,13 @@ impl ReaderScreen {
                         b.compose(&upper, &lower, cx.canvas);
                     }
                     None => {
-                        doc.render_page(self.page, cx.canvas)?;
+                        // Right after a zoom step: the page shown before, scaled, now; the
+                        // sharp page once the gesture settled (`sharp_at`).
+                        let asked = std::mem::take(&mut self.zoom_preview);
+                        preview = asked && doc.render_zoom_preview(self.page, cx.canvas);
+                        if !preview {
+                            doc.render_page(self.page, cx.canvas)?;
+                        }
                         draw_highlights(doc, self.page, cx.canvas, &self.saved_hl, &self.session_hl);
                     }
                 }
@@ -2689,14 +2738,27 @@ impl ReaderScreen {
                     let to = self.back.last().and_then(|r| doc.page_of(&r.position).ok());
                     draw_back(cx.canvas, cx.fonts, cx.theme, to);
                 }
-                log::debug!("reader: page {} drawn in {:.2} ms (plugins {plugins_ms} ms before)", self.page + 1, t_draw.elapsed().as_secs_f64() * 1000.0);
+                let ms = t_draw.elapsed().as_secs_f64() * 1000.0;
+                let what = if preview { "zoom preview" } else { "drawn" };
+                log::debug!("reader: page {} {what} in {ms:.2} ms (plugins {plugins_ms} ms before)", self.page + 1);
                 match &mut self.page_buf {
                     Some(buf) if buf.size() == cx.canvas.size() => buf.pixels.copy_from_slice(&cx.canvas.pixels),
                     buf => *buf = Some(cx.canvas.clone()),
                 }
-                self.rerender = false;
-                save = true;
-                self.prefetch_at = Some(Instant::now() + PREFETCH_IDLE);
+                // The sharp page after its preview: the position was noted already.
+                save = self.preview_shown != Some(self.page);
+                if preview {
+                    // Drawn again sharp later: the page stays to be rendered, and the
+                    // page ahead waits for the sharp one.
+                    self.sharp_at = Some(Instant::now() + ZOOM_SETTLE);
+                    self.preview_shown = Some(self.page);
+                    self.prefetch_at = None;
+                } else {
+                    self.rerender = false;
+                    self.sharp_at = None;
+                    self.preview_shown = None;
+                    self.prefetch_at = Some(Instant::now() + PREFETCH_IDLE);
+                }
                 if let Some(t) = self.open_trace.as_mut() {
                     t.step("decorations+plugins");
                 }

@@ -30,6 +30,9 @@ All notable changes to rinky are listed here. The format is based on
 - Books finish counting their pages sooner after opening and after a font-size change,
   and rinky uses about 35 MB less memory while reading: each font is now read once and
   shared, where the page counter read it again for itself.
+- Counting a book's pages (after opening it for the first time or changing the font
+  size) takes about half as long as before, and a third as long on two-core Kindles and
+  Kobos. It also needs about half the memory while a book with long chapters is counted.
 - AZW3 books whose cover page is an SVG around one picture (Calibre's usual cover)
   open several times faster: the picture is decoded straight to its size on screen.
 - The library takes in new books about twice as fast: the cover thumbnail of each book
@@ -46,6 +49,14 @@ All notable changes to rinky are listed here. The format is based on
   colours now come out darker (pure red is 77 of 255 instead of 129).
 - PDF and comic page turns are near instant when you rest on a page for a moment:
   rinky draws the next page (or the previous one, after turning back) while you read.
+- rinky starts faster: the first screen no longer waits for the interface font to be
+  fully loaded.
+- Long EPUB books open sooner, above all when opened again: rinky unpacks the chapter
+  it shows first and the others while you read, not every chapter before the first page.
+- On Kindles with 512 MB of memory, scanned PDFs and comics take about 20 MB less
+  memory while reading, with no slower page turns.
+- Zooming a PDF or comic page with a pinch shows the zoomed page at once, a little
+  coarse, and sharpens it a moment after your fingers lift.
 - Wi-Fi connects by itself more reliably and says what it is doing. rinky remembers
   that Wi-Fi was on and turns it on again when it starts and after the e-reader wakes
   up (on a Kobo, which turns Wi-Fi off to sleep, it stayed off until you turned it on

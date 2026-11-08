@@ -22,7 +22,9 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
+use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 
 static REGULAR: &[u8] = include_bytes!("../../../fonts/NotoSerif-Regular.ttf");
@@ -268,9 +270,64 @@ impl ProtoGlyphs {
 /// Default byte budget of the shaped glyph cache.
 pub const GLYPH_CACHE_BYTES: usize = 8 << 20;
 
+/// The `fontdue` faces of the three main slots: parsed when the [`Fonts`] is made, or
+/// later ([`Fonts::from_static_deferred`]).
+struct MainFonts {
+    ready: OnceLock<[Arc<Font>; 3]>,
+    /// The thread parsing the faces ([`Fonts::parse_in_background`]), until the first
+    /// use takes its result.
+    parsing: Mutex<Option<ParseThread>>,
+    /// The font data of the three slots.
+    bytes: [&'static [u8]; 3],
+}
+
+type ParseThread = JoinHandle<Result<[Arc<Font>; 3], TextError>>;
+
+impl MainFonts {
+    fn parsed(fonts: [Arc<Font>; 3], bytes: [&'static [u8]; 3]) -> Self {
+        MainFonts { ready: OnceLock::from(fonts), parsing: Mutex::new(None), bytes }
+    }
+
+    fn parse_in_background(&self) {
+        if self.ready.get().is_some() {
+            return;
+        }
+        let mut parsing = self.parsing.lock().unwrap_or_else(|e| e.into_inner());
+        if parsing.is_some() {
+            return;
+        }
+        let faces = self.bytes;
+        match std::thread::Builder::new().name("font-parse".into()).spawn(move || parse_all(faces, parsed::parse_static)) {
+            Ok(thread) => *parsing = Some(thread),
+            Err(e) => log::warn!("fonts: cannot start a font parsing thread: {e}"),
+        }
+    }
+
+    /// The faces of the three slots: the parsing thread's (waited for), else parsed
+    /// here, the first time.
+    fn get(&self) -> &[Arc<Font>; 3] {
+        self.ready.get_or_init(|| {
+            let thread = self.parsing.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let t = Instant::now();
+            let joined = thread.map(|h| h.join());
+            match joined {
+                Some(Ok(Ok(fonts))) => {
+                    log::info!("fonts: first use waited {:?} for the faces parsed on a thread", t.elapsed());
+                    return fonts;
+                }
+                Some(Ok(Err(e))) => log::warn!("fonts: parsing on a thread: {e}"),
+                Some(Err(_)) => log::warn!("fonts: the parsing thread panicked"),
+                None => {}
+            }
+            // Only faces known to parse are given to `from_static_deferred`.
+            parse_all(self.bytes, parsed::parse_static).expect("main faces parse")
+        })
+    }
+}
+
 /// A set of faces (main family plus fallbacks) with caches.
 pub struct Fonts {
-    fonts: [Arc<Font>; 3],
+    fonts: MainFonts,
     /// Per main face: it has a legacy `kern` table, the only kerning `fontdue` reads.
     kern: [bool; 3],
     advance: FastMap<(Style, char, u32), f32>,
@@ -360,8 +417,9 @@ impl Fonts {
     /// of a face another `Fonts` holds share its parsed face.
     pub fn from_bytes(faces: [&[u8]; 3]) -> Result<Self, TextError> {
         let fonts = parse_all(faces, parsed::parse_owned)?;
-        let data = faces.iter().map(|f| FaceData::from_vec(f.to_vec(), 0)).collect::<Result<_, _>>()?;
-        Ok(Fonts::from_parts(fonts, data))
+        let data: Vec<FaceData> = faces.iter().map(|f| FaceData::from_vec(f.to_vec(), 0)).collect::<Result<_, _>>()?;
+        let bytes = std::array::from_fn(|i| data[i].bytes());
+        Ok(Fonts::from_parts(MainFonts::parsed(fonts, bytes), data))
     }
 
     /// Faces from bytes that live for the whole program (embedded or memory-mapped with
@@ -370,7 +428,26 @@ impl Fonts {
     pub fn from_static(faces: [&'static [u8]; 3]) -> Result<Self, TextError> {
         let fonts = parse_all(faces, parsed::parse_static)?;
         let data = faces.iter().map(|f| FaceData::from_static(f, 0)).collect::<Result<_, _>>()?;
+        Ok(Fonts::from_parts(MainFonts::parsed(fonts, faces), data))
+    }
+
+    /// [`Fonts::from_static`] that returns at once and leaves the `fontdue` faces (0.3 to
+    /// 1.3 s each on a Kindle) for later: [`Fonts::parse_in_background`] parses them on
+    /// a thread, else the first call that needs one parses them. Shaping, shaped drawing
+    /// and [`Fonts::vmetrics`] read the tables with `ttf-parser` and never wait for
+    /// them; advances, prototype drawing and [`Fonts::font`] do. The parsed faces are
+    /// shared as [`Fonts::from_static`]'s are. For faces known to parse (the embedded
+    /// ones): a face `ttf-parser` reads but `fontdue` refuses panics on first use.
+    pub fn from_static_deferred(faces: [&'static [u8]; 3]) -> Result<Self, TextError> {
+        let data = faces.iter().map(|f| FaceData::from_static(f, 0)).collect::<Result<_, _>>()?;
+        let fonts = MainFonts { ready: OnceLock::new(), parsing: Mutex::new(None), bytes: faces };
         Ok(Fonts::from_parts(fonts, data))
+    }
+
+    /// Starts parsing the `fontdue` faces of a [`Fonts::from_static_deferred`] on a
+    /// thread; does nothing when they are parsed or being parsed.
+    pub fn parse_in_background(&self) {
+        self.fonts.parse_in_background();
     }
 
     /// Faces from font files: `[regular, bold, italic]`.
@@ -380,7 +457,7 @@ impl Fonts {
         Fonts::from_bytes([&r, &b, &i])
     }
 
-    fn from_parts(fonts: [Arc<Font>; 3], faces: Vec<FaceData>) -> Self {
+    fn from_parts(fonts: MainFonts, faces: Vec<FaceData>) -> Self {
         let kern = std::array::from_fn(|i| faces[i].ttf().is_some_and(|f| f.raw_face().table(Tag::from_bytes(b"kern")).is_some()));
         Fonts {
             fonts,
@@ -398,7 +475,7 @@ impl Fonts {
 
     /// The `fontdue` face for `style` (bold italic: the italic face).
     pub fn font(&self, style: Style) -> &Font {
-        &self.fonts[index(style)]
+        &self.fonts.get()[index(style)]
     }
 
     // ---- Prototype path (exact math; golden pages depend on it) ----
@@ -410,7 +487,7 @@ impl Fonts {
         if let Some(a) = self.advance.get(&key) {
             return *a;
         }
-        let mut a = self.fonts[index(style)].metrics(c, px).advance_width;
+        let mut a = self.fonts.get()[index(style)].metrics(c, px).advance_width;
         if style == Style::BoldItalic {
             a += embolden_px(px) as f32;
         }
@@ -423,7 +500,7 @@ impl Fonts {
         let mut w = 0.0;
         let mut prev: Option<char> = None;
         for c in text.chars() {
-            w += kern(&self.fonts[index(style)], self.kern[index(style)], prev, c, px);
+            w += kern(&self.fonts.get()[index(style)], self.kern[index(style)], prev, c, px);
             w += self.advance(style, c, px);
             prev = Some(c);
         }
@@ -431,8 +508,17 @@ impl Fonts {
     }
 
     /// (ascent, descent) in pixels; descent is negative.
+    ///
+    /// Read from the face's tables with `ttf-parser`, by the same arithmetic as
+    /// `fontdue`'s `horizontal_line_metrics` (ascender and descender times `px` over
+    /// units per em, in `f32`), so the numbers are the same to the bit and no `fontdue`
+    /// face is needed for them.
     pub fn vmetrics(&self, style: Style, px: f32) -> (f32, f32) {
-        match self.fonts[index(style)].horizontal_line_metrics(px) {
+        if let Some(t) = self.faces[index(style)].ttf() {
+            let scale = px / t.units_per_em() as f32;
+            return (t.ascender() as f32 * scale, t.descender() as f32 * scale);
+        }
+        match self.fonts.get()[index(style)].horizontal_line_metrics(px) {
             Some(m) => (m.ascent, m.descent),
             None => (px * 0.8, -px * 0.2),
         }
@@ -451,7 +537,7 @@ impl Fonts {
     pub fn draw_text_extra(&mut self, canvas: &mut Canvas, style: Style, px: f32, x: f32, baseline: f32, text: &str, extra: u32) -> f32 {
         let mut pen = x;
         let mut prev: Option<char> = None;
-        let (font, has_kern) = (&self.fonts[index(style)], self.kern[index(style)]);
+        let (font, has_kern) = (&self.fonts.get()[index(style)], self.kern[index(style)]);
         let glyphs = self.glyphs.entry((style, px.to_bits(), extra)).or_default();
         for c in text.chars() {
             pen += kern(font, has_kern, prev, c, px);
@@ -824,6 +910,57 @@ mod tests {
         assert!(f.cached_glyphs() >= 5);
         f.clear_caches();
         assert_eq!(f.cached_glyphs(), 0);
+    }
+
+    /// `vmetrics` reads the tables itself; its numbers are `fontdue`'s to the bit, for
+    /// every embedded face (Noto Serif and the UI's Noto Sans) and the test font, at
+    /// every size from 1 to 200 px in quarter pixels and some odd ones.
+    #[test]
+    fn vmetrics_are_fontdues_to_the_bit() {
+        let sans = |name: &str| std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts/ui").join(name)).unwrap();
+        let mut faces = vec![REGULAR.to_vec(), BOLD.to_vec(), ITALIC.to_vec()];
+        faces.extend(["NotoSans-Regular.ttf", "NotoSans-Bold.ttf", "NotoSans-Italic.ttf"].map(sans));
+        faces.push(std::fs::read(test_font()).unwrap());
+        let sizes = (4..=800).map(|q| q as f32 / 4.0).chain([0.0, 13.37, 31.9, 44.0 * 0.9, 1e-3, 1234.5]);
+        let sizes: Vec<f32> = sizes.collect();
+        for bytes in &faces {
+            let f = Fonts::from_bytes([bytes, bytes, bytes]).unwrap();
+            let face = Font::from_bytes(bytes.as_slice(), fontdue::FontSettings::default()).unwrap();
+            for &px in &sizes {
+                let m = face.horizontal_line_metrics(px).unwrap();
+                for style in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
+                    let (asc, desc) = f.vmetrics(style, px);
+                    assert_eq!((asc.to_bits(), desc.to_bits()), (m.ascent.to_bits(), m.descent.to_bits()), "{px} px");
+                }
+            }
+        }
+    }
+
+    /// Faces parsed later, on a thread or on first use, give the same runs, widths and
+    /// pixels as faces parsed at once, and share the parsed faces.
+    #[test]
+    fn faces_parsed_later_draw_the_same() {
+        let mut now = Fonts::from_static([REGULAR, BOLD, BOLD]).unwrap();
+        let mut later = Fonts::from_static_deferred([REGULAR, BOLD, BOLD]).unwrap();
+        later.parse_in_background();
+        later.parse_in_background();
+        let text = "Romeo, Juliet: fi ffl AVA";
+        assert_eq!(later.shape(Style::Bold, 31.5, text), now.shape(Style::Bold, 31.5, text));
+        assert_eq!(later.vmetrics(Style::Italic, 31.5), now.vmetrics(Style::Italic, 31.5));
+        assert_eq!(later.text_width(Style::Regular, text, 31.5).to_bits(), now.text_width(Style::Regular, text, 31.5).to_bits());
+        let draw = |f: &mut Fonts| {
+            let mut c = Canvas::new(600, 120);
+            let run = f.shape(Style::Regular, 40.0, text);
+            f.draw_run(&mut c, &run, 5.0, 50.0);
+            f.draw_text(&mut c, Style::BoldItalic, 40.0, 5.0, 100.0, text);
+            c.pixels
+        };
+        assert_eq!(draw(&mut later), draw(&mut now));
+        assert!(std::ptr::eq(later.font(Style::Regular), now.font(Style::Regular)));
+        assert!(std::ptr::eq(later.font(Style::Bold), later.font(Style::Italic)));
+        let mut first_use = Fonts::from_static_deferred([REGULAR, BOLD, BOLD]).unwrap();
+        assert_eq!(draw(&mut first_use), draw(&mut now));
+        first_use.parse_in_background();
     }
 
     #[test]
