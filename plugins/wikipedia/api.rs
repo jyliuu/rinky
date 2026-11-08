@@ -212,17 +212,19 @@ fn limited(text: &str) -> (String, bool) {
     (cut[..end].to_string(), true)
 }
 
+/// The article cut by [`limited`], each non-blank line written by `head` (with the
+/// heading level 2 to 6) or by `para`; the flag says it was cut.
+fn blocks(text: &str, head: impl Fn(usize, &str) -> String, para: impl Fn(&str) -> String) -> (String, bool) {
+    let (text, cut) = limited(text);
+    let out = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| heading(l).map_or_else(|| para(l), |(level, h)| head(level.min(5) + 1, h))).collect();
+    (out, cut)
+}
+
 /// The text of the full view: Markdown with `##` headings (`:::top` first, so a viewer
 /// that already shows a loading text starts at the top).
 pub fn article_markdown(text: &str, url: Option<&str>) -> String {
-    let (text, cut) = limited(text);
-    let mut md = String::from(":::top\n\n");
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        match heading(line) {
-            Some((level, h)) => md.push_str(&format!("{} {}\n\n", "#".repeat(level.min(5) + 1), md_escape(h))),
-            None => md.push_str(&format!("{}\n\n", md_escape(line))),
-        }
-    }
+    let (body, cut) = blocks(text, |n, h| format!("{} {}\n\n", "#".repeat(n), md_escape(h)), |l| format!("{}\n\n", md_escape(l)));
+    let mut md = format!(":::top\n\n{body}");
     if cut {
         md.push_str("*The article is cut here.*\n\n");
     }
@@ -240,17 +242,12 @@ pub fn html_escape(s: &str) -> String {
 /// A small HTML book of the article for the library: title, description, headings and
 /// paragraphs, and the source line (the text is CC BY-SA).
 pub fn article_html(lang: &str, title: &str, description: Option<&str>, text: &str, url: &str) -> String {
-    let (text, cut) = limited(text);
+    let (body, cut) = blocks(text, |n, t| format!("<h{n}>{}</h{n}>\n", html_escape(t)), |l| format!("<p>{}</p>\n", html_escape(l)));
     let mut h = format!("<!DOCTYPE html>\n<html lang=\"{lang}\">\n<head><meta charset=\"utf-8\"><title>{t}</title></head>\n<body>\n<h1>{t}</h1>\n", t = html_escape(title));
     if let Some(d) = description {
         h.push_str(&format!("<p><i>{}</i></p>\n", html_escape(d)));
     }
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        match heading(line) {
-            Some((level, t)) => h.push_str(&format!("<h{n}>{}</h{n}>\n", html_escape(t), n = level.min(5) + 1)),
-            None => h.push_str(&format!("<p>{}</p>\n", html_escape(line))),
-        }
-    }
+    h.push_str(&body);
     if cut {
         h.push_str("<p><i>The article is cut here.</i></p>\n");
     }

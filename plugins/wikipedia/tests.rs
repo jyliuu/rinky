@@ -239,6 +239,8 @@ fn parses_the_article_and_builds_text() {
     assert!(html.contains("<meta charset=\"utf-8\"><title>A &lt;b&gt; &amp; C</title>"), "{html}");
     assert!(html.contains("<h2>Background</h2>") && html.contains("<h3>Voyage</h3>") && html.contains("<p><i>desc</i></p>"), "{html}");
     assert!(html.contains("CC BY-SA"), "{html}");
+    let at = |s: &str| html.find(s).unwrap_or(usize::MAX);
+    assert!(at("<h1>") < at("<p><i>desc</i></p>\n") && at("<p><i>desc</i></p>\n") < at("<h2>Background</h2>\n") && at("</h2>\n") < at("<hr>"), "{html}");
     assert_eq!(api::file_name("AC/DC: live?", "de"), "AC_DC_ live_ (Wikipedia de).html");
     // No space where the title is cut or after a leading dot.
     assert_eq!(api::file_name(&format!("{} yyy", "x".repeat(79)), "en"), format!("{} (Wikipedia en).html", "x".repeat(79)));
