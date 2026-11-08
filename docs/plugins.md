@@ -501,6 +501,11 @@ when repeated.
   start), and a swipe, a tap on a side or a page key moves them by a screenful less a
   line (REAGL on the text below the app bar, no flash); a thin bar shows the position.
   `:::you LINK | CAPTION` makes a user bubble tappable with a muted caption.
+- A viewer draws bold and italic text in the interface font's regular face (light
+  titles) unless its text has a `:::emphasis` line: then the body uses the family's
+  own bold and italic faces (headings and table headers too), for text whose emphasis
+  carries meaning such as a dictionary entry or a chat answer. App bar titles and
+  answer-card labels stay light.
 - A keyboard request over the plugin's chat view docks under it
   (`InputBox::docked`): no new panel with a prompt and Cancel/OK, but the view's input
   bar lifted onto the keyboard (`ink_ui::keyboard::lift_above`); the view lays out above

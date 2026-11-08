@@ -2066,8 +2066,9 @@ impl MarkdownView {
                     if !seg.a.is_empty() {
                         let h = cap * 1.8;
                         let ix = PAD + (h * 0.8).min(56.0) + 12.0;
-                        let label = fit(cx, &seg.a, cap, Style::Bold, inner - ix);
-                        body.push(Line { height: h, runs: vec![Run { x: ix, text: label, style: Style::Bold, px: cap, link: None, muted: false }], icon: Some((PAD, Icon::Chat)), ..Line::default() });
+                        // Regular: the label stays light in a view with `:::emphasis`.
+                        let label = fit(cx, &seg.a, cap, Style::Regular, inner - ix);
+                        body.push(Line { height: h, runs: vec![Run { x: ix, text: label, style: Style::Regular, px: cap, link: None, muted: false }], icon: Some((PAD, Icon::Chat)), ..Line::default() });
                         body.push(gap_line(base * 0.3));
                     }
                     let mut text = text_and_caption(cx, seg, base, cap, inner);
@@ -4421,6 +4422,33 @@ mod tests {
                 assert_eq!(fit_end(&mut cx, text, px, max), slow_end(&mut cx, text, max), "fit_end {text:?} {max}");
             }
         }
+    }
+
+    /// A chat view with `:::emphasis` (the Insightful chat) draws an answer's bold and
+    /// italic text in the interface font's own bold and italic faces, which the UI fonts
+    /// draw in the regular face otherwise, and keeps its card labels light.
+    #[test]
+    fn emphasis_chat_shows_bold_and_italics_and_keeps_labels_light() {
+        let theme = Theme::day();
+        let mut fonts = crate::fonts::ui_fonts("").expect("embedded UI font");
+        let mut paint = |md: &str| {
+            let mut canvas = Canvas::new(W as usize, H as usize);
+            canvas.clear(theme.bg);
+            let mut v = MarkdownView::new("Insightful\nRomeo and Juliet", md);
+            v.paint(&mut PaintCx { canvas: &mut canvas, fonts: &mut fonts, theme: &theme }, Rect::new(0, 0, W, H));
+            canvas
+        };
+        let chat = |emphasis: bool, text: &str| format!("{}:::back chats\n:::answer AI — gpt-test |\n{text}\n\n:::\n:::input ask | Message", if emphasis { ":::emphasis\n" } else { "" });
+        let sample = "## Tybalt\n\n**Tybalt** is Juliet's *cousin*, a **Capulet** who hates the *Montagues*.";
+        shot(&paint(&chat(true, sample)), "40-chat-emphasis");
+        shot(&paint(&chat(false, sample)), "40-chat-no-emphasis");
+        let mut draw = |md: &str| paint(md).pixels;
+        let plain = draw(&chat(false, "A Household word"));
+        assert!(draw(&chat(false, "A **Household** word")) == plain, "without :::emphasis the UI draws bold in the regular face");
+        for styled in ["A **Household** word", "A *Household* word"] {
+            assert!(draw(&chat(true, styled)) != draw(&chat(true, "A Household word")), "{styled}: drawn as regular");
+        }
+        assert!(draw(&chat(true, "A Household word")) == plain, "the label and plain text look the same with :::emphasis");
     }
 
     /// A word wider than the line starts a line of its own and is cut into pieces that
