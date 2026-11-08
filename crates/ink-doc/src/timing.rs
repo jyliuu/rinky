@@ -41,7 +41,13 @@ pub fn clear() {
 
 /// Formats steps as `name 12.3 ms, name 4.0 ms`.
 pub fn format(steps: &[(&'static str, Duration)]) -> String {
-    steps.iter().map(|(n, d)| format!("{n} {:.1} ms", d.as_secs_f64() * 1000.0)).collect::<Vec<_>>().join(", ")
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (i, (n, d)) in steps.iter().enumerate() {
+        let sep = if i > 0 { ", " } else { "" };
+        let _ = write!(out, "{sep}{n} {:.1} ms", d.as_secs_f64() * 1000.0);
+    }
+    out
 }
 
 #[cfg(test)]
