@@ -148,21 +148,58 @@ fn binary(b: &Element) -> (String, Vec<u8>) {
     (mt, bytes)
 }
 
+/// Start tags of elements with local name `local` in `text`, with or without a namespace
+/// prefix (`<binary`, `<fb:binary`), as (offset of the `<`, qualified name). Comments,
+/// CDATA sections and processing instructions are skipped, as the parser would.
+fn start_tags<'a>(text: &'a str, local: &'a str) -> impl Iterator<Item = (usize, &'a str)> + 'a {
+    let b = text.as_bytes();
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        while let Some(k) = b.get(at..)?.iter().position(|&c| c == b'<') {
+            let lt = at + k;
+            let rest = &b[lt..];
+            let skip_to = |close: &[u8]| find_bytes(b, close, lt + 1).map_or(b.len(), |e| e + close.len());
+            if rest.starts_with(b"<!--") {
+                at = skip_to(b"-->");
+                continue;
+            }
+            if rest.starts_with(b"<![CDATA[") {
+                at = skip_to(b"]]>");
+                continue;
+            }
+            if rest.starts_with(b"<?") {
+                at = skip_to(b"?>");
+                continue;
+            }
+            at = lt + 1;
+            let len = rest[1..].iter().position(|&c| c.is_ascii_whitespace() || c == b'>' || c == b'/').unwrap_or(rest.len() - 1);
+            let qname = &text[lt + 1..lt + 1 + len];
+            if qname.rsplit(':').next() == Some(local) {
+                return Some((lt, qname));
+            }
+        }
+        None
+    })
+}
+
 /// The last `binary` element of `text` whose id gives `path`, parsed alone (the rest
 /// of the book is not built into a tree).
 fn find_binary(text: &str, path: &str) -> Option<(String, Vec<u8>)> {
     let b = text.as_bytes();
     let mut found = None;
-    let mut at = 0;
-    while let Some(start) = find_bytes(b, b"<binary", at) {
+    for (start, qname) in start_tags(text, "binary") {
         let Some(gt) = xml::tag_end(b, start) else { break };
-        at = gt;
         let open = text[start..gt].trim_end_matches('/');
         let Ok(tag) = xml::parse(&format!("{open}/>")) else { continue };
-        if tag.name != "binary" || tag.attr("id").map(image_path).as_deref() != Some(path) {
+        if tag.attr("id").map(image_path).as_deref() != Some(path) {
             continue;
         }
-        let end = if b[gt - 1] == b'/' { gt + 1 } else { find_bytes(b, b"</binary>", gt).map_or(text.len(), |e| e + "</binary>".len()) };
+        let end = if b[gt - 1] == b'/' {
+            gt + 1
+        } else {
+            let close = format!("</{qname}>");
+            find_bytes(b, close.as_bytes(), gt).map_or(text.len(), |e| e + close.len())
+        };
         if let Ok(el) = xml::parse(&text[start..end]) {
             found = Some(binary(&el));
         }
@@ -607,8 +644,14 @@ pub fn load(path: &Path) -> Result<Book> {
 /// is not parsed whole for the library.
 pub fn read_info(path: &Path) -> Result<BookInfo> {
     let text = xml::decode_xml_bytes(&read_bytes(path)?);
-    let head_end = [find_bytes(text.as_bytes(), b"<body", 0), find_bytes(text.as_bytes(), b"<binary", 0)].into_iter().flatten().min();
-    let mut info = info_of(&parse_text(&text[..head_end.unwrap_or(text.len())])?);
+    let head_end = [start_tags(&text, "body").next(), start_tags(&text, "binary").next()].into_iter().flatten().map(|(at, _)| at).min();
+    // A head that does not parse (the cut fell inside a comment, say) falls back to the
+    // whole book, as before.
+    let root = match head_end.map(|e| parse_text(&text[..e])) {
+        Some(Ok(head)) => head,
+        _ => parse_text(&text)?,
+    };
+    let mut info = info_of(&root);
     if info.metadata.title.is_empty() {
         info.metadata.title = crate::title_from(path);
     }
@@ -712,6 +755,9 @@ Ggo=</binary>
             SAMPLE.replace("</FictionBook>", &format!("{jpg}</FictionBook>")),
             SAMPLE.replace(png, "<binary id=\"cover.png\" content-type=\"image/png\"/>"),
             SAMPLE.replace(png, ""),
+            // Namespace prefixes, and markup-like text in a description comment.
+            SAMPLE.replace("<FictionBook xmlns=", "<fb:FictionBook xmlns:fb=").replace("</FictionBook>", "</fb:FictionBook>").replace("<body", "<fb:body").replace("</body>", "</fb:body>").replace(png, &png.replace("<binary", "<fb:binary").replace("</binary>", "</fb:binary>")),
+            SAMPLE.replace("<book-title>", "<!-- <body> <binary id=\"cover.png\"> --><book-title>"),
         ];
         for (i, src) in variants.iter().enumerate() {
             let f = dir.join(format!("v{i}.fb2"));
@@ -725,6 +771,7 @@ Ggo=</binary>
         }
         assert_eq!(whole(&variants[2]).1.map(|c| c.0).as_deref(), Some("image/jpeg"));
         assert_eq!(whole(&variants[4]).1, None);
+        assert!(whole(&variants[5]).1.is_some() && whole(&variants[6]).1.is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
