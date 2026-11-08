@@ -1713,4 +1713,10 @@ fn a_wifi_status_change_redraws_only_the_bars() {
     assert!(!ups.is_empty(), "the bars were drawn again");
     assert!(ups.iter().all(|(r, c)| r.h < 200 && *c != RefreshClass::Gc16), "{ups:?}");
     assert_eq!(h.reader.page(), page);
+    // Only the signal changed: the icon is the same, nothing is drawn.
+    let home = |signal| NetStatus::Connected { essid: "Home".into(), signal };
+    h.reader.bars.device.as_mut().unwrap().wifi = Some(home(Some(3)));
+    let n = h.probe.updates().len();
+    h.feed(InputEvent::Power(PowerEvent::Network(NetEvent::Status(home(Some(5))))));
+    assert_eq!(h.probe.updates().len(), n, "a signal change draws nothing");
 }

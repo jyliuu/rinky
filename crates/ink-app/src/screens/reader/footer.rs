@@ -434,14 +434,7 @@ pub fn widget_piece(name: &str, info: &FooterInfo) -> Option<Piece> {
         "battery" => info.device.battery.map(|(p, c)| Piece::Text(if c { format!("{p}% +") } else { format!("{p}%") }, Style::Regular)),
         "battery_icon" => info.device.battery.map(|(p, c)| Piece::Battery(p, c, false)),
         "battery_icon_percent" => info.device.battery.map(|(p, c)| Piece::Battery(p, c, true)),
-        "wifi" => info.device.wifi.as_ref().map(|w| {
-            let icon = match w {
-                NetStatus::Connected { .. } => Icon::Wifi,
-                NetStatus::Connecting { .. } => Icon::WifiConnecting,
-                NetStatus::Off | NetStatus::NoNetwork => Icon::WifiOff,
-            };
-            Piece::Icon(icon, String::new())
-        }),
+        "wifi" => info.device.wifi.as_ref().map(|w| Piece::Icon(wifi_icon(w), String::new())),
         "frontlight" => info.device.light.map(|l| Piece::Icon(Icon::Light, l.to_string())),
         "page" => (info.total > 0).then(|| Piece::Text((info.page + 1).to_string(), Style::Regular)),
         "page_of_total" => (info.total > 0).then(|| {
@@ -840,6 +833,16 @@ pub fn draw_default_bars(doc: &dyn Document, page: usize, canvas: &mut Canvas, f
     let map = ChapterMap::build(doc, &toc);
     let info = info(doc, &toc, &map, page, Speed::default());
     draw_bars(canvas, fonts, doc.layout(), &StatusBars::default(), &info, Part::All);
+}
+
+/// The Wi-Fi widget's icon for `status` (the signal and the network's name are not
+/// shown: a change of only those draws nothing).
+pub fn wifi_icon(status: &NetStatus) -> Icon {
+    match status {
+        NetStatus::Connected { .. } => Icon::Wifi,
+        NetStatus::Connecting { .. } => Icon::WifiConnecting,
+        NetStatus::Off | NetStatus::NoNetwork => Icon::WifiOff,
+    }
 }
 
 /// The bars' minute tick state of a reader.

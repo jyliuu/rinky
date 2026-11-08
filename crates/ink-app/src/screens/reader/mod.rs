@@ -2224,9 +2224,11 @@ impl AppScreen for ReaderScreen {
                 _ => Transition::None,
             });
         }
-        // A Wi-Fi status change: the bars show it at once (their minute tick, now).
-        if let UiEvent::Power(PowerEvent::Network(NetEvent::Status(_))) = ev {
-            if footer::uses_widget(&cx.settings.status_bars, "wifi") && self.bars.next_tick.is_some() {
+        // A Wi-Fi status change: the bars show it at once (their minute tick, now), when
+        // the icon they show changes (not for a signal change: nothing to draw).
+        if let UiEvent::Power(PowerEvent::Network(NetEvent::Status(st))) = ev {
+            let shown = self.bars.device.as_ref().and_then(|d| d.wifi.as_ref()).map(footer::wifi_icon);
+            if footer::uses_widget(&cx.settings.status_bars, "wifi") && self.bars.next_tick.is_some() && shown != Some(footer::wifi_icon(st)) {
                 self.bars.next_tick = Some(Instant::now());
             }
             return Ok(Transition::None);
