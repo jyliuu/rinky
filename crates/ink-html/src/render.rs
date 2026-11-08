@@ -3,12 +3,11 @@
 use crate::fonts::FontBook;
 use crate::layout::{ChapterLayout, Draw, RectRun};
 use crate::paginate::PageSpan;
-use image::GrayImage;
 use ink_device::Canvas;
 use std::sync::Arc;
 
 /// Loads, scales and dithers the image `src` to `w` x `h` (None = draw a frame).
-pub type ImageFn<'a> = dyn FnMut(&str, u32, u32) -> Option<Arc<GrayImage>> + 'a;
+pub type ImageFn<'a> = dyn FnMut(&str, u32, u32) -> Option<Arc<Canvas>> + 'a;
 
 /// Coordinates beyond this many px from the page cannot be visible; items there are
 /// skipped (hostile CSS lengths), so float-to-int casts stay far from the i32 limits.
@@ -61,14 +60,13 @@ pub fn draw_page(canvas: &mut Canvas, fonts: &mut FontBook, lay: &ChapterLayout,
                         x = fonts.draw(canvas, t.face, t.px, x, base, c.encode_utf8(&mut buf)) + t.letter_spacing;
                     }
                 }
-                let thick = (t.px / 16.0).max(1.0);
-                if t.underline {
-                    let y = base + t.px * 0.12;
-                    canvas.fill_rect(t.x.round() as i32, y.round() as i32, t.deco_w.round() as i32, thick.round() as i32, 0);
-                }
-                if t.strike {
-                    let y = base - t.px * 0.28;
-                    canvas.fill_rect(t.x.round() as i32, y.round() as i32, t.deco_w.round() as i32, thick.round() as i32, 0);
+                // Underline below the baseline, line-through above it.
+                let thick = (t.px / 16.0).max(1.0).round() as i32;
+                for (on, below) in [(t.underline, 0.12), (t.strike, -0.28)] {
+                    if on {
+                        let y = base + t.px * below;
+                        canvas.fill_rect(t.x.round() as i32, y.round() as i32, t.deco_w.round() as i32, thick, 0);
+                    }
                 }
             }
             Draw::Image(i) => {
@@ -80,10 +78,7 @@ pub fn draw_page(canvas: &mut Canvas, fonts: &mut FontBook, lay: &ChapterLayout,
                 let x = i.x.round() as i32;
                 let y = (i.y + dy).round() as i32;
                 match images(&i.src, w, h) {
-                    Some(img) => {
-                        let src = Canvas::from_pixels(img.width() as usize, img.height() as usize, img.as_raw().clone());
-                        canvas.blit(&src, x, y);
-                    }
+                    Some(img) => canvas.blit(&img, x, y),
                     None => canvas.stroke_rect(ink_device::Rect::new(x, y, w, h), 2, 128),
                 }
             }

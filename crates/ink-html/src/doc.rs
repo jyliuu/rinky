@@ -112,32 +112,7 @@ impl HtmlDocument {
         }
         let book = Book::new(meta, chapters.into_iter().map(|c| (c.path, c.html)).collect(), resources.as_ref());
         let mut font_sources = FontSources { fallback_dirs: crate::fonts::font_dirs(None), ..Default::default() };
-        let mut faces = Vec::new();
-        for (path, sheet) in &book.sheets {
-            let dir = path.rfind('/').map(|i| &path[..=i]).unwrap_or("");
-            for ff in &sheet.font_faces {
-                faces.push((dir.to_string(), ff.clone()));
-            }
-        }
-        // `<style>` blocks with @font-face.
-        for ch in &book.chapters {
-            if let Some(head_end) = ch.html.find("<body") {
-                let head = &ch.html[..head_end];
-                if head.contains("@font-face") {
-                    let mut from = 0;
-                    while let Some(p) = head[from..].find("<style") {
-                        let s = from + p;
-                        let Some(o) = head[s..].find('>').map(|e| s + e + 1) else { break };
-                        let e = head[o..].find("</style").map(|e| o + e).unwrap_or(head.len());
-                        for ff in crate::css::parse_stylesheet(&head[o..e]).font_faces {
-                            faces.push((ch.dir.clone(), ff));
-                        }
-                        from = e;
-                    }
-                }
-            }
-        }
-        font_sources.add_font_faces(&faces, &book.fonts);
+        font_sources.add_font_faces(&book.font_faces, &book.fonts);
         let fonts = RefCell::new(font_sources.build_foreground());
         let mut paths = HashMap::new();
         for (i, ch) in book.chapters.iter().enumerate() {
@@ -236,12 +211,7 @@ impl HtmlDocument {
     }
 
     fn fg_image_size(&self, path: &str) -> Option<(u32, u32)> {
-        if let Some(s) = self.book.images.lock().unwrap().get(path) {
-            return *s;
-        }
-        let size = self.resources.read(path).ok().and_then(|b| crate::images::intrinsic_size(&b));
-        self.book.images.lock().unwrap().insert(path.to_string(), size);
-        size
+        self.book.image_size(path, Some(self.resources.as_ref())).flatten()
     }
 
     /// Reads the sizes of every image referenced by the spine (used when the resource
@@ -319,13 +289,7 @@ impl HtmlDocument {
                 let cached = self.laid.borrow().get(&i).cloned().filter(|l| l.complete);
                 let laid = match cached {
                     Some(l) => l,
-                    None => {
-                        let lay = self.with_env(|env| layout_chapter(&self.book, i, &params, env));
-                        let pages = paginate(&lay, params.content_h);
-                        let l = Arc::new(LaidOut { lay, pages, complete: true });
-                        self.keep_laid(i, l.clone());
-                        l
-                    }
+                    None => self.lay_out_now(i)?,
                 };
                 ChapterPages { keys: laid.pages.iter().map(|p| p.key).collect(), text_bytes: chapter_text_bytes(&self.book.chapter(i).dom) }
             } else {
@@ -660,14 +624,11 @@ impl HtmlDocument {
             }
             let Some(t) = dom.text(n) else { continue };
             let p = dom.node(n).parent;
-            if dom.element(p).is_some_and(|e| e.in_svg || e.name == "svg" || matches!(e.name.as_str(), "script" | "style")) {
+            if dom.element(p).is_some_and(|e| e.in_svg_tree() || matches!(e.name.as_str(), "script" | "style")) {
                 continue;
             }
-            // Nearest block ancestor: a new block starts a new line.
-            let mut b = p;
-            while b != dom.body && dom.element(b).is_some_and(|e| e.st.display == crate::style::Display::Inline) {
-                b = dom.node(b).parent;
-            }
+            // A new block starts a new line.
+            let b = dom.block_of(p);
             if b != last_block && !chars.is_empty() {
                 chars.push('\n');
                 map.push((n, 0));
@@ -773,7 +734,7 @@ impl HtmlDocument {
         let mut cur = n;
         for _ in 0..4 {
             let e = dom.element(cur)?;
-            let ty = format!("{} {}", e.attr_local("type").unwrap_or(""), e.attr("role").unwrap_or("")).to_ascii_lowercase();
+            let ty = type_and_role(e);
             if ty.contains("endnote") || ty.contains("rearnote") {
                 return Some((NoteKind::Endnote, cur));
             }
@@ -797,8 +758,7 @@ impl HtmlDocument {
         let ch = self.book.chapter(c);
         let dom = &ch.dom;
         let Some(e) = dom.element(a) else { return false };
-        let ty = format!("{} {}", e.attr_local("type").unwrap_or(""), e.attr("role").unwrap_or("")).to_ascii_lowercase();
-        if ty.contains("noteref") {
+        if type_and_role(e).contains("noteref") {
             return true;
         }
         if let Some((tc, Position::XPointer(x))) = target {
@@ -847,16 +807,19 @@ impl HtmlDocument {
             .collect()
     }
 
-    /// x positions of each char boundary of a run (len = chars + 1).
-    fn char_edges(&self, t: &TextRun) -> Vec<f32> {
-        let mut fonts = self.fonts.borrow_mut();
-        let mut edges = vec![t.x];
-        let mut s = String::new();
-        for ch in t.text.chars() {
-            s.push(ch);
-            edges.push(t.x + fonts.width(t.face, t.px, &s) + t.letter_spacing * s.chars().count() as f32);
+    /// x position of char boundary `i` of a run (0: its left edge).
+    fn char_x(&self, t: &TextRun, i: usize) -> f32 {
+        if i == 0 {
+            return t.x;
         }
-        edges
+        let end = t.text.char_indices().nth(i).map_or(t.text.len(), |(b, _)| b);
+        t.x + self.fonts.borrow_mut().width(t.face, t.px, &t.text[..end]) + t.letter_spacing * i as f32
+    }
+
+    /// The page rectangle of chars `c0..c1` of a run (`dy`: flow to page).
+    fn chars_rect(&self, t: &TextRun, c0: usize, c1: usize, dy: f32) -> Rect {
+        let (x0, x1) = (self.char_x(t, c0), self.char_x(t, c1));
+        Rect::new(x0 as i32, (t.line_top + dy) as i32, (x1 - x0).max(1.0) as u32, (t.line_bottom - t.line_top).max(1.0) as u32)
     }
 
     fn hit(&self, items: &[(usize, TextRun)], dy: f32, p: Point) -> Option<(usize, usize)> {
@@ -872,9 +835,16 @@ impl HtmlDocument {
         }
         let (_, k) = best?;
         let t = &items[k].1;
-        let edges = self.char_edges(t);
         let n = t.text.chars().count();
-        let ci = (0..n).find(|&i| px < (edges[i] + edges[i + 1]) / 2.0).unwrap_or(n.saturating_sub(1));
+        let mut left = t.x;
+        let ci = (0..n)
+            .find(|&i| {
+                let right = self.char_x(t, i + 1);
+                let before_middle = px < (left + right) / 2.0;
+                left = right;
+                before_middle
+            })
+            .unwrap_or(n.saturating_sub(1));
         Some((k, ci))
     }
 
@@ -1234,8 +1204,10 @@ impl Document for HtmlDocument {
         let images = &self.images;
         let mut fonts = self.fonts.borrow_mut();
         fonts.set_embolden(self.layout.embolden);
-        let mut img = |src: &str, w: u32, h: u32| -> Option<Arc<image::GrayImage>> {
-            images.borrow_mut().get((src.to_string(), w, h), || {
+        let mut img = |src: &str, w: u32, h: u32| -> Option<Arc<Canvas>> {
+            // An inline SVG is named by its node, which is only unique in its chapter.
+            let name = if src.starts_with("#svg:") { std::borrow::Cow::Owned(format!("{src}@{c}")) } else { std::borrow::Cow::Borrowed(src) };
+            images.borrow_mut().get(&name, w, h, || {
                 if let Some(node) = src.strip_prefix("#svg:") {
                     let node: u32 = node.parse().ok()?;
                     let ch = book.chapter(c);
@@ -1492,12 +1464,7 @@ impl Document for HtmlDocument {
                 joins_next = c1 == n && piece.ends_with('-');
             }
             text.push_str(&piece);
-            let edges = self.char_edges(t);
-            let r = Rect::new(edges[c0] as i32, (t.line_top + dy) as i32, (edges[c1] - edges[c0]).max(1.0) as u32, (t.line_bottom - t.line_top).max(1.0) as u32);
-            match rects.last_mut() {
-                Some(last) if last.y == r.y => *last = last.union(&r),
-                _ => rects.push(r),
-            }
+            push_line_rect(&mut rects, self.chars_rect(t, c0, c1, dy));
         }
         let ts = &items[s.0].1;
         let te = &items[e.0].1;
@@ -1554,12 +1521,7 @@ impl Document for HtmlDocument {
             if c0 >= c1 {
                 continue;
             }
-            let edges = self.char_edges(t);
-            let r = Rect::new(edges[c0] as i32, (t.line_top + dy) as i32, (edges[c1] - edges[c0]).max(1.0) as u32, (t.line_bottom - t.line_top).max(1.0) as u32);
-            match rects.last_mut() {
-                Some(last) if last.y == r.y => *last = last.union(&r),
-                _ => rects.push(r),
-            }
+            push_line_rect(&mut rects, self.chars_rect(t, c0, c1, dy));
         }
         rects
     }
@@ -1611,10 +1573,7 @@ impl Document for HtmlDocument {
             }
         }
         let (c, key) = self.chapter_key(pos).ok()?;
-        let mut bytes = 0u64;
-        for i in 0..c {
-            bytes += self.chapter_bytes(i);
-        }
+        let mut bytes: u64 = (0..c).map(|i| self.chapter_bytes(i)).sum();
         let ch = self.book.chapter(c);
         let dom = &ch.dom;
         for &n in &dom.preorder {
@@ -1623,7 +1582,7 @@ impl Document for HtmlDocument {
                 break;
             }
             if let Some(t) = dom.text(n) {
-                if dom.element(dom.node(n).parent).is_some_and(|e| e.in_svg || e.name == "svg") {
+                if dom.element(dom.node(n).parent).is_some_and(crate::dom::Element::in_svg_tree) {
                     continue;
                 }
                 if order == key.0 {
@@ -1662,10 +1621,7 @@ impl Document for HtmlDocument {
             Some(k) => k,
             None => {
                 // An anchor inside a paragraph of a notes list: the paragraph is the note.
-                let mut b = node;
-                while b != ch.dom.body && ch.dom.element(b).is_some_and(|e| e.st.display == crate::style::Display::Inline) {
-                    b = ch.dom.node(b).parent;
-                }
+                let b = ch.dom.block_of(node);
                 if b == ch.dom.body {
                     return Ok(None);
                 }
@@ -1739,6 +1695,19 @@ impl Drop for HtmlDocument {
             }
         }
     }
+}
+
+/// Adds `r` to `rects`, merged with the last one when it is on the same line.
+fn push_line_rect(rects: &mut Vec<Rect>, r: Rect) {
+    match rects.last_mut() {
+        Some(last) if last.y == r.y => *last = last.union(&r),
+        _ => rects.push(r),
+    }
+}
+
+/// `epub:type` and `role` of an element, lowercase, with a space between.
+fn type_and_role(e: &crate::dom::Element) -> String {
+    format!("{} {}", e.attr_local("type").unwrap_or(""), e.attr("role").unwrap_or("")).to_ascii_lowercase()
 }
 
 /// A remembered position: spine item, page within it, hash of the item's page starts.
@@ -1816,24 +1785,13 @@ fn svg_resolver(loader: &dyn ResourceLoader, dir: &str, svg: &str) -> crate::ima
     Arc::new(move |h: &str| found.get(h).cloned())
 }
 
-impl MapState {
-    #[allow(dead_code)]
-    fn debug_summary(&self) -> String {
-        self.chapters.iter().map(|c| c.as_ref().map(|p| p.keys.len().to_string()).unwrap_or("?".into())).collect::<Vec<_>>().join(",")
-    }
-}
-
-/// Text of `id` with a space between block-level elements (an FB2 note's `<title>` number
-/// and its body paragraph: "1 The first footnote.", not "1The first footnote."). Inline
-/// elements join without a space ("<a>1</a>. Text" stays "1. Text").
 /// A backlink inside a note (back to the reference): `role="doc-backlink"`,
 /// `epub:type="backlink"`, or a link whose text is only an arrow (`↩`, `↑`, `^`).
 fn is_backlink(dom: &crate::dom::Dom, n: crate::dom::NodeId, e: &crate::dom::Element) -> bool {
     if e.name != "a" {
         return false;
     }
-    let ty = format!("{} {}", e.attr_local("type").unwrap_or(""), e.attr("role").unwrap_or("")).to_ascii_lowercase();
-    if ty.contains("backlink") {
+    if type_and_role(e).contains("backlink") {
         return true;
     }
     let t = dom.text_content(n);
@@ -1906,7 +1864,7 @@ fn note_body(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> (Option<String>, 
                 raw.push(NoteSpan { text: t.to_string(), bold, italic });
             }
             NodeKind::Element(e) => {
-                if e.in_svg || e.name == "svg" || is_backlink(dom, n, e) {
+                if e.in_svg_tree() || is_backlink(dom, n, e) {
                     continue;
                 }
                 if n != id && !seen {
@@ -2026,6 +1984,36 @@ mod tests {
             HtmlChapter { path: "b.xhtml".into(), html: html("<p>The end.</p>") },
         ];
         HtmlDocument::new(Metadata::default(), chapters, Box::new(ink_doc::MemoryLoader::default())).unwrap()
+    }
+
+    /// Two chapters whose inline `<svg>` wrappers have the same node id and size but show
+    /// different images: each page draws its own image.
+    #[test]
+    fn inline_svg_images_of_two_chapters_are_not_mixed_up() {
+        let png = |v: u8| {
+            let mut c = std::io::Cursor::new(Vec::new());
+            image::GrayImage::from_pixel(8, 8, image::Luma([v])).write_to(&mut c, image::ImageFormat::Png).unwrap();
+            c.into_inner()
+        };
+        let mut res = ink_doc::MemoryLoader::default();
+        res.0.insert("black.png".into(), png(0));
+        res.0.insert("white.png".into(), png(255));
+        let page = |img: &str| {
+            format!(
+                "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:xlink='http://www.w3.org/1999/xlink'><body><svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 8 8'><image width='8' height='8' xlink:href='{img}'/></svg></body></html>"
+            )
+        };
+        let chapters = vec![HtmlChapter { path: "a.xhtml".into(), html: page("black.png") }, HtmlChapter { path: "b.xhtml".into(), html: page("white.png") }];
+        let mut doc = HtmlDocument::new(Metadata::default(), chapters, Box::new(res)).unwrap();
+        doc.set_layout(&LayoutSettings::for_screen(600, 800)).unwrap();
+        let mut c = Canvas::new(600, 800);
+        let mut dark = |p: usize| {
+            doc.render_page(p, &mut c).unwrap();
+            c.pixels.iter().filter(|&&v| v < 128).count()
+        };
+        let (black, white) = (dark(0), dark(1));
+        assert!(black > 1000, "the black image is drawn: {black} dark pixels");
+        assert!(white < black / 10, "the white image is drawn: {white} dark pixels");
     }
 
     #[test]
