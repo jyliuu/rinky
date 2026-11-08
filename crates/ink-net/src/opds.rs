@@ -114,22 +114,13 @@ impl OpdsEntry {
 
     /// The best acquisition for a reader: free first, then EPUB, then any.
     pub fn best_acquisition(&self) -> Option<&OpdsLink> {
-        let acq = self.acquisitions();
+        // The first marker the file type contains gives its rank; anything else ranks 3.
+        const FORMATS: &[(&str, u8)] = &[("epub", 0), ("pdf", 2), ("mobi", 1), ("fb2", 1), ("cbz", 1), ("comicbook", 1)];
         let rank = |l: &&OpdsLink| {
-            let free = if l.is_free_acquisition() { 0 } else { 10 };
-            let m = l.final_mime();
-            let fmt = if m.contains("epub") {
-                0
-            } else if m.contains("pdf") {
-                2
-            } else if m.contains("mobi") || m.contains("fb2") || m.contains("cbz") || m.contains("comicbook") {
-                1
-            } else {
-                3
-            };
-            free + fmt
+            let fmt = FORMATS.iter().find(|(marker, _)| l.final_mime().contains(marker)).map_or(3, |(_, r)| *r);
+            if l.is_free_acquisition() { fmt } else { fmt + 10 }
         };
-        acq.into_iter().min_by_key(rank)
+        self.links.iter().filter(|l| l.is_acquisition()).min_by_key(rank)
     }
 
     /// The link to follow for a navigation entry: a catalog link with no `rel`,
@@ -245,16 +236,6 @@ impl OpdsFeed {
         self.href("previous").or_else(|| self.href("prev"))
     }
 
-    /// First page.
-    pub fn first_url(&self) -> Option<&str> {
-        self.href("first")
-    }
-
-    /// Last page.
-    pub fn last_url(&self) -> Option<&str> {
-        self.href("last")
-    }
-
     /// Catalog root.
     pub fn start_url(&self) -> Option<&str> {
         self.href("start")
@@ -299,33 +280,26 @@ impl OpdsFeed {
 /// Decodes XML/HTML character references: the five XML entities, numeric references and
 /// common HTML names. Unknown references are kept as written.
 pub fn decode_entities(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
     let mut out = String::with_capacity(s.len());
+    push_decoded(&mut out, s);
+    out
+}
+
+/// [`decode_entities`] of `s`, appended to `out`.
+fn push_decoded(out: &mut String, s: &str) {
     let mut rest = s;
+    let mut utf8 = [0; 4];
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
         let end = rest[1..].find(|c: char| c == ';' || c == '&' || c.is_whitespace()).map(|j| j + 1);
-        let Some(end) = end.filter(|&e| rest.as_bytes().get(e) == Some(&b';') && e <= 12) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
+        let decoded = match end.filter(|&e| rest.as_bytes().get(e) == Some(&b';') && e <= 12) {
+            Some(e) => entity(&rest[1..e], &mut utf8).map(|text| (e, text)),
+            None => None,
         };
-        let name = &rest[1..end];
-        let ch: Option<String> = if let Some(num) = name.strip_prefix('#') {
-            let v = match num.strip_prefix(['x', 'X']) {
-                Some(h) => u32::from_str_radix(h, 16).ok(),
-                None => num.parse().ok(),
-            };
-            v.and_then(char::from_u32).map(String::from)
-        } else {
-            named_entity(name).map(str::to_string)
-        };
-        match ch {
-            Some(c) => {
-                out.push_str(&c);
+        match decoded {
+            Some((end, text)) => {
+                out.push_str(text);
                 rest = &rest[end + 1..];
             }
             None => {
@@ -335,7 +309,20 @@ pub fn decode_entities(s: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
+}
+
+/// The text of the character reference `&name;`, encoded into `utf8` when numeric.
+fn entity<'a>(name: &str, utf8: &'a mut [u8; 4]) -> Option<&'a str> {
+    match name.strip_prefix('#') {
+        Some(num) => {
+            let v = match num.strip_prefix(['x', 'X']) {
+                Some(h) => u32::from_str_radix(h, 16).ok(),
+                None => num.parse().ok(),
+            };
+            Some(&*char::from_u32(v?)?.encode_utf8(utf8))
+        }
+        None => named_entity(name),
+    }
 }
 
 fn named_entity(name: &str) -> Option<&'static str> {
@@ -386,7 +373,30 @@ fn is_block(tag: &str) -> bool {
 
 /// Normalizes whitespace per line and drops empty lines.
 fn tidy_lines(s: &str) -> String {
-    s.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        let mut words = line.split_whitespace().peekable();
+        if words.peek().is_some() && !out.is_empty() {
+            out.push('\n');
+        }
+        push_words(&mut out, words);
+    }
+    out
+}
+
+/// Appends `words` separated by single spaces.
+fn push_words<'a>(out: &mut String, words: impl Iterator<Item = &'a str>) {
+    for (i, w) in words.enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+}
+
+/// Appends `s` with line breaks turned into spaces.
+fn push_flat(out: &mut String, s: &str) {
+    out.extend(s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }));
 }
 
 /// HTML markup (already unescaped from the XML) to plain text: tags removed, block tags
@@ -395,29 +405,30 @@ pub fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
     // Line breaks in the markup are spaces; block elements make the lines.
-    let flat = |t: &str| t.replace(['\n', '\r'], " ");
     while let Some(i) = rest.find('<') {
-        out.push_str(&flat(&rest[..i]));
+        push_flat(&mut out, &rest[..i]);
         let Some(j) = rest[i..].find('>') else {
-            out.push_str(&flat(&rest[i..]));
+            push_flat(&mut out, &rest[i..]);
             rest = "";
             break;
         };
         let tag = rest[i + 1..i + j].trim_start_matches('/');
-        let name: String = tag.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-        if is_block(&name) {
+        let name = &tag[..tag.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(tag.len())];
+        if is_block(name) {
             out.push('\n');
         } else if !name.is_empty() {
             out.push(' ');
         }
         rest = &rest[i + j + 1..];
     }
-    out.push_str(&flat(rest));
+    push_flat(&mut out, rest);
     tidy_lines(&decode_entities(&out))
 }
 
 fn one_line(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(s.len());
+    push_words(&mut out, s.split_whitespace());
+    out
 }
 
 // ---------------------------------------------------------------------------------------
@@ -474,13 +485,24 @@ impl OpenElements {
     }
 }
 
-/// `(local name, value)` of every attribute.
-fn attrs(e: &BytesStart<'_>) -> Vec<(String, String)> {
-    e.attributes().with_checks(false).flatten().map(|a| (local(a.key.as_ref()).into_owned(), decode_entities(&String::from_utf8_lossy(&a.value)))).collect()
+/// `(local name, value)` of every attribute, borrowed from the document where possible.
+fn attrs<'a>(e: &'a BytesStart<'_>) -> Vec<(Cow<'a, str>, Cow<'a, str>)> {
+    let value = |v: Cow<'a, [u8]>| {
+        let v = match v {
+            Cow::Borrowed(b) => String::from_utf8_lossy(b),
+            Cow::Owned(b) => Cow::Owned(String::from_utf8_lossy(&b).into_owned()),
+        };
+        if v.contains('&') {
+            Cow::Owned(decode_entities(&v))
+        } else {
+            v
+        }
+    };
+    e.attributes().with_checks(false).flatten().map(|a| (local(a.key.into_inner()), value(a.value))).collect()
 }
 
-fn attr<'a>(list: &'a [(String, String)], local_name: &str) -> Option<&'a str> {
-    list.iter().find(|(l, _)| l == local_name).map(|(_, v)| v.as_str())
+fn attr<'a>(list: &'a [(Cow<'_, str>, Cow<'_, str>)], local_name: &str) -> Option<&'a str> {
+    list.iter().find(|(l, _)| l == local_name).map(|(_, v)| v.as_ref())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -604,12 +626,12 @@ pub fn parse_feed(xml: &str, base_url: &str) -> Result<OpdsFeed> {
             }
             Event::Text(t) => {
                 if let Some(c) = cap.as_mut() {
-                    let text = decode_entities(&String::from_utf8_lossy(&t));
+                    let text = String::from_utf8_lossy(&t);
                     if c.mode == Mode::Xhtml {
                         // XML line breaks are spaces; block elements make the lines.
-                        c.buf.push_str(&text.replace(['\n', '\r'], " "));
+                        push_flat(&mut c.buf, &decode_entities(&text));
                     } else {
-                        c.buf.push_str(&text);
+                        push_decoded(&mut c.buf, &text);
                     }
                 }
             }
@@ -737,6 +759,11 @@ fn json_names(v: Option<&serde_json::Value>) -> Vec<String> {
     }
 }
 
+/// The array at `key` of a JSON object (empty when absent or not an array).
+fn json_array<'a>(v: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {
+    v.get(key).and_then(|a| a.as_array()).map_or(&[], Vec::as_slice)
+}
+
 fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
     let href = v.get("href")?.as_str()?;
     let templated = v.get("templated").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -766,13 +793,11 @@ fn json_link(v: &serde_json::Value, base: &str) -> Option<OpdsLink> {
         rel,
         mime: v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         title: v.get("title").and_then(json_str),
-        length: None,
         indirect,
-        facet_group: None,
-        active_facet: false,
         count: props.and_then(|p| p.get("numberOfItems")).and_then(|n| n.as_u64()),
         price,
         templated,
+        ..Default::default()
     })
 }
 
@@ -794,38 +819,31 @@ fn json_publication(p: &serde_json::Value, base: &str) -> OpdsEntry {
         categories: json_names(md.get("subject")),
         ..Default::default()
     };
-    if let Some(links) = p.get("links").and_then(|l| l.as_array()) {
-        e.links.extend(links.iter().filter_map(|l| json_link(l, base)));
-    }
-    if let Some(images) = p.get("images").and_then(|l| l.as_array()) {
-        // The largest image is the cover, the smallest (if there are several) the thumbnail.
-        let area = |l: &serde_json::Value| l.get("width").and_then(|w| w.as_u64()).unwrap_or(0) * l.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
-        let imgs: Vec<(u64, OpdsLink)> = images.iter().filter_map(|l| json_link(l, base).map(|k| (area(l), k))).collect();
-        let largest = imgs.iter().enumerate().max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.0.cmp(&a.0))).map(|(i, _)| i);
-        let smallest = imgs.iter().enumerate().min_by(|a, b| a.1 .0.cmp(&b.1 .0).then(a.0.cmp(&b.0))).map(|(i, _)| i);
-        if let Some(i) = largest {
-            let mut c = imgs[i].1.clone();
-            c.rel = IMAGE_RELS[0].into();
-            e.links.push(c);
-        }
-        if let Some(i) = smallest.filter(|_| imgs.len() > 1) {
-            let mut t = imgs[i].1.clone();
-            t.rel = THUMBNAIL_RELS[0].into();
-            e.links.push(t);
+    e.links.extend(json_array(p, "links").iter().filter_map(|l| json_link(l, base)));
+    // The largest image is the cover, the smallest (if there are several) the thumbnail.
+    let area = |l: &serde_json::Value| l.get("width").and_then(|w| w.as_u64()).unwrap_or(0) * l.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
+    let imgs: Vec<(u64, OpdsLink)> = json_array(p, "images").iter().filter_map(|l| json_link(l, base).map(|k| (area(l), k))).collect();
+    // On ties the first image wins (max_by_key keeps the last maximum, hence the rev).
+    let largest = imgs.iter().rev().max_by_key(|(area, _)| *area);
+    let smallest = imgs.iter().min_by_key(|(area, _)| *area).filter(|_| imgs.len() > 1);
+    for (img, rel) in [(largest, IMAGE_RELS[0]), (smallest, THUMBNAIL_RELS[0])] {
+        if let Some((_, l)) = img {
+            e.links.push(OpdsLink { rel: rel.into(), ..l.clone() });
         }
     }
     e
 }
 
-fn json_navigation(n: &serde_json::Value, base: &str) -> Option<OpdsEntry> {
-    let mut l = json_link(n, base)?;
+/// A navigation entry for a link to another feed, titled `title` or else by the link;
+/// the link gets `subsection` and the OPDS 2 type when it has none.
+fn nav_entry(mut l: OpdsLink, title: Option<String>) -> OpdsEntry {
     if l.rel.is_empty() {
         l.rel = "subsection".into();
     }
     if l.mime.is_empty() {
         l.mime = "application/opds+json".into();
     }
-    Some(OpdsEntry { id: l.href.clone(), title: l.title.clone().unwrap_or_default(), links: vec![l], ..Default::default() })
+    OpdsEntry { id: l.href.clone(), title: title.or_else(|| l.title.clone()).unwrap_or_default(), links: vec![l], ..Default::default() }
 }
 
 /// Parses a basic OPDS 2 feed: metadata, links, navigation, publications, groups and
@@ -850,43 +868,26 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
         // Saturating: a hostile catalog may send page and size near u64::MAX.
         feed.start_index = Some(page.saturating_sub(1).saturating_mul(per).saturating_add(1));
     }
-    if let Some(links) = v.get("links").and_then(|l| l.as_array()) {
-        feed.links.extend(links.iter().filter_map(|l| json_link(l, base_url)));
-    }
+    feed.links.extend(json_array(&v, "links").iter().filter_map(|l| json_link(l, base_url)));
     let add_items = |obj: &serde_json::Value, feed: &mut OpdsFeed| {
-        if let Some(nav) = obj.get("navigation").and_then(|n| n.as_array()) {
-            feed.entries.extend(nav.iter().filter_map(|n| json_navigation(n, base_url)));
-        }
-        if let Some(pubs) = obj.get("publications").and_then(|n| n.as_array()) {
-            feed.entries.extend(pubs.iter().map(|p| json_publication(p, base_url)));
-        }
+        feed.entries.extend(json_array(obj, "navigation").iter().filter_map(|n| json_link(n, base_url)).map(|l| nav_entry(l, None)));
+        feed.entries.extend(json_array(obj, "publications").iter().map(|p| json_publication(p, base_url)));
     };
     add_items(&v, &mut feed);
-    if let Some(groups) = v.get("groups").and_then(|g| g.as_array()) {
-        for g in groups {
-            let title = g.get("metadata").and_then(|m| m.get("title")).and_then(json_str).unwrap_or_default();
-            if let Some(more) = g.get("links").and_then(|l| l.as_array()).and_then(|a| a.iter().filter_map(|l| json_link(l, base_url)).find(|l| l.rel == "self")) {
-                let mut l = more;
-                l.rel = "subsection".into();
-                if l.mime.is_empty() {
-                    l.mime = "application/opds+json".into();
-                }
-                feed.entries.push(OpdsEntry { id: l.href.clone(), title: title.clone(), links: vec![l], ..Default::default() });
-            }
-            add_items(g, &mut feed);
+    for g in json_array(&v, "groups") {
+        let title = g.get("metadata").and_then(|m| m.get("title")).and_then(json_str).unwrap_or_default();
+        if let Some(l) = json_array(g, "links").iter().filter_map(|l| json_link(l, base_url)).find(|l| l.rel == "self") {
+            feed.entries.push(nav_entry(OpdsLink { rel: "subsection".into(), ..l }, Some(title)));
         }
+        add_items(g, &mut feed);
     }
-    if let Some(facets) = v.get("facets").and_then(|f| f.as_array()) {
-        for f in facets {
-            let group = f.get("metadata").and_then(|m| m.get("title")).and_then(json_str);
-            for l in f.get("links").and_then(|l| l.as_array()).into_iter().flatten() {
-                if let Some(mut link) = json_link(l, base_url) {
-                    link.active_facet = link.rel == "self";
-                    link.rel = REL_FACET.into();
-                    link.facet_group = group.clone();
-                    feed.links.push(link);
-                }
-            }
+    for f in json_array(&v, "facets") {
+        let group = f.get("metadata").and_then(|m| m.get("title")).and_then(json_str);
+        for mut link in json_array(f, "links").iter().filter_map(|l| json_link(l, base_url)) {
+            link.active_facet = link.rel == "self";
+            link.rel = REL_FACET.into();
+            link.facet_group = group.clone();
+            feed.links.push(link);
         }
     }
     Ok(feed)
@@ -894,7 +895,9 @@ pub fn parse_opds2(json: &str, base_url: &str) -> Result<OpdsFeed> {
 
 /// Parses Atom or JSON, chosen by MIME type, else by the first non-space byte.
 pub fn parse_any(body: &[u8], mime: &str, base_url: &str) -> Result<OpdsFeed> {
-    let text = String::from_utf8_lossy(body);
+    // The fast validator for the usual valid body; the lossy decoder's byte loop only for
+    // a broken one.
+    let text = std::str::from_utf8(body).map_or_else(|_| String::from_utf8_lossy(body), Cow::Borrowed);
     let text = text.trim_start_matches('\u{feff}');
     let m = mime.to_ascii_lowercase();
     if m.contains("json") || (!m.contains("xml") && text.trim_start().starts_with('{')) {
@@ -1022,11 +1025,7 @@ pub struct OpdsClient<'a> {
     pub max_bytes: usize,
 }
 
-impl std::fmt::Debug for OpdsClient<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpdsClient").field("auth", &self.auth.as_ref().map(|(u, _)| u)).field("max_bytes", &self.max_bytes).finish_non_exhaustive()
-    }
-}
+debug_fields!([] OpdsClient<'_>, "OpdsClient", |s| "auth": s.auth.as_ref().map(|(u, _)| u), "max_bytes": s.max_bytes);
 
 impl<'a> OpdsClient<'a> {
     /// A client without credentials, 16 MB feed limit.
