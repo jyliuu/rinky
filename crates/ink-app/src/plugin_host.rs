@@ -1354,9 +1354,11 @@ fn fit(cx: &mut PaintCx, text: &str, px: f32, style: Style, max: f32) -> String 
     if cx.fonts.text_width(style, text, px) <= max {
         return text.to_string();
     }
-    // Byte ends of the proper prefixes, by character count.
+    // Byte ends of the proper prefixes, by character count. None for empty text (it
+    // misses only a negative `max`): just the dots, as trimming gave.
     let ends: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
-    let k = last_fitting(ends.len() - 1, |k| cx.fonts.text_width(style, &format!("{}...", &text[..ends[k]]), px) <= max);
+    let Some(n) = ends.len().checked_sub(1) else { return "...".to_string() };
+    let k = last_fitting(n, |k| cx.fonts.text_width(style, &format!("{}...", &text[..ends[k]]), px) <= max);
     format!("{}...", text[..ends[k]].trim_end())
 }
 
@@ -4554,7 +4556,7 @@ mod tests {
             s
         };
         for text in ["", "a", "Household words", "Ünïcödé — ✓ wide WWWW iiii", "word word word word word word word word"] {
-            for max in [0.0, 5.0, 30.0, 61.0, 150.0, 333.0, 1000.0] {
+            for max in [-10.0, 0.0, 5.0, 30.0, 61.0, 150.0, 333.0, 1000.0] {
                 assert_eq!(fit(&mut cx, text, px, Style::Regular, max), slow_fit(&mut cx, text, max), "fit {text:?} {max}");
                 assert_eq!(fit_end(&mut cx, text, px, max), slow_end(&mut cx, text, max), "fit_end {text:?} {max}");
             }
