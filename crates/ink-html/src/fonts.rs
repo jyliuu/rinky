@@ -57,7 +57,10 @@ enum Src {
 /// of a face up front (about 0.5 s per Noto Serif face in the emulator), and a page often
 /// needs only the regular face. Each face lives in the regular slot of its own
 /// `ink_text::Fonts` (always used with `Style::Regular`); the bold and italic slots hold a
-/// 924-byte placeholder font (Droid Sans Mono subset to `.notdef` and space).
+/// 924-byte placeholder font (Droid Sans Mono subset to `.notdef` and space). The parsed
+/// face itself is shared: `ink_text` keeps one per font data for the whole process, so
+/// the books of the paginator threads and the foreground use the same parsed face while
+/// any of them holds it (only the glyph and width caches are per book).
 struct Family {
     src: Src,
     /// Faces by [`face_index`]: `None` not parsed yet, `Some(None)` not usable.
@@ -169,7 +172,8 @@ pub struct FamilyBytes(pub [Option<Arc<Vec<u8>>>; 4]);
 type WordWidths = HashMap<Box<str>, f32, FxBuild>;
 
 /// Families by lowercase name. Not `Send` across threads by design: each thread builds
-/// its own book from the same [`FontSources`].
+/// its own book from the same [`FontSources`] (with its own caches; the parsed faces are
+/// shared, see [`Family`]).
 pub struct FontBook {
     families: Vec<Family>,
     by_name: HashMap<String, FamilyId, FxBuild>,
@@ -867,6 +871,22 @@ mod tests {
         assert_eq!(junk, fb.width(FaceKey { family: 0, bold: false, italic: false }, 30.0, "Juliet"));
         // The placeholder parses (it fills the unused slots of every face).
         assert!(Fonts::from_bytes([PLACEHOLDER, PLACEHOLDER, PLACEHOLDER]).is_ok());
+    }
+
+    #[test]
+    fn books_on_other_threads_share_the_parsed_faces() {
+        let face = |fb: &mut FontBook, k: FaceKey| {
+            let (f, s) = fb.fonts_style(k);
+            std::ptr::from_ref(f.font(s)) as usize
+        };
+        let mut s = FontSources::default();
+        s.families.push(("book".into(), FamilyBytes([Some(Arc::new(MONO.to_vec())), None, None, None])));
+        let id = s.build().family_by_name("book").unwrap();
+        let keys = [FaceKey { family: 0, bold: true, italic: false }, FaceKey { family: id, bold: false, italic: false }];
+        let mut fg = s.build();
+        let here = keys.map(|k| face(&mut fg, k));
+        let there = std::thread::spawn(move || keys.map(|k| face(&mut s.build(), k))).join().unwrap();
+        assert_eq!(here, there, "embedded and book faces are parsed once");
     }
 
     #[test]

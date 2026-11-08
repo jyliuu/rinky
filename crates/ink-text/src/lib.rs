@@ -18,6 +18,7 @@ pub mod face;
 pub mod fonts;
 pub mod hyphen;
 pub mod linebreak;
+mod parsed;
 pub mod raster;
 pub mod registry;
 
