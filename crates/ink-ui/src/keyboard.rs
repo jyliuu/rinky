@@ -107,17 +107,22 @@ pub struct KeyboardLayout {
 /// Languages with a letter layout, in globe-key order.
 pub const LANGUAGES: [&str; 7] = ["en", "da", "de", "fr", "es", "sv", "nb"];
 
-/// Display name of a keyboard language (shown on the space bar).
+/// Each letter layout, in [`LANGUAGES`] order: language, display name (shown on the
+/// space bar), the three rows of letters.
+const LETTERS: [(&str, &str, [&str; 3]); 7] = [
+    ("en", "English", ["q w e r t y u i o p", "a s d f g h j k l", "z x c v b n m"]),
+    ("da", "Dansk", ["q w e r t y u i o p å", "a s d f g h j k l æ ø", "z x c v b n m"]),
+    ("de", "Deutsch", ["q w e r t z u i o p ü", "a s d f g h j k l ö ä", "y x c v b n m ß"]),
+    ("fr", "Français", ["a z e r t y u i o p", "q s d f g h j k l m", "w x c v b n '"]),
+    ("es", "Español", ["q w e r t y u i o p", "a s d f g h j k l ñ", "z x c v b n m"]),
+    ("sv", "Svenska", ["q w e r t y u i o p å", "a s d f g h j k l ö ä", "z x c v b n m"]),
+    ("nb", "Norsk", ["q w e r t y u i o p å", "a s d f g h j k l ø æ", "z x c v b n m"]),
+];
+
+/// Display name of a keyboard language (shown on the space bar); English for an unknown
+/// one.
 pub fn language_name(lang: &str) -> &'static str {
-    match lang {
-        "da" => "Dansk",
-        "de" => "Deutsch",
-        "fr" => "Français",
-        "es" => "Español",
-        "sv" => "Svenska",
-        "nb" => "Norsk",
-        _ => "English",
-    }
+    LETTERS.iter().find(|l| l.0 == lang).map_or("English", |l| l.1)
 }
 
 /// Long-press alternates in the layouts' space-separated style: per language (`""`: for
@@ -174,16 +179,7 @@ impl KeyboardLayout {
 
     /// The letter layout of a language (`en`, `da`, `de`, `fr`, `es`, `sv`, `nb`).
     pub fn letters(lang: &str) -> Option<Self> {
-        let rows: [&str; 3] = match lang {
-            "en" => ["q w e r t y u i o p", "a s d f g h j k l", "z x c v b n m"],
-            "da" => ["q w e r t y u i o p å", "a s d f g h j k l æ ø", "z x c v b n m"],
-            "de" => ["q w e r t z u i o p ü", "a s d f g h j k l ö ä", "y x c v b n m ß"],
-            "fr" => ["a z e r t y u i o p", "q s d f g h j k l m", "w x c v b n '"],
-            "es" => ["q w e r t y u i o p", "a s d f g h j k l ñ", "z x c v b n m"],
-            "sv" => ["q w e r t y u i o p å", "a s d f g h j k l ö ä", "z x c v b n m"],
-            "nb" => ["q w e r t y u i o p å", "a s d f g h j k l ø æ", "z x c v b n m"],
-            _ => return None,
-        };
+        let rows = LETTERS.iter().find(|l| l.0 == lang)?.2;
         let (r1, r2, letters3) = (keys(lang, rows[0]), keys(lang, rows[1]), keys(lang, rows[2]));
         let total = units(&r1).max(units(&r2)).max(units(&letters3) + 6);
         let side = (total - units(&letters3)) / 2;
@@ -868,6 +864,14 @@ mod tests {
         }
         assert_eq!(kb.layout.name, "en");
         assert!(kb.set_language("fr") && !kb.set_language("xx"));
+    }
+
+    #[test]
+    fn every_language_has_letters_and_a_name() {
+        assert_eq!(LETTERS.map(|l| l.0), LANGUAGES);
+        assert_eq!(language_name("fr"), "Français");
+        assert_eq!(language_name("xx"), "English");
+        assert!(KeyboardLayout::letters("xx").is_none());
     }
 
     #[test]
