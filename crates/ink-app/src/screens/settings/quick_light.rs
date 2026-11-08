@@ -2202,7 +2202,7 @@ mod tests {
         let tile = layout(Size::new(1272, 1696), 2).tiles[1];
         let (x, y) = (tile.x + 40, tile.y + tile.h as i32 / 2);
         let (mut device, probe) =
-            headless::open(HeadlessOptions { script: parse(&format!("{OPEN}sleep 6000\nquit\n")).unwrap(), out_dir: None, ..Default::default() });
+            headless::open(HeadlessOptions { script: parse(&format!("{OPEN}sleep 7000\nquit\n")).unwrap(), out_dir: None, ..Default::default() });
         let _fake = crate::screens::settings::fakes::install(&mut device);
         let root = std::env::temp_dir().join(format!("ink-cc-drift-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2211,7 +2211,9 @@ mod tests {
         app.plugins = crate::plugin_entries::test_plugin::Drift::host();
         app.run(crate::router::Route::Demo).unwrap();
         // `late` is an "on" state: the tile is filled. (The first seconds after opening
-        // poll for the device state read; the tile poll follows it.)
+        // poll for the device state read, which the fakes never finish: the first tile
+        // poll comes STATE_WAIT + PLUGIN_POLL, just over 6 s, after opening, so the
+        // script sleeps 7 s.)
         assert!(probe.panel().get(x, y).is_some_and(|v| v < 0x40), "the tile shows the state from after the panel opened");
         let _ = std::fs::remove_dir_all(&root);
     }
