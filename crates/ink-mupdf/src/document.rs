@@ -553,11 +553,9 @@ impl MupdfDocument {
 
     /// Opens an encrypted document with `password` (an empty password is always tried).
     pub fn open_with_password(path: &Path, opts: FixedOptions, password: Option<&str>) -> Result<Self> {
-        if !path.exists() {
-            return Err(DocError::NotFound(path.display().to_string()));
-        }
         // At least 1 MiB: 0 would make the shim fall back to MuPDF's 256 MiB default.
         let store = env_mb("INK_MUPDF_STORE_MB", DEFAULT_STORE_MB).max(1) << 20;
+        // A missing file is DocError::NotFound from here.
         let mut raw = RawDoc::open(path, store, DISPLAY_LISTS)?;
         if raw.needs_password() && !raw.authenticate("") && !password.is_some_and(|p| raw.authenticate(p)) {
             return Err(DocError::Unsupported(format!("{} is password-protected", path.display())));
