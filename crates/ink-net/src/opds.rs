@@ -1054,11 +1054,7 @@ pub struct OpdsClient<'a> {
     pub max_bytes: usize,
 }
 
-impl std::fmt::Debug for OpdsClient<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpdsClient").field("auth", &self.auth.as_ref().map(|(u, _)| u)).field("max_bytes", &self.max_bytes).finish_non_exhaustive()
-    }
-}
+debug_fields!([] OpdsClient<'_>, "OpdsClient", |s| "auth": s.auth.as_ref().map(|(u, _)| u), "max_bytes": s.max_bytes);
 
 impl<'a> OpdsClient<'a> {
     /// A client without credentials, 16 MB feed limit.

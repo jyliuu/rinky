@@ -273,11 +273,7 @@ pub struct SseReader<R> {
     cancel: Option<CancelToken>,
 }
 
-impl<R> std::fmt::Debug for SseReader<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SseReader").field("parser", &self.parser).field("unparsed", &(self.end - self.start)).field("eof", &self.eof).finish_non_exhaustive()
-    }
-}
+debug_fields!([R] SseReader<R>, "SseReader", |s| "parser": s.parser, "unparsed": s.end - s.start, "eof": s.eof);
 
 impl<R: Read> SseReader<R> {
     /// Wraps a body.
@@ -373,11 +369,7 @@ pub struct EventSource<'a> {
     pub activity: Option<NetActivity>,
 }
 
-impl std::fmt::Debug for EventSource<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EventSource").field("url", &self.request.url).field("last_event_id", &self.last_event_id).field("connections", &self.connections).finish_non_exhaustive()
-    }
-}
+debug_fields!([] EventSource<'_>, "EventSource", |s| "url": s.request.url, "last_event_id": s.last_event_id, "connections": s.connections);
 
 impl<'a> EventSource<'a> {
     /// An event source for `request` (normally a GET). Defaults: 3 s retry, 5 reconnects,

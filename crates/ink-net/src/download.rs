@@ -141,11 +141,7 @@ pub struct Hooks<'a> {
     pub on_progress: Option<ProgressFn<'a>>,
 }
 
-impl std::fmt::Debug for Hooks<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Hooks").field("cancel", &self.cancel).field("connectivity", &self.connectivity.is_some()).field("keep_awake", &self.keep_awake.is_some()).finish_non_exhaustive()
-    }
-}
+debug_fields!([] Hooks<'_>, "Hooks", |s| "cancel": s.cancel, "connectivity": s.connectivity.is_some(), "keep_awake": s.keep_awake.is_some());
 
 /// A download job.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -188,11 +188,7 @@ pub struct Response {
     pub url: String,
 }
 
-impl std::fmt::Debug for Response {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Response").field("status", &self.status).field("url", &self.url).field("headers", &self.headers).finish_non_exhaustive()
-    }
-}
+debug_fields!([] Response, "Response", |s| "status": s.status, "url": s.url, "headers": s.headers);
 
 impl Response {
     /// A response (for fakes in tests); header names are lowercased.

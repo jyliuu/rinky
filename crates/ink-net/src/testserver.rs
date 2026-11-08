@@ -133,11 +133,7 @@ pub struct TestServer {
     pub state: Arc<State>,
 }
 
-impl std::fmt::Debug for TestServer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TestServer").field("addr", &self.addr).field("tls", &self.tls).finish_non_exhaustive()
-    }
-}
+debug_fields!([] TestServer, "TestServer", |s| "addr": s.addr, "tls": s.tls);
 
 impl TestServer {
     /// Plain HTTP on `127.0.0.1` with a free port.

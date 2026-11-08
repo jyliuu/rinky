@@ -200,11 +200,7 @@ pub struct KoSyncClient<'a> {
     pub progress_timeout: Duration,
 }
 
-impl std::fmt::Debug for KoSyncClient<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KoSyncClient").field("server", &self.account.server).field("user", &self.account.user).finish_non_exhaustive()
-    }
-}
+debug_fields!([] KoSyncClient<'_>, "KoSyncClient", |s| "server": s.account.server, "user": s.account.user);
 
 impl<'a> KoSyncClient<'a> {
     /// A client with the default timeouts.
