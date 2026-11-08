@@ -312,7 +312,8 @@ fn kern(font: &Font, has_kern: bool, prev: Option<char>, c: char, px: f32) -> f3
     }
 }
 
-/// Rasterizes a prototype-path glyph ([`Fonts::glyph_extra`]).
+/// Rasterizes a prototype-path glyph: metrics and an 8-bit coverage mask, `extra`
+/// pixels bolder ([`Fonts::draw_text_extra`]).
 fn proto_glyph(font: &Font, style: Style, c: char, px: f32, extra: u32) -> ProtoGlyph {
     let (m, mask) = font.rasterize(c, px);
     let mut k = extra;
@@ -426,26 +427,15 @@ impl Fonts {
         }
     }
 
-    /// Rasterized glyph (cached): metrics and an 8-bit coverage mask.
-    pub fn glyph(&mut self, style: Style, c: char, px: f32) -> &(Metrics, Vec<u8>) {
-        self.glyph_extra(style, c, px, 0)
-    }
-
-    /// [`Fonts::glyph`] with `extra` more pixels of stroke weight (the user's "darker
-    /// text": [`raster::embolden`] on top of the face's own weight). The advance stays
-    /// the same, so the line breaks do not move.
-    pub fn glyph_extra(&mut self, style: Style, c: char, px: f32, extra: u32) -> &(Metrics, Vec<u8>) {
-        let font = &self.fonts[index(style)];
-        self.glyphs.entry((style, px.to_bits(), extra)).or_default().get_or_insert(c, || proto_glyph(font, style, c, px, extra))
-    }
-
     /// Draws `text` with its left edge at `x` and baseline at `baseline`.
     /// Returns the pen position after the last glyph.
     pub fn draw_text(&mut self, canvas: &mut Canvas, style: Style, px: f32, x: f32, baseline: f32, text: &str) -> f32 {
         self.draw_text_extra(canvas, style, px, x, baseline, text, 0)
     }
 
-    /// [`Fonts::draw_text`] with `extra` more pixels of stroke weight ([`Fonts::glyph_extra`]).
+    /// [`Fonts::draw_text`] with `extra` more pixels of stroke weight (the user's "darker
+    /// text": [`raster::embolden`] on top of the face's own weight). The advance stays
+    /// the same, so the line breaks do not move.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_text_extra(&mut self, canvas: &mut Canvas, style: Style, px: f32, x: f32, baseline: f32, text: &str, extra: u32) -> f32 {
         let mut pen = x;
@@ -709,13 +699,8 @@ impl Fonts {
         self.shape(style, px, text).width
     }
 
-    /// The cached bitmap of one shaped glyph.
-    pub fn glyph_mask(&mut self, face: FaceId, id: u16, px: f32, synth: Synth) -> &GlyphMask {
-        self.glyph_mask_extra(face, id, px, synth, 0)
-    }
-
-    /// [`Fonts::glyph_mask`] with `extra` more pixels of stroke weight (the user's
-    /// "darker text", as [`Fonts::glyph_extra`] on the prototype path).
+    /// The cached bitmap of one shaped glyph with `extra` more pixels of stroke weight
+    /// (the user's "darker text", as [`Fonts::draw_text_extra`] on the prototype path).
     pub fn glyph_mask_extra(&mut self, face: FaceId, id: u16, px: f32, synth: Synth, extra: u32) -> &GlyphMask {
         let key = GlyphKey { face, id, px: px.to_bits(), synth, extra };
         let data = &self.faces[face as usize];
@@ -1031,7 +1016,7 @@ mod tests {
         assert_eq!(italic.glyphs[0].synth, Synth { bold: false, italic: true });
         assert_eq!(both.glyphs[0].synth, Synth { bold: true, italic: true });
         assert!(bold.width > regular.width);
-        let ink = |f: &mut Fonts, run: &TextRun| f.glyph_mask(run.glyphs[0].face, run.glyphs[0].id, 40.0, run.glyphs[0].synth).ink();
+        let ink = |f: &mut Fonts, run: &TextRun| f.glyph_mask_extra(run.glyphs[0].face, run.glyphs[0].id, 40.0, run.glyphs[0].synth, 0).ink();
         let (r, b) = (ink(&mut f, &regular), ink(&mut f, &bold));
         assert!(b > r * 1.2, "bold ink {b} regular {r}");
         // Main faces: bold italic is the italic face plus synthetic bold.
