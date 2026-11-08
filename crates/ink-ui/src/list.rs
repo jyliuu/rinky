@@ -111,13 +111,11 @@ pub fn paint_cover(cx: &mut PaintCx, r: Rect, cover: &Cover) -> Rect {
                     break;
                 }
                 // A word wider than the cover (no break point) is set smaller to fit.
-                let mut lpx = px;
-                let mut w = cx.text_width(Style::Bold, lpx, &l);
-                if w > inner.w as f32 {
-                    lpx = (px * inner.w as f32 / w).floor().max(10.0);
-                    w = cx.text_width(Style::Bold, lpx, &l);
+                let mut run = cx.fonts.shape(Style::Bold, px, &l);
+                if run.width > inner.w as f32 {
+                    run = cx.fonts.shape(Style::Bold, (px * inner.w as f32 / run.width).floor().max(10.0), &l);
                 }
-                cx.draw_text_clipped(Style::Bold, lpx, inner.x as f32 + (inner.w as f32 - w).max(0.0) / 2.0, y, &l, t.fg, inner);
+                cx.put_run(&run, inner.x as f32 + (inner.w as f32 - run.width).max(0.0) / 2.0, y, t.fg, Some(inner));
                 y += px * 1.2;
             }
             r

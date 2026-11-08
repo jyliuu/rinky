@@ -331,10 +331,9 @@ impl Widget for ProgressBar {
     fn paint(&mut self, cx: &mut PaintCx, b: Rect) {
         let t = cx.theme;
         let small = t.caption.px;
-        let text_w = match &self.label {
-            Some(l) => cx.text_width(Style::Bold, small, l).ceil() as u32,
-            None => 0,
-        };
+        // The label is shaped once: for its width and to draw it.
+        let label = self.label.as_ref().map(|l| (l, cx.fonts.shape(Style::Bold, small, l)));
+        let text_w = label.as_ref().map_or(0, |(_, run)| run.width.ceil() as u32);
         let slot_w = match (&self.label, &self.label_slot) {
             (Some(_), Some(w)) => cx.text_width(Style::Bold, small, w).ceil() as u32,
             _ => 0,
@@ -359,12 +358,12 @@ impl Widget for ProgressBar {
         } else {
             self.paint_gray(cx, area, bar, h, done);
         }
-        if let Some(l) = &self.label {
+        if let Some((l, run)) = label {
             // Right-aligned in the column when a slot is reserved.
             let col_w = label_w.saturating_sub(space(2) as u32);
             let off = if self.label_slot.is_some() { col_w.saturating_sub(text_w + 4) } else { 0 };
             let r = Rect::new(bar.right() + space(2) + off as i32, area.y, col_w - off.min(col_w), area.h);
-            cx.text_left(r, l, small, Style::Bold, t.fg);
+            cx.put_left(r, run, l, Style::Bold, t.fg);
         }
     }
 }

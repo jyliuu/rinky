@@ -104,7 +104,7 @@ impl<'a> PaintCx<'a> {
     }
 
     /// Draws a shaped run inside the current clip (and inside `extra` when given).
-    fn put_run(&mut self, run: &ink_text::TextRun, x: f32, baseline: f32, value: u8, extra: Option<Rect>) -> f32 {
+    pub(crate) fn put_run(&mut self, run: &ink_text::TextRun, x: f32, baseline: f32, value: u8, extra: Option<Rect>) -> f32 {
         let clip = match (self.clip(), extra) {
             (Some(a), Some(b)) => Some(a.intersect(&b)),
             (a, b) => a.or(b),
@@ -123,7 +123,8 @@ impl<'a> PaintCx<'a> {
     /// Draws `text` centred in `r` at `px` (shaped: kerning, ligatures, fallback faces),
     /// cut with "…" when wider than `r`; inside the [`PaintCx::clip`].
     pub fn text_centered(&mut self, r: Rect, text: &str, px: f32, style: Style, value: u8) {
-        let run = self.fit_run(text, px, style, r.w as f32);
+        let run = self.fonts.shape(style, px, text);
+        let run = self.fit(run, text, style, r.w as f32);
         self.put_centered(r, &run, style, value);
     }
 
@@ -132,12 +133,6 @@ impl<'a> PaintCx<'a> {
         let x = r.x as f32 + (r.w as f32 - run.width) / 2.0;
         let baseline = self.baseline_in(r, run.px, style);
         self.put_run(run, x, baseline, value, None);
-    }
-
-    /// `text` shaped, or its [`PaintCx::ellipsize`]d form when wider than `max`.
-    fn fit_run(&mut self, text: &str, px: f32, style: Style, max: f32) -> ink_text::TextRun {
-        let run = self.fonts.shape(style, px, text);
-        self.fit(run, text, style, max)
     }
 
     /// `run` (`text` shaped in `style`), or the shaped [`PaintCx::ellipsize`]d text when
@@ -188,8 +183,14 @@ impl<'a> PaintCx<'a> {
     /// Draws `text` left-aligned in `r` (vertically centred), cut with "…" when too wide;
     /// inside the [`PaintCx::clip`].
     pub fn text_left(&mut self, r: Rect, text: &str, px: f32, style: Style, value: u8) {
-        let baseline = self.baseline_in(r, px, style);
-        let run = self.fit_run(text, px, style, r.w as f32);
+        let run = self.fonts.shape(style, px, text);
+        self.put_left(r, run, text, style, value);
+    }
+
+    /// [`PaintCx::text_left`] of `run`, `text` already shaped in `style`.
+    pub(crate) fn put_left(&mut self, r: Rect, run: ink_text::TextRun, text: &str, style: Style, value: u8) {
+        let baseline = self.baseline_in(r, run.px, style);
+        let run = self.fit(run, text, style, r.w as f32);
         self.put_run(&run, r.x as f32, baseline, value, None);
     }
 
