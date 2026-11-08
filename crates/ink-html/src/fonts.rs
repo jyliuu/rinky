@@ -503,12 +503,9 @@ impl FontBook {
             } else {
                 t
             };
+            // No sans face is embedded: a sans name only matches a system or book family.
             if let Some(&id) = self.by_name.get(k) {
                 return id;
-            }
-            if k == "sans-serif" || k.contains("sans") {
-                // No sans face is embedded; a system or book sans would have matched above.
-                continue;
             }
         }
         0

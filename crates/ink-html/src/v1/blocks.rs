@@ -44,13 +44,6 @@ impl Block {
     }
 }
 
-/// One spine item.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Chapter {
-    /// Blocks in order.
-    pub blocks: Vec<Block>,
-}
-
 /// Replacement text for a named HTML entity.
 pub fn html_entity(name: &str) -> Option<&'static str> {
     Some(match name {

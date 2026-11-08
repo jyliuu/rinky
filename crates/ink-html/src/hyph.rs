@@ -60,8 +60,6 @@ fn dictionary_code(tag: &str) -> Option<HLang> {
         "sr" => "sr-cyrl",
         "sh" => "sh-latn",
         "mn" => "mn-cyrl",
-        "la" => "la",
-        "fi" => "fi",
         "zh" => "zh-latn-pinyin",
         p => p,
     };
