@@ -825,17 +825,13 @@ fn json_publication(p: &serde_json::Value, base: &str) -> OpdsEntry {
     // The largest image is the cover, the smallest (if there are several) the thumbnail.
     let area = |l: &serde_json::Value| l.get("width").and_then(|w| w.as_u64()).unwrap_or(0) * l.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
     let imgs: Vec<(u64, OpdsLink)> = json_array(p, "images").iter().filter_map(|l| json_link(l, base).map(|k| (area(l), k))).collect();
-    let largest = imgs.iter().enumerate().max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.0.cmp(&a.0))).map(|(i, _)| i);
-    let smallest = imgs.iter().enumerate().min_by(|a, b| a.1 .0.cmp(&b.1 .0).then(a.0.cmp(&b.0))).map(|(i, _)| i);
-    if let Some(i) = largest {
-        let mut c = imgs[i].1.clone();
-        c.rel = IMAGE_RELS[0].into();
-        e.links.push(c);
-    }
-    if let Some(i) = smallest.filter(|_| imgs.len() > 1) {
-        let mut t = imgs[i].1.clone();
-        t.rel = THUMBNAIL_RELS[0].into();
-        e.links.push(t);
+    // On ties the first image wins (max_by_key keeps the last maximum, hence the rev).
+    let largest = imgs.iter().rev().max_by_key(|(area, _)| *area);
+    let smallest = imgs.iter().min_by_key(|(area, _)| *area).filter(|_| imgs.len() > 1);
+    for (img, rel) in [(largest, IMAGE_RELS[0]), (smallest, THUMBNAIL_RELS[0])] {
+        if let Some((_, l)) = img {
+            e.links.push(OpdsLink { rel: rel.into(), ..l.clone() });
+        }
     }
     e
 }
