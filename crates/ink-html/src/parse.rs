@@ -54,10 +54,7 @@ pub fn decode_attr(raw: &str) -> String {
         if let Some(e) = end.filter(|&e| rest.as_bytes().get(e) == Some(&b';')) {
             let name = &rest[1..e];
             let decoded = if let Some(num) = name.strip_prefix('#') {
-                let code = match num.strip_prefix(['x', 'X']) {
-                    Some(h) => u32::from_str_radix(h, 16).ok(),
-                    None => num.parse::<u32>().ok(),
-                };
+                let code = num.strip_prefix(['x', 'X']).map_or_else(|| num.parse().ok(), |h| u32::from_str_radix(h, 16).ok());
                 code.and_then(char::from_u32).map(|c| c.to_string())
             } else {
                 crate::dom::named_entity(name).map(|(a, b)| std::iter::once(a).chain(b).collect())
@@ -266,10 +263,7 @@ fn walk(root: &Handle, b: &mut Builder, has_tbody: bool) {
                     .borrow()
                     .iter()
                     .map(|a| {
-                        let k = match &a.name.prefix {
-                            Some(p) => format!("{}:{}", p, a.name.local),
-                            None => a.name.local.to_string(),
-                        };
+                        let k = a.name.prefix.as_ref().map_or_else(|| a.name.local.to_string(), |p| format!("{p}:{}", a.name.local));
                         (k, a.value.to_string())
                     })
                     .collect();

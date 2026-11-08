@@ -631,10 +631,7 @@ impl<'c> Builder<'c> {
         } else {
             self.dom.element(parent).map(|e| e.st.white_space).unwrap_or_default()
         };
-        let mut st = match self.classifier.as_deref_mut() {
-            Some(c) => c.classify(&self.dom, id, parent_ws),
-            None => default_struct(&name, parent_ws),
-        };
+        let mut st = self.classifier.as_deref_mut().map_or_else(|| default_struct(&name, parent_ws), |c| c.classify(&self.dom, id, parent_ws));
         // `body` is a block whatever the CSS says.
         if name == "body" {
             st.display = Display::Block;

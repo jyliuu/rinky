@@ -129,10 +129,8 @@ impl Family {
             let pooled = if self.use_pool { self.static_bytes(c).and_then(pool::take) } else { None };
             let parsed = pooled.or_else(|| {
                 // Data that lives for the whole program is not copied.
-                let r = match self.static_bytes(c) {
-                    Some(b) => Some(Fonts::from_static([b, PLACEHOLDER, PLACEHOLDER])),
-                    None => self.bytes(c).map(|b| Fonts::from_bytes([b, PLACEHOLDER, PLACEHOLDER])),
-                };
+                let r = self.static_bytes(c).map(|b| Fonts::from_static([b, PLACEHOLDER, PLACEHOLDER]));
+                let r = r.or_else(|| self.bytes(c).map(|b| Fonts::from_bytes([b, PLACEHOLDER, PLACEHOLDER])));
                 r.and_then(|r| match r {
                     Ok(f) => Some(f),
                     Err(e) => {

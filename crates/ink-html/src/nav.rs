@@ -33,10 +33,7 @@ pub struct Navigation {
 
 /// Resolves `href` (with fragment) against `dir`.
 pub fn resolve_with_fragment(dir: &str, href: &str) -> String {
-    let (path, frag) = match href.split_once('#') {
-        Some((p, f)) => (p, Some(f)),
-        None => (href, None),
-    };
+    let (path, frag) = href.split_once('#').map_or((href, None), |(p, f)| (p, Some(f)));
     let base = if path.is_empty() { String::new() } else { resolve_href(dir, path) };
     match frag {
         Some(f) => format!("{base}#{}", ink_doc::percent_decode(f)),

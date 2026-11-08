@@ -663,10 +663,7 @@ impl HtmlDocument {
 
     /// The target of an href (`path#frag`): spine item, position and position key.
     fn href_target(&self, href: &str) -> Option<(usize, Position, (u32, u32))> {
-        let (path, frag) = match href.split_once('#') {
-            Some((p, f)) => (p, Some(f)),
-            None => (href, None),
-        };
+        let (path, frag) = href.split_once('#').map_or((href, None), |(p, f)| (p, Some(f)));
         let c = *self.paths.get(path)?;
         let frag_n = self.book.chapters[c].fragment?;
         let ch = self.book.chapter(c);

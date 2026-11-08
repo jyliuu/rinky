@@ -255,10 +255,7 @@ pub fn has_image_tag(html: &str) -> bool {
             j += 1;
         }
         let name = &b[start..j];
-        let local = match name.iter().rposition(|&c| c == b':') {
-            Some(k) => &name[k + 1..],
-            None => name,
-        };
+        let local = name.rsplit(|&c| c == b':').next().unwrap_or(name);
         if local.eq_ignore_ascii_case(b"img") || local.eq_ignore_ascii_case(b"image") {
             return true;
         }
@@ -471,10 +468,7 @@ impl Book {
         let ch = &self.chapters[i];
         let mut cl = ChapterClassifier { book: self, dir: &ch.dir, cascade: None };
         let dom = crate::parse::parse_chapter(&ch.html, &mut cl);
-        let author = match cl.cascade {
-            Some(c) => c.author,
-            None => self.author_rules(&ch.dir, &dom.sheets),
-        };
+        let author = cl.cascade.map_or_else(|| self.author_rules(&ch.dir, &dom.sheets), |c| c.author);
         ChapterDom { dom, author }
     }
 }
