@@ -152,8 +152,8 @@ impl Accumulator {
                 out.push((acc.abs().min(1.0) * 255.0 + 0.5) as u8);
             }
         };
-        let mut chunks = cells.chunks_exact(CHUNK);
-        for c in &mut chunks {
+        let (chunks, rest) = cells.as_chunks::<CHUNK>();
+        for c in chunks {
             // Zero or minus zero in every cell (sign bit masked off).
             if c.iter().fold(0u32, |m, a| m | a.to_bits()) & 0x7fff_ffff == 0 {
                 let v = out.last().copied().unwrap_or(0);
@@ -162,7 +162,7 @@ impl Accumulator {
                 sum(&mut out, c);
             }
         }
-        sum(&mut out, chunks.remainder());
+        sum(&mut out, rest);
         out
     }
 }
