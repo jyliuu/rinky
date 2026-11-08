@@ -475,6 +475,47 @@ fn aa_preview_shows_the_text_weight() {
     assert!(ink[1] as f64 > ink[0] as f64 * 1.1 && ink[2] as f64 > ink[1] as f64 * 1.1, "preview ink normal, darker, darkest: {ink:?}");
 }
 
+/// A change on one control of the Aa sheet that other controls show (a preset sets the
+/// size, spacing, margins, justify and hyphenation; a size step can select or clear a
+/// preset; a font changes the preview) is shown in the same frame: no pixel stays
+/// drawn outside every update rect, also through key presses and the relayout.
+#[test]
+fn aa_controls_show_every_value_they_change() {
+    let mut h = Harness::new("aa-damage", "juliet.epub");
+    h.tap_at(636, 848);
+    h.tap_button("aa");
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Aa));
+    let o = h.reader.overlay().unwrap();
+    let presets = o.tree.bounds(o.ids["preset"]).unwrap();
+    let weight = o.tree.bounds(o.ids["weight"]).unwrap();
+    let justify = ink_ui::Toggle::switch_rect(o.tree.bounds(o.ids["justify"]).unwrap());
+    let n = aa::PRESETS.len() as i32;
+    let chip = |i: i32| (presets.x + presets.w as i32 * (2 * i + 1) / (2 * n), presets.y + presets.h as i32 / 2);
+    for i in [3, 0, 2, 1] {
+        let (x, y) = chip(i);
+        h.tap_at(x, y);
+        assert_eq!(h.reader.actions().last().map(String::as_str), Some(format!("aa-preset:{i}").as_str()));
+        assert_eq!(h.probe.uncovered(), vec![], "preset {i}");
+        h.key(Key::PageNext);
+        h.key(Key::PagePrev);
+        assert_eq!(h.probe.uncovered(), vec![], "keys after preset {i}");
+    }
+    // Standard is selected; a size step clears it and a step back selects it again.
+    for r in [slider_plus(&h, "size"), aa::slider_parts(h.reader.overlay().unwrap(), "size").unwrap().0] {
+        let n = h.probe.updates().len();
+        h.tap(r);
+        assert_eq!(h.probe.uncovered(), vec![], "{:?}", h.reader.actions().last());
+        let ups = &h.probe.updates()[n..];
+        assert!(ups.iter().any(|u| u.rect.intersect(&presets) == presets), "the preset row is shown again: {ups:?}");
+    }
+    h.tap(justify);
+    h.tap_at(weight.x + weight.w as i32 / 2, weight.y + weight.h as i32 / 2);
+    assert_eq!(h.probe.uncovered(), vec![], "{:?}", h.reader.actions());
+    settle_aa(&mut h);
+    h.key(Key::PageNext);
+    assert_eq!(h.probe.uncovered(), vec![], "after the relayout");
+}
+
 #[test]
 fn aa_panel_relayouts_keeps_the_position_and_saves_per_book_and_global() {
     let mut h = Harness::new("aa", "juliet.epub");

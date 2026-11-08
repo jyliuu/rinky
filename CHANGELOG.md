@@ -4,6 +4,13 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Reading settings (Aa): a preset or a font size step now also refreshes the preview
+  and the other controls it changes (the size, the preset chips, Justify), which
+  could stay showing the old values on the screen.
+
 ## [0.5.3] - 2026-11-07
 
 ### Changed
