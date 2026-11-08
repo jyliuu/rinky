@@ -66,21 +66,6 @@ impl KoreaderDirs {
     pub fn vocabulary(&self) -> PathBuf {
         self.settings_dir().join("vocabulary_builder.sqlite3")
     }
-
-    /// `docsettings/` (the "dir" sidecar location).
-    pub fn docsettings(&self) -> PathBuf {
-        self.root.join("docsettings")
-    }
-
-    /// `hashdocsettings/` (the "hash" sidecar location).
-    pub fn hashdocsettings(&self) -> PathBuf {
-        self.root.join("hashdocsettings")
-    }
-
-    /// `history/` (legacy sidecars).
-    pub fn history(&self) -> PathBuf {
-        self.root.join("history")
-    }
 }
 
 /// Kind of a KOReader annotation.
@@ -356,12 +341,12 @@ pub fn metadata_candidates(book: &Path, ko: Option<&KoreaderDirs>, md5: Option<&
         // KOReader: DOCSETTINGS_DIR .. "<absolute path without suffix>.sdr".
         let b = os_bytes(doc_dir.as_os_str());
         let rel = os_from_bytes(b[b.iter().take_while(|&&c| c == b'/').count()..].to_vec());
-        v.extend(with_old(ko.docsettings().join(rel).join(&name)));
+        v.extend(with_old(ko.root.join("docsettings").join(rel).join(&name)));
         // Only a real book id names a directory (it comes from a file).
         if let Some(md5) = md5.and_then(crate::md5::normalize_md5) {
-            v.extend(with_old(ko.hashdocsettings().join(&md5[..2]).join(format!("{md5}.sdr")).join(&name)));
+            v.extend(with_old(ko.root.join("hashdocsettings").join(&md5[..2]).join(format!("{md5}.sdr")).join(&name)));
         }
-        v.extend(with_old(ko.history().join(history_name(book))));
+        v.extend(with_old(ko.root.join("history").join(history_name(book))));
     }
     v.push(with_suffix(book, ".kpdfview.lua"));
     v
