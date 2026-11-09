@@ -2,7 +2,8 @@
 //! at its bottom, a thick rule along its top edge, as KOReader's `FootnoteWidget`
 //! (`frontend/ui/widget/footnotewidget.lua`) shows it. Its height follows the text, up
 //! to half the screen; a longer note is shown a page at a time (a tap on the text or a
-//! swipe turns). A *Go to note* button ends it; a tap outside closes it (the overlay's
+//! swipe turns). It starts with the note's number in bold, as the book prints it before
+//! the text, and a *Go to note* button at the right ends it; a tap outside closes it (the overlay's
 //! scrim), so it has no Close button.
 //!
 //! The text is set in the interface family with its real bold and italic faces
@@ -125,15 +126,19 @@ impl NotePanel {
         Rect::new(b.x, bottom - (PAD_BOTTOM + ROW_H) as i32, b.w, ROW_H)
     }
 
-    /// Where the buttons are inside the panel's bounds `b`: the first at the left, the
-    /// second at the right, each under the text's padding.
+    /// Where the buttons are inside the panel's bounds `b`, under the text's padding: a
+    /// single button at the right, two at the left and the right.
     pub fn button_rects(&self, b: Rect) -> Vec<Rect> {
         let row = self.row_rect(b);
         let pad = self.pad_x.round() as i32;
         let w = BUTTON_W.min(b.w / 2 - pad as u32);
         let left = Rect::new(b.x + pad, row.y, w, ROW_H);
         let right = Rect::new(b.right() - pad - w as i32, row.y, w, ROW_H);
-        [left, right].into_iter().take(self.buttons.len()).collect()
+        match self.buttons.len() {
+            0 => Vec::new(),
+            1 => vec![right],
+            _ => vec![left, right],
+        }
     }
 
     /// Turns `by` pages (wrapping round); true when the page changed.

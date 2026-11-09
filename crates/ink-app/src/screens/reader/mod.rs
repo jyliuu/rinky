@@ -461,6 +461,17 @@ pub fn prepare_note(note: &mut ink_doc::Note, reference: &str) {
     }
 }
 
+/// A note's styled text with its number in front, in bold and followed by a space
+/// (`**57** The text`), as the book prints it before the text: the extraction takes the
+/// number out with the punctuation after it so that a "57." never stays behind as a
+/// paragraph of its own, and the panel puts it back on the first line.
+pub fn numbered(label: Option<String>, mut spans: Vec<(String, Style)>) -> Vec<(String, Style)> {
+    if let Some(l) = label.filter(|_| !spans.is_empty()) {
+        spans.insert(0, (format!("{l} "), Style::Bold));
+    }
+    spans
+}
+
 /// Height of a link popup `width` wide on a screen `screen_h` high for `text` (`\n`
 /// between paragraphs) above a button row: the text's lines at about 17 px per
 /// character of the popup's 34 px text, between 240 px and 60 % of the screen.
@@ -1169,7 +1180,8 @@ impl ReaderScreen {
                         prepare_note(&mut n, &link.text);
                         self.note_target = Some(n.position.clone());
                         let buttons = vec![("Go to note".to_string(), "note-go".to_string())];
-                        let o = self.note_overlay(note_spans(&n, 4000), buttons, size, anchor);
+                        let label = n.label.clone().or_else(|| ink_doc::note_mark(&link.text));
+                        let o = self.note_overlay(numbered(label, note_spans(&n, 4000)), buttons, size, anchor);
                         self.open_overlay(o, cx);
                     }
                     None => self.jump(&target, link.footnote),

@@ -736,8 +736,9 @@ fn footnote_panel_at_the_bottom_shows_only_the_note() {
     assert_eq!((r.x, r.w, r.bottom()), (0, full.w, full.h as i32), "full width, on the bottom edge: {r:?}");
     assert!(!p.at_top);
     let text: String = p.spans.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(text, "The text of note 57, which says something about Hamlet.");
-    assert_eq!(p.spans[1], ("Hamlet".to_string(), Style::Italic));
+    assert_eq!(text, "57 The text of note 57, which says something about Hamlet.");
+    assert_eq!(p.spans[0], ("57 ".to_string(), Style::Bold), "the number leads, in bold");
+    assert_eq!(p.spans[2], ("Hamlet".to_string(), Style::Italic));
     assert_eq!(p.pages.len(), 1);
     let one_line = r.h;
     // One line of text: no empty space (the text, padding and the button row).
@@ -746,6 +747,7 @@ fn footnote_panel_at_the_bottom_shows_only_the_note() {
     // Go to note sits in the panel; there is no Close button (a tap outside closes).
     let go = h.reader.overlay().unwrap().button_rect("note-go").unwrap();
     assert!(r.contains(Point::new(go.x, go.y)));
+    assert!(go.x > (full.w / 2) as i32, "Go to note sits at the right: {go:?}");
     assert!(h.reader.overlay().unwrap().button_rect("close").is_none());
     h.tap_at(636, r.y - 200);
     assert_eq!(h.kind(), None);
@@ -753,7 +755,7 @@ fn footnote_panel_at_the_bottom_shows_only_the_note() {
     tap_note(&mut h, "58");
     let (p, r) = note_panel(&mut h);
     let text: String = p.spans.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(text, "The first paragraph of note 58.\nIts second paragraph.");
+    assert_eq!(text, "58 The first paragraph of note 58.\nIts second paragraph.");
     assert!(r.h > one_line + 40 && r.h < one_line + 100, "{} {one_line}", r.h);
     assert_eq!(r.bottom(), full.h as i32);
     h.shot("02-note-58");
