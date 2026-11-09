@@ -333,6 +333,9 @@ pub struct LibraryScreen {
     pub(crate) nav: Vec<String>,
     /// On-screen keyboard layouts (`ui.keyboard_layouts`, first = default).
     keyboard_layouts: Vec<String>,
+    /// The tap of the key lift that closed the keyboard (hide, Enter): dropped, so it
+    /// does not reach the navigation bar or the books under the key.
+    closing_tap: ink_ui::ClosingTap,
     /// A navigation item that opens a plugin page, run in `handle` (needs `cx`).
     nav_plugin: Option<String>,
     /// Library entries of the enabled plugins (copied from the plugin host on enter):
@@ -402,6 +405,7 @@ impl LibraryScreen {
             home: home::HomeCache::default(),
             nav: ink_store::prefs::UiSettings::default().nav_items,
             keyboard_layouts: vec!["en".into()],
+            closing_tap: ink_ui::ClosingTap::default(),
             nav_plugin: None,
             plugin_entries: Vec::new(),
             run_entry: None,
@@ -910,6 +914,7 @@ impl LibraryScreen {
                 if let Some(accept) = done {
                     self.search_due = None;
                     self.overlay = None;
+                    self.closing_tap.arm(ev);
                     self.redraw();
                     if accept {
                         self.input_done(purpose, text.trim());
@@ -1250,6 +1255,9 @@ impl LibraryScreen {
         }
         if self.overlay.is_some() {
             return self.handle_overlay(ev, size);
+        }
+        if self.closing_tap.drop(ev) {
+            return Transition::None;
         }
         if let UiEvent::Touch(t) = ev {
             if self.bar_touch(t, size) {
