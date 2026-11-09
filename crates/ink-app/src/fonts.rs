@@ -23,7 +23,7 @@
 
 use ink_store::{Paths, Settings};
 use ink_text::registry::{self, FaceRef, FontFamily};
-use ink_text::{FaceData, FaceId, Fonts, Style};
+use ink_text::{FaceData, FaceId, Fonts, Style, Synth};
 use ink_ui::PaintCx;
 use ink_device::Rect;
 use serde_json::{json, Value};
@@ -328,9 +328,10 @@ pub fn builtin_ui_fonts() -> Fonts {
 }
 
 /// The UI family `name` with its bold and italic faces, for UI text whose emphasis
-/// matters (a dictionary entry). The interface picker offers only families that have
-/// both ([`ui_picker_names`]); a face missing from one chosen before is its regular
-/// face. Falls back to the built-in family.
+/// matters (the plugin Markdown viewer, a footnote). The interface picker offers only
+/// families that have both ([`ui_picker_names`]); a face missing from one chosen before
+/// is its regular face drawn with synthetic bold or slant. Falls back to the built-in
+/// family.
 pub fn emphasis_fonts(name: &str) -> Fonts {
     family_fonts(name, true).unwrap_or_else(|| family_fonts("", true).expect("embedded UI font"))
 }
@@ -359,24 +360,37 @@ pub fn with_emphasis_fonts<R>(f: impl FnOnce(&mut Fonts) -> R) -> R {
 /// [`BUILTIN`]: the embedded Noto Serif) with the UI fallback faces
 /// ([`add_ui_fallbacks`]). With `emphasis` the bold slot holds the family's bold face;
 /// without, bold text is drawn in the regular face (light titles), and so is italic
-/// text in Noto Sans. A missing bold or italic face is the regular one. `None` when the
-/// family is not installed or does not parse.
+/// text in Noto Sans. `None` when the family is not installed or does not parse.
 fn family_fonts(name: &str, emphasis: bool) -> Option<Fonts> {
     let name = name.trim();
-    let (faces, noto_serif) = if name.is_empty() || name.eq_ignore_ascii_case(UI_BUILTIN) {
-        (if emphasis { [UI_REGULAR, UI_BOLD, UI_ITALIC] } else { [UI_REGULAR; 3] }, false)
+    let (faces, noto_serif, missing) = if name.is_empty() || name.eq_ignore_ascii_case(UI_BUILTIN) {
+        (if emphasis { [UI_REGULAR, UI_BOLD, UI_ITALIC] } else { [UI_REGULAR; 3] }, false, Synth::NONE)
     } else if name.eq_ignore_ascii_case(BUILTIN) {
         let face = ink_text::embedded_font_bytes;
-        ([face(Style::Regular), face(if emphasis { Style::Bold } else { Style::Regular }), face(Style::Italic)], true)
+        ([face(Style::Regular), face(if emphasis { Style::Bold } else { Style::Regular }), face(Style::Italic)], true, Synth::NONE)
     } else {
-        let fam = registry::installed_family(name)?;
-        let map = |f: Option<&FaceRef>| f.and_then(|f| ink_text::face::map_file(&f.path).ok());
-        let r = map(fam.regular())?;
-        let b = if emphasis { map(fam.face(true, false)).unwrap_or(r) } else { r };
-        ([r, b, map(fam.face(false, true)).unwrap_or(r)], false)
+        let (faces, missing) = installed_faces(&registry::installed_family(name)?, emphasis)?;
+        (faces, false, missing)
     };
+    build_ui_fonts(name, faces, noto_serif, missing)
+}
+
+/// The faces of installed family `fam` for [`family_fonts`]: a missing bold or italic
+/// face is the regular one, and with `emphasis` it is drawn synthetic (the returned
+/// [`Synth`]), so bold and italic text still shows.
+fn installed_faces(fam: &FontFamily, emphasis: bool) -> Option<([&'static [u8]; 3], Synth)> {
+    let map = |f: Option<&FaceRef>| f.and_then(|f| ink_text::face::map_file(&f.path).ok());
+    let r = map(fam.regular())?;
+    let (b, i) = (map(fam.faces[1].as_ref()), map(fam.faces[2].as_ref()));
+    let missing = Synth { bold: emphasis && b.is_none(), italic: emphasis && i.is_none() };
+    Some(([r, if emphasis { b.unwrap_or(r) } else { r }, i.unwrap_or(r)], missing))
+}
+
+/// UI fonts from `faces` with the UI fallback faces, `missing` slots synthesized.
+fn build_ui_fonts(name: &str, faces: [&'static [u8]; 3], noto_serif: bool, missing: Synth) -> Option<Fonts> {
     match Fonts::from_static(faces) {
         Ok(mut f) => {
+            f.synthesize(missing);
             add_ui_fallbacks(&mut f, noto_serif);
             Some(f)
         }
@@ -572,6 +586,29 @@ mod tests {
         assert_eq!(ui_list(&installed, ""), ["Noto Serif", "Noto Sans", "Bookerly"]);
         // A family chosen before stays listed, so its check mark shows.
         assert_eq!(ui_list(&installed, "futura"), ["Noto Serif", "Noto Sans", "Bookerly", "Futura"]);
+    }
+
+    /// An installed interface family without bold and italic files (Droid Sans Mono, one
+    /// face): emphasis draws its regular face with synthetic bold and slant, so bold
+    /// and italic text still differs from regular; the light UI fonts do not.
+    #[test]
+    fn emphasis_of_a_family_without_bold_or_italic_is_synthetic() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/ink-html/fonts");
+        let families = registry::group_families(&registry::scan_fonts(&[dir]));
+        let mono = families.iter().find(|f| f.name == "Droid Sans Mono").expect("Droid Sans Mono");
+        assert!(mono.faces[1].is_none() && mono.faces[2].is_none());
+        let (faces, missing) = installed_faces(mono, true).unwrap();
+        assert_eq!(missing, Synth { bold: true, italic: true });
+        let mut f = build_ui_fonts(&mono.name, faces, false, missing).unwrap();
+        let t = "Household";
+        let (regular, _) = render(&mut f, &[(Style::Regular, t)]);
+        for style in [Style::Bold, Style::Italic, Style::BoldItalic] {
+            assert!(render(&mut f, &[(style, t)]).0.pixels != regular.pixels, "{style:?}: drawn as regular");
+        }
+        let (faces, missing) = installed_faces(mono, false).unwrap();
+        assert_eq!(missing, Synth::NONE);
+        let mut light = build_ui_fonts(&mono.name, faces, false, missing).unwrap();
+        assert!(render(&mut light, &[(Style::Bold, t)]).0.pixels == render(&mut light, &[(Style::Regular, t)]).0.pixels, "light titles");
     }
 
     /// Text whose emphasis matters gets the family's real bold and italic faces.

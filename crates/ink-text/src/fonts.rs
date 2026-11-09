@@ -345,6 +345,9 @@ pub struct Fonts {
     runs: FastMap<(Style, u32), FastMap<Box<str>, TextRun>>,
     /// Bytes of the kept runs: keys, runs, text and glyphs.
     run_bytes: usize,
+    /// The bold slot (`bold`) or the italic slot (`italic`) holds the regular face and
+    /// is drawn with synthetic bold or oblique ([`Fonts::synthesize`]).
+    synthetic: Synth,
 }
 
 /// Bytes of runs [`Fonts::shape`] keeps: a text field shapes its whole text on each
@@ -470,7 +473,17 @@ impl Fonts {
             shaped: GlyphCache::new(GLYPH_CACHE_BYTES),
             runs: FastMap::default(),
             run_bytes: 0,
+            synthetic: Synth::NONE,
         }
+    }
+
+    /// Draws the bold slot with synthetic bold (`missing.bold`) and the italic slot with
+    /// a synthetic slant (`missing.italic`) on the shaped path ([`Fonts::shape`]): for a
+    /// family without a bold or italic file, whose regular face fills that slot.
+    pub fn synthesize(&mut self, missing: Synth) {
+        self.synthetic = missing;
+        self.runs.clear();
+        self.run_bytes = 0;
     }
 
     /// The `fontdue` face for `style` (bold italic: the italic face).
@@ -668,7 +681,10 @@ impl Fonts {
     /// Synthesis needed to show `style` with face `id`.
     fn synth_for(&self, id: FaceId, style: Style) -> Synth {
         if id < 3 {
-            return Self::main_face(style).1;
+            let mut s = Self::main_face(style).1;
+            s.bold |= id == 1 && self.synthetic.bold;
+            s.italic |= id == 2 && self.synthetic.italic;
+            return s;
         }
         let info = &self.faces[id as usize].info;
         Synth { bold: style.is_bold() && !info.bold, italic: style.is_italic() && !info.italic }
@@ -1181,6 +1197,30 @@ mod tests {
         // Main faces: bold italic is the italic face plus synthetic bold.
         let bi = f.shape(Style::BoldItalic, 40.0, "a");
         assert_eq!((bi.glyphs[0].face, bi.glyphs[0].synth), (2, Synth { bold: true, italic: false }));
+    }
+
+    /// A family without bold and italic files: the regular face in those slots, drawn
+    /// with synthetic bold and slant, wider and darker or slanted.
+    #[test]
+    fn synthetic_main_slots_for_a_family_without_bold_and_italic() {
+        let mut f = Fonts::from_static([REGULAR; 3]).unwrap();
+        let ink = |f: &mut Fonts, style: Style| {
+            let run = f.shape(style, 40.0, "Household");
+            let mut c = Canvas::new(400, 80);
+            f.draw_run(&mut c, &run, 10.0, 60.0);
+            (run.width, c.pixels)
+        };
+        let regular = ink(&mut f, Style::Regular);
+        assert_eq!(ink(&mut f, Style::Bold), regular, "without synthesis the slots draw the regular face");
+        f.synthesize(Synth { bold: true, italic: true });
+        assert_eq!(ink(&mut f, Style::Regular), regular);
+        let (bw, bold) = ink(&mut f, Style::Bold);
+        let darkness = |p: &[u8]| p.iter().map(|v| 255 - *v as u32).sum::<u32>();
+        assert!(bw > regular.0 && darkness(&bold) as f32 > darkness(&regular.1) as f32 * 1.15, "bold");
+        let (iw, italic) = ink(&mut f, Style::Italic);
+        assert!(italic != regular.1 && (iw - regular.0).abs() < 0.01, "italic: slanted, same advance");
+        let bi = f.shape(Style::BoldItalic, 40.0, "a");
+        assert_eq!((bi.glyphs[0].face, bi.glyphs[0].synth), (2, Synth { bold: true, italic: true }));
     }
 
     #[test]
