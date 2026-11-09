@@ -29,6 +29,7 @@ pub mod footer;
 pub mod goto;
 pub mod light_gestures;
 pub mod menu;
+pub mod note;
 pub mod overlay;
 pub mod search;
 pub mod selection;
@@ -460,10 +461,10 @@ pub fn prepare_note(note: &mut ink_doc::Note, reference: &str) {
     }
 }
 
-/// Height of a popup `width` wide on a screen `screen_h` high for `text` (`\n` between
-/// paragraphs) above a button row: the text's lines at about 17 px per character of the
-/// popup's 34 px text, between 240 px and 60 % of the screen.
-pub fn note_popup_height(text: &str, width: u32, screen_h: u32) -> u32 {
+/// Height of a link popup `width` wide on a screen `screen_h` high for `text` (`\n`
+/// between paragraphs) above a button row: the text's lines at about 17 px per
+/// character of the popup's 34 px text, between 240 px and 60 % of the screen.
+pub fn popup_height(text: &str, width: u32, screen_h: u32) -> u32 {
     let per_line = ((width as usize).saturating_sub(56) / 17).max(10);
     let paras: Vec<&str> = text.split('\n').collect();
     let lines: usize = paras.iter().map(|p| p.chars().count().div_ceil(per_line).max(1)).sum();
@@ -1123,6 +1124,21 @@ impl ReaderScreen {
         links.iter().find(|l| l.rect.is_some_and(|r| near(&r, pos, 18))).cloned()
     }
 
+    /// The overlay of a note: the [`note::NotePanel`] with the note's `spans`, the text
+    /// at the book's size less a step and inside the book's side margins (as KOReader),
+    /// over the page on a `size` screen, kept off the tapped link at `anchor` when it
+    /// can.
+    fn note_overlay(&self, spans: Vec<(String, Style)>, buttons: Vec<(String, String)>, size: Size, anchor: Rect) -> Overlay {
+        let (book_px, margin) = self.doc.as_deref().map_or((40.0, 48.0), |d| (d.layout().font_px, d.layout().margin_left));
+        let px = (book_px * 0.9).round().clamp(26.0, 60.0);
+        let pad = margin.clamp(24.0, 120.0);
+        let mut o = Overlay::over_page(overlay::OverlayKind::Popup, size, "close");
+        let (panel, frame) = note::NotePanel::new(spans, buttons, px, pad, size, anchor);
+        o.buttons.extend(panel.buttons.iter().zip(panel.button_rects(frame)).map(|((_, a), r)| (a.clone(), r)));
+        o.tree.add(None, Box::new(panel), frame);
+        o
+    }
+
     /// Follows a tapped link: a footnote opens a popup, another internal link jumps
     /// (remembering where from), an external link is only shown.
     fn follow_link(&mut self, link: Link, cx: &mut AppCtx) {
@@ -1134,7 +1150,7 @@ impl ReaderScreen {
             let pw = (size.w - 48).min(1100);
             // A title (web links) takes about two lines.
             let lines = if title.is_empty() { text.clone() } else { format!("{title}\n\n{text}") };
-            let psize = Size::new(pw, note_popup_height(&lines, pw, size.h));
+            let psize = Size::new(pw, popup_height(&lines, pw, size.h));
             let frame = ink_ui::Popup::frame(anchor, psize, size);
             o.buttons.extend(buttons.iter().enumerate().map(|(i, (_, a))| {
                 // Same split as the popup's own button row.
@@ -1153,9 +1169,7 @@ impl ReaderScreen {
                         prepare_note(&mut n, &link.text);
                         self.note_target = Some(n.position.clone());
                         let buttons = vec![("Go to note".to_string(), "note-go".to_string()), ("Close".to_string(), "close".to_string())];
-                        let spans = note_spans(&n, 1000);
-                        let text = spans.iter().map(|(t, _)| t.as_str()).collect();
-                        let o = popup(String::new(), text, spans, buttons);
+                        let o = self.note_overlay(note_spans(&n, 4000), buttons, size, anchor);
                         self.open_overlay(o, cx);
                     }
                     None => self.jump(&target, link.footnote),

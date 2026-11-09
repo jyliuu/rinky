@@ -624,7 +624,7 @@ fn footnote_popup_internal_link_and_back() {
     // A tap outside the popup closes it.
     h.tap(r);
     assert_eq!(h.kind(), Some(overlay::OverlayKind::Popup));
-    h.tap_at(636, 1600);
+    h.tap_at(636, 1000);
     assert_eq!(h.kind(), None);
     // A plain internal link jumps at once; the Back key returns.
     let (page2, l2) = find_link(&mut h, 0, |l| !l.footnote && matches!(l.target, ink_doc::LinkTarget::Internal(_)));
@@ -677,51 +677,134 @@ fn note_popup_text_and_spans() {
 }
 
 #[test]
-fn note_popup_height_follows_the_text() {
-    let short = note_popup_height("A short note.", 1100, 1696);
-    assert_eq!(short, 240, "the smallest popup");
+fn link_popup_height_follows_the_text() {
+    assert_eq!(popup_height("A short note.", 1100, 1696), 240, "the smallest popup");
     // Each paragraph starts a line of its own.
-    let one = note_popup_height(&"word ".repeat(30), 1100, 1696);
-    let two = note_popup_height(&format!("{}\n{}", "word ".repeat(15), "word ".repeat(15)), 1100, 1696);
+    let one = popup_height(&"word ".repeat(30), 1100, 1696);
+    let two = popup_height(&format!("{}\n{}", "word ".repeat(15), "word ".repeat(15)), 1100, 1696);
     assert!(two > one, "{two} {one}");
-    assert_eq!(note_popup_height(&"word ".repeat(1000), 1100, 1696), 1696 * 3 / 5);
+    assert_eq!(popup_height(&"word ".repeat(1000), 1100, 1696), 1696 * 3 / 5);
 }
 
-/// The note popup shows the note's text and nothing else: no "Footnote 57" heading, no
-/// number or period left over from the note as the book prints it, paragraphs kept.
-#[test]
-fn footnote_popup_shows_only_the_note() {
-    let html = r##"<html><head><title>Notes</title></head><body>
-        <p>A sentence with a note<a href="#fn57" id="ref57"><sup>57</sup></a> and a second one<a href="#fn58" id="ref58"><sup>58</sup></a>.</p>
+/// The open note panel and its bounds.
+fn note_panel(h: &mut Harness) -> (note::NotePanel, Rect) {
+    let o = h.reader.overlay.as_mut().expect("an overlay");
+    (0..16)
+        .find_map(|i| {
+            let id = ink_ui::WidgetId(i);
+            let p = o.tree.get_mut::<note::NotePanel>(id).cloned()?;
+            Some((p, o.tree.bounds(id)?))
+        })
+        .expect("a note panel")
+}
+
+/// A book with notes 57 (one line, italic), 58 (two paragraphs) and 59 (long), their
+/// references on the first page.
+fn notes_book(test: &str) -> Harness {
+    let long: String = (1..=40).map(|i| format!("Sentence {i} of the long note, which goes on for a while. ")).collect();
+    let html = format!(
+        r##"<html><head><title>Notes</title></head><body>
+        <p>A sentence with a note<a href="#fn57" id="ref57"><sup>57</sup></a>, a second one<a href="#fn58" id="ref58"><sup>58</sup></a> and a long one<a href="#fn59" id="ref59"><sup>59</sup></a>.</p>
         <p>More of the chapter so the notes are further down.</p>
         <p id="fn57"><a href="#ref57">57</a>. The text of note 57, which says something about <i>Hamlet</i>.</p>
         <p id="fn58"><a href="#ref58">58</a>. The first paragraph of note 58.</p><p>Its second paragraph.</p>
-        </body></html>"##;
-    let mut h = Harness::generated("note-popup", "notes.html", html.as_bytes());
-    let popup_of = |h: &mut Harness| -> ink_ui::Popup {
-        let o = h.reader.overlay.as_mut().expect("an overlay");
-        (0..16).find_map(|i| o.tree.get_mut::<ink_ui::Popup>(ink_ui::WidgetId(i)).cloned()).expect("a popup")
-    };
-    let (page, l) = find_link(&mut h, 0, |l| l.footnote && l.text.trim() == "57");
+        <p id="fn59"><a href="#ref59">59</a>. {long}</p>
+        </body></html>"##
+    );
+    let mut h = Harness::generated(test, "notes.html", html.as_bytes());
+    let (page, _) = find_link(&mut h, 0, |l| l.footnote);
     h.reader.go_to_page(page);
     h.paint();
+    h
+}
+
+fn tap_note(h: &mut Harness, number: &str) {
+    let (_, l) = find_link(h, 0, |l| l.footnote && l.text.trim() == number);
     h.tap(l.rect.unwrap());
     assert_eq!(h.kind(), Some(overlay::OverlayKind::Popup), "{:?}", h.reader.actions());
-    let p = popup_of(&mut h);
-    assert_eq!(p.title, "");
+}
+
+/// The note shows as KOReader shows it: in a panel across the whole width at the bottom
+/// of the screen, as high as its text, with the note's text and nothing else (no
+/// "Footnote 57" heading, no number or period left over), paragraphs kept.
+#[test]
+fn footnote_panel_at_the_bottom_shows_only_the_note() {
+    let mut h = notes_book("note-popup");
+    let full = Size::new(1272, 1696);
+    tap_note(&mut h, "57");
+    let (p, r) = note_panel(&mut h);
+    assert_eq!((r.x, r.w, r.bottom()), (0, full.w, full.h as i32), "full width, on the bottom edge: {r:?}");
+    assert!(!p.at_top);
     let text: String = p.spans.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(text, "The text of note 57, which says something about Hamlet.");
     assert_eq!(p.spans[1], ("Hamlet".to_string(), Style::Italic));
+    assert_eq!(p.pages.len(), 1);
+    let one_line = r.h;
+    // One line of text: no empty space (the text, padding and the button row).
+    assert!(one_line < 260, "{one_line}");
     h.shot("01-note-57");
+    // Close and Go to note sit in the panel.
+    let close = h.reader.overlay().unwrap().button_rect("close").unwrap();
+    assert!(r.contains(Point::new(close.x, close.y)) && r.contains(Point::new(h.reader.overlay().unwrap().button_rect("note-go").unwrap().x, close.y)));
     h.tap_button("close");
     assert_eq!(h.kind(), None);
-    // A note of two paragraphs.
-    let (_, l) = find_link(&mut h, 0, |l| l.footnote && l.text.trim() == "58");
-    h.tap(l.rect.unwrap());
-    let p = popup_of(&mut h);
+    // Two paragraphs: taller by the second line and the gap between them.
+    tap_note(&mut h, "58");
+    let (p, r) = note_panel(&mut h);
     let text: String = p.spans.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(text, "The first paragraph of note 58.\nIts second paragraph.");
+    assert!(r.h > one_line + 40 && r.h < one_line + 100, "{} {one_line}", r.h);
+    assert_eq!(r.bottom(), full.h as i32);
     h.shot("02-note-58");
+    // A tap outside the panel closes it.
+    h.tap_at(636, r.y - 200);
+    assert_eq!(h.kind(), None);
+    // A long note: at most half the screen, a page at a time; a tap on the text turns.
+    tap_note(&mut h, "59");
+    let (p, r) = note_panel(&mut h);
+    assert!(p.pages.len() > 1, "{:?}", p.pages);
+    assert!(r.h <= full.h / 2, "{}", r.h);
+    h.shot("03-note-59");
+    h.tap_at(636, r.y + 60);
+    assert_eq!(note_panel(&mut h).0.page, 1);
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Popup));
+    h.shot("04-note-59-page-2");
+    // Go to note jumps there.
+    h.tap_button("note-go");
+    assert_eq!(h.kind(), None);
+}
+
+/// Italic and bold in a note are drawn with real italic and bold faces (the UI fonts
+/// draw them in the regular face).
+#[test]
+fn note_panel_draws_italic_and_bold() {
+    let size = Size::new(1272, 1696);
+    let paint = |style: Style| {
+        let (mut p, r) = note::NotePanel::new(vec![("Hamlet".into(), style)], Vec::new(), 36.0, 60.0, size, Rect::default());
+        let mut canvas = Canvas::new(size.w as usize, size.h as usize);
+        canvas.clear(255);
+        let mut fonts = crate::fonts::builtin_ui_fonts();
+        let theme = Theme::day();
+        ink_ui::Widget::paint(&mut p, &mut PaintCx { canvas: &mut canvas, fonts: &mut fonts, theme: &theme }, r);
+        canvas
+    };
+    let (regular, italic, bold) = (paint(Style::Regular), paint(Style::Italic), paint(Style::Bold));
+    assert!(regular.pixels.iter().filter(|&&v| v < 128).count() > 100, "text drawn");
+    assert!(regular.pixels != italic.pixels, "italic face");
+    assert!(regular.pixels != bold.pixels, "bold face");
+}
+
+/// The panel moves to the top of the screen when at the bottom it would cover the link.
+#[test]
+fn note_panel_keeps_off_the_tapped_link() {
+    let size = Size::new(1272, 1696);
+    let spans = vec![("A note.".to_string(), Style::Regular)];
+    let (p, r) = note::NotePanel::new(spans.clone(), Vec::new(), 36.0, 60.0, size, Rect::new(500, 1600, 40, 40));
+    assert!(p.at_top);
+    assert_eq!((r.x, r.y, r.w), (0, 0, size.w));
+    let (p, r) = note::NotePanel::new(spans, Vec::new(), 36.0, 60.0, size, Rect::new(500, 100, 40, 40));
+    assert!(!p.at_top);
+    assert_eq!(r.bottom(), size.h as i32);
 }
 
 impl Harness {
