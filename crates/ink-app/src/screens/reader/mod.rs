@@ -1168,7 +1168,7 @@ impl ReaderScreen {
                     Some(mut n) => {
                         prepare_note(&mut n, &link.text);
                         self.note_target = Some(n.position.clone());
-                        let buttons = vec![("Go to note".to_string(), "note-go".to_string()), ("Close".to_string(), "close".to_string())];
+                        let buttons = vec![("Go to note".to_string(), "note-go".to_string())];
                         let o = self.note_overlay(note_spans(&n, 4000), buttons, size, anchor);
                         self.open_overlay(o, cx);
                     }

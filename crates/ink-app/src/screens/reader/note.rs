@@ -2,8 +2,8 @@
 //! at its bottom, a thick rule along its top edge, as KOReader's `FootnoteWidget`
 //! (`frontend/ui/widget/footnotewidget.lua`) shows it. Its height follows the text, up
 //! to half the screen; a longer note is shown a page at a time (a tap on the text or a
-//! swipe turns). A row of two buttons, *Go to note* and *Close*, ends it; a tap outside
-//! closes it (the overlay's scrim).
+//! swipe turns). A *Go to note* button ends it; a tap outside closes it (the overlay's
+//! scrim), so it has no Close button.
 //!
 //! The text is set in the interface family with its real bold and italic faces
 //! ([`crate::fonts::with_emphasis_fonts`]), at about the book's text size.

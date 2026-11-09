@@ -9,8 +9,8 @@ All notable changes to rinky are listed here. The format is based on
 ### Changed
 - A footnote opens in a panel across the bottom of the screen, as in KOReader, as
   high as the note (at most half the screen; a longer note turns a page at a time
-  with a tap on its text), with *Go to note* and *Close* under it; a tap above the
-  panel closes it. The panel shows only the note itself: no "Footnote 57" heading,
+  with a tap on its text), with *Go to note* under it; a tap above the panel
+  closes it. The panel shows only the note itself: no "Footnote 57" heading,
   and no leftover number, period or "back" link from the way the book prints the
   note. Italics and bold in the note show, a note of several paragraphs keeps its
   paragraphs, and a note that runs on over paragraphs without a container of its

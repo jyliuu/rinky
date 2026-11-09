@@ -169,7 +169,7 @@ steps to the previous and next hit; taps on the page still turn pages.
 
 Tapping a link follows it. A footnote opens in a panel at the bottom of the screen
 that shows the note's text (without the note's number or its link back), with *Go
-to note* and *Close*; a tap on the page above closes it. A long note fills at most
+to note*; a tap on the page above closes it. A long note fills at most
 half the screen: tap its text to see the rest. After a jump to a note, a **Back to
 p. N** pill takes you back.
 

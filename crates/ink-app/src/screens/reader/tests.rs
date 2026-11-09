@@ -743,10 +743,11 @@ fn footnote_panel_at_the_bottom_shows_only_the_note() {
     // One line of text: no empty space (the text, padding and the button row).
     assert!(one_line < 260, "{one_line}");
     h.shot("01-note-57");
-    // Close and Go to note sit in the panel.
-    let close = h.reader.overlay().unwrap().button_rect("close").unwrap();
-    assert!(r.contains(Point::new(close.x, close.y)) && r.contains(Point::new(h.reader.overlay().unwrap().button_rect("note-go").unwrap().x, close.y)));
-    h.tap_button("close");
+    // Go to note sits in the panel; there is no Close button (a tap outside closes).
+    let go = h.reader.overlay().unwrap().button_rect("note-go").unwrap();
+    assert!(r.contains(Point::new(go.x, go.y)));
+    assert!(h.reader.overlay().unwrap().button_rect("close").is_none());
+    h.tap_at(636, r.y - 200);
     assert_eq!(h.kind(), None);
     // Two paragraphs: taller by the second line and the gap between them.
     tap_note(&mut h, "58");
