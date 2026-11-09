@@ -26,7 +26,7 @@
 use ink_device::{Canvas, Point, PowerEvent, Rect, RefreshClass, Size};
 use ink_doc::{Document, Selection};
 use ink_net::HttpClient;
-use ink_plugin::markdown::{self, Block, Span};
+use ink_plugin::markdown::{self, Block, Span, SpanStyle};
 use ink_plugin::registry::{LibraryAction, MenuItem, SelectionAction, SettingsPage, StatusSlot};
 use ink_plugin::serde_json::{self, Map, Value};
 use ink_plugin::{
@@ -1351,6 +1351,10 @@ struct Run {
     link: Option<String>,
     /// Secondary text (drawn in `muted`).
     muted: bool,
+    /// Inline code: on a gray background.
+    code: bool,
+    /// Struck through.
+    strike: bool,
 }
 
 /// One laid-out line.
@@ -1451,7 +1455,8 @@ fn split_directives(md: &str) -> Directives {
                 "input" => input = Some((a, b)),
                 "sheet" => sheet = true,
                 "back" => back = Some(a),
-                // Read by `PluginUi::push` and `MarkdownView::set_text`.
+                // `:::top` is read by `PluginUi::push`; `:::emphasis` asked for real bold
+                // and italics before every viewer had them, and is ignored.
                 "top" | "emphasis" => {}
                 _ => match BoxKind::WORDS.iter().find(|(w, _)| *w == word) {
                     Some(&(_, kind)) => flush(std::mem::replace(&mut cur, (kind, a, b, String::new())), &mut segs),
@@ -1470,13 +1475,11 @@ fn split_directives(md: &str) -> Directives {
     (segs, input, sheet, back)
 }
 
-/// Runs `f` with the UI family's bold and italic faces
-/// ([`crate::fonts::with_emphasis_fonts`]) when `emphasis`, else with `cx`'s UI fonts,
-/// which draw bold and italic text in the regular face.
-fn body_fonts<R>(emphasis: bool, cx: &mut PaintCx, f: impl FnOnce(&mut PaintCx) -> R) -> R {
-    if !emphasis {
-        return f(cx);
-    }
+/// Runs `f` with the UI family's real bold and italic faces
+/// ([`crate::fonts::with_emphasis_fonts`]): the viewer's text shows its Markdown bold
+/// and italics, where `cx`'s UI fonts draw them in the regular face (light titles).
+/// Chrome drawn with these fonts (labels, rows, captions) asks for `Style::Regular`.
+fn body_fonts<R>(cx: &mut PaintCx, f: impl FnOnce(&mut PaintCx) -> R) -> R {
     crate::fonts::with_emphasis_fonts(|fonts| f(&mut PaintCx { canvas: &mut *cx.canvas, fonts, theme: cx.theme }))
 }
 
@@ -1514,9 +1517,6 @@ pub struct MarkdownView {
     pub sheet: bool,
     /// Link the Back button reports (`:::back`); no button when `None`.
     back: Option<String>,
-    /// Bold and italic text is drawn bold and italic (`:::emphasis`), not in the UI's
-    /// regular face.
-    emphasis: bool,
     /// Current page (0-based).
     pub page: usize,
     pages: Vec<Vec<Line>>,
@@ -1583,8 +1583,8 @@ fn shift(lines: &mut [Line], dx: f32) {
 /// one set of fonts ([`WordWidths::for_fonts`]).
 #[derive(Default)]
 struct WordWidths {
-    /// The UI family and emphasis the widths were measured with.
-    fonts: (String, bool),
+    /// The UI family the widths were measured with.
+    family: String,
     /// (style, px bits) -> text -> width.
     map: HashMap<(Style, u32), HashMap<String, f32>>,
     entries: usize,
@@ -1595,9 +1595,9 @@ impl WordWidths {
     const MAX: usize = 20_000;
 
     /// Forgets the widths when the fonts are not the ones they were measured with.
-    fn for_fonts(&mut self, family: String, emphasis: bool) {
-        if self.fonts != (family.clone(), emphasis) || self.entries > Self::MAX {
-            *self = WordWidths { fonts: (family, emphasis), ..WordWidths::default() };
+    fn for_fonts(&mut self, family: String) {
+        if self.family != family || self.entries > Self::MAX {
+            *self = WordWidths { family, ..WordWidths::default() };
         }
     }
 }
@@ -1655,7 +1655,7 @@ fn spans_of(blocks: &[Block]) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
     for b in blocks {
         let spans = match b {
-            Block::Heading { spans, .. } | Block::Paragraph(spans) | Block::Quote(spans) | Block::ListItem { spans, .. } => spans.clone(),
+            Block::Heading { spans, .. } | Block::Paragraph(spans) | Block::Quote(spans) | Block::ListItem { spans, .. } | Block::ItemParagraph { spans, .. } => spans.clone(),
             Block::Code(lines) => vec![Span::plain(&lines.join(" "))],
             _ => continue,
         };
@@ -1701,6 +1701,11 @@ fn layout_blocks(cx: &mut Lay, blocks: &[Block], base: f32, width: f32) -> Vec<L
                 wrap_spans(cx, spans, base, None, indent, width, Some(marker), &mut lines);
                 gap(&mut lines, base * 0.2);
             }
+            Block::ItemParagraph { depth, spans } => {
+                gap(&mut lines, base * 0.2);
+                wrap_spans(cx, spans, base, None, 56.0 + *depth as f32 * 48.0, width, None, &mut lines);
+                gap(&mut lines, base * 0.2);
+            }
             Block::Quote(spans) => {
                 let start = lines.len();
                 wrap_spans(cx, spans, base, Some(Style::Italic), 40.0, width, None, &mut lines);
@@ -1713,7 +1718,7 @@ fn layout_blocks(cx: &mut Lay, blocks: &[Block], base: f32, width: f32) -> Vec<L
                 let px = base * 0.8;
                 for text in code {
                     let text = if text.is_empty() { " ".to_string() } else { text.replace('\t', "    ") };
-                    lines.push(Line { height: px * 1.35, runs: vec![Run { x: 16.0, text, style: Style::Regular, px, link: None, muted: false }], shade: true, ..Line::default() });
+                    lines.push(Line { height: px * 1.35, runs: vec![Run { x: 16.0, text, style: Style::Regular, px, link: None, muted: false, code: false, strike: false }], shade: true, ..Line::default() });
                 }
                 gap(&mut lines, base * 0.5);
             }
@@ -1811,7 +1816,6 @@ impl MarkdownView {
         self.input = input;
         self.sheet = sheet;
         self.back = back;
-        self.emphasis = markdown.lines().any(|l| l.trim() == ":::emphasis");
         self.laid_for = None;
     }
 
@@ -2018,10 +2022,9 @@ impl MarkdownView {
     }
 
     fn layout(&mut self, cx: &mut PaintCx, b: Rect) {
-        let emphasis = self.emphasis;
         let mut widths = std::mem::take(&mut self.widths);
-        widths.for_fonts(crate::fonts::ui_family(), emphasis);
-        body_fonts(emphasis, cx, |cx| self.layout_text(&mut Lay { cx, widths: &mut widths }, b));
+        widths.for_fonts(crate::fonts::ui_family());
+        body_fonts(cx, |cx| self.layout_text(&mut Lay { cx, widths: &mut widths }, b));
         self.widths = widths;
     }
 
@@ -2052,8 +2055,9 @@ impl MarkdownView {
                     if !seg.a.is_empty() {
                         let h = cap * 1.8;
                         let ix = PAD + (h * 0.8).min(56.0) + 12.0;
-                        let label = fit(cx, &seg.a, cap, Style::Bold, inner - ix);
-                        body.push(Line { height: h, runs: vec![Run { x: ix, text: label, style: Style::Bold, px: cap, link: None, muted: false }], icon: Some((PAD, Icon::Chat)), ..Line::default() });
+                        // Chrome: the label stays light.
+                        let label = fit(cx, &seg.a, cap, Style::Regular, inner - ix);
+                        body.push(Line { height: h, runs: vec![Run { x: ix, text: label, style: Style::Regular, px: cap, link: None, muted: false, code: false, strike: false }], icon: Some((PAD, Icon::Chat)), ..Line::default() });
                         body.push(gap_line(base * 0.3));
                     }
                     let mut text = text_and_caption(cx, seg, base, cap, inner);
@@ -2117,7 +2121,7 @@ impl MarkdownView {
                     let tx = if icon.is_some() { PAD + 56.0 + 32.0 } else { PAD };
                     let label = markdown::to_plain(&seg.blocks).split_whitespace().collect::<Vec<_>>().join(" ");
                     let label = fit(cx, &label, px, Style::Regular, width - tx - PAD);
-                    let line = Line { height: ROW_H, runs: vec![Run { x: tx, text: label, style: Style::Regular, px, link: None, muted: false }], icon: icon.map(|i| (PAD, i)), ..Line::default() };
+                    let line = Line { height: ROW_H, runs: vec![Run { x: tx, text: label, style: Style::Regular, px, link: None, muted: false, code: false, strike: false }], icon: icon.map(|i| (PAD, i)), ..Line::default() };
                     let link = (!seg.a.is_empty()).then(|| seg.a.clone());
                     push_box(&mut lines, &mut groups, Group { kind: seg.kind, x: 0.0, w: width, link }, vec![line], 0.0, 0.0);
                 }
@@ -2229,13 +2233,19 @@ fn with_slack(r: Rect) -> Rect {
     Rect::new(r.x - s, r.y - s, r.w + 2 * s as u32, r.h + 2 * s as u32)
 }
 
-/// The face for a span (`force` overrides it: headings, table headers, quotes).
+/// The face for a span. `force` adds bold (headings, table headers) or italics
+/// (quotes) to the span's own; `Style::Regular` draws it regular (captions).
 fn span_style(s: &Span, force: Option<Style>) -> Style {
-    match force {
-        Some(f) => f,
-        None if s.style.bold => Style::Bold,
-        None if s.style.italic => Style::Italic,
-        None => Style::Regular,
+    if force == Some(Style::Regular) {
+        return Style::Regular;
+    }
+    let bold = s.style.bold || force.is_some_and(|f| f.is_bold());
+    let italic = s.style.italic || force.is_some_and(|f| f.is_italic());
+    match (bold, italic) {
+        (true, true) => Style::BoldItalic,
+        (true, false) => Style::Bold,
+        (false, true) => Style::Italic,
+        (false, false) => Style::Regular,
     }
 }
 
@@ -2243,36 +2253,47 @@ fn span_style(s: &Span, force: Option<Style>) -> Style {
 #[allow(clippy::too_many_arguments)]
 fn wrap_spans(cx: &mut Lay, spans: &[Span], px: f32, force: Option<Style>, indent: f32, width: f32, marker: Option<String>, lines: &mut Vec<Line>) {
     let style_of = |s: &Span| span_style(s, force);
-    // Words with their style; a word may span several spans (no space between).
-    let mut words: Vec<Vec<(String, Style, Option<String>)>> = vec![Vec::new()];
+    // Words with their style; a word may span several spans (no space between). The
+    // flag: a hard line break (`\n`) comes before the word.
+    type Word = (bool, Vec<(String, Style, Option<String>, SpanStyle)>);
+    let next = |words: &mut Vec<Word>, brk: bool| match words.last_mut() {
+        Some(w) if w.1.is_empty() => w.0 |= brk,
+        _ => words.push((brk, Vec::new())),
+    };
+    let mut words: Vec<Word> = vec![(false, Vec::new())];
     for s in spans {
         let st = style_of(s);
-        for (i, part) in s.text.split(' ').enumerate() {
-            if i > 0 {
-                words.push(Vec::new());
+        for (l, text) in s.text.split('\n').enumerate() {
+            if l > 0 {
+                next(&mut words, true);
             }
-            if !part.is_empty() {
-                if let Some(w) = words.last_mut() {
-                    w.push((part.to_string(), st, s.link.clone()));
+            for (i, part) in text.split(' ').enumerate() {
+                if i > 0 {
+                    next(&mut words, false);
+                }
+                if !part.is_empty() {
+                    if let Some(w) = words.last_mut() {
+                        w.1.push((part.to_string(), st, s.link.clone(), s.style));
+                    }
                 }
             }
         }
     }
-    words.retain(|w| !w.is_empty());
+    words.retain(|w| !w.1.is_empty());
     let height = px * 1.4;
     let space = cx.width(Style::Regular, px, " ");
     let mut line = Line { height, ..Line::default() };
     if let Some(m) = marker {
         let mw = cx.width(Style::Regular, px, &m);
-        line.runs.push(Run { x: (indent - mw - 14.0).max(0.0), text: m, style: Style::Regular, px, link: None, muted: false });
+        line.runs.push(Run { x: (indent - mw - 14.0).max(0.0), text: m, style: Style::Regular, px, link: None, muted: false, code: false, strike: false });
     }
     let mut x = indent;
     let mut first = true;
-    for word in words {
+    for (brk, word) in words {
         // Each part is shaped once here; its width is reused below.
-        let widths: Vec<f32> = word.iter().map(|(t, st, _)| cx.width(*st, px, t)).collect();
+        let widths: Vec<f32> = word.iter().map(|(t, st, _, _)| cx.width(*st, px, t)).collect();
         let ww: f32 = widths.iter().sum();
-        if !first && x + space + ww > width {
+        if !first && (brk || x + space + ww > width) {
             lines.push(std::mem::replace(&mut line, Line { height, ..Line::default() }));
             x = indent;
             first = true;
@@ -2280,20 +2301,20 @@ fn wrap_spans(cx: &mut Lay, spans: &[Span], px: f32, force: Option<Style>, inden
         if !first {
             x += space;
         }
-        for ((mut t, st, link), mut w) in word.into_iter().zip(widths) {
+        for ((mut t, st, link, sp), mut w) in word.into_iter().zip(widths) {
             // Hard-break words wider than the line: the longest head that fits the rest
             // of the line (at least one character) goes on it.
             while w > width - indent && t.chars().count() > 1 {
                 let ends: Vec<usize> = t.char_indices().map(|(i, _)| i).chain([t.len()]).collect();
                 let k = last_fitting(ends.len() - 1, |k| cx.fonts.shaped_width(st, px, &t[..ends[k]]) <= width - x).max(1);
                 let rest = t.split_off(ends[k]);
-                line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false });
+                line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false, code: sp.code, strike: sp.strike });
                 lines.push(std::mem::replace(&mut line, Line { height, ..Line::default() }));
                 x = indent;
                 t = rest;
                 w = cx.fonts.shaped_width(st, px, &t);
             }
-            line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false });
+            line.runs.push(Run { x, text: t, style: st, px, link: link.clone(), muted: false, code: sp.code, strike: sp.strike });
             x += w;
         }
         first = false;
@@ -2380,9 +2401,20 @@ impl MarkdownView {
                 let r = Rect::new((x0 + ix) as i32, (y + (line.height - side as f32) / 2.0) as i32, side, side);
                 cx.icon(icon, r, side, fg);
             }
+            // Inline code on gray, under the whole line's text.
+            for r in line.runs.iter().filter(|r| r.code) {
+                let (asc, desc) = cx.fonts.vmetrics(r.style, r.px);
+                let top = y + (line.height - (asc - desc)) / 2.0;
+                let (w, pad) = (cx.fonts.shaped_width(r.style, r.px, &r.text), (r.px * 0.15).round());
+                cx.canvas.fill_rect((x0 + r.x - pad) as i32, (top - 2.0) as i32, (w + 2.0 * pad).ceil() as i32, (asc - desc + 4.0).ceil() as i32, t.light);
+            }
             for r in &line.runs {
                 let (asc, desc) = cx.fonts.vmetrics(r.style, r.px);
                 let base = y + (line.height - (asc - desc)) / 2.0 + asc;
+                if r.strike {
+                    let w = cx.fonts.shaped_width(r.style, r.px, &r.text);
+                    cx.canvas.fill_rect((x0 + r.x) as i32, (base - r.px * 0.3) as i32, w.ceil() as i32, 2, fg);
+                }
                 cx.draw_text(r.style, r.px, x0 + r.x, base, &r.text, if r.muted { muted } else { fg });
                 if let Some(url) = &r.link {
                     let w = cx.fonts.shaped_width(r.style, r.px, &r.text);
@@ -2426,8 +2458,7 @@ impl Widget for MarkdownView {
             tmp.clear(t.bg);
             {
                 let mut tcx = PaintCx { canvas: &mut tmp, fonts: &mut *cx.fonts, theme: cx.theme };
-                let emphasis = self.emphasis;
-                body_fonts(emphasis, &mut tcx, |cx| self.paint_content(cx, x0 - win.x as f32, -self.scroll, cw));
+                body_fonts(&mut tcx, |cx| self.paint_content(cx, x0 - win.x as f32, -self.scroll, cw));
             }
             cx.canvas.blit(&tmp, win.x, win.y);
             self.links = std::mem::take(&mut self.links)
@@ -2439,8 +2470,7 @@ impl Widget for MarkdownView {
                 .collect();
             self.paint_scroll_bar(cx, win);
         } else {
-            let emphasis = self.emphasis;
-            body_fonts(emphasis, cx, |cx| self.paint_content(cx, x0, top, cw));
+            body_fonts(cx, |cx| self.paint_content(cx, x0, top, cw));
         }
         // Footer: the input bar (drawn by the docked keyboard panel while docked) with the
         // page counter above it, or the page counter.
@@ -4420,6 +4450,81 @@ mod tests {
         }
     }
 
+    /// Paints `md` in a full-screen viewer with the app's light UI fonts (bold drawn
+    /// regular) as `cx`'s fonts, as the app does; returns the canvas and the view.
+    fn paint_md(md: &str) -> (Canvas, MarkdownView) {
+        let theme = Theme::day();
+        let mut fonts = crate::fonts::ui_fonts("").expect("embedded UI font");
+        let mut canvas = Canvas::new(W as usize, H as usize);
+        canvas.clear(theme.bg);
+        let mut v = MarkdownView::new("Insightful\nRomeo and Juliet", md);
+        v.paint(&mut PaintCx { canvas: &mut canvas, fonts: &mut fonts, theme: &theme }, Rect::new(0, 0, W, H));
+        (canvas, v)
+    }
+
+    /// The laid-out runs of `v` as (text, style, code, strike), line by line.
+    fn runs_of(v: &MarkdownView) -> Vec<Vec<(String, Style, bool, bool)>> {
+        v.pages.iter().flatten().filter(|l| !l.runs.is_empty()).map(|l| l.runs.iter().map(|r| (r.text.clone(), r.style, r.code, r.strike)).collect()).collect()
+    }
+
+    /// Every viewer, with no directive, draws Markdown in the interface family's real
+    /// faces: bold, italic, bold italic, headings (bold, italics kept), quotes (italic,
+    /// bold kept), inline code on gray, struck text, hard line breaks, and the later
+    /// paragraphs of a list item indented with it.
+    #[test]
+    fn viewer_draws_markdown_faithfully_in_the_ui_family() {
+        let md = "## A *heading*\n\nA **b** *i* ***bi*** `c` ~~s~~ end  \nnext\n\n> q **qb**\n\n1. item\n\n   more\n";
+        let (_, v) = paint_md(md);
+        let runs = runs_of(&v);
+        let r = |t: &str| runs.iter().flatten().find(|r| r.0 == t).cloned().unwrap_or_else(|| panic!("{t}: {runs:?}"));
+        assert_eq!(r("heading").1, Style::BoldItalic);
+        assert_eq!(r("A").1, Style::Bold, "the heading's own text");
+        assert_eq!((r("b").1, r("i").1, r("bi").1), (Style::Bold, Style::Italic, Style::BoldItalic));
+        assert_eq!((r("c").2, r("s").3), (true, true));
+        assert_eq!((r("q").1, r("qb").1), (Style::Italic, Style::BoldItalic));
+        let line_of = |t: &str| runs.iter().position(|l| l.iter().any(|r| r.0 == t)).unwrap();
+        assert_eq!(line_of("next"), line_of("end") + 1, "a hard break");
+        let x_of = |t: &str| v.pages.iter().flatten().flat_map(|l| &l.runs).find(|r| r.text == t).unwrap().x;
+        assert_eq!(x_of("more"), x_of("item"), "the item's second paragraph is indented with it");
+        // Real faces, not the UI fonts' light bold: each style draws differently.
+        let pixels = |m: &str| paint_md(m).0.pixels;
+        let plain = pixels("Household words");
+        for styled in ["**Household** words", "*Household* words", "***Household*** words", "`Household` words", "~~Household~~ words"] {
+            assert!(pixels(styled) != plain, "{styled}: drawn as plain");
+        }
+        assert!(pixels("***Household*** words") != pixels("**Household** words"), "bold italic is not just bold");
+        // A streamed answer cut inside `**` keeps the rest as it was.
+        let (_, v) = paint_md("Done **well** and **ha");
+        let runs = runs_of(&v);
+        assert!(runs.iter().flatten().any(|r| r.0 == "**ha" && r.1 == Style::Regular) && runs.iter().flatten().any(|r| r.0 == "well" && r.1 == Style::Bold), "{runs:?}");
+    }
+
+    /// Chrome stays light although the viewer's fonts have real bold: the answer card's
+    /// label and caption, a card's caption and sheet rows draw in the regular face.
+    #[test]
+    fn viewer_chrome_stays_light() {
+        let (_, v) = paint_md(":::answer AI — gpt-test | 5 tokens\nText\n\n:::card open | Current · 1 message\nWho is Tybalt?\n\n:::");
+        let runs = runs_of(&v);
+        assert!(runs.iter().flatten().all(|r| r.1 == Style::Regular), "{runs:?}");
+        let (_, v) = paint_md(":::sheet\n:::row a | chat\nContinue current chat\n:::row b | folder\n**Chats**\n");
+        let runs = runs_of(&v);
+        assert!(runs.iter().flatten().all(|r| r.1 == Style::Regular), "rows are labels: {runs:?}");
+    }
+
+    /// Renders an Insightful chat with a rich answer, a dictionary full view, a chat list
+    /// and a Wikipedia-like article (`INK_PLUGIN_SHOTS=DIR`), for a look.
+    #[test]
+    fn viewer_markdown_shots() {
+        let chat = ":::back chats\n:::you\nSelected passage — Act 1\n\n> \"Two households, both alike in dignity\"\n\nExplain the selected passage clearly\n\n:::answer AI — gpt-test | 300 tokens in · 90 out\n## The feud\n\nThe **Montagues** and the *Capulets* are ***equally noble*** houses:\n\n1. **Verona** is the setting.\n2. The grudge is *ancient*.\n   - It breaks out again.\n\n   Its cause is never told.\n\n> \"From ancient grudge break to **new** mutiny\"\n\nCall `search_book` with a query:\n\n```\nsearch_book(\"grudge\")\n```\n\nLine one  \nLine two, ~~not this~~.\n\n| House | Head |\n|---|---|\n| Montague | Lord Montague |\n\n:::\n:::input ask | Message Insightful…";
+        shot(&paint_md(chat).0, "41-insightful-chat");
+        let dict = "## Sample English Dictionary\n\n**household** *noun*\n\n1. a house and its occupants regarded as a unit: *the head of the household*\n2. ***plural*** households\n\n**household** *adjective*\n\nrelating to the running of a household.\n\n[Other dictionary](dict:1)";
+        shot(&paint_md(dict).0, "42-dictionary-full");
+        let list = ":::back chats\n:::chips\n- [Start new chat](new)\n\n:::card open/c1 | Current · 9 Nov 2026 · 2 messages\nWho is Tybalt?\n\n*\"In fair Verona\"*\n:::card open/c2 | 8 Nov 2026 · 4 messages\nExplain the selected passage clearly\n:::";
+        shot(&paint_md(list).0, "43-chat-list");
+        let wiki = ":::top\n\n**Verona** is a city on the *Adige* river in Veneto, Italy.\n\n## History\n\nThe city was a Roman colony; see [Roman Verona](https://en.wikipedia.org/wiki/Verona).\n\n### Middle Ages\n\n- Scaliger rule\n- Venetian rule\n";
+        shot(&paint_md(wiki).0, "44-wikipedia");
+    }
+
     /// A word wider than the line starts a line of its own and is cut into pieces that
     /// each fit their line.
     #[test]
@@ -4462,11 +4567,11 @@ mod tests {
         s.ui(&mut ui, false);
         assert_eq!(entries(&ui), first, "no word measured again");
         let mut w = WordWidths::default();
-        w.for_fonts("A".into(), false);
+        w.for_fonts("A".into());
         w.entries = 3;
-        w.for_fonts("A".into(), false);
+        w.for_fonts("A".into());
         assert_eq!(w.entries, 3);
-        w.for_fonts("B".into(), false);
+        w.for_fonts("B".into());
         assert_eq!(w.entries, 0, "another family");
     }
 

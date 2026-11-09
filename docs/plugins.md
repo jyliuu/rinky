@@ -244,10 +244,17 @@ the answer arrives in a later call. Only one modal request shows at a time; late
 wait. Several toasts at once show as the first one with `(+N more)`.
 
 Markdown: CommonMark with GitHub tables (pulldown-cmark, `ink_plugin::markdown`):
-headings, paragraphs, bullet and numbered lists (nested items indented to their parent's
-text, 3 spaces under `1. `), block quotes, fenced and indented code, rules, tables (with
-or without outer pipes; columns wrap on narrow screens), `**bold**`, `*italic*`,
-`` `code` ``, `[text](url)` and `<https://url>`. HTML is shown as text.
+headings, paragraphs, hard line breaks (two spaces or `\` at a line end), bullet and
+numbered lists (nested items indented to their parent's text, 3 spaces under `1. `;
+later paragraphs of an item stay indented), block quotes (a list in a quote shows as
+quoted lines with their markers), fenced and indented code, rules, tables (with or
+without outer pipes; columns wrap on narrow screens), `**bold**`, `*italic*`,
+`***both***`, `~~struck~~`, `` `code` `` (on gray), `[text](url)` and `<https://url>`,
+images as their alt text. HTML is shown as text. Bold and italics use the interface
+font's own bold and italic faces (synthetic ones for a family without them); headings
+and table headers are bold, quotes italic. The app bar, card labels, captions and sheet
+rows stay light: send a title or label as plain text, not `**bold**`. Unclosed `**`
+or `` ` `` (a streamed answer cut mid-word) shows as typed until it is closed.
 
 ### Storage (`storage`)
 

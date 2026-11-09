@@ -25,6 +25,15 @@ All notable changes to rinky are listed here. The format is based on
 - In the library, the hide-keyboard and Enter keys of the search and collection name
   keyboards no longer also tap what lies under them once the keyboard is gone (the
   hide key opened Settings from the navigation bar).
+- Bold and italics now show in every plugin view (Insightful answers, Wikipedia,
+  the dictionary, help pages), whatever the interface font: before, they looked like
+  the rest of the text in Insightful and most other views. An interface font without
+  bold or italic files gets slanted and heavier letters made from its regular ones.
+  Labels, titles and list rows keep their light look.
+- Plugin views show more of what Insightful's answers and other Markdown contain:
+  bold italic text, italics in headings, a gray background behind `code`, struck
+  text, line breaks within a paragraph, later paragraphs of a list item indented
+  with it, and lists inside quotes.
 
 ## [0.6.0] - 2026-11-08
 

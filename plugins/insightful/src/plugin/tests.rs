@@ -119,7 +119,7 @@ fn explain_with_tool_call_streams_in_batches_and_saves() {
         "AGENT ACTION block shown: {views:#?}"
     );
     let last = views.last().unwrap();
-    assert!(last.starts_with(":::back insightful:chats\n:::you\n**Selected passage"), "{last}");
+    assert!(last.starts_with(":::back insightful:chats\n:::you\nSelected passage"), "{last}");
     assert!(last.contains("> \"Two households, both alike in dignity\"\n\nExplain the selected passage clearly"), "{last}");
     assert!(last.contains(":::answer AI — gpt-test | 300 tokens in · 90 out · 2 requests\nword0 word1"), "{last}");
     assert!(last.contains(":::chips\n- [Who is Tybalt?](insightful:q/0)"));
@@ -168,7 +168,7 @@ fn chats_list_open_delete_and_close_keeps_running() {
     env.action("chats");
     let list = env.viewers().last().unwrap().clone();
     assert!(list.starts_with(":::chips\n- [Start new chat](insightful:new)\n\n:::card insightful:open/c1 | Current · "), "{list}");
-    assert!(list.contains(" · 2 messages · 280 tokens\n**People / characters**\n\n*\"In fair Verona\"*"), "{list}");
+    assert!(list.contains(" · 2 messages · 280 tokens\nPeople / characters\n\n*\"In fair Verona\"*"), "{list}");
     env.answer(VIEWER, "insightful:open/c1");
     assert!(env.viewers().last().unwrap().contains("Who is Tybalt?"));
 
@@ -239,7 +239,7 @@ fn ask_ai_errors_and_provider_menu() {
     env.action("ask");
     // Ask AI… opens the chat with the keyboard closed; the passage waits for the message.
     let view = env.viewers().last().unwrap().clone();
-    assert!(view.contains(":::card | Sent with your next message\n**Selected passage — Act 1**\n\n> \"dignity\""), "{view}");
+    assert!(view.contains(":::card | Sent with your next message\nSelected passage — Act 1\n\n> \"dignity\""), "{view}");
     assert!(!matches!(env.ui.0.last(), Some(UiRequest::TextInput { .. })));
     env.answer(VIEWER, "insightful:ask");
     assert!(matches!(env.ui.0.last(), Some(UiRequest::TextInput { id: INPUT_ASK, prompt, .. }) if prompt == "Message Insightful…"));
@@ -566,7 +566,7 @@ fn preset_sends_the_full_prompt_and_the_bubble_shows_it() {
     assert!(system.contains("Title: Romeo and Juliet\nAuthor: William Shakespeare"));
 
     let view = env.viewers().last().unwrap().clone();
-    let bubble = format!(":::back insightful:chats\n:::you\n**Selected passage — Act 1**\n\n> \"In fair Verona, where we lay our scene\"\n\n{full}\n");
+    let bubble = format!(":::back insightful:chats\n:::you\nSelected passage — Act 1\n\n> \"In fair Verona, where we lay our scene\"\n\n{full}\n");
     assert!(view.starts_with(&bubble), "the passage and the whole prompt, no tap needed: {view}");
     assert!(!view.contains("tap to see") && !view.contains("People / characters"), "{view}");
 }
@@ -623,4 +623,21 @@ fn a_run_answers_its_own_chat_while_another_is_open() {
     let saved = env.chats_file();
     assert_eq!(saved["chats"][0]["messages"].as_array().unwrap().len(), 2, "c1 untouched");
     assert_eq!(saved["chats"][1]["messages"].as_array().unwrap().len(), 2, "c2 has its answer");
+}
+
+/// Every viewer draws Markdown bold and italics in real faces, so the chat sends its
+/// chrome (the list's card titles, passage labels) as plain text, which stays light,
+/// and asks for nothing else (no `:::emphasis`).
+#[test]
+fn chat_chrome_is_plain_text() {
+    let mut env = Env::new("chrome", TOML, &[(200, &answer_turn())]);
+    env.action("ask_book");
+    env.answer(VIEWER, "insightful:ask");
+    env.answer(INPUT_ASK, "Who is Tybalt?");
+    env.pump();
+    env.answer(VIEWER, "insightful:chats");
+    let views = env.viewers();
+    assert!(views.iter().all(|v| !v.contains(":::emphasis")), "{views:#?}");
+    let list = views.last().unwrap();
+    assert!(list.contains(" message") && list.contains("\nWho is Tybalt?") && !list.contains("**"), "{list}");
 }

@@ -260,7 +260,7 @@ impl InsightfulPlugin {
         let x = Extras { live: run.map(|r| &r.live), error: self.error.as_deref(), can_retry: !self.retry_blocked, pending: self.pending_sel.as_ref() };
         let (md, q) = chat::render(conv, x);
         // Back goes to the list of chats.
-        let md = format!(":::back {}\n{md}", chat::LINK_CHATS);
+        let md = chat_view(&md);
         let title = self.view_title();
         self.questions = q;
         cx.view_markdown(VIEWER, &title, &md)?;
@@ -691,10 +691,10 @@ impl InsightfulPlugin {
                 Some(t) => format!("Selected passage — {}", t.replace('|', "/")),
                 None => "Selected passage".into(),
             };
-            md.push_str(&format!("\n\n:::card | Sent with your next message\n**{label}**\n\n{}", chat::quote_passage(&s.text)));
+            md.push_str(&format!("\n\n:::card | Sent with your next message\n{label}\n\n{}", chat::quote_passage(&s.text)));
         }
         md.push_str(&format!("\n\n:::\n:::input {LINK_ASK} | {}", chat::ASK_PLACEHOLDER));
-        md = format!(":::back {}\n{md}", chat::LINK_CHATS);
+        md = chat_view(&md);
         cx.view_markdown(VIEWER, &self.view_title(), &md)?;
         self.viewer_open = true;
         self.list = false;
@@ -1104,6 +1104,12 @@ fn provider_name(id: &str) -> &str {
 fn retryable(msg: &str) -> bool {
     let m = msg.to_lowercase();
     !["http 401", "http 403", "not configured", "api key", "context window", "context length", "content was filtered", "request was refused"].iter().any(|k| m.contains(k))
+}
+
+/// The viewer text of a chat (`md` from [`chat::render`]): a Back button to the list of
+/// chats.
+fn chat_view(md: &str) -> String {
+    format!(":::back {}\n{md}", chat::LINK_CHATS)
 }
 
 #[cfg(test)]
