@@ -6,7 +6,19 @@ All notable changes to rinky are listed here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- A footnote opens in a panel across the bottom of the screen, as in KOReader, as
+  high as the note (at most half the screen; a longer note turns a page at a time
+  with a tap on its text), with *Go to note* at its right; a tap above the panel
+  closes it. The panel shows the note as the book prints it, its number included,
+  with its italics and bold, and no "Footnote 57" heading. A number and the period
+  after it stay on the note's first line instead of a line of their own, a note of
+  several paragraphs keeps its paragraphs, and a note that runs on over paragraphs
+  without a container of its own is shown whole.
+
 ### Fixed
+- A footnote in an endnotes list (`<li>` items, as Pandoc and many publishers write
+  them) shows that one note, not the whole list.
 - The hide-keyboard key puts the keyboard away in a plugin's chat (Insightful) and
   other plugin text boxes. It used to open the keyboard again at once, so the screen
   only flickered.

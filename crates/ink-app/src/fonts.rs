@@ -335,6 +335,26 @@ pub fn emphasis_fonts(name: &str) -> Fonts {
     family_fonts(name, true).unwrap_or_else(|| family_fonts("", true).expect("embedded UI font"))
 }
 
+thread_local! {
+    /// [`emphasis_fonts`] of the UI family in use, and its name (built again when the
+    /// UI font changes).
+    static EMPHASIS_FONTS: std::cell::RefCell<Option<(String, Fonts)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with the UI family in use with its real bold and italic faces
+/// ([`emphasis_fonts`]), kept between calls on this thread.
+pub fn with_emphasis_fonts<R>(f: impl FnOnce(&mut Fonts) -> R) -> R {
+    EMPHASIS_FONTS.with(|s| {
+        let mut s = s.borrow_mut();
+        let family = ui_family();
+        if s.as_ref().is_none_or(|(n, _)| *n != family) {
+            *s = Some((family.clone(), emphasis_fonts(&family)));
+        }
+        let (_, fonts) = s.as_mut().expect("set above");
+        f(fonts)
+    })
+}
+
 /// Fonts of UI family `name` (empty or [`UI_BUILTIN`]: the embedded Noto Sans;
 /// [`BUILTIN`]: the embedded Noto Serif) with the UI fallback faces
 /// ([`add_ui_fallbacks`]). With `emphasis` the bold slot holds the family's bold face;

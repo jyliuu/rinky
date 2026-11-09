@@ -167,8 +167,11 @@ remove its bookmark.
 **Search** finds text in the book. After you pick a result, a small bar at the bottom
 steps to the previous and next hit; taps on the page still turn pages.
 
-Tapping a link follows it. A footnote opens in a popup with *Go to note*; after a jump
-to a note, a **Back to p. N** pill takes you back.
+Tapping a link follows it. A footnote opens in a panel at the bottom of the screen
+that shows the note as the book prints it, with *Go to note* at the right; a tap on
+the page above closes it. A long note fills at most
+half the screen: tap its text to see the rest. After a jump to a note, a **Back to
+p. N** pill takes you back.
 
 ### Text appearance (Aa)
 
