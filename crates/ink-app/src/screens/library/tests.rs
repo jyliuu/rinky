@@ -1558,3 +1558,46 @@ fn plugin_rescan_while_the_library_is_shown() {
     assert_eq!(h.screen.library().unwrap().index.books.len(), 2);
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
+
+/// Presses the keyboard key with `action` as a finger does (touch down, lift; the
+/// recognizer adds the tap) and returns the transitions and the hit under the key.
+fn press_key(h: &mut Harness, action: KeyAction) -> (Vec<Transition>, Option<Hit>) {
+    let Some(Overlay::Input { keyboard, .. }) = h.screen.overlay.as_ref() else { panic!("no keyboard") };
+    let kb = keyboard_rect(h.dev.screen.size());
+    let (r, _) = keyboard.layout.key_rects(keyboard.keys_area(kb)).into_iter().find(|(_, k)| k.action == action).unwrap();
+    let p = Point::new(r.x + r.w as i32 / 2, r.y + r.h as i32 / 2);
+    let n = h.transitions.len();
+    h.tap_at(p);
+    let under = h.screen.hits.iter().find(|(r, _)| r.contains(p)).map(|(_, x)| x.clone());
+    (h.transitions[n..].to_vec(), under)
+}
+
+/// The hide key and Enter close the search keyboard on the key's lift; the tap that
+/// lift makes is the same press and does nothing to the books under the key.
+#[test]
+fn search_keyboard_keys_do_not_tap_what_is_under_them() {
+    let (dir, paths) = books("kb-under", &["formats/alice.txt"]);
+    for i in 0..12 {
+        std::fs::copy(testdata("formats/alice.txt"), dir.join(format!("alice{i:02}.txt"))).unwrap();
+    }
+    let mut h = Harness::new("kb-under", &dir, paths);
+    h.settle_metadata();
+    h.tap(|x| *x == Hit::Tab(1));
+    for key in [KeyAction::Close, KeyAction::Enter] {
+        h.tap(|x| *x == Hit::Search);
+        let (ts, under) = press_key(&mut h, key.clone());
+        assert!(h.screen.overlay.is_none(), "{key:?} closes the keyboard");
+        assert!(ts.iter().all(|t| *t == Transition::None), "{key:?} (over {under:?}): {ts:?}");
+        assert_eq!(h.screen.view, View::Books, "{key:?}");
+    }
+    // The name keyboard (new collection, rename) is the same panel.
+    h.tap(|x| *x == Hit::Tab(2));
+    for key in [KeyAction::Close, KeyAction::Enter] {
+        h.tap(|x| *x == Hit::NewCollection);
+        let (ts, under) = press_key(&mut h, key.clone());
+        assert!(h.screen.overlay.is_none(), "{key:?} closes the keyboard");
+        assert!(ts.iter().all(|t| *t == Transition::None), "{key:?} (over {under:?}): {ts:?}");
+        assert_eq!(h.screen.view, View::Collections, "{key:?}");
+    }
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}

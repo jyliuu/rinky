@@ -2852,6 +2852,9 @@ pub struct PluginUi {
     pub notification_time: Duration,
     /// Keyboard languages of the input panel (`ui.keyboard_layouts`; first = default).
     pub keyboard_layouts: Vec<String>,
+    /// The tap of a keyboard key's lift that closed its layer: it belongs to that key,
+    /// not to the layer under it.
+    closing_tap: ink_ui::ClosingTap,
 }
 
 impl Default for PluginUi {
@@ -2863,6 +2866,7 @@ impl Default for PluginUi {
             toast_time: Duration::from_millis(2500),
             notification_time: Duration::from_secs(4),
             keyboard_layouts: vec!["en".into()],
+            closing_tap: ink_ui::ClosingTap::default(),
         }
     }
 }
@@ -3101,6 +3105,9 @@ impl PluginUi {
     /// `(plugin, request id, result)`.
     pub fn handle(&mut self, ev: &UiEvent, screen: Size) -> (bool, Vec<(String, u32, String)>) {
         self.close_expired();
+        if self.closing_tap.drop(ev) {
+            return (true, Vec::new());
+        }
         // Per-contact touches go only to an open keyboard (it types on them); other
         // layers work on gestures.
         let keyboard_open = self.layers.last().is_some_and(|l| matches!(l.kind, Kind::Input(_)));
@@ -3235,6 +3242,10 @@ impl PluginUi {
             let keep = matches!(&l.kind, Kind::Viewer(v) if !v.sheet || r.starts_with("stay:") || r.starts_with("hold:")) && r != "closed";
             if !keep {
                 self.close(top);
+                // A key (hide, Enter) closed the keyboard on its lift: the tap gesture
+                // that follows is the same press and must not reach the layer below
+                // (over a chat view it hit the input bar and opened the keyboard again).
+                self.closing_tap.arm(ev);
             }
             if let Some(id) = id {
                 answers.push((plugin, id, r));
@@ -4703,6 +4714,43 @@ mod tests {
         ui.push("q", UiRequest::TextInput { id: 1, prompt: "Name".into(), initial: String::new() });
         s.ui(&mut ui, false);
         assert!(ui.layers.iter().all(|l| !matches!(&l.kind, Kind::Input(b) if b.docked)));
+    }
+
+    /// The keyboard's hide key over a chat view puts the keyboard away. The keyboard
+    /// closes on the key's lift; the tap gesture that lift makes then reached the chat
+    /// view under it, landed on the view's input bar (back at the bottom of the screen)
+    /// and asked for the keyboard again: on a PW12 the key only seemed to refresh the
+    /// screen.
+    #[test]
+    fn hide_key_puts_a_docked_keyboard_away() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        let md = ":::you\nWho is Tybalt?\n:::answer model |\nJuliet's cousin.\n:::\n:::input chat:ask | Message…";
+        ui.push("p", UiRequest::TextViewer { id: 1, title: "Chat".into(), markdown: md.into() });
+        s.ui(&mut ui, false);
+        ui.push("p", UiRequest::TextInput { id: 2, prompt: "Message…".into(), initial: String::new() });
+        s.ui(&mut ui, false);
+        assert_eq!(ui.layer_names(), vec!["viewer", "input"]);
+        let input = ui.layers[1].rect;
+        let Kind::Input(b) = &ui.layers[1].kind else { panic!() };
+        let (_, _, _, kb) = b.parts(Rect::new(0, 0, input.w, input.h));
+        let kb = Rect::new(kb.x, kb.y + input.y, kb.w, kb.h);
+        let (r, _) = KeyboardLayout::qwerty_en().key_rects(Keyboard::new().keys_area(kb)).into_iter().find(|(_, k)| k.action == KeyAction::Close).expect("hide key");
+        let mut answers = Vec::new();
+        for ev in press(r.x + r.w as i32 / 2, r.y + r.h as i32 / 2) {
+            let (used, a) = ui.handle(&ev, screen());
+            assert!(used, "{ev:?}");
+            answers.extend(a);
+        }
+        assert_eq!(answers, vec![("p".to_string(), 2, String::new())], "only the keyboard answers, put away");
+        let d = s.ui(&mut ui, false);
+        assert_eq!(ui.layer_names(), vec!["viewer"]);
+        let Kind::Viewer(v) = &ui.layers[0].kind else { panic!() };
+        assert_eq!(v.dock, 0, "the view takes the whole screen again");
+        assert!(d.iter().any(|d| d.rect.bottom() == H as i32), "the panel's pixels are drawn again: {d:?}");
+        // The next tap is the user's again: on the input bar it opens the keyboard.
+        let bar = MarkdownView::input_rect(Rect::new(0, 0, W, H));
+        assert_eq!(ui.handle(&tap(bar.x + 200, bar.y + 20), screen()).1, vec![("p".to_string(), 1, "chat:ask".to_string())]);
     }
 
     #[test]
