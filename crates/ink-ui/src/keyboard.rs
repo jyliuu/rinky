@@ -717,8 +717,52 @@ impl Widget for Keyboard {
     }
 }
 
+/// Keys act on the lift of a touch, and the gesture recognizer makes a tap from the same
+/// lift right after. When a key closes the keyboard (hide, Enter), that tap must not
+/// reach what was under the keyboard: a host [`arm`](Self::arm)s this when it closes the
+/// keyboard on a touch and runs every event through [`drop`](Self::drop) first.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClosingTap {
+    armed: bool,
+}
+
+impl ClosingTap {
+    /// The keyboard closed on `ev`: when that was a touch, the next gesture is its tap.
+    pub fn arm(&mut self, ev: &UiEvent) {
+        self.armed = matches!(ev, UiEvent::Touch(_));
+    }
+
+    /// True for the tap of the closing key's lift (drop it). The next touch down ends
+    /// the wait, so a later tap of the user is never dropped.
+    pub fn drop(&mut self, ev: &UiEvent) -> bool {
+        match ev {
+            UiEvent::Touch(t) if t.kind == TouchKind::Down => {
+                self.armed = false;
+                false
+            }
+            UiEvent::Gesture(_) => std::mem::take(&mut self.armed),
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn closing_tap_drops_only_the_tap_of_the_closing_lift() {
+        use crate::Gesture;
+        let p = Point::new(10, 10);
+        let tap = UiEvent::Gesture(Gesture::Tap { pos: p });
+        let mut c = ClosingTap::default();
+        assert!(!c.drop(&tap), "nothing closed");
+        c.arm(&t(0, TouchKind::Up, p));
+        assert!(c.drop(&tap) && !c.drop(&tap), "the lift's tap only");
+        c.arm(&tap);
+        assert!(!c.drop(&tap), "closed by a gesture: no tap follows");
+        c.arm(&t(0, TouchKind::Up, p));
+        assert!(!c.drop(&t(0, TouchKind::Down, p)) && !c.drop(&tap), "a new touch is the user's");
+    }
 
     #[test]
     fn lift_above_moves_a_covered_field_onto_the_keyboard() {
