@@ -1470,28 +1470,14 @@ fn split_directives(md: &str) -> Directives {
     (segs, input, sheet, back)
 }
 
-thread_local! {
-    /// The UI family with bold and italics for viewers with `:::emphasis`, and its name
-    /// (built again when the UI font changes).
-    static EMPHASIS_FONTS: std::cell::RefCell<Option<(String, ink_text::Fonts)>> = const { std::cell::RefCell::new(None) };
-}
-
 /// Runs `f` with the UI family's bold and italic faces
-/// ([`crate::fonts::emphasis_fonts`]) when `emphasis`, else with `cx`'s UI fonts, which
-/// draw bold and italic text in the regular face.
+/// ([`crate::fonts::with_emphasis_fonts`]) when `emphasis`, else with `cx`'s UI fonts,
+/// which draw bold and italic text in the regular face.
 fn body_fonts<R>(emphasis: bool, cx: &mut PaintCx, f: impl FnOnce(&mut PaintCx) -> R) -> R {
     if !emphasis {
         return f(cx);
     }
-    EMPHASIS_FONTS.with(|s| {
-        let mut s = s.borrow_mut();
-        let family = crate::fonts::ui_family();
-        if s.as_ref().is_none_or(|(n, _)| *n != family) {
-            *s = Some((family.clone(), crate::fonts::emphasis_fonts(&family)));
-        }
-        let (_, fonts) = s.as_mut().expect("set above");
-        f(&mut PaintCx { canvas: &mut *cx.canvas, fonts, theme: cx.theme })
-    })
+    crate::fonts::with_emphasis_fonts(|fonts| f(&mut PaintCx { canvas: &mut *cx.canvas, fonts, theme: cx.theme }))
 }
 
 /// The icon called `name` (`chat`, `info`, ...; any case).
