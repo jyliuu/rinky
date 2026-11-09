@@ -291,13 +291,10 @@ pub struct Note {
     pub kind: NoteKind,
     /// Where the note text starts.
     pub position: Position,
-    /// The note text (for a popup), without its leading number, the punctuation after
-    /// that number, or backlinks: the text of [`Note::spans`] joined. Paragraphs are
-    /// separated by `\n`.
+    /// The note text (for a popup) as the book prints it, its number included, without
+    /// the links back to the reference the book marks as such: the text of
+    /// [`Note::spans`] joined. Paragraphs are separated by `\n`.
     pub text: String,
-    /// The note's own number or mark as the book prints it before the text (`12`, `*`),
-    /// without brackets or a trailing dot; `None` when the note has none.
-    pub label: Option<String>,
     /// [`Note::text`] with its inline formatting (italic, bold), white space collapsed;
     /// a span may end with the `\n` of a paragraph break.
     pub spans: Vec<NoteSpan>,
@@ -319,48 +316,9 @@ impl Note {
     pub fn plain(kind: NoteKind, position: Position, text: impl Into<String>) -> Note {
         let text = text.into();
         let spans = if text.is_empty() { Vec::new() } else { vec![NoteSpan { text: text.clone(), ..Default::default() }] };
-        Note { kind, position, text, label: None, spans }
+        Note { kind, position, text, spans }
     }
 
-    /// Removes `label` (the reference's own text, such as `12` or `[12]`) from the start
-    /// of the text when the note repeats it there as plain text (`12 The text`,
-    /// `12. The text`, `[12] The text`), and sets [`Note::label`] if it was unset.
-    /// Nothing changes when the text does not start with it. Returns true when it was
-    /// removed.
-    pub fn strip_label(&mut self, label: &str) -> bool {
-        let want = note_mark(label);
-        let Some(want) = want.filter(|w| !w.is_empty()) else { return false };
-        let Some(first) = self.spans.first() else { return false };
-        let t = first.text.trim_start();
-        let (token, rest) = t.split_once(char::is_whitespace).unwrap_or((t, ""));
-        if note_mark(token).as_deref() != Some(want.as_str()) {
-            return false;
-        }
-        let rest = rest.trim_start().to_string();
-        if rest.is_empty() {
-            self.spans.remove(0);
-            if let Some(s) = self.spans.first_mut() {
-                s.text = s.text.trim_start().to_string();
-            }
-        } else {
-            self.spans[0].text = rest;
-        }
-        self.spans.retain(|s| !s.text.is_empty());
-        self.text = self.spans.iter().map(|s| s.text.as_str()).collect();
-        self.label.get_or_insert(want);
-        true
-    }
-}
-
-/// The mark of a note number as written (`[12]`, `(12)`, `12.`, `12)`, `*`): the
-/// number or mark itself; `None` for text that does not look like one (at most four
-/// letters or digits, or a few of `*†‡§¶#`).
-pub fn note_mark(s: &str) -> Option<String> {
-    let t = s.trim();
-    let t = t.strip_prefix('[').and_then(|x| x.strip_suffix(']')).or_else(|| t.strip_prefix('(').and_then(|x| x.strip_suffix(')'))).unwrap_or(t);
-    let t = t.trim_end_matches(['.', ')', ':']).trim();
-    let ok = !t.is_empty() && t.chars().count() <= 4 && (t.chars().all(|c| c.is_alphanumeric()) || t.chars().all(|c| "*†‡§¶#".contains(c)));
-    ok.then(|| t.to_string())
 }
 
 /// Selected text.

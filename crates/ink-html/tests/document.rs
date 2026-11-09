@@ -414,7 +414,7 @@ fn spans(n: &ink_doc::Note) -> Vec<(&str, bool, bool)> {
 }
 
 #[test]
-fn note_text_without_its_number() {
+fn note_text_as_the_book_prints_it() {
     let text = r##"<p>EPUB 3<a epub:type="noteref" href="#fn1">1</a>, classic<a href="n.xhtml#fn2" id="ref2"><sup>2</sup></a>,
         bracketed<a href="n.xhtml#fn3">[3]</a>, sup<sup><a href="n.xhtml#fn4">4</a></sup>, pandoc<a href="n.xhtml#fn5" role="doc-noteref"><sup>5</sup></a>,
         dotted<a href="n.xhtml#fn6">6</a>, plain<a href="n.xhtml#fn7">7</a>, star<a href="n.xhtml#fn8">*</a>.</p>
@@ -429,36 +429,25 @@ fn note_text_without_its_number() {
     let n = notes_of(text, notes);
     let by = |t: &str| n.iter().find(|(l, _)| l == t).map(|(_, n)| n.clone()).unwrap_or_else(|| panic!("{t} in {n:?}"));
 
+    // An aside whose first child is a paragraph: no empty paragraph before the text.
     let n1 = by("1");
-    assert_eq!(n1.text, "The first note.");
-    assert_eq!(n1.label.as_deref(), Some("1"));
-    assert_eq!(spans(&n1), [("The ", false, false), ("first", false, true), (" note.", false, false)]);
-
+    assert_eq!(n1.text, "1. The first note.");
+    assert_eq!(spans(&n1), [("1. The ", false, false), ("first", false, true), (" note.", false, false)]);
     let n2 = by("2");
-    assert_eq!(n2.text, "Classic note with emphasis and bold.");
-    assert_eq!(n2.label.as_deref(), Some("2"));
-    assert_eq!(spans(&n2), [("Classic note with ", false, false), ("emphasis", false, true), (" and ", false, false), ("bold", true, false), (".", false, false)]);
-
-    let n3 = by("[3]");
-    assert_eq!((n3.text.as_str(), n3.label.as_deref()), ("Bracketed backlink.", Some("3")));
+    assert_eq!(n2.text, "2 Classic note with emphasis and bold.");
+    assert_eq!(spans(&n2), [("2 Classic note with ", false, false), ("emphasis", false, true), (" and ", false, false), ("bold", true, false), (".", false, false)]);
+    assert_eq!(by("[3]").text, "[3] Bracketed backlink.");
+    // A <sup> number stays inline.
     let n4 = by("4");
-    assert_eq!((n4.text.as_str(), n4.label.as_deref()), ("Sup number, A Book.", Some("4")));
+    assert_eq!(n4.text, "4 Sup number, A Book.");
     assert_eq!(n4.spans[1].text, "A Book");
     assert!(n4.spans[1].italic);
-    // The backlink at the end is gone; pandoc notes have no number of their own (the
-    // list item number is CSS).
-    let n5 = by("5");
-    assert_eq!((n5.text.as_str(), n5.label.as_deref()), ("Pandoc note.", None));
-    let n6 = by("6");
-    assert_eq!((n6.text.as_str(), n6.label.as_deref()), ("Bracketed text number, then 1984 stays.", Some("6")));
-    // A bare number in the text is only removed when it equals the reference.
-    let mut n7 = by("7");
-    assert_eq!((n7.text.as_str(), n7.label.as_deref()), ("7 Bare number in the text.", None));
-    assert!(!n7.strip_label("8"));
-    assert!(n7.strip_label("[7]"));
-    assert_eq!((n7.text.as_str(), n7.label.as_deref()), ("Bare number in the text.", Some("7")));
-    let n8 = by("*");
-    assert_eq!((n8.text.as_str(), n8.label.as_deref()), ("Starred note", Some("*")));
+    // A backlink marked role="doc-backlink" goes.
+    assert_eq!(by("5").text, "Pandoc note.");
+    assert_eq!(by("6").text, "[6] Bracketed text number, then 1984 stays.");
+    assert_eq!(by("7").text, "7 Bare number in the text.");
+    // An unmarked arrow link stays: only marked backlinks go.
+    assert_eq!(by("*").text, "* Starred note ↩");
 }
 
 #[test]
@@ -549,9 +538,10 @@ fn page_map_layout_has_the_full_layouts_page_starts() {
     }
 }
 
-/// Notes the way books really write them: the popup text is the note's own content,
-/// without the number the book prints before it, the punctuation after that number,
-/// or a backlink before or after the text; paragraphs stay apart.
+/// Notes the way books really write them, found as KOReader finds them (which blocks
+/// make up the note) and shown as the book prints them: the number and its punctuation
+/// stay where they are, inline elements stay inline, paragraphs stay apart, and only
+/// backlinks the book marks as such go.
 #[test]
 fn note_content_like_koreader() {
     let text = r##"<p>A<a href="n.xhtml#fn57">57</a> B<a href="n.xhtml#fn58">58</a> C<a href="n.xhtml#fn59">59</a>
@@ -567,41 +557,41 @@ fn note_content_like_koreader() {
         <h2>Next part</h2>
         <section epub:type="endnotes" role="doc-endnotes"><ol>
           <li id="en61"><p>List endnote 61. <a href="a.xhtml#r61" role="doc-backlink">↩︎</a></p></li>
-          <li id="fn62"><p>List endnote 62, a sibling. <a href="a.xhtml#r62">Back</a></p></li>
+          <li id="fn62"><p>List endnote 62, a sibling. <span class="noprint"><a href="a.xhtml#r62">Back</a></span></p></li>
         </ol></section>
         <p><a id="fn63"></a><a href="a.xhtml#r63">63.</a> Mobi note with an empty anchor.</p>
         <a id="fn64"></a><p>64. Anchor before the paragraph.</p>
-        <p id="fn65">65 <a href="a.xhtml#r65">↑</a> Bare number, then an arrow backlink.</p>
+        <p id="fn65">65 <a href="a.xhtml#r65" epub:type="backlink">↑</a> Bare number, then a marked backlink.</p>
         <div class="footnotes"><p id="fn67"><span class="num">67.</span> In a list of notes.</p><p id="fn68">68. The next one.</p></div>
         "##;
     let n = notes_of(text, notes);
     let by = |t: &str| n.iter().find(|(l, _)| l == t).map(|(_, n)| n.clone()).unwrap_or_else(|| panic!("{t} in {n:?}"));
     let text = |t: &str| by(t).text;
 
-    // The number as a backlink, then a period: neither stays.
-    assert_eq!(text("57"), "The text of note 57.");
-    assert_eq!(by("57").label.as_deref(), Some("57"));
-    // A numbered backlink after the text goes.
-    assert_eq!(text("58"), "The text of note 58.");
-    // The number alone in the first paragraph: that paragraph is gone.
-    assert_eq!(text("59"), "Calibre note, its number in a paragraph of its own.");
+    // The number link and the period after it on one line, as printed.
+    assert_eq!(text("57"), "57. The text of note 57.");
+    // A numbered link after the text is the book's, not marked as a backlink: it stays.
+    assert_eq!(text("58"), "The text of note 58. [58]");
+    // The number in a paragraph of its own stays a paragraph (as KOReader shows it).
+    assert_eq!(text("59"), "59.\nCalibre note, its number in a paragraph of its own.");
     // A note of two paragraphs without a container: the following paragraph belongs
-    // to it (up to the heading).
-    assert_eq!(text("60"), "First paragraph of note 60.\nSecond paragraph of note 60, no id of its own.");
-    // One <li> of an endnotes list, not the whole list; the backlink goes.
+    // to it (up to the heading); the <sup> number stays inline.
+    assert_eq!(text("60"), "[60]: First paragraph of note 60.\nSecond paragraph of note 60, no id of its own.");
+    // One <li> of an endnotes list, not the whole list; marked backlinks go
+    // (role="doc-backlink", class "noprint").
     assert_eq!(text("61"), "List endnote 61.");
     assert_eq!(by("61").kind, NoteKind::Endnote);
     assert_eq!(text("62"), "List endnote 62, a sibling.");
     // An empty anchor in the paragraph, or before it.
-    assert_eq!(text("63"), "Mobi note with an empty anchor.");
-    assert_eq!(text("64"), "Anchor before the paragraph.");
-    assert_eq!(text("65"), "65 Bare number, then an arrow backlink.");
+    assert_eq!(text("63"), "63. Mobi note with an empty anchor.");
+    assert_eq!(text("64"), "64. Anchor before the paragraph.");
+    assert_eq!(text("65"), "65 Bare number, then a marked backlink.");
     // An EPUB 3 aside of two paragraphs, its number then a bracket.
-    assert_eq!(text("66"), "Aside note,\nsecond paragraph.");
+    assert_eq!(text("66"), "66) Aside note,\nsecond paragraph.");
     assert_eq!(by("66").kind, NoteKind::Footnote);
     // Notes side by side in a footnotes container: just the one.
-    assert_eq!(text("67"), "In a list of notes.");
+    assert_eq!(text("67"), "67. In a list of notes.");
     assert_eq!(by("67").kind, NoteKind::Footnote);
-    assert_eq!(text("68"), "The next one.");
+    assert_eq!(text("68"), "68. The next one.");
 }
 

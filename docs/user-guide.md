@@ -168,8 +168,8 @@ remove its bookmark.
 steps to the previous and next hit; taps on the page still turn pages.
 
 Tapping a link follows it. A footnote opens in a panel at the bottom of the screen
-that shows the note's number in bold and its text (without its link back), with *Go
-to note* at the right; a tap on the page above closes it. A long note fills at most
+that shows the note as the book prints it, with *Go to note* at the right; a tap on
+the page above closes it. A long note fills at most
 half the screen: tap its text to see the rest. After a jump to a note, a **Back to
 p. N** pill takes you back.
 

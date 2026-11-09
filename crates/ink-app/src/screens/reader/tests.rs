@@ -598,12 +598,11 @@ fn footnote_popup_internal_link_and_back() {
     let mut h = Harness::new("links", "formats/sample.fb2");
     // A footnote reference: a popup with the note text, the page stays.
     let (page, l) = find_link(&mut h, 0, |l| l.footnote);
-    // The FB2 note's number (its title) is the label, not part of the text.
+    // The FB2 note's title (its number) runs in bold into the text, as KOReader shows it.
     let ink_doc::LinkTarget::Internal(nt) = &l.target else { panic!() };
-    let mut note = h.reader.doc.as_deref_mut().unwrap().note(nt).unwrap().unwrap();
-    prepare_note(&mut note, &l.text);
-    assert_eq!(note.text, "The first footnote.");
-    assert_eq!(note.label.as_deref(), Some("1"));
+    let note = h.reader.doc.as_deref_mut().unwrap().note(nt).unwrap().unwrap();
+    assert_eq!(note.text, "1 The first footnote.");
+    assert!(note.spans[0].bold && note.spans[0].text.starts_with('1'), "{:?}", note.spans);
     h.reader.go_to_page(page);
     h.paint();
     let r = l.rect.unwrap();
@@ -650,24 +649,10 @@ fn note_popup_text_and_spans() {
     use ink_doc::{Note, NoteKind, NoteSpan};
     let pos = Position::Page(Default::default());
     let span = |t: &str, italic| NoteSpan { text: t.into(), bold: false, italic };
-    // The note has its own number (already taken off): the text stays.
-    let mut n = Note { kind: NoteKind::Footnote, position: pos.clone(), text: "12 Text.".into(), label: Some("12".into()), spans: vec![span("12 Text.", false)] };
-    prepare_note(&mut n, "[12]");
-    assert_eq!(n.text, "12 Text.");
-    // A bare number repeated in the text: removed when it equals the reference.
-    let mut n = Note { kind: NoteKind::Endnote, position: pos.clone(), text: "3 See ".into(), label: None, spans: vec![span("3 See ", false), span("Hamlet", true)] };
-    prepare_note(&mut n, "3");
-    assert_eq!(n.text, "See Hamlet");
-    assert_eq!(n.label.as_deref(), Some("3"));
-    assert_eq!(note_spans(&n, 700), [("See ".to_string(), Style::Regular), ("Hamlet".to_string(), Style::Italic)]);
-    // A number that differs from the reference stays.
-    let mut n = Note::plain(NoteKind::Footnote, pos.clone(), "1984 was a year.");
-    prepare_note(&mut n, "[4]");
-    assert_eq!(n.text, "1984 was a year.");
-    // A reference that is no number (a word link): nothing to take off.
+    // The note's spans as they are, number included, with their styles.
+    let n = Note { kind: NoteKind::Endnote, position: pos.clone(), text: "3 See Hamlet".into(), spans: vec![span("3 See ", false), span("Hamlet", true)] };
+    assert_eq!(note_spans(&n, 700), [("3 See ".to_string(), Style::Regular), ("Hamlet".to_string(), Style::Italic)]);
     let mut n = Note::plain(NoteKind::Footnote, pos, "Text.");
-    prepare_note(&mut n, "see the appendix");
-    assert_eq!(n.text, "Text.");
     // Long notes are cut at a word, also at a paragraph break.
     n.spans = vec![span("one two ", false), span("three four", true)];
     assert_eq!(note_spans(&n, 14), [("one two ".to_string(), Style::Regular), ("three ...".to_string(), Style::Italic)]);
@@ -725,8 +710,8 @@ fn tap_note(h: &mut Harness, number: &str) {
 }
 
 /// The note shows as KOReader shows it: in a panel across the whole width at the bottom
-/// of the screen, as high as its text, with the note's text and nothing else (no
-/// "Footnote 57" heading, no number or period left over), paragraphs kept.
+/// of the screen, as high as its text, with the note as the book prints it (its number
+/// and the period after it on the same line, no heading), paragraphs kept.
 #[test]
 fn footnote_panel_at_the_bottom_shows_only_the_note() {
     let mut h = notes_book("note-popup");
@@ -736,9 +721,8 @@ fn footnote_panel_at_the_bottom_shows_only_the_note() {
     assert_eq!((r.x, r.w, r.bottom()), (0, full.w, full.h as i32), "full width, on the bottom edge: {r:?}");
     assert!(!p.at_top);
     let text: String = p.spans.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(text, "57 The text of note 57, which says something about Hamlet.");
-    assert_eq!(p.spans[0], ("57 ".to_string(), Style::Bold), "the number leads, in bold");
-    assert_eq!(p.spans[2], ("Hamlet".to_string(), Style::Italic));
+    assert_eq!(text, "57. The text of note 57, which says something about Hamlet.");
+    assert_eq!(p.spans[1], ("Hamlet".to_string(), Style::Italic));
     assert_eq!(p.pages.len(), 1);
     let one_line = r.h;
     // One line of text: no empty space (the text, padding and the button row).
@@ -755,7 +739,7 @@ fn footnote_panel_at_the_bottom_shows_only_the_note() {
     tap_note(&mut h, "58");
     let (p, r) = note_panel(&mut h);
     let text: String = p.spans.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(text, "58 The first paragraph of note 58.\nIts second paragraph.");
+    assert_eq!(text, "58. The first paragraph of note 58.\nIts second paragraph.");
     assert!(r.h > one_line + 40 && r.h < one_line + 100, "{} {one_line}", r.h);
     assert_eq!(r.bottom(), full.h as i32);
     h.shot("02-note-58");

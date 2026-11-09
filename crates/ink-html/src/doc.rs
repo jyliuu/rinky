@@ -1550,10 +1550,10 @@ impl Document for HtmlDocument {
             return Ok(None);
         }
         let Some((kind, blocks)) = note_scope(&ch.dom, node) else { return Ok(None) };
-        let (label, spans) = note_body(&ch.dom, &blocks);
+        let spans = note_body(&ch.dom, &blocks);
         let text = spans.iter().map(|s| s.text.as_str()).collect();
         let position = Position::XPointer(self.xpointer(c, DomPos::Element { node: blocks[0], point: Some(0) }));
-        Ok(Some(Note { kind, position, text, label, spans }))
+        Ok(Some(Note { kind, position, text, spans }))
     }
 
     fn set_page_cache(&mut self, dir: &Path, book_id: &str) {
@@ -1912,152 +1912,81 @@ fn note_scope(dom: &crate::dom::Dom, target: crate::dom::NodeId) -> Option<(Note
     Some((kind, blocks))
 }
 
-/// A backlink inside a note (back to the reference): `role="doc-backlink"`,
-/// `epub:type="backlink"`, a link whose text is only an arrow (`↩`, `↑`, `^`) or a word
-/// such as "Back", or an element the book hides when printed (class `noprint`, as
-/// Wikipedia's backlinks).
-fn is_backlink(dom: &crate::dom::Dom, n: crate::dom::NodeId, e: &crate::dom::Element) -> bool {
-    if e.attr("class").is_some_and(|c| c.split_whitespace().any(|c| c.eq_ignore_ascii_case("noprint"))) {
-        return true;
-    }
-    if e.name != "a" {
-        return false;
-    }
-    if type_and_role(e).contains("backlink") {
-        return true;
-    }
-    let t = dom.text_content(n);
-    let t = t.trim().trim_matches(|c| matches!(c, '[' | ']' | '(' | ')')).trim();
-    if matches!(t.to_lowercase().as_str(), "back" | "return" | "go back" | "back to text" | "retour" | "zurück" | "назад") {
-        return true;
-    }
-    !t.is_empty() && t.chars().all(|c| "↩↪↑⤴⇧^\u{fe0e}\u{fe0f}".contains(c) || c.is_whitespace())
-}
-
-/// The link at the very end of `root` (only white space or punctuation after it) when
-/// it holds just a note number (`<a href="#ref12">[12]</a>`): a backlink after the text.
-fn trailing_number_link(dom: &crate::dom::Dom, root: crate::dom::NodeId) -> Option<crate::dom::NodeId> {
-    let mut n = root;
-    loop {
-        // The last child that holds more than white space and punctuation.
-        let last = dom.node(n).children.iter().rev().copied().find(|&k| match dom.text(k) {
-            Some(t) => !t.trim_matches(|c: char| c.is_whitespace() || ".,;:)]".contains(c)).is_empty(),
-            None => dom.element(k).is_some_and(|e| !e.in_svg_tree() && !dom.text_content(k).trim().is_empty()),
-        })?;
-        let e = dom.element(last)?;
-        if e.name == "a" && e.attr("href").is_some() {
-            return element_mark("a", &dom.text_content(last)).map(|_| last);
-        }
-        n = last;
-    }
-}
-
-/// The note's mark when the whole text of an element is one: up to three digits, a few
-/// of `*†‡§¶#` or, in a link or `<sup>`, up to four letters (`iv`, `a`); with optional
-/// brackets or a trailing dot (`[12]`, `12.`).
-fn element_mark(name: &str, text: &str) -> Option<String> {
-    let m = ink_doc::note_mark(text)?;
-    let digits = m.chars().all(|c| c.is_ascii_digit()) && m.len() <= 3;
-    let symbols = m.chars().all(|c| "*†‡§¶#".contains(c));
-    let letters = matches!(name, "a" | "sup") && m.chars().all(char::is_alphanumeric);
-    (digits || symbols || letters).then_some(m)
-}
-
-/// The mark at the start of plain text when it is set off as one: `[12]`, `(12)`,
-/// `12.`, `12)`, or `*`/`†` marks, followed by white space. A bare number (`12 The
-/// text`) stays: it could be the text itself (`1984 was ...`); the reader strips it
-/// when it equals the reference ([`Note::strip_label`]).
-fn text_mark(text: &str) -> Option<(String, usize)> {
-    let t = text.trim_start();
-    let lead = text.len() - t.len();
-    let (token, _) = t.split_once(char::is_whitespace)?;
-    let set_off = (token.starts_with('[') && token.ends_with(']'))
-        || (token.starts_with('(') && token.ends_with(')'))
-        || (token.ends_with(['.', ')', ':']) && token.trim_end_matches(['.', ')', ':']).chars().all(|c| c.is_ascii_digit()))
-        || token.chars().all(|c| "*†‡§¶".contains(c));
-    let m = ink_doc::note_mark(token).filter(|_| set_off)?;
-    if m.chars().all(|c| c.is_ascii_digit()) && m.len() > 3 {
-        return None;
-    }
-    Some((m, lead + token.len()))
-}
-
-/// What may come between a note's number and its text: `57. Text`, `57) Text`,
-/// `57: Text`, `57 – Text`.
-fn after_mark(c: char) -> bool {
-    c.is_whitespace() || ".,:;)]}–—".contains(c)
+/// A link back to the reference that the book marks as one: `role="doc-backlink"` or
+/// `epub:type="backlink"` (the EPUB marking), or class `noprint` (Wikipedia's
+/// backlinks, the only ones KOReader's footnote popup hides).
+fn is_backlink(e: &crate::dom::Element) -> bool {
+    e.attr("class").is_some_and(|c| c.split_whitespace().any(|c| c.eq_ignore_ascii_case("noprint")))
+        || (e.name == "a" && type_and_role(e).split_whitespace().any(|t| t == "backlink" || t == "doc-backlink"))
 }
 
 /// A paragraph break in the raw spans of [`note_body`] (a `\n` in the result).
 const PARA: char = '\u{2029}';
 
-/// The note text of `blocks` (from [`note_scope`]) as styled spans, without its leading
-/// number (an element that holds only the number, such as `<a href="#ref1">1</a>`,
-/// `<sup>1</sup>` or an FB2 `<title>`, or a set-off `[1]` / `1.` in the text, and the
-/// punctuation after it) and without backlinks (anywhere, and a number link at the end).
-/// Returns the number found (the note's label) and the spans, white space collapsed,
-/// paragraphs separated by `\n`. Italic and bold come from the elements (`i`, `em`, `b`,
-/// `strong`, ...) inside the note, so a note set in italic as a whole stays plain.
-fn note_body(dom: &crate::dom::Dom, blocks: &[crate::dom::NodeId]) -> (Option<String>, Vec<ink_doc::NoteSpan>) {
+/// The note text of `blocks` (from [`note_scope`]) as styled spans, as the book prints
+/// it (its number and the punctuation after it included), without backlinks
+/// ([`is_backlink`]); white space collapsed, paragraphs (block elements) separated by
+/// `\n`. Italic and bold come from the elements (`i`, `em`, `b`, `strong`, ...) inside
+/// the note, so a note set in italic as a whole stays plain. An FB2 note's title (the
+/// `title` heading the FB2 converter writes first in the note's section) runs in bold
+/// into the first paragraph, as KOReader's popup CSS sets it
+/// (`body > section > title { display: inline; font-weight: bold }`).
+fn note_body(dom: &crate::dom::Dom, blocks: &[crate::dom::NodeId]) -> Vec<ink_doc::NoteSpan> {
     use crate::dom::NodeKind;
     use ink_doc::NoteSpan;
     let para = || NoteSpan { text: PARA.to_string(), ..Default::default() };
-    let trailing = blocks.last().and_then(|&b| trailing_number_link(dom, b));
-    // (node, bold, italic, end of a block)
+    // What ends where an element ends.
+    #[derive(Clone, Copy, PartialEq)]
+    enum End {
+        Not,
+        Para,
+        Space,
+    }
+    // (node, bold, italic, what this entry is)
     let mut stack = Vec::new();
     for &b in blocks.iter().rev() {
-        stack.push((b, false, false, true));
-        stack.push((b, false, false, false));
+        stack.push((b, false, false, End::Para));
+        stack.push((b, false, false, End::Not));
     }
-    let mut label: Option<String> = None;
     let mut raw: Vec<NoteSpan> = Vec::new();
-    // Any text yet (a mark counts only before the text).
-    let mut seen = false;
     while let Some((n, bold, italic, end)) = stack.pop() {
-        if end {
-            raw.push(para());
+        match end {
+            End::Para => raw.push(para()),
+            End::Space => raw.push(NoteSpan { text: " ".into(), bold, italic }),
+            End::Not => {}
+        }
+        if end != End::Not {
             continue;
         }
         match &dom.node(n).kind {
-            NodeKind::Text(t) => {
-                let mut t = t.as_str();
-                if !seen {
-                    if label.is_some() {
-                        t = t.trim_start_matches(after_mark);
-                    }
-                    if t.trim().is_empty() {
-                        continue;
-                    }
-                    seen = true;
-                    if label.is_none() {
-                        if let Some((m, len)) = text_mark(t) {
-                            label = Some(m);
-                            t = t[len..].trim_start_matches(after_mark);
-                        }
-                    }
-                }
-                raw.push(NoteSpan { text: t.to_string(), bold, italic });
-            }
+            NodeKind::Text(t) => raw.push(NoteSpan { text: t.clone(), bold, italic }),
             NodeKind::Element(e) => {
-                if e.in_svg_tree() || e.st.display == crate::style::Display::None || is_backlink(dom, n, e) || Some(n) == trailing {
+                if e.in_svg_tree() || e.st.display == crate::style::Display::None || is_backlink(e) {
                     continue;
                 }
                 let root = blocks.contains(&n);
-                if !root && !seen {
-                    if let Some(m) = element_mark(&e.name, &dom.text_content(n)) {
-                        label.get_or_insert(m);
-                        continue;
-                    }
-                }
-                let bold = bold || matches!(e.name.as_str(), "b" | "strong");
+                let parent = dom.node(n).parent;
+                // The element children of a root: the title runs in when it is the
+                // first, and so does the block right after it.
+                let mut kids = dom.node(parent).children.iter().copied().filter(|&k| dom.element(k).is_some());
+                let first = kids.next();
+                let second = kids.next();
+                let titled = blocks.contains(&parent)
+                    && first.and_then(|k| dom.element(k)).is_some_and(|t| is_heading(&t.name) && t.attr("class").is_some_and(|c| c.split_whitespace().any(|c| c == "title")));
+                let run_in = titled && first == Some(n);
+                let bold = bold || run_in || matches!(e.name.as_str(), "b" | "strong");
                 let italic = italic || matches!(e.name.as_str(), "i" | "em" | "cite" | "var" | "dfn");
-                if !root && e.st.display.is_block_like() {
-                    raw.push(para());
-                    stack.push((n, bold, italic, true));
+                if run_in {
+                    stack.push((n, bold, false, End::Space));
+                } else if !root && e.st.display.is_block_like() {
+                    if !(titled && second == Some(n)) {
+                        raw.push(para());
+                    }
+                    stack.push((n, bold, italic, End::Para));
                 } else if e.name == "br" {
                     raw.push(para());
                 }
-                stack.extend(dom.node(n).children.iter().rev().map(|&c| (c, bold, italic, false)));
+                stack.extend(dom.node(n).children.iter().rev().map(|&c| (c, bold, italic, End::Not)));
             }
         }
     }
@@ -2093,11 +2022,7 @@ fn note_body(dom: &crate::dom::Dom, blocks: &[crate::dom::NodeId]) -> (Option<St
             push(&mut spans, ch, s.bold, s.italic);
         }
     }
-    match label {
-        // Nothing but the number: show the number rather than nothing.
-        Some(l) if spans.is_empty() => (None, vec![NoteSpan { text: l, ..Default::default() }]),
-        l => (l, spans),
-    }
+    spans
 }
 
 #[cfg(test)]
