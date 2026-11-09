@@ -606,7 +606,7 @@ impl DictionaryPlugin {
     /// [`full_markdown_tab`]); nothing without a lookup.
     fn full_view(&self, cx: &mut HostCtx, tab: usize) -> Result<()> {
         if let Some(l) = &self.last {
-            cx.view_markdown(ID_VIEW, &l.word.word, &format!(":::emphasis\n{}", full_markdown_tab(&l.result, tab)))?;
+            cx.view_markdown(ID_VIEW, &l.word.word, &full_markdown_tab(&l.result, tab))?;
         }
         Ok(())
     }

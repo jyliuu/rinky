@@ -45,8 +45,9 @@ Settings › Fonts › Interface font (Noto Serif, or an installed family with b
 italic faces; `crates/ink-app/src/fonts.rs`). The UI fonts draw the bold style with
 the regular face, so titles are light and size steps carry the hierarchy; they are
 large enough to tell apart on the panel. Text whose emphasis carries meaning, such as
-a dictionary entry, gets the family's real bold and italic faces
-(`fonts::emphasis_fonts`).
+the Markdown of every plugin view, gets the family's real bold and italic faces
+(`fonts::emphasis_fonts`; synthetic ones for a family without them); the chrome drawn
+with them (labels, captions, rows) asks for the regular style.
 
 | Role | Size | Style | Use |
 | --- | --- | --- | --- |

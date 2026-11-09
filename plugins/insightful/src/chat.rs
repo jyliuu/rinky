@@ -442,7 +442,7 @@ pub fn render(conv: &Conversation, x: Extras) -> (String, Vec<String>) {
             // was sent (a preset action's whole prompt, not its short label).
             let mut s = String::from(":::you\n");
             if let Some(sel) = m.selection.as_ref().filter(|s| !s.text.trim().is_empty()) {
-                s.push_str(&format!("**{}**\n\n{}\n\n", guard(&passage_label(sel)), quote_passage(&sel.text)));
+                s.push_str(&format!("{}\n\n{}\n\n", guard(&passage_label(sel)), quote_passage(&sel.text)));
             }
             s.push_str(&guard(&m.content));
             md.push(s);
@@ -489,7 +489,7 @@ pub fn render(conv: &Conversation, x: Extras) -> (String, Vec<String>) {
         md.push("*No conversation yet.*".into());
     }
     if let Some(sel) = x.pending.filter(|s| !s.text.trim().is_empty()) {
-        md.push(format!(":::card | Sent with your next message\n**{}**\n\n{}", guard(&passage_label(sel)), quote_passage(&sel.text)));
+        md.push(format!(":::card | Sent with your next message\n{}\n\n{}", guard(&passage_label(sel)), quote_passage(&sel.text)));
     }
     md.push(format!(":::\n:::input {LINK_ASK} | {ASK_PLACEHOLDER}"));
     (md.join("\n\n"), questions)
@@ -520,7 +520,7 @@ pub fn render_list(book: &BookChats) -> String {
         }
         let first = c.messages.iter().find(|m| m.role == "user");
         let q = first.map(|m| m.label.as_deref().unwrap_or(&m.content)).unwrap_or(&c.title);
-        let mut body = format!("**{}**", guard(&short(q, 90)).replace('*', ""));
+        let mut body = guard(&short(q, 90)).replace('*', "");
         if let Some(sel) = first.and_then(|m| m.selection.as_ref()).filter(|s| !s.text.trim().is_empty()) {
             body.push_str(&format!("\n\n*\"{}\"*", guard(&short(&sel.text, 90)).replace('*', "")));
         }
@@ -563,7 +563,7 @@ mod tests {
         c.messages.push(u);
         let live = Live { actions: vec!["Calling `toc`".into()], text: "Par\n:::input x".into(), status: String::new(), model: "m1".into() };
         let (md, _) = render(&c, Extras { live: Some(&live), ..none });
-        assert!(md.starts_with(":::you\n**Selected passage**\n\n> \"Two households\"\n\nExplain the selected passage clearly\n\n:::action\nCalling `toc`\n\n:::answer AI — m1 |\nPar\n\\:::input x\n\n:::chips\n- [Stop](insightful:stop)"), "{md}");
+        assert!(md.starts_with(":::you\nSelected passage\n\n> \"Two households\"\n\nExplain the selected passage clearly\n\n:::action\nCalling `toc`\n\n:::answer AI — m1 |\nPar\n\\:::input x\n\n:::chips\n- [Stop](insightful:stop)"), "{md}");
         assert!(md.ends_with(":::\n:::input insightful:ask | Message Insightful…") && !md.contains("Retry"));
         // The label names the section, else the page, else the locator.
         let at = |section: Option<&str>, page, locator: Option<&str>| {
@@ -581,7 +581,7 @@ mod tests {
         assert!(render(&c, none).0.contains(&format!("*{UNANSWERED}*\n\n:::chips\n- [Retry](insightful:retry)")));
         // A passage for the next message.
         let sel = SelectionInfo { text: "In fair Verona".into(), section: Some("Prologue".into()), ..Default::default() };
-        assert!(render(&c, Extras { pending: Some(&sel), ..none }).0.contains(":::card | Sent with your next message\n**Selected passage — Prologue**\n\n> \"In fair Verona\""));
+        assert!(render(&c, Extras { pending: Some(&sel), ..none }).0.contains(":::card | Sent with your next message\nSelected passage — Prologue\n\n> \"In fair Verona\""));
         let mut a = msg("assistant", "Answer.\n- <question>Next?</question>");
         a.model = Some("m1".into());
         a.usage = Some(Totals { requests: 1, input_tokens: 5, output_tokens: 7, total_tokens: 12, cost_usd: 0.01, measured_requests: 1, costed_requests: 1 });
@@ -602,7 +602,7 @@ mod tests {
         c.updated = 0;
         c.messages.push(msg("user", "Who is Tybalt?"));
         let md = render_list(&b);
-        assert!(md.starts_with(":::chips\n- [Start new chat](insightful:new)\n\n:::card insightful:open/c1 | 1 Jan 1970 · 1 message\n**Who is Tybalt?**"), "{md}");
+        assert!(md.starts_with(":::chips\n- [Start new chat](insightful:new)\n\n:::card insightful:open/c1 | 1 Jan 1970 · 1 message\nWho is Tybalt?"), "{md}");
         assert!(md.ends_with("*Hold a chat to delete it.*"));
         b.current = Some(id.clone());
         assert!(render_list(&b).contains(":::card insightful:open/c1 | Current · 1 Jan 1970"));

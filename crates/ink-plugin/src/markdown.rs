@@ -2,9 +2,11 @@
 //! (CommonMark with GitHub tables and strikethrough).
 //!
 //! The output is data ([`Block`]s of [`Span`]s): headings, paragraphs (soft line
-//! breaks become spaces), list items with their nesting depth and number, block quote
-//! paragraphs, code blocks, rules and tables (cells of spans, the first row the header).
-//! Inline: bold, italic, code and links. HTML is kept as text. Layout and painting are
+//! breaks become spaces, hard ones `\n`), list items with their nesting depth and number
+//! and their later paragraphs, block quote paragraphs (a list in a quote: quoted lines
+//! that start with the marker), code blocks, rules and tables (cells of spans, the first
+//! row the header). Inline: bold, italic, struck, code and links (images: their alt
+//! text). HTML is kept as text. Layout and painting are
 //! the app's job.
 
 /// Inline style of a [`Span`].
@@ -16,6 +18,8 @@ pub struct SpanStyle {
     pub italic: bool,
     /// Code.
     pub code: bool,
+    /// Struck through (`~~x~~`).
+    pub strike: bool,
 }
 
 /// A run of text with one style.
@@ -57,6 +61,14 @@ pub enum Block {
         /// Text.
         spans: Vec<Span>,
     },
+    /// A further paragraph of a list item (after its first line), indented like the
+    /// item's text.
+    ItemParagraph {
+        /// Nesting depth of the item.
+        depth: u8,
+        /// Text.
+        spans: Vec<Span>,
+    },
     /// Block quote paragraph.
     Quote(Vec<Span>),
     /// Code block, lines kept.
@@ -91,6 +103,7 @@ pub fn parse(md: &str) -> Vec<Block> {
                 Tag::Table(_) => b.table = Some(Vec::new()),
                 Tag::Emphasis => b.italic += 1,
                 Tag::Strong => b.bold += 1,
+                Tag::Strikethrough => b.strike += 1,
                 Tag::Link { dest_url, .. } => b.link = Some(dest_url.to_string()),
                 _ => {}
             },
@@ -131,6 +144,7 @@ pub fn parse(md: &str) -> Vec<Block> {
                 }
                 TagEnd::Emphasis => b.italic = b.italic.saturating_sub(1),
                 TagEnd::Strong => b.bold = b.bold.saturating_sub(1),
+                TagEnd::Strikethrough => b.strike = b.strike.saturating_sub(1),
                 TagEnd::Link => b.link = None,
                 _ => {}
             },
@@ -139,7 +153,8 @@ pub fn parse(md: &str) -> Vec<Block> {
                 None => b.text(&t, false),
             },
             Event::Code(t) => b.text(&t, true),
-            Event::SoftBreak | Event::HardBreak => b.text(" ", false),
+            Event::SoftBreak => b.text(" ", false),
+            Event::HardBreak => b.text("\n", false),
             Event::Html(t) | Event::InlineHtml(t) => b.text(t.trim_end_matches('\n'), false),
             Event::Rule => b.out.push(Block::Rule),
             Event::FootnoteReference(t) => b.text(&format!("[^{t}]"), false),
@@ -158,6 +173,7 @@ struct Builder {
     spans: Vec<Span>,
     bold: usize,
     italic: usize,
+    strike: usize,
     link: Option<String>,
     quote: usize,
     code: Option<String>,
@@ -174,7 +190,7 @@ impl Builder {
         if t.is_empty() {
             return;
         }
-        let style = SpanStyle { bold: self.bold > 0, italic: self.italic > 0, code };
+        let style = SpanStyle { bold: self.bold > 0, italic: self.italic > 0, code, strike: self.strike > 0 };
         match self.spans.last_mut() {
             Some(last) if last.style == style && last.link == self.link => last.text.push_str(t),
             _ => self.spans.push(Span { text: t.to_string(), style, link: self.link.clone() }),
@@ -189,10 +205,20 @@ impl Builder {
         match self.items.last_mut() {
             Some(done @ false) => {
                 *done = true;
-                let spans = std::mem::take(&mut self.spans);
+                let mut spans = std::mem::take(&mut self.spans);
                 let depth = self.lists.len().saturating_sub(1).min(6) as u8;
                 let number = self.lists.last().copied().flatten();
-                self.out.push(Block::ListItem { number, depth, spans });
+                if self.quote > 0 {
+                    // A list in a quote: quoted lines that start with their marker.
+                    let marker = number.map(|n| format!("{n}. ")).unwrap_or_else(|| "\u{2022} ".into());
+                    match spans.first_mut() {
+                        Some(f) if f.style == SpanStyle::default() && f.link.is_none() => f.text.insert_str(0, &marker),
+                        _ => spans.insert(0, Span::plain(&marker)),
+                    }
+                    self.out.push(Block::Quote(spans));
+                } else {
+                    self.out.push(Block::ListItem { number, depth, spans });
+                }
             }
             _ => self.flush_text(),
         }
@@ -206,7 +232,13 @@ impl Builder {
             return self.flush_item();
         }
         let spans = std::mem::take(&mut self.spans);
-        self.out.push(if self.quote > 0 { Block::Quote(spans) } else { Block::Paragraph(spans) });
+        let depth = self.lists.len().saturating_sub(1).min(6) as u8;
+        self.out.push(match (self.quote > 0, self.items.is_empty()) {
+            (true, _) => Block::Quote(spans),
+            // A later paragraph of a list item.
+            (false, false) => Block::ItemParagraph { depth, spans },
+            (false, true) => Block::Paragraph(spans),
+        });
     }
 }
 
@@ -215,7 +247,7 @@ pub fn inline(text: &str) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
     for b in parse(text) {
         let spans = match b {
-            Block::Heading { spans, .. } | Block::Paragraph(spans) | Block::Quote(spans) | Block::ListItem { spans, .. } => spans,
+            Block::Heading { spans, .. } | Block::Paragraph(spans) | Block::Quote(spans) | Block::ListItem { spans, .. } | Block::ItemParagraph { spans, .. } => spans,
             _ => continue,
         };
         for s in spans {
@@ -234,7 +266,7 @@ pub fn to_plain(blocks: &[Block]) -> String {
     let mut out = Vec::new();
     for b in blocks {
         match b {
-            Block::Heading { spans, .. } | Block::Paragraph(spans) | Block::Quote(spans) => out.push(join(spans)),
+            Block::Heading { spans, .. } | Block::Paragraph(spans) | Block::Quote(spans) | Block::ItemParagraph { spans, .. } => out.push(join(spans)),
             Block::ListItem { number, depth, spans } => {
                 let marker = number.map(|n| format!("{n}.")).unwrap_or_else(|| "-".into());
                 out.push(format!("{}{marker} {}", "  ".repeat(*depth as usize), join(spans)));
@@ -256,7 +288,7 @@ mod tests {
     use super::*;
 
     fn st(bold: bool, italic: bool, code: bool) -> SpanStyle {
-        SpanStyle { bold, italic, code }
+        SpanStyle { bold, italic, code, strike: false }
     }
 
     #[test]
@@ -309,5 +341,72 @@ mod tests {
         assert_eq!(inline("[a](b"), vec![Span::plain("[a](b")]);
         assert_eq!(inline("_x_"), vec![Span { text: "x".into(), style: st(false, true, false), link: None }]);
         assert!(parse("").is_empty());
+    }
+
+    fn styled(s: &[Span]) -> Vec<(&str, SpanStyle)> {
+        s.iter().map(|x| (x.text.as_str(), x.style)).collect()
+    }
+
+    /// Emphasis as models write it: nested, adjacent, both delimiters, intraword `_`,
+    /// struck text and escapes.
+    #[test]
+    fn emphasis_as_models_write_it() {
+        let bi = SpanStyle { bold: true, italic: true, ..SpanStyle::default() };
+        let b = st(true, false, false);
+        let i = st(false, true, false);
+        let p = SpanStyle::default();
+        assert_eq!(styled(&inline("***x***")), vec![("x", bi)]);
+        assert_eq!(styled(&inline("**a *b* c**")), vec![("a ", b), ("b", bi), (" c", b)]);
+        assert_eq!(styled(&inline("*a **b** c*")), vec![("a ", i), ("b", bi), (" c", i)]);
+        assert_eq!(styled(&inline("__x__ and _y_")), vec![("x", b), (" and ", p), ("y", i)]);
+        assert_eq!(styled(&inline("**a**__b__")), vec![("ab", b)]);
+        assert_eq!(styled(&inline("snake_case_name and 2*3*4")), vec![("snake_case_name and 2", p), ("3", i), ("4", p)]);
+        assert_eq!(styled(&inline("\\*not\\* \\_this\\_")), vec![("*not* _this_", p)]);
+        let strike = SpanStyle { strike: true, ..SpanStyle::default() };
+        assert_eq!(styled(&inline("~~gone~~ kept")), vec![("gone", strike), (" kept", p)]);
+        // Streaming: an unclosed delimiter or code span stays text, the rest keeps its style.
+        assert_eq!(styled(&inline("**done** and **half")), vec![("done", b), (" and **half", p)]);
+        assert_eq!(styled(&inline("`open code")), vec![("`open code", p)]);
+    }
+
+    /// A hard line break (two spaces or a backslash at the end of a line) starts a new
+    /// line; a soft one is a space.
+    #[test]
+    fn hard_and_soft_breaks() {
+        assert_eq!(parse("one  \ntwo\\\nthree\nfour"), vec![Block::Paragraph(vec![Span::plain("one\ntwo\nthree four")])]);
+    }
+
+    /// A list item with more than one paragraph keeps the later ones in the item, a
+    /// code block in an item is code, and a list in a quote stays quoted.
+    #[test]
+    fn list_items_with_paragraphs_and_lists_in_quotes() {
+        let b = parse("1. First item.\n\n   More about it.\n2. Second\n   - nested\n\n     nested more\n\n> - quoted item\n> 1. quoted number\n>\n> > deeper\n\nAfter.");
+        assert_eq!(
+            b,
+            vec![
+                Block::ListItem { number: Some(1), depth: 0, spans: vec![Span::plain("First item.")] },
+                Block::ItemParagraph { depth: 0, spans: vec![Span::plain("More about it.")] },
+                Block::ListItem { number: Some(2), depth: 0, spans: vec![Span::plain("Second")] },
+                Block::ListItem { number: None, depth: 1, spans: vec![Span::plain("nested")] },
+                Block::ItemParagraph { depth: 1, spans: vec![Span::plain("nested more")] },
+                Block::Quote(vec![Span::plain("\u{2022} quoted item")]),
+                Block::Quote(vec![Span::plain("1. quoted number")]),
+                Block::Quote(vec![Span::plain("deeper")]),
+                Block::Paragraph(vec![Span::plain("After.")]),
+            ]
+        );
+        let code = parse("- Run:\n\n  ```\n  cargo test\n  ```\n- Done");
+        assert_eq!(code[1], Block::Code(vec!["cargo test".into()]));
+        assert_eq!(code[2], Block::ListItem { number: None, depth: 0, spans: vec![Span::plain("Done")] });
+    }
+
+    /// Headings of every level, links shown by their text, images by their alt text.
+    #[test]
+    fn headings_links_and_images() {
+        let b = parse("# One\n## Two *it*\n### Three\n#### Four\n##### Five\n###### Six\n\nSee [the **docs**](https://e.org) and ![a cat](cat.png).");
+        let levels: Vec<u8> = b.iter().filter_map(|b| if let Block::Heading { level, .. } = b { Some(*level) } else { None }).collect();
+        assert_eq!(levels, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(b[1], Block::Heading { level: 2, spans: vec![Span::plain("Two "), Span { text: "it".into(), style: st(false, true, false), link: None }] });
+        assert_eq!(to_plain(&b[6..]), "See the docs and a cat.");
     }
 }

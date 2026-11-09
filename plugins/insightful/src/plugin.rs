@@ -691,7 +691,7 @@ impl InsightfulPlugin {
                 Some(t) => format!("Selected passage — {}", t.replace('|', "/")),
                 None => "Selected passage".into(),
             };
-            md.push_str(&format!("\n\n:::card | Sent with your next message\n**{label}**\n\n{}", chat::quote_passage(&s.text)));
+            md.push_str(&format!("\n\n:::card | Sent with your next message\n{label}\n\n{}", chat::quote_passage(&s.text)));
         }
         md.push_str(&format!("\n\n:::\n:::input {LINK_ASK} | {}", chat::ASK_PLACEHOLDER));
         md = chat_view(&md);
@@ -1106,12 +1106,10 @@ fn retryable(msg: &str) -> bool {
     !["http 401", "http 403", "not configured", "api key", "context window", "context length", "content was filtered", "request was refused"].iter().any(|k| m.contains(k))
 }
 
-/// The viewer text of a chat (`md` from [`chat::render`]): bold and italics drawn in the
-/// interface font's own bold and italic faces (`:::emphasis`; the UI draws them in the
-/// regular face otherwise, so an answer's emphasis would not show) and a Back button to
-/// the list of chats.
+/// The viewer text of a chat (`md` from [`chat::render`]): a Back button to the list of
+/// chats.
 fn chat_view(md: &str) -> String {
-    format!(":::emphasis\n:::back {}\n{md}", chat::LINK_CHATS)
+    format!(":::back {}\n{md}", chat::LINK_CHATS)
 }
 
 #[cfg(test)]
