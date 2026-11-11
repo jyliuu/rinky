@@ -46,6 +46,7 @@ flate2 = { workspace = true, features = ["default"] }
 # Compiled-in plugins (one line each).
 dictionary = { path = "../../plugins/dictionary" }
 wikipedia = { path = "../../plugins/wikipedia" }
+translate = { path = "../../plugins/translate" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true

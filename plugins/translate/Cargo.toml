@@ -1,0 +1,21 @@
+[package]
+name = "translate"
+description = "Translate plugin: translates the selected text with Google Translate and shows it as a card"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# No doctests exist; skipping rustdoc --test saves about 0.7 s per crate in `cargo test`.
+doctest = false
+path = "lib.rs"
+
+[dependencies]
+ink-plugin.workspace = true
+ink-net.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+ink-doc.workspace = true

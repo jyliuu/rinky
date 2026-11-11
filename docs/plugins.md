@@ -11,7 +11,7 @@ same `PluginManager`, registry and host services, and get the same permissions c
 | App side: loading, storage on disk, network, UI presenter (ink-ui widgets) | `crates/ink-app/src/plugin_host.rs` |
 | Sample Lua plugin (word count and reading timer) | `plugins/sample-lua/plugin.toml`, `main.lua` |
 | Lua plugins on the device | `/mnt/us/rinky/plugins/<name>/` (Kobo: `/mnt/onboard/.adds/rinky/plugins/<name>/`) |
-| Compiled-in Rust plugins | `plugins/<name>/` crates, one line each in `crates/ink-app/src/plugins.rs` (kosync, opds, calibre, dictionary, stats, insightful, wikipedia, usbnet, ssh) |
+| Compiled-in Rust plugins | `plugins/<name>/` crates, one line each in `crates/ink-app/src/plugins.rs` (kosync, opds, calibre, dictionary, stats, insightful, wikipedia, translate, usbnet, ssh) |
 
 Contents: [Lua quick start](#lua-quick-start) - [plugin.toml](#plugintoml) -
 [Hooks](#hooks) - [Registries](#registries) - [The `ink` table](#the-ink-table) -

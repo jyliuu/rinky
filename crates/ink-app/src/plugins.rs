@@ -19,6 +19,7 @@ pub fn compiled_in() -> Vec<Box<dyn Plugin>> {
         Box::new(ink_stats::StatsPlugin::default()),
         Box::new(insightful::InsightfulPlugin::default()),
         Box::new(wikipedia::WikipediaPlugin::default()),
+        Box::new(translate::TranslatePlugin::default()),
         // Device access: USB Ethernet and the bundled SSH server (control tiles).
         Box::new(usbnet::UsbNetPlugin::default()),
         Box::new(ssh::SshPlugin::default()),
