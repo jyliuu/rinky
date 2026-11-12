@@ -807,7 +807,8 @@ impl HtmlDocument {
     /// x position of char boundary `i` of a run (0: its left edge).
     fn char_x(&self, t: &TextRun, i: usize) -> f32 {
         if i == 0 {
-            return t.x;
+            // The cell of the first character takes in the room the layout made for ruby.
+            return t.x - t.pad_before;
         }
         let end = t.text.char_indices().nth(i).map_or(t.text.len(), |(b, _)| b);
         t.x + self.fonts.borrow_mut().width(t.face, t.px, &t.text[..end]) + t.letter_spacing * i as f32
@@ -824,7 +825,8 @@ impl HtmlDocument {
         let mut best: Option<(f32, usize)> = None;
         for (k, (_, t)) in items.iter().enumerate() {
             let dyv = if py < t.line_top { t.line_top - py } else if py > t.line_bottom { py - t.line_bottom } else { 0.0 };
-            let dxv = if px < t.x { t.x - px } else if px > t.x + t.width { px - t.x - t.width } else { 0.0 };
+            let cell = t.x - t.pad_before;
+            let dxv = if px < cell { cell - px } else if px > t.x + t.width { px - t.x - t.width } else { 0.0 };
             let d = dyv * 4.0 + dxv;
             if best.is_none_or(|b| d < b.0) {
                 best = Some((d, k));
@@ -1385,7 +1387,7 @@ impl Document for HtmlDocument {
             }
             match last_line {
                 Some(l) if joins_next && l != t.line_top => {}
-                Some(l) if l == t.line_top && t.x > prev_right + 0.5 => text.push(' '),
+                Some(l) if l == t.line_top && t.x - t.pad_before > prev_right + 0.5 => text.push(' '),
                 Some(l) if l == t.line_top => {}
                 Some(_) => text.push('\n'),
                 None => {}

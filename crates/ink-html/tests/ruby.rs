@@ -592,3 +592,27 @@ fn measure_annotator_cost_on_a_big_cjk_book() {
         println!("{name}: {pages} pages, open + full pagination median {:.0} ms (min {:.0}, max {:.0}, n=5)", times[2], times[0], times[4]);
     }
 }
+
+/// Selects from the first to the last base character of the page's first line.
+fn select_line(d: &mut HtmlDocument) -> String {
+    let (bases, _) = page_runs(d);
+    let line: Vec<&TextRun> = bases.iter().filter(|b| b.line_top == bases[0].line_top).collect();
+    let (a, b) = (line[0], line[line.len() - 1]);
+    let y = ((a.line_top + a.line_bottom) / 2.0) as i32;
+    d.select(0, Point::new(a.x as i32 + 1, y), Point::new((b.x + b.width) as i32 - 1, y)).unwrap().unwrap().text
+}
+
+#[test]
+fn selected_text_is_the_same_with_and_without_readings() {
+    let text = "床前明月光疑是地上霜";
+    let body = format!("<p>{text}</p>");
+    let wide = vec!["aaaaaaaaaa"; 10];
+    let mut plain = cjk_doc(&body, &settings());
+    let mut annotated = cjk_annotated(&body, wide);
+    let ruby_body = format!("<p><ruby>{}</ruby></p>", text.chars().map(|c| format!("{c}<rt>aaaaaaaaaa</rt>")).collect::<String>());
+    let mut book = cjk_doc(&ruby_body, &settings());
+    let p = select_line(&mut plain);
+    assert_eq!(p, text);
+    assert_eq!(select_line(&mut annotated), p, "annotations add nothing to selected text");
+    assert_eq!(select_line(&mut book), p, "nor book ruby");
+}

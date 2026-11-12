@@ -76,6 +76,10 @@ pub struct TextRun {
     /// The line breaks inside a word here: the `-` that ends `text` was added by the
     /// layout (hyphenation or a soft hyphen), it is not in the book.
     pub hyphenated: bool,
+    /// Space the layout put right before this run's first character to make room for
+    /// ruby text (not a space of the text): the run's character cell starts this much
+    /// left of `x`, so selection and word finding see no gap there.
+    pub pad_before: f32,
 }
 
 /// An image drawn at a rectangle.
@@ -574,6 +578,8 @@ struct Piece {
     start: usize,
     end: usize,
     width: f32,
+    /// Space before the piece for ruby text ([`TextRun::pad_before`]).
+    pad_before: f32,
 }
 
 /// An unbreakable box: text between two break opportunities.
@@ -1997,13 +2003,15 @@ impl<'a, 'e> Flow<'a, 'e> {
             for run in p.pieces(b.start, b.end) {
                 // Widths only place the pieces across the line.
                 let width = if self.text_items { self.run_width(p, run) } else { 0.0 };
+                let mut pad_before = 0.0;
                 if self.text_items && !p.ruby.is_empty() {
                     // The space before a base its ruby text needs (overhang in lay_lines).
                     if let Some(r) = p.ruby_at(run.1, run.2).map(|i| &p.ruby[i]).filter(|r| r.start == run.1) {
                         pen += r.pad;
+                        pad_before = r.pad;
                     }
                 }
-                let pc = Piece { seg: run.0, start: run.1, end: run.2, width };
+                let pc = Piece { seg: run.0, start: run.1, end: run.2, width, pad_before };
                 if measured_seg != Some(pc.seg) {
                     measured_seg = Some(pc.seg);
                     let seg = &segs[pc.seg as usize];
@@ -2231,6 +2239,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                         line_top: top,
                         line_bottom: bottom,
                         hyphenated: hyphen,
+                        pad_before: pc.pad_before,
                     }));
                 }
             }
