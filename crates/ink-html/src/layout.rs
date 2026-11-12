@@ -274,21 +274,70 @@ const RUBY_MIN_SCALE: f32 = 0.7;
 /// that its neighbours keep their pitch.
 const RUBY_SHIFT: f32 = 0.25;
 
+/// One ruby text of a run being placed: its index in the run, its centred left edge
+/// with no space added, its width, the gap after it and how far it may sit off centre.
+#[derive(Clone, Copy)]
+struct RunText {
+    k: usize,
+    ideal: f32,
+    w: f32,
+    gap: f32,
+    slack: f32,
+}
+
+/// Buffers [`place_ruby`] reuses from run to run.
+#[derive(Default)]
+struct RubyScratch {
+    texts: Vec<RunText>,
+    /// Pool-adjacent-violators blocks: (sum, count).
+    blocks: Vec<(f32, usize)>,
+    /// Spacing before each text of the run (sum of widths and gaps).
+    offsets: Vec<f32>,
+    /// Upper bounds of the positions, from the right.
+    upper: Vec<f32>,
+}
+
+/// True when every ruby text of the tier fits at `scale` without space added before
+/// any base: each within [`RUBY_SHIFT`] of its base's centre, [`RUBY_GAP`] from the one
+/// before. One pass: placing each text as far left as allowed is the test.
+fn ruby_fits(ruby: &[Ruby], before: &[(f32, bool)], scale: f32) -> bool {
+    let (mut x, mut reach) = (0.0f32, f32::NEG_INFINITY);
+    for (r, &(w, brk)) in ruby.iter().zip(before) {
+        if brk {
+            reach = f32::NEG_INFINITY;
+        }
+        x += w;
+        if !r.text.is_empty() {
+            let rw = r.ruby_w * scale;
+            let ideal = x + (r.base_w - rw) / 2.0;
+            let at = reach.max(ideal - RUBY_SHIFT * r.base_w);
+            if at > ideal + RUBY_SHIFT * r.base_w + 0.01 {
+                return false;
+            }
+            reach = at + rw + RUBY_GAP * r.px * scale;
+        }
+        x += r.base_w;
+    }
+    true
+}
+
 /// Places the ruby texts of a paragraph over their bases at `scale` of their size:
 /// sets [`Ruby::pad`] (space before the base) and [`Ruby::shift`] (offset of the ruby
 /// text from the centre of its base). Returns the space added in all.
 ///
 /// Overhang: a ruby text may reach over the text beside it, as long as it keeps
-/// [`RUBY_GAP`] from the ruby text before it. A run of bases with nothing between them
-/// (one reading per character) keeps one pitch: every base of the run but the first gets
-/// the same pad, the smallest that lets each ruby text sit within [`RUBY_SHIFT`] of its
-/// base's centre without coming too close to the one before (the ruby texts sit as
-/// close to their centres as their spacing allows, see `try_place`). The first base of a run moves only if the
-/// ruby text before the run reaches too far. `before[i]` is the raw width of the text
-/// between ruby `i - 1` and ruby `i`, and whether a forced line break lies in it (the
-/// readings start afresh there). The edges of the lines the text is broken into are the
-/// boxes' lead and trail.
-fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32) -> f32 {
+/// [`RUBY_GAP`] from the ruby text before it, and sit up to [`RUBY_SHIFT`] of its base's
+/// width off centre. A run of bases with nothing between them (one reading per
+/// character) keeps one pitch: every base of the run but the first gets the same pad
+/// `u`, the smallest that lets the texts fit (a binary search over a one-pass test, only
+/// for runs that do not fit as they are). The first base of a run moves only if the
+/// ruby text before the run reaches too far. The texts are then put as close to their
+/// centres as their spacing allows (least squares: pool-adjacent-violators on the
+/// positions less the spacing before each), within the bounds the fit allows.
+/// `before[i]` is the raw width of the text between ruby `i - 1` and ruby `i`, and
+/// whether a forced line break lies in it (the readings start afresh there). The edges
+/// of the lines the text is broken into are the boxes' lead and trail.
+fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32, sc: &mut RubyScratch) -> f32 {
     let n = ruby.len();
     let (mut x, mut reach, mut total) = (0.0f32, f32::NEG_INFINITY, 0.0f32);
     let mut i = 0;
@@ -302,87 +351,96 @@ fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32) -> f32 {
             j += 1;
         }
         let run = &mut ruby[i..j];
-        // Places the run with pad `u` before every base but the first; Some(reach after
-        // it) when every ruby text fits within RUBY_SHIFT of its base's centre, the
-        // shifts written into the run. The ruby texts are put as close to their centres
-        // as their spacing allows (least squares: pool-adjacent-violators on the
-        // positions less the spacing before them), then pushed right where the ruby
-        // text before the run reaches too far. A base without a reading (an empty ruby
-        // text) only keeps the pitch.
-        let try_place = |run: &mut [Ruby], pad0: f32, u: f32| -> Option<f32> {
-            // (index, ideal left edge, width, gap after) of the ruby texts.
-            let mut items: Vec<(usize, f32, f32, f32)> = Vec::with_capacity(run.len());
-            let mut left = x + pad0;
-            for (k, r) in run.iter_mut().enumerate() {
-                if k > 0 {
-                    left += u;
-                }
-                r.shift = 0.0;
-                if !r.text.is_empty() {
-                    let rw = r.ruby_w * scale;
-                    items.push((k, left + (r.base_w - rw) / 2.0, rw, RUBY_GAP * r.px * scale));
-                }
-                left += r.base_w;
+        sc.texts.clear();
+        let mut left = x;
+        for (k, r) in run.iter_mut().enumerate() {
+            r.shift = 0.0;
+            r.pad = 0.0;
+            if !r.text.is_empty() {
+                let w = r.ruby_w * scale;
+                sc.texts.push(RunText { k, ideal: left + (r.base_w - w) / 2.0, w, gap: RUBY_GAP * r.px * scale, slack: RUBY_SHIFT * r.base_w });
             }
-            // Pool adjacent violators on the targets less the spacing before each text.
-            let mut blocks: Vec<(f32, usize)> = Vec::with_capacity(items.len());
+            left += r.base_w;
+        }
+        let run_w = left - x;
+        let (mut pad0, mut u) = (0.0f32, 0.0f32);
+        if let Some(first) = sc.texts.first() {
+            pad0 = (reach - (first.ideal + first.slack)).max(0.0);
+            let fits = |texts: &[RunText], u: f32| {
+                let mut end = reach;
+                texts.iter().all(|t| {
+                    let ideal = t.ideal + pad0 + t.k as f32 * u;
+                    let at = end.max(ideal - t.slack);
+                    end = at + t.w + t.gap;
+                    at <= ideal + t.slack + 0.01
+                })
+            };
+            if !fits(&sc.texts, 0.0) {
+                let mut hi = sc.texts.iter().map(|t| t.w + t.gap).fold(0.0, f32::max) * 2.0;
+                while !fits(&sc.texts, hi) {
+                    hi *= 2.0;
+                }
+                let mut lo = 0.0;
+                for _ in 0..14 {
+                    let mid = (lo + hi) / 2.0;
+                    if fits(&sc.texts, mid) {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                u = hi;
+            }
+            sc.blocks.clear();
+            sc.offsets.clear();
             let mut spacing = 0.0;
-            let mut offsets = Vec::with_capacity(items.len());
-            for &(_, ideal, rw, gap) in &items {
-                offsets.push(spacing);
-                let mut b = (ideal - spacing, 1usize);
-                while let Some(&(sum, n)) = blocks.last() {
-                    if sum / n as f32 > b.0 / b.1 as f32 {
-                        blocks.pop();
-                        b = (b.0 + sum, b.1 + n);
+            for t in &sc.texts {
+                sc.offsets.push(spacing);
+                let mut b = (t.ideal + pad0 + t.k as f32 * u - spacing, 1usize);
+                while let Some(&(sum, cnt)) = sc.blocks.last() {
+                    if sum / cnt as f32 > b.0 / b.1 as f32 {
+                        sc.blocks.pop();
+                        b = (b.0 + sum, b.1 + cnt);
                     } else {
                         break;
                     }
                 }
-                blocks.push(b);
-                spacing += rw + gap;
+                sc.blocks.push(b);
+                spacing += t.w + t.gap;
             }
-            let mut reach = reach;
-            let mut k = 0;
-            for (sum, n) in blocks {
-                let q = sum / n as f32;
-                for _ in 0..n {
-                    let (ri, ideal, rw, gap) = items[k];
-                    let at = (q + offsets[k]).max(reach);
-                    let r = &mut run[ri];
-                    if (at - ideal).abs() > RUBY_SHIFT * r.base_w + 0.01 {
-                        return None;
-                    }
-                    r.shift = at - ideal;
-                    reach = at + rw + gap;
-                    k += 1;
+            sc.upper.clear();
+            sc.upper.resize(sc.texts.len(), 0.0);
+            let mut up = f32::INFINITY;
+            for m in (0..sc.texts.len()).rev() {
+                let t = sc.texts[m];
+                up = up.min(t.ideal + pad0 + t.k as f32 * u + t.slack);
+                sc.upper[m] = up;
+                if m > 0 {
+                    up -= sc.texts[m - 1].w + sc.texts[m - 1].gap;
                 }
             }
-            Some(reach)
-        };
-        let first = &run[0];
-        let pad0 = (reach - (x + (first.base_w - first.ruby_w * scale) / 2.0 + RUBY_SHIFT * first.base_w)).max(0.0);
-        let mut u = 0.0;
-        if run.len() > 1 && try_place(run, pad0, 0.0).is_none() {
-            let mut hi = run.iter().map(|r| r.ruby_w * scale + RUBY_GAP * r.px * scale).fold(0.0, f32::max) * 2.0;
-            let mut lo = 0.0;
-            for _ in 0..14 {
-                let mid = (lo + hi) / 2.0;
-                if try_place(run, pad0, mid).is_some() {
-                    hi = mid;
-                } else {
-                    lo = mid;
+            let mut m = 0;
+            let mut end = reach;
+            for &(sum, cnt) in &sc.blocks {
+                let q = sum / cnt as f32;
+                for _ in 0..cnt {
+                    let t = sc.texts[m];
+                    let ideal = t.ideal + pad0 + t.k as f32 * u;
+                    let lo = end.max(ideal - t.slack);
+                    let at = (q + sc.offsets[m]).max(lo).min(sc.upper[m].max(lo));
+                    run[t.k].shift = at - ideal;
+                    end = at + t.w + t.gap;
+                    m += 1;
                 }
             }
-            u = hi;
+            reach = end;
         }
-        reach = try_place(run, pad0, u).unwrap_or(reach);
         for (k, r) in run.iter_mut().enumerate() {
             r.pad = if k == 0 { pad0 } else { u };
         }
         let added = pad0 + u * (run.len() - 1) as f32;
         total += added;
-        x += added + run.iter().map(|r| r.base_w).sum::<f32>();
+        x += added + run_w;
         i = j;
     }
     total
@@ -890,6 +948,8 @@ pub struct Flow<'a, 'e> {
     ruby_under_h: f32,
     /// Extra space between two ideographs of that paragraph, for annotations (px).
     ideo_space: f32,
+    /// Buffers of [`place_ruby`].
+    ruby_scratch: RubyScratch,
 }
 
 /// Where [`Flow::layout_until`] stops: once the flow is `extra` px below the first slice
@@ -1028,6 +1088,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             ruby_h: 0.0,
             ruby_under_h: 0.0,
             ideo_space: 0.0,
+            ruby_scratch: RubyScratch::default(),
         };
         if dom.body != NONE {
             f.block(dom.body, p.left, p.content_w);
@@ -1828,17 +1889,17 @@ impl<'a, 'e> Flow<'a, 'e> {
         // condensed first: one smaller size for every ruby text of the tier (a uniform
         // look), as large as lets them fit, at least RUBY_MIN_SCALE of the normal size.
         // Only what is still missing then moves bases apart.
-        if place_ruby(&mut ruby, &before, 1.0) > 0.01 {
-            let scale = if place_ruby(&mut ruby, &before, RUBY_MIN_SCALE) > 0.01 {
+        if !ruby_fits(&ruby, &before, 1.0) {
+            let scale = if !ruby_fits(&ruby, &before, RUBY_MIN_SCALE) {
                 RUBY_MIN_SCALE
             } else {
                 let (mut lo, mut hi) = (RUBY_MIN_SCALE, 1.0f32);
                 for _ in 0..8 {
                     let mid = (lo + hi) / 2.0;
-                    if place_ruby(&mut ruby, &before, mid) > 0.01 {
-                        hi = mid;
-                    } else {
+                    if ruby_fits(&ruby, &before, mid) {
                         lo = mid;
+                    } else {
+                        hi = mid;
                     }
                 }
                 lo
@@ -1848,7 +1909,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 r.ruby_w = self.env.fonts.width(r.face, r.px, &r.text);
             }
         }
-        place_ruby(&mut ruby, &before, 1.0);
+        place_ruby(&mut ruby, &before, 1.0, &mut self.ruby_scratch);
         ruby
     }
 
