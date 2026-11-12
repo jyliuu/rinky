@@ -2598,8 +2598,22 @@ fn a_page_drawn_before_its_annotations_are_ready_is_drawn_again_once() {
     h.reader.go_to_page(page);
     h.paint();
     assert!(h.reader.annot_wait, "drawn before the annotations were ready");
-    // No timer while waiting: the annotation thread wakes the app loop when it is done.
-    assert!(h.reader.timeout().is_none_or(|t| t > std::time::Duration::from_secs(1)), "{:?}", h.reader.timeout());
+    // No timer of its own while waiting: the annotation thread wakes the app loop when it
+    // is done. Other timers may run (on a slow machine the page count is still being
+    // polled), so compare the reader's timeout with and without the wait.
+    let waiting = h.reader.timeout();
+    h.reader.annot_wait = false;
+    let not_waiting = h.reader.timeout();
+    h.reader.annot_wait = true;
+    let close = |a: std::time::Duration, b: std::time::Duration| a.abs_diff(b) < std::time::Duration::from_millis(100);
+    assert!(
+        match (waiting, not_waiting) {
+            (None, None) => true,
+            (Some(a), Some(b)) => close(a, b),
+            _ => false,
+        },
+        "waiting for annotations changed the timeout: {waiting:?} vs {not_waiting:?}"
+    );
     ink_device::wake::take();
     let n = h.probe.updates().len();
     let t = std::time::Instant::now();
