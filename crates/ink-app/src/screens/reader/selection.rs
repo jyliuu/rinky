@@ -82,6 +82,25 @@ fn word_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '\'' | '\u{2019}' | '-' | '\u{2010}' | '\u{2011}')
 }
 
+/// Punctuation that closes what comes before it and is selected with the last word of a
+/// passage: stops, commas, closing quotes and brackets (also full-width ones).
+fn closing_punct(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ',' | ';' | ':' | '!' | '?' | '\u{2026}' | '\'' | '"' | '\u{2019}' | '\u{201d}' | ')' | ']' | '}' | '\u{bb}' | '\u{203a}'
+            | '\u{3002}' | '\u{ff0c}' | '\u{3001}' | '\u{ff1b}' | '\u{ff1a}' | '\u{ff01}' | '\u{ff1f}' | '\u{300d}' | '\u{300f}' | '\u{ff09}' | '\u{3011}' | '\u{300b}'
+    )
+}
+
+/// Punctuation that opens what comes after it and is selected with the first word of a
+/// passage: opening quotes and brackets, Spanish inverted marks.
+fn opening_punct(c: char) -> bool {
+    matches!(
+        c,
+        '\'' | '"' | '\u{2018}' | '\u{201c}' | '(' | '[' | '{' | '\u{ab}' | '\u{2039}' | '\u{bf}' | '\u{a1}' | '\u{300c}' | '\u{300e}' | '\u{ff08}' | '\u{3010}' | '\u{300a}'
+    )
+}
+
 /// The one character of a probe's text (`None` for none or several, e.g. a trimmed space).
 fn single(text: &str) -> Option<char> {
     let mut it = text.chars();
@@ -104,19 +123,39 @@ fn hyphen(text: &str) -> bool {
 /// The word characters next to `from` on its line, nearest first: to the right
 /// (`forward`) or the left, up to a non-word character, a gap or the line's end.
 fn scan_line(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect, forward: bool) -> Vec<(char, Rect)> {
+    let mut out = scan_chars(probe, from, forward, word_char, 64);
+    // Trim apostrophes and hyphens at the far end.
+    while out.last().is_some_and(|(c, _)| !c.is_alphanumeric()) {
+        out.pop();
+    }
+    out
+}
+
+/// The rectangle of the farthest of the punctuation marks right after `last` (closing
+/// marks: "word." or "word?\u{201d}") or right before `first` (opening marks), with no
+/// gap between; `None` when there is none.
+fn punct_beyond(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect, forward: bool) -> Option<Rect> {
+    let keep = if forward { closing_punct } else { opening_punct };
+    scan_chars(probe, from, forward, keep, 4).last().map(|(_, r)| *r)
+}
+
+/// The characters next to `from` on its line that `keep` accepts, nearest first (at
+/// most `max`): to the right (`forward`) or the left, up to another character, a gap or
+/// the line's end.
+fn scan_chars(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect, forward: bool, keep: fn(char) -> bool, max: usize) -> Vec<(char, Rect)> {
     let y = from.y + from.h as i32 / 2;
     let mut out: Vec<(char, Rect)> = Vec::new();
     let mut cur = from;
     // `r` is the character right after (before) `cur` on the line, with no gap between.
     let adjacent = |r: Rect, cur: Rect| r.y == from.y && if forward { r.right() > cur.right() && r.x <= cur.right() + 2 } else { r.x < cur.x && r.right() >= cur.x - 2 };
-    while out.len() < 64 {
+    while out.len() < max {
         let mut x = if forward { cur.right() } else { cur.x - 1 };
         let mut next = None;
         while if forward { x <= cur.right() + SCAN_PX } else { x >= (cur.x - SCAN_PX).max(0) } {
             match probe(Point::new(x, y)) {
                 Some((_, r)) if r == cur => x += if forward { SCAN_STEP } else { -SCAN_STEP },
                 Some((t, r)) if adjacent(r, cur) => {
-                    next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
+                    next = single(&t).filter(|c| keep(*c)).map(|c| (c, r));
                     break;
                 }
                 _ => break,
@@ -125,10 +164,6 @@ fn scan_line(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect,
         let Some((c, r)) = next else { break };
         out.push((c, r));
         cur = r;
-    }
-    // Trim apostrophes and hyphens at the far end.
-    while out.last().is_some_and(|(c, _)| !c.is_alphanumeric()) {
-        out.pop();
     }
     out
 }
@@ -199,6 +234,12 @@ pub struct Word {
     pub first: Point,
     /// A point on its last character.
     pub last: Point,
+    /// A point on the opening punctuation right before the word ("\u{201c}" or "("),
+    /// else on its first character: where a passage that starts at this word starts.
+    pub lead: Point,
+    /// A point on the closing punctuation right after the word ("." or ",\u{201d}"),
+    /// else on its last character: where a passage that ends at this word ends.
+    pub tail: Point,
 }
 
 impl Word {
@@ -229,11 +270,19 @@ pub fn word_hit(doc: &mut dyn ink_doc::Document, page: usize, pos: Point) -> Opt
     };
     let (a, b) = span?;
     // x + 1: the left part of a character maps to it under both point rules.
-    let first = Point::new(a.x + 1, a.y + a.h as i32 / 2);
-    let last = Point::new(b.x + 1, b.y + b.h as i32 / 2);
+    let at = |r: Rect| Point::new(r.x + 1, r.y + r.h as i32 / 2);
+    let (first, last) = (at(a), at(b));
+    let (lead, tail) = {
+        let mut probe = |p: Point| {
+            probes += 1;
+            let s = doc.select(page, p, p).ok()??;
+            Some((s.text, *s.rects.first()?))
+        };
+        (punct_beyond(&mut probe, a, false).map_or(first, at), punct_beyond(&mut probe, b, true).map_or(last, at))
+    };
     let sel = doc.select(page, first, last).ok()??;
     log::debug!("reader: word {:?} at {},{} in {} probes, {} ms", sel.text, pos.x, pos.y, probes + 1, t0.elapsed().as_millis());
-    Some(Word { sel, first, last })
+    Some(Word { sel, first, last, lead, tail })
 }
 
 /// The whole word under `pos` on `page` (see [`word_hit`]).
@@ -285,24 +334,29 @@ pub struct Span {
 /// part comes from `Document::select`; the pieces are joined with a line break, and the
 /// document's selection is set to the whole (`Document::set_selection`), which plugins
 /// read. `None` when no page has text in the range.
+///
+/// A passage of more than one word takes the punctuation around its ends with it (an
+/// opening quote before its first word, the full stop or closing quote after its last:
+/// [`Word::lead`], [`Word::tail`]); one word alone stays without it (a look-up).
 pub fn span_select(doc: &mut dyn ink_doc::Document, size: Size, anchor_page: usize, anchor: &Word, page: usize, end: &SpanEnd) -> Option<Span> {
     let (s, e) = (page_start(), page_end(size));
     let (end_first, end_last) = match end {
-        SpanEnd::Word(w) => (w.first, w.last),
+        SpanEnd::Word(w) => (w.lead, w.tail),
         SpanEnd::PageStart => (s, s),
         SpanEnd::PageEnd => (e, e),
     };
     let segs: Vec<(usize, Point, Point)> = if page == anchor_page {
         let (from, to) = match end {
-            SpanEnd::Word(w) if w.before(anchor) => (w.first, anchor.last),
-            SpanEnd::Word(w) => (anchor.first, w.last),
-            SpanEnd::PageStart => (s, anchor.last),
-            SpanEnd::PageEnd => (anchor.first, e),
+            SpanEnd::Word(w) if w.first == anchor.first => (anchor.first, anchor.last),
+            SpanEnd::Word(w) if w.before(anchor) => (w.lead, anchor.tail),
+            SpanEnd::Word(w) => (anchor.lead, w.tail),
+            SpanEnd::PageStart => (s, anchor.tail),
+            SpanEnd::PageEnd => (anchor.lead, e),
         };
         vec![(page, from, to)]
     } else {
         // (page, point) of the earlier and the later end.
-        let ((p0, from), (p1, to)) = if page > anchor_page { ((anchor_page, anchor.first), (page, end_last)) } else { ((page, end_first), (anchor_page, anchor.last)) };
+        let ((p0, from), (p1, to)) = if page > anchor_page { ((anchor_page, anchor.lead), (page, end_last)) } else { ((page, end_first), (anchor_page, anchor.tail)) };
         let mut v = vec![(p0, from, e)];
         v.extend((p0 + 1..p1).map(|p| (p, s, e)));
         v.push((p1, s, to));
@@ -1178,6 +1232,35 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_passage_takes_the_punctuation_around_its_ends_and_one_word_does_not() {
+        let mut doc = PagedDoc::new(vec![vec!["He said, \u{201c}Go now.\u{201d} Then", "(she left)."]]);
+        // One word alone: no punctuation (what a look-up gets).
+        let now = word_on(&mut doc, 0, 0, 13);
+        assert_eq!(now.sel.text, "now");
+        let one = span_select(&mut doc, SIZE, 0, &now, 0, &SpanEnd::Word(now.clone())).unwrap();
+        assert_eq!(one.sel.text, "now");
+        // "Go" to "now": the opening quote and the full stop with its closing quote.
+        let go = word_on(&mut doc, 0, 0, 10);
+        assert_eq!(go.sel.text, "Go");
+        let s = span_select(&mut doc, SIZE, 0, &go, 0, &SpanEnd::Word(now.clone())).unwrap();
+        assert_eq!(s.sel.text, "\u{201c}Go now.\u{201d}");
+        assert_eq!(s.sel.rects, vec![Rect::new(100 + 20 * 9, 100, 20 * 9, 50)]);
+        // Dragged backwards, the same passage.
+        let s = span_select(&mut doc, SIZE, 0, &now, 0, &SpanEnd::Word(go.clone())).unwrap();
+        assert_eq!(s.sel.text, "\u{201c}Go now.\u{201d}");
+        // A comma closes "said"; a space before the next word stops the scan.
+        let he = word_on(&mut doc, 0, 0, 0);
+        let said = word_on(&mut doc, 0, 0, 4);
+        assert_eq!(span_select(&mut doc, SIZE, 0, &he, 0, &SpanEnd::Word(said)).unwrap().sel.text, "He said,");
+        // Over a line break: the bracket before "she", ")." after "left".
+        let then = word_on(&mut doc, 0, 0, 20);
+        let left = word_on(&mut doc, 0, 1, 6);
+        assert_eq!(span_select(&mut doc, SIZE, 0, &then, 0, &SpanEnd::Word(left)).unwrap().sel.text, "Then\n(she left).");
+        let she = word_on(&mut doc, 0, 1, 2);
+        assert_eq!(span_select(&mut doc, SIZE, 0, &she, 0, &SpanEnd::Word(then)).unwrap().sel.text, "Then\n(she");
+    }
+
+    #[test]
     fn a_selection_continues_on_the_previous_page() {
         let mut doc = three_pages();
         // "scene" on page 1, dragged back to page 0, where it starts at the last word.
@@ -1187,18 +1270,19 @@ pub(super) mod tests {
         let SpanEnd::Word(w) = &last else { panic!("{last:?}") };
         assert_eq!(w.sel.text, "In");
         let s = span_select(&mut doc, SIZE, 1, &anchor, 0, &last).unwrap();
-        assert_eq!(s.sel.text, "In\nfair Verona, where we\nlay our scene");
+        // The comma after "scene" ends the passage with it.
+        assert_eq!(s.sel.text, "In\nfair Verona, where we\nlay our scene,");
         let end = word_on(&mut doc, 0, 1, 10);
         let s = span_select(&mut doc, SIZE, 1, &anchor, 0, &SpanEnd::Word(end)).unwrap();
-        assert_eq!(s.sel.text, "dignity, In\nfair Verona, where we\nlay our scene");
+        assert_eq!(s.sel.text, "dignity, In\nfair Verona, where we\nlay our scene,");
         assert_eq!(s.sel.start.to_string(), "flow:0.1.9");
-        assert_eq!(s.sel.end.to_string(), "flow:1.1.13");
+        assert_eq!(s.sel.end.to_string(), "flow:1.1.14");
         assert_eq!((s.sel.page, s.pages[0].0, s.pages[1].0), (0, 0, 1));
         // Back on the anchor's page: a one-page selection again; the page edges as ends.
         let s = span_select(&mut doc, SIZE, 1, &anchor, 1, &SpanEnd::PageEnd).unwrap();
         assert_eq!((s.sel.text.as_str(), s.pages.len()), ("scene, From", 1));
         let s = span_select(&mut doc, SIZE, 1, &anchor, 1, &SpanEnd::PageStart).unwrap();
-        assert_eq!(s.sel.text, "fair Verona, where we\nlay our scene");
+        assert_eq!(s.sel.text, "fair Verona, where we\nlay our scene,");
     }
 
     #[test]

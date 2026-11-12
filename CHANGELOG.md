@@ -27,6 +27,9 @@ All notable changes to rinky are listed here. The format is based on
   gets it.
 
 ### Fixed
+- Selecting a passage takes the punctuation at its ends with it: the full stop,
+  comma or closing quote after the last word and an opening quote or bracket before
+  the first. A single word pressed for a look-up is still taken without them.
 - Chinese, Japanese and Korean text in menus, cards, messages and title bars shows
   in the Kindle's own sans fonts instead of as empty boxes.
 
