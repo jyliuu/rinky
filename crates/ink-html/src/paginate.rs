@@ -567,7 +567,10 @@ impl Worker {
             // Every thread gets the path: whichever ends last writes the file (when the
             // map is complete), marks the map complete and logs the total time.
             let (cache, n) = (cache.clone(), book.chapters.len());
-            let last: LastWork = Box::new(move |sh: &Shared| finish_map(sh, cache, n, started));
+            // A map made while the annotator failed partway is not the one the
+            // annotator gives; it is not kept.
+            let annotated = params.clone();
+            let last: LastWork = Box::new(move |sh: &Shared| finish_map(sh, cache.filter(|_| !annotated.annotator_failed()), n, started));
             // The guard moves into the thread; a thread that cannot start drops it at
             // once, so the running count never waits for it.
             let guard = RunGuard { shared: sh.clone(), last: Some(last) };

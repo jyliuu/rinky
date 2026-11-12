@@ -340,6 +340,11 @@ impl HtmlDocument {
             return;
         }
         let Some(path) = &self.cache_path else { return };
+        if self.params.as_ref().is_some_and(Params::annotator_failed) {
+            // Laid out partly with annotations and partly without: not the map the
+            // settings give.
+            return;
+        }
         let (chapters, known) = {
             let m = self.shared.map.lock().unwrap_or_else(|e| e.into_inner());
             let (known, n) = (m.chapters.iter().filter(|c| c.is_some()).count(), m.chapters.len());

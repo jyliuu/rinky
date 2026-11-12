@@ -1,11 +1,13 @@
-//! Ruby: `<ruby>` markup drawn above the text, checked on the laid-out page (draw
-//! items), and the document text (positions, selection, search, page text) unchanged by
-//! it.
+//! Ruby: `<ruby>` markup and annotations of a [`TextAnnotator`] drawn above the text,
+//! checked on the laid-out page (draw items), and the document text (positions,
+//! selection, search, page text) unchanged by them.
 
 use ink_device::Point;
-use ink_doc::{Document, LayoutSettings, MemoryLoader, Metadata};
+use ink_doc::{Annotation, AnnotatorHandle, Document, LayoutSettings, MemoryLoader, Metadata, TextAnnotator};
 use ink_html::layout::{Draw, TextRun};
 use ink_html::{HtmlChapter, HtmlDocument};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 const W: u32 = 1000;
 const H: u32 = 1400;
@@ -42,6 +44,12 @@ fn doc_with(chapters: &[&str], css: &str, s: &LayoutSettings) -> HtmlDocument {
 
 fn doc(body: &str, css: &str) -> HtmlDocument {
     doc_with(&[body], css, &settings())
+}
+
+fn annotated(body: &str, a: Arc<dyn TextAnnotator>) -> HtmlDocument {
+    let mut s = settings();
+    s.annotator = Some(AnnotatorHandle::new(a));
+    doc_with(&[body], "", &s)
 }
 
 /// Text runs of page 0: (document text, ruby text).
@@ -212,4 +220,165 @@ fn ruby_is_not_document_text() {
     let y = ((a.line_top + a.line_bottom) / 2.0) as i32;
     let sel = d.select(0, Point::new(a.x as i32 + 1, y), Point::new((b.x + b.width) as i32 - 1, y)).unwrap().unwrap();
     assert_eq!(sel.text, "one base two");
+}
+
+/// Annotates every occurrence of a word with a text; `version` and `text` can change.
+struct Words {
+    word: &'static str,
+    text: std::sync::Mutex<String>,
+    version: AtomicU64,
+}
+
+impl Words {
+    fn new(word: &'static str, text: &str) -> Arc<Self> {
+        Arc::new(Words { word, text: std::sync::Mutex::new(text.into()), version: AtomicU64::new(1) })
+    }
+}
+
+impl TextAnnotator for Words {
+    fn id(&self) -> &str {
+        "words"
+    }
+    fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+    fn wants(&self, p: &str) -> bool {
+        p.contains(self.word)
+    }
+    fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<Annotation> {
+        let t = self.text.lock().unwrap().clone();
+        p.match_indices(self.word).map(|(i, w)| Annotation::new(i..i + w.len(), t.clone())).collect()
+    }
+}
+
+#[test]
+fn annotations_are_drawn_like_ruby_and_are_not_text() {
+    let body = "<p>one base two base</p>";
+    let mut d = annotated(body, Words::new("base", "B"));
+    let (text, ruby) = page_runs(&d);
+    assert_eq!(ruby.len(), 2);
+    for r in &ruby {
+        assert_eq!(r.text, "B");
+        assert_eq!(r.px, 16.0, "half the base size");
+    }
+    let bases: Vec<&TextRun> = text.iter().filter(|t| t.text == "base").collect();
+    assert!((mid(&ruby[0]) - mid(bases[0])).abs() < 0.5 && (mid(&ruby[1]) - mid(bases[1])).abs() < 0.5);
+    let plain = doc(body, "");
+    assert_eq!(d.position_of_page(0).unwrap(), plain.position_of_page(0).unwrap());
+    assert!(d.search("B", 10).unwrap().iter().all(|h| !h.excerpt.contains('B')), "annotations are not searched");
+    let around = d.read_around(&d.position_of_page(0).unwrap(), 100).unwrap();
+    assert_eq!(around.trim(), "one base two base");
+    let (a, b) = (run(&text, "one"), text.last().unwrap());
+    let y = ((a.line_top + a.line_bottom) / 2.0) as i32;
+    let sel = d.select(0, Point::new(a.x as i32 + 1, y), Point::new((b.x + b.width) as i32 - 1, y)).unwrap().unwrap();
+    assert_eq!(sel.text, "one base two base");
+}
+
+/// Returns a fixed list of annotations for every paragraph.
+struct Fixed(Vec<Annotation>);
+
+impl TextAnnotator for Fixed {
+    fn id(&self) -> &str {
+        "fixed"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, _: &str) -> bool {
+        true
+    }
+    fn annotate(&self, _: &str, _: Option<&str>) -> Vec<Annotation> {
+        self.0.clone()
+    }
+}
+
+#[test]
+fn invalid_annotations_are_dropped() {
+    // The paragraph text is "café base end x".
+    let body = "<p>café <ruby>base<rt>r</rt></ruby> end x</p>";
+    let list = vec![
+        Annotation::new(0..0, "empty"),
+        Annotation::new(10..400, "out"),
+        Annotation::new(0..4, "mid-char"), // é is bytes 3..5
+        Annotation::new(11..14, "ok"),     // "end"
+        Annotation::new(12..15, "overlap"),
+        Annotation::new(6..9, "book"), // inside the book's ruby base "base" (6..10)
+        Annotation::new(14..15, "  "), // nothing to draw
+        Annotation::new(14..15, "sp"), // only a space: no piece of text to draw it over
+        Annotation::new(15..16, "x"),
+    ];
+    let d = annotated(body, Arc::new(Fixed(list)));
+    let (_, ruby) = page_runs(&d);
+    let mut got: Vec<&str> = ruby.iter().map(|r| r.text.as_str()).collect();
+    got.sort();
+    assert_eq!(got, ["ok", "r", "x"]);
+}
+
+/// Panics on paragraphs holding "boom", annotates the others.
+struct Boom;
+
+impl TextAnnotator for Boom {
+    fn id(&self) -> &str {
+        "boom"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, _: &str) -> bool {
+        true
+    }
+    fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
+        assert!(!p.contains("boom"), "test annotator panics on purpose");
+        vec![Annotation::new(0..1, "a")]
+    }
+}
+
+#[test]
+fn a_panicking_annotator_leaves_the_rest_of_the_book_plain() {
+    let d = annotated("<p>first</p><p>boom</p><p>third</p><p>fourth</p>", Arc::new(Boom));
+    let (text, ruby) = page_runs(&d);
+    let words: Vec<&str> = text.iter().map(|t| t.text.as_str()).collect();
+    // The annotated "f" is a piece of its own.
+    assert_eq!(words, ["f", "irst", "boom", "third", "fourth"], "every paragraph is laid out");
+    assert_eq!(ruby.len(), 1, "only the paragraph before the panic is annotated: {:?}", ruby.iter().map(|r| &r.text).collect::<Vec<_>>());
+    assert!(ruby[0].baseline < run(&text, "f").baseline);
+}
+
+#[test]
+fn a_version_change_lays_the_book_out_again() {
+    let a = Words::new("base", "old");
+    let mut s = settings();
+    s.annotator = Some(AnnotatorHandle::new(a.clone()));
+    let mut d = doc_with(&["<p>one base two</p>"], "", &s);
+    assert_eq!(page_runs(&d).1[0].text, "old");
+    // The annotator changes its output and its version: settings made now differ.
+    *a.text.lock().unwrap() = "new".into();
+    a.version.store(2, Ordering::Relaxed);
+    let mut s2 = s.clone();
+    s2.annotator = Some(AnnotatorHandle::new(a.clone()));
+    assert_ne!(s, s2);
+    assert_ne!(s.cache_key(), s2.cache_key());
+    d.set_layout(&s2).unwrap();
+    assert_eq!(page_runs(&d).1[0].text, "new");
+    // Turning annotations off (no annotator) or ruby off removes them.
+    let mut off = s2.clone();
+    off.annotator = None;
+    assert_ne!(off.cache_key(), s2.cache_key());
+    d.set_layout(&off).unwrap();
+    assert!(page_runs(&d).1.is_empty());
+    let mut hidden = s2.clone();
+    hidden.ruby = false;
+    d.set_layout(&hidden).unwrap();
+    assert!(page_runs(&d).1.is_empty());
+}
+
+#[test]
+fn giant_paragraphs_keep_annotations_whole() {
+    // A paragraph over the giant-paragraph limit is broken into lines in chunks; an
+    // annotated range never straddles two chunks.
+    let body = format!("<p>{}</p>", "base ".repeat(70_000));
+    let d = annotated(&body, Words::new("base", "B"));
+    let (text, ruby) = page_runs(&d);
+    assert!(!text.is_empty());
+    assert!(ruby.len() > 10 && ruby.iter().all(|r| r.text == "B"));
 }

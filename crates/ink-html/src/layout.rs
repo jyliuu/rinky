@@ -8,7 +8,8 @@
 //!   breaking at UAX #14 opportunities, hyphenation by language, soft hyphens,
 //!   justification, sub/superscript, inline images.
 //! - Ruby: the text of `<rt>` drawn centred above its base at a reduced size (the `rt`
-//!   font size, 50 % by default) ([`Ruby`]). A base is never broken across lines; a ruby wider than
+//!   font size, 50 % by default), and the annotations of the settings' annotator laid
+//!   out the same way ([`Ruby`]). A base is never broken across lines; a ruby wider than
 //!   its base spreads the base's letters apart. A paragraph with ruby gets the same
 //!   extra space above every line. Ruby text is drawn only: it has no DOM position, so
 //!   selection, search and page text never see it.
@@ -25,6 +26,7 @@ use crate::style::{
 use ink_doc::{resolve_href, LayoutSettings};
 use ink_text::linebreak::{break_opportunities, Break};
 use ink_text::Hyphenator;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// No link.
@@ -173,6 +175,8 @@ pub struct Params {
     pub content_w: f32,
     /// Settings.
     pub settings: LayoutSettings,
+    /// Whether the settings' annotator failed (shared by the clones of these params).
+    pub(crate) annotator_state: AnnotatorState,
 }
 
 impl Params {
@@ -180,12 +184,41 @@ impl Params {
     pub fn new(s: &LayoutSettings) -> Self {
         let content_w = (s.width as f32 - s.margin_left - s.margin_right).max(50.0);
         let content_h = (s.height as f32 - s.margin_top - s.margin_bottom).max(50.0);
-        Params { content_h, left: s.margin_left, content_w, settings: s.clone() }
+        Params { content_h, left: s.margin_left, content_w, settings: s.clone(), annotator_state: AnnotatorState::default() }
     }
 
+    /// True once the annotator of these settings panicked: the layouts made with these
+    /// params from then on have no annotations.
+    pub fn annotator_failed(&self) -> bool {
+        self.annotator_state.failed()
+    }
 }
 
-/// Text drawn above a base: the text of an `<rt>` element.
+/// Whether the annotator of one layout still runs. Every clone of one [`Params`] (the
+/// foreground and the pagination threads) shares it; after a panic in the annotator it
+/// is off for the rest of the book. Always equal: it is state, not a setting.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AnnotatorState(Arc<AtomicBool>);
+
+impl PartialEq for AnnotatorState {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl AnnotatorState {
+    fn failed(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Turns the annotator off; true the first time (the caller logs it once).
+    fn fail(&self) -> bool {
+        !self.0.swap(true, Ordering::Relaxed)
+    }
+}
+
+/// Text drawn above a base: the text of an `<rt>` element, or an annotation of the
+/// settings' annotator.
 #[derive(Clone, Debug)]
 struct Ruby {
     /// Byte range of the base in the paragraph (or chunk) text.
@@ -213,6 +246,9 @@ impl Ruby {
 
 /// Least space between two ruby texts side by side, in em of the ruby text.
 const RUBY_GAP: f32 = 0.25;
+
+/// Annotation text size as a share of the base text's size.
+const ANNOTATION_SCALE: f32 = 0.5;
 
 /// Things layout needs from outside.
 pub struct Env<'a> {
@@ -1271,6 +1307,71 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
+    /// The annotations of the settings' annotator for the paragraph `text` (with the
+    /// sources `src` of its chars), as ruby. Ranges that are empty, out of the text,
+    /// inside a char, overlapping an earlier annotation or a ruby of the book (`book`,
+    /// sorted) are dropped. A panic in the annotator turns it off for the rest of the
+    /// book (logged once).
+    fn annotations(&mut self, owner: NodeId, text: &str, src: &SrcRuns, segs: &[Seg], book: &[Ruby]) -> Vec<Ruby> {
+        let s = &self.p.settings;
+        let Some(handle) = s.annotator.as_ref().filter(|_| s.ruby) else { return Vec::new() };
+        if self.p.annotator_state.failed() {
+            return Vec::new();
+        }
+        let a = handle.annotator();
+        let lang = self.lang_of(owner);
+        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| if a.wants(text) { a.annotate(text, lang.as_deref()) } else { Vec::new() }));
+        let list = match called {
+            Ok(list) => list,
+            Err(e) => {
+                if self.p.annotator_state.fail() {
+                    let what = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
+                    log::error!("ink-html: annotator {} panicked ({what}); the rest of the book is laid out without annotations", handle.key());
+                }
+                return Vec::new();
+            }
+        };
+        if list.is_empty() {
+            return Vec::new();
+        }
+        // Taken ranges by start (the book's ruby, then each accepted annotation).
+        let mut taken: std::collections::BTreeMap<usize, usize> = book.iter().map(|r| (r.start, r.end)).collect();
+        let mut keep: Vec<(usize, usize, String)> = Vec::new();
+        for an in list {
+            let (st, en) = (an.range.start, an.range.end);
+            if st >= en || en > text.len() || !text.is_char_boundary(st) || !text.is_char_boundary(en) || an.text.trim().is_empty() {
+                continue;
+            }
+            if taken.range(..en).next_back().is_some_and(|(_, &e)| e > st) {
+                continue;
+            }
+            taken.insert(st, en);
+            keep.push((st, en, an.text.trim().to_string()));
+        }
+        keep.sort_by_key(|k| k.0);
+        // The segment at each start (one pass over the chars).
+        let mut out = Vec::with_capacity(keep.len());
+        let mut k = 0;
+        for ((b, _), cs) in text.char_indices().zip(src.iter()) {
+            while k < keep.len() && keep[k].0 < b {
+                k += 1;
+            }
+            while k < keep.len() && keep[k].0 == b {
+                let seg = &segs[cs.seg as usize];
+                if let SegKind::Text { face, px } = seg.kind {
+                    let (st, en, ref t) = keep[k];
+                    let gray = self.st(seg.style).color;
+                    out.push(Ruby { start: st, end: en, text: t.clone(), face, px: px * ANNOTATION_SCALE, gray, base_w: 0.0, ruby_w: 0.0, chars: 0 });
+                }
+                k += 1;
+            }
+            if k >= keep.len() {
+                break;
+            }
+        }
+        out
+    }
+
     /// Baseline shift of an inline element relative to its parent.
     fn valign_shift(&self, n: NodeId) -> f32 {
         let st = self.st(n);
@@ -1372,6 +1473,13 @@ impl<'a, 'e> Flow<'a, 'e> {
         // The text may have lost trailing spaces and breaks since the book's ruby was
         // collected.
         ruby.retain(|r| r.end <= text.len());
+        if self.p.settings.annotator.is_some() {
+            let more = self.annotations(owner, &text, &src, &segs, &ruby);
+            if !more.is_empty() {
+                ruby.extend(more);
+                ruby.sort_by_key(|r| r.start);
+            }
+        }
         self.ruby_h = 0.0;
         for r in &ruby {
             let (a, d) = self.env.fonts.vmetrics(r.face, r.px);

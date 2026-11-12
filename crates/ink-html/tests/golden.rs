@@ -33,6 +33,30 @@ enum Variant {
     SmallNoPublisher,
     /// Publisher styles off.
     NoPublisher,
+    /// Annotations of [`CodepointAnnotator`].
+    Annotated,
+}
+
+/// A test annotator: every CJK ideograph gets its code point in hex.
+struct CodepointAnnotator;
+
+impl ink_doc::TextAnnotator for CodepointAnnotator {
+    fn id(&self) -> &str {
+        "codepoints"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, p: &str) -> bool {
+        p.chars().any(is_ideograph)
+    }
+    fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<ink_doc::Annotation> {
+        p.char_indices().filter(|&(_, c)| is_ideograph(c)).map(|(i, c)| ink_doc::Annotation::new(i..i + c.len_utf8(), format!("{:x}", c as u32))).collect()
+    }
+}
+
+fn is_ideograph(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c)
 }
 
 /// (golden name prefix, book under the repo root, 0-based pages, layout).
@@ -53,6 +77,7 @@ const CASES: &[(&str, &str, &[usize], Variant)] = &[
     ("pagelist", "crates/ink-html/tests/fixtures/pagelist.epub", &[0, 1], Variant::Default),
     ("malformed", "crates/ink-html/tests/fixtures/malformed.epub", &[0, 1, 2], Variant::Default),
     ("ruby", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::Default),
+    ("ruby-annotated", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::Annotated),
 ];
 
 fn settings(v: Variant) -> LayoutSettings {
@@ -65,6 +90,7 @@ fn settings(v: Variant) -> LayoutSettings {
             s.publisher_styles = false;
         }
         Variant::NoPublisher => s.publisher_styles = false,
+        Variant::Annotated => s.annotator = Some(ink_doc::AnnotatorHandle::new(std::sync::Arc::new(CodepointAnnotator))),
     }
     s
 }
