@@ -3,7 +3,7 @@
 //! selection, search, page text) unchanged by them.
 
 use ink_device::Point;
-use ink_doc::{Annotation, AnnotatorHandle, Document, LayoutSettings, MemoryLoader, Metadata, TextAnnotator};
+use ink_doc::{Annotation, AnnotationPosition, AnnotatorHandle, Document, LayoutSettings, MemoryLoader, Metadata, TextAnnotator};
 use ink_html::layout::{Draw, TextRun};
 use ink_html::{HtmlChapter, HtmlDocument};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,18 +52,27 @@ fn annotated(body: &str, a: Arc<dyn TextAnnotator>) -> HtmlDocument {
     doc_with(&[body], "", &s)
 }
 
-/// Text runs of page 0: (document text, ruby text).
-fn page_runs(d: &HtmlDocument) -> (Vec<TextRun>, Vec<TextRun>) {
+/// Text runs of page 0: (document text, ruby text). The ruby text is the book's (draw
+/// items) and the annotations as drawn (computed while drawing, page 0 drawn now).
+fn page_runs(d: &mut HtmlDocument) -> (Vec<TextRun>, Vec<TextRun>) {
+    d.set_annotations_sync(true);
+    d.set_record_annotations(true);
+    let mut canvas = ink_device::Canvas::new(W as usize, H as usize);
+    d.render_page(0, &mut canvas).unwrap();
     let (l, span) = d.page_layout(0).unwrap();
     let a = l.slices[span.first as usize].first_item as usize;
     let b = l.slices[span.end as usize - 1].end_item as usize;
-    l.items[a..b]
+    let dy = d.layout().margin_top - span.y0;
+    let (text, mut ruby): (Vec<TextRun>, Vec<TextRun>) = l.items[a..b]
         .iter()
         .filter_map(|i| match i {
             Draw::Text(t) => Some(t.clone()),
             _ => None,
         })
-        .partition(|t| t.node != NONE)
+        .partition(|t| t.node != NONE);
+    // Annotations are drawn in page coordinates: back to flow coordinates.
+    ruby.extend(d.placed_annotations().into_iter().map(|p| TextRun { x: p.x, width: p.width, baseline: p.baseline - dy, px: p.px, text: p.text, node: NONE, ..Default::default() }));
+    (text, ruby)
 }
 
 fn run<'a>(runs: &'a [TextRun], text: &str) -> &'a TextRun {
@@ -82,16 +91,16 @@ fn line_heights(d: &HtmlDocument) -> Vec<f32> {
 
 #[test]
 fn ruby_text_is_centred_above_its_base_at_half_size() {
-    let d = doc("<p>one <ruby>base<rt>top</rt></ruby> two</p>", "");
-    let (text, ruby) = page_runs(&d);
+    let mut d = doc("<p>one <ruby>base<rt>top</rt></ruby> two</p>", "");
+    let (text, ruby) = page_runs(&mut d);
     let (base, top) = (run(&text, "base"), run(&ruby, "top"));
     assert_eq!(top.px, base.px / 2.0, "rt is 50 % by default");
     assert!((mid(top) - mid(base)).abs() < 0.5, "centred: {} vs {}", mid(top), mid(base));
     assert!(top.baseline < base.baseline - base.px * 0.6, "above the base: {} vs {}", top.baseline, base.baseline);
     assert!(top.baseline > base.line_top, "inside the line box");
     // The base keeps its DOM position and the words around it are where they were.
-    let plain = doc("<p>one base two</p>", "");
-    let (ptext, pruby) = page_runs(&plain);
+    let mut plain = doc("<p>one base two</p>", "");
+    let (ptext, pruby) = page_runs(&mut plain);
     assert!(pruby.is_empty());
     for w in ["one", "base", "two"] {
         assert_eq!(run(&text, w).x, run(&ptext, w).x, "{w}");
@@ -100,27 +109,27 @@ fn ruby_text_is_centred_above_its_base_at_half_size() {
 
 #[test]
 fn rt_font_size_from_css() {
-    let d = doc("<p><ruby>base<rt>top</rt></ruby></p>", "rt { font-size: 40% }");
-    let (text, ruby) = page_runs(&d);
+    let mut d = doc("<p><ruby>base<rt>top</rt></ruby></p>", "rt { font-size: 40% }");
+    let (text, ruby) = page_runs(&mut d);
     assert!((run(&ruby, "top").px - run(&text, "base").px * 0.4).abs() < 0.01);
 }
 
 #[test]
 fn several_pairs_in_one_ruby_with_and_without_rb() {
     // Bases between the rt elements.
-    let d = doc("<p><ruby>one<rt>uno</rt>two<rt>dos</rt></ruby></p>", "");
-    let (text, ruby) = page_runs(&d);
+    let mut d = doc("<p><ruby>one<rt>uno</rt>two<rt>dos</rt></ruby></p>", "");
+    let (text, ruby) = page_runs(&mut d);
     assert!((mid(run(&ruby, "uno")) - mid(run(&text, "one"))).abs() < 0.5);
     assert!((mid(run(&ruby, "dos")) - mid(run(&text, "two"))).abs() < 0.5);
     // rb elements, the rts after them in order, rp left out.
-    let d = doc("<p><ruby><rb>one</rb> <rb>two</rb><rp>(</rp><rt>uno</rt> <rt>dos</rt><rp>)</rp></ruby></p>", "");
-    let (text, ruby) = page_runs(&d);
+    let mut d = doc("<p><ruby><rb>one</rb> <rb>two</rb><rp>(</rp><rt>uno</rt> <rt>dos</rt><rp>)</rp></ruby></p>", "");
+    let (text, ruby) = page_runs(&mut d);
     assert!((mid(run(&ruby, "uno")) - mid(run(&text, "one"))).abs() < 0.5);
     assert!((mid(run(&ruby, "dos")) - mid(run(&text, "two"))).abs() < 0.5);
     assert!(text.iter().chain(&ruby).all(|t| !t.text.contains(['(', ')'])), "rp is not drawn");
     // One rb with an rp-wrapped rt, as most books write it.
-    let d = doc("<p><ruby><rb>one</rb><rp>(</rp><rt>uno</rt><rp>)</rp></ruby>.</p>", "");
-    let (text, ruby) = page_runs(&d);
+    let mut d = doc("<p><ruby><rb>one</rb><rp>(</rp><rt>uno</rt><rp>)</rp></ruby>.</p>", "");
+    let (text, ruby) = page_runs(&mut d);
     assert_eq!(ruby.len(), 1);
     assert!(text.iter().all(|t| !t.text.contains('(')));
 }
@@ -128,8 +137,8 @@ fn several_pairs_in_one_ruby_with_and_without_rb() {
 #[test]
 fn rt_display_none_draws_no_ruby_and_no_extra_space() {
     let body = "<p><ruby>base<rt>top</rt></ruby> and more</p>";
-    let d = doc(body, "rt { display: none }");
-    let (_, ruby) = page_runs(&d);
+    let mut d = doc(body, "rt { display: none }");
+    let (_, ruby) = page_runs(&mut d);
     assert!(ruby.is_empty());
     assert_eq!(line_heights(&d), line_heights(&doc("<p>base and more</p>", "")));
 }
@@ -138,8 +147,8 @@ fn rt_display_none_draws_no_ruby_and_no_extra_space() {
 fn ruby_setting_off_draws_the_base_only() {
     let mut s = settings();
     s.ruby = false;
-    let d = doc_with(&["<p><ruby>base<rt>top</rt></ruby> and more</p>"], "", &s);
-    let (text, ruby) = page_runs(&d);
+    let mut d = doc_with(&["<p><ruby>base<rt>top</rt></ruby> and more</p>"], "", &s);
+    let (text, ruby) = page_runs(&mut d);
     assert!(ruby.is_empty());
     assert!(text.iter().all(|t| t.text != "top"));
     assert_eq!(line_heights(&d), line_heights(&doc("<p>base and more</p>", "")));
@@ -147,10 +156,10 @@ fn ruby_setting_off_draws_the_base_only() {
 
 #[test]
 fn a_wide_ruby_reaches_over_plain_neighbours_without_moving_them() {
-    let d = doc("<p>xx <ruby>ab<rt>a much longer reading</rt></ruby> zz</p>", "");
-    let plain = doc("<p>xx ab zz</p>", "");
-    let (text, ruby) = page_runs(&d);
-    let (ptext, _) = page_runs(&plain);
+    let mut d = doc("<p>xx <ruby>ab<rt>a much longer reading</rt></ruby> zz</p>", "");
+    let mut plain = doc("<p>xx ab zz</p>", "");
+    let (text, ruby) = page_runs(&mut d);
+    let (ptext, _) = page_runs(&mut plain);
     let (base, top) = (run(&text, "ab"), run(&ruby, "a much longer reading"));
     assert!(top.width > base.width + 20.0, "the reading is wider than its base");
     for w in ["xx", "ab", "zz"] {
@@ -162,8 +171,8 @@ fn a_wide_ruby_reaches_over_plain_neighbours_without_moving_them() {
 
 #[test]
 fn neighbouring_wide_rubies_are_condensed_then_keep_a_gap() {
-    let d = doc("<p>x<ruby>a<rt>wide reading</rt>b<rt>wide reading</rt>c<rt>c</rt></ruby>xxxxxxxx</p>", "p { text-indent: 0 }");
-    let (text, ruby) = page_runs(&d);
+    let mut d = doc("<p>x<ruby>a<rt>wide reading</rt>b<rt>wide reading</rt>c<rt>c</rt></ruby>xxxxxxxx</p>", "p { text-indent: 0 }");
+    let (text, ruby) = page_runs(&mut d);
     let normal = run(&text, "a").px / 2.0;
     for r in &ruby {
         assert!(r.px >= normal * 0.7 - 0.01 && r.px < normal, "condensed, not below 70 %: {} of {normal}", r.px);
@@ -189,8 +198,8 @@ fn neighbouring_wide_rubies_are_condensed_then_keep_a_gap() {
 fn a_ruby_text_does_not_reach_past_the_line_start_or_end() {
     let s = settings();
     for (body, at_end) in [("<p><ruby>i<rt>a very wide reading</rt></ruby> b</p>", false), ("<p style=\"text-align: right\">b <ruby>i<rt>a very wide reading</rt></ruby></p>", true)] {
-        let d = doc(body, "");
-        let (_, ruby) = page_runs(&d);
+        let mut d = doc(body, "");
+        let (_, ruby) = page_runs(&mut d);
         let r = &ruby[0];
         assert!(r.x >= s.margin_left - 0.5, "{body}: starts at {}", r.x);
         assert!(r.x + r.width <= W as f32 - s.margin_right + 0.5, "{body}: ends at {}", r.x + r.width);
@@ -198,9 +207,10 @@ fn a_ruby_text_does_not_reach_past_the_line_start_or_end() {
     }
 }
 
-/// Gives each ideograph a reading whose length cycles through `lens` (0: none), as
-/// readings of one syllable per character in Latin letters do.
-struct MixedReadings(Vec<usize>);
+/// Gives each ideograph a reading whose length cycles through `.0` (0: none), as
+/// readings of one syllable per character in Latin letters do; asks for `.1` em between
+/// ideographs.
+struct MixedReadings(Vec<usize>, f32);
 
 impl TextAnnotator for MixedReadings {
     fn id(&self) -> &str {
@@ -211,6 +221,9 @@ impl TextAnnotator for MixedReadings {
     }
     fn wants(&self, _: &str, _lang: Option<&str>) -> bool {
         true
+    }
+    fn ideograph_spacing(&self, _: Option<&str>) -> f32 {
+        self.1
     }
     fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
         p.char_indices()
@@ -241,40 +254,38 @@ fn cjk_doc(body: &str, s: &LayoutSettings) -> HtmlDocument {
 }
 
 #[test]
-fn per_character_readings_of_mixed_width_keep_one_pitch() {
+fn per_character_readings_of_mixed_width_fit_the_pitch_the_layout_kept() {
     // One syllable per character, as Latin-letter readings of Chinese have: the
     // lengths of the readings of the first two lines of the fixture's first poem.
     let text = "床前明月光疑是地上霜";
     let lens = vec![6, 4, 4, 3, 5, 2, 3, 2, 5, 6];
     let body = format!("<p>{text}</p>");
-    let mut s = settings();
-    s.annotators = vec![AnnotatorHandle::new(Arc::new(MixedReadings(lens)))];
-    let d = cjk_doc(&body, &s);
-    s.annotators = Vec::new();
-    let plain = cjk_doc(&body, &s);
-    let (bases, ruby) = page_runs(&d);
-    let (pbases, _) = page_runs(&plain);
-    // The pitch: from one character's left edge to the next one's (32 px plain).
-    let gaps: Vec<f32> = bases.windows(2).map(|w| w[1].x - w[0].x).collect();
-    let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
-    let sd = (gaps.iter().map(|g| (g - mean) * (g - mean)).sum::<f32>() / gaps.len() as f32).sqrt();
-    let (lo, hi) = gaps.iter().fold((f32::MAX, f32::MIN), |(a, b), &g| (a.min(g), b.max(g)));
-    let right = |r: &[TextRun]| r.iter().map(|t| t.x + t.width).fold(f32::MIN, f32::max);
-    let left = |r: &[TextRun]| r.iter().map(|t| t.x).fold(f32::MAX, f32::min);
-    println!("character pitch: min {lo:.1} max {hi:.1} mean {mean:.1} sd {sd:.1} px; reading size {} px", ruby[0].px);
-    assert_eq!(ruby.len(), 10);
-    assert!(bases.iter().all(|b| b.line_top == bases[0].line_top), "one line");
-    let gap = ruby[0].px * 0.35;
-    for w in ruby.windows(2) {
-        assert!(w[1].x - (w[0].x + w[0].width) >= gap - 0.5, "{:?} and {:?} too close", w[0].text, w[1].text);
+    for spacing in [0.0, 0.15, 0.25] {
+        let mut s = settings();
+        s.annotators = vec![AnnotatorHandle::new(Arc::new(MixedReadings(lens.clone(), spacing)))];
+        let mut d = cjk_doc(&body, &s);
+        let (bases, ruby) = page_runs(&mut d);
+        // The pitch: from one character's left edge to the next one's (32 px plain).
+        let gaps: Vec<f32> = bases.windows(2).map(|w| w[1].x - w[0].x).collect();
+        let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
+        let sd = (gaps.iter().map(|g| (g - mean) * (g - mean)).sum::<f32>() / gaps.len() as f32).sqrt();
+        let between: Vec<f32> = ruby.windows(2).map(|w| w[1].x - (w[0].x + w[0].width)).collect();
+        let off: f32 = ruby.iter().zip(&bases).map(|(r, b)| (mid(r) - mid(b)).abs()).fold(0.0, f32::max);
+        println!(
+            "spacing {spacing} em: pitch {mean:.1} px (sd {sd:.2}), readings {:.1} px, least gap between readings {:.1} px, most off centre {off:.1} px",
+            ruby[0].px,
+            between.iter().cloned().fold(f32::MAX, f32::min)
+        );
+        assert_eq!(ruby.len(), 10);
+        assert!(sd < 0.01, "the layout's pitch: {gaps:?}");
+        assert!((mean - 32.0 * (1.0 + spacing)).abs() < 0.5, "{mean}");
+        assert!(ruby.iter().all(|r| r.px >= 16.0 * 0.55 - 0.01 && r.px == ruby[0].px), "one size, at least 55 %");
+        assert!(ruby[0].x >= s.margin_left - 0.5, "inside the line");
+        if ruby[0].px > 16.0 * 0.55 + 0.01 {
+            // Not at the floor: centred, a gap apart.
+            assert!(off < 0.5 && between.iter().all(|&g| g >= ruby[0].px * 0.35 - 0.5));
+        }
     }
-    assert!(ruby[0].x >= s.margin_left - 0.5, "inside the line");
-    // One pitch for the whole run, readings condensed to no less than 70 %.
-    assert!(sd < 0.5, "uneven pitch: sd {sd}");
-    assert!(ruby.iter().all(|r| r.px >= 16.0 * 0.7 - 0.01 && r.px == ruby[0].px));
-    let plain_w = right(&pbases) - left(&pbases);
-    let now = right(&bases) - left(&bases) - plain_w;
-    println!("extra width of the line: {now:.1} px over {plain_w:.1} px of plain text");
 }
 
 /// Readings given by position: `texts[k]` for the k-th ideograph ("" none).
@@ -305,48 +316,70 @@ fn cjk_annotated(body: &str, texts: Vec<&'static str>) -> HtmlDocument {
     cjk_doc(body, &s)
 }
 
-/// Pitch from one character's left edge to the next.
-fn pitches(bases: &[TextRun]) -> Vec<f32> {
-    let xs: Vec<f32> = bases.iter().flat_map(|b| {
-        // A run of several characters: its characters at the plain advance.
-        let n = b.text.chars().count();
-        (0..n).map(move |k| b.x + b.width * k as f32 / n as f32)
-    }).collect();
-    xs.windows(2).map(|w| w[1] - w[0]).collect()
+/// Counts its `annotate` calls; readings of `.1` letters for every ideograph.
+struct Counting(std::sync::atomic::AtomicUsize, usize, f32);
+
+impl TextAnnotator for Counting {
+    fn id(&self) -> &str {
+        "counting"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, p: &str, _: Option<&str>) -> bool {
+        p.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+    }
+    fn ideograph_spacing(&self, _: Option<&str>) -> f32 {
+        self.2
+    }
+    fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        p.char_indices().filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c)).map(|(i, c)| Annotation::over(i..i + c.len_utf8(), "a".repeat(self.1))).collect()
+    }
 }
 
 #[test]
-fn one_or_two_characters_without_a_reading_keep_the_run_pitch() {
-    // Readings too wide to fit even condensed: the bases move apart.
-    let texts = vec!["aaaaaaaaaa", "", "aaaaaaaaaa", "aaaaaaaaaa", "", "", "aaaaaaaaaa", "aaaaaaaaaa"];
-    let d = cjk_annotated("<p>床前明月光疑是地</p>", texts);
-    let (bases, ruby) = page_runs(&d);
-    assert_eq!(ruby.len(), 5, "empty readings draw nothing");
-    let p = pitches(&bases);
-    let (lo, hi) = p.iter().fold((f32::MAX, f32::MIN), |(a, b), &g| (a.min(g), b.max(g)));
-    println!("partly annotated pitch: min {lo:.1} max {hi:.1} px");
-    assert!(lo > 33.0, "the readings needed room: {p:?}");
-    assert!(hi - lo < 0.5, "one pitch with gaps of one and two characters: {p:?}");
+fn pagination_never_calls_annotate_and_does_not_depend_on_its_output() {
+    let body = "<p>床前明月光，疑是地上霜。举头望明月，低头思故乡。</p>".repeat(40);
+    let mut maps = Vec::new();
+    for letters in [1, 12] {
+        let a = Arc::new(Counting(Default::default(), letters, 0.2));
+        let mut s = settings();
+        s.annotators = vec![AnnotatorHandle::new(a.clone())];
+        let mut d = cjk_doc(&body, &s);
+        assert!(d.wait_paginated(std::time::Duration::from_secs(60)));
+        assert_eq!(a.0.load(Ordering::Relaxed), 0, "no annotate() while paginating");
+        let n = d.page_count().pages;
+        let map: Vec<String> = (0..n).map(|p| d.position_of_page(p).unwrap().to_string()).collect();
+        let (bases, _) = page_runs(&mut d);
+        assert!(a.0.load(Ordering::Relaxed) > 0, "drawing asks for them");
+        maps.push((map, bases.iter().map(|b| (b.x, b.baseline)).collect::<Vec<_>>()));
+    }
+    assert_eq!(maps[0], maps[1], "the same pages and positions whatever annotate() returns");
 }
 
 #[test]
-fn readings_stay_centred_when_they_fit_and_shift_little_otherwise() {
-    // Narrow readings: every one centred.
-    let d = cjk_annotated("<p>床前明</p>", vec!["a", "bb", "ccc"]);
-    let (bases, ruby) = page_runs(&d);
+fn readings_stay_centred_when_they_fit_and_are_condensed_otherwise() {
+    // Narrow readings: every one centred, at the normal size.
+    let mut d = cjk_annotated("<p>床前明</p>", vec!["a", "bb", "ccc"]);
+    let (bases, ruby) = page_runs(&mut d);
+    for (r, b) in ruby.iter().zip(&bases) {
+        assert!((mid(r) - mid(b)).abs() < 0.5, "{:?} off centre", r.text);
+        assert_eq!(r.px, 16.0);
+    }
+    // A wide reading in the middle: the paragraph's readings get smaller, all still
+    // centred and a gap apart; the characters do not move.
+    let mut d = cjk_annotated("<p>床前明月光疑</p>", vec!["a", "a", "ccccccc", "a", "a", "a"]);
+    let (bases, ruby) = page_runs(&mut d);
+    assert!(ruby[0].px < 16.0 && ruby.iter().all(|r| r.px == ruby[0].px));
     for (r, b) in ruby.iter().zip(&bases) {
         assert!((mid(r) - mid(b)).abs() < 0.5, "{:?} off centre", r.text);
     }
-    // A wide reading in the middle moves its neighbours a little; the readings far from
-    // it stay centred.
-    let d = cjk_annotated("<p>床前明月光疑</p>", vec!["a", "a", "ccccccc", "a", "a", "a"]);
-    let (bases, ruby) = page_runs(&d);
-    let (first, last) = (ruby.first().unwrap(), ruby.last().unwrap());
-    assert!((mid(first) - mid(&bases[0])).abs() < 0.5 && (mid(last) - mid(bases.last().unwrap())).abs() < 0.5, "{ruby:?}");
     let gap = ruby[0].px * 0.35;
     for w in ruby.windows(2) {
         assert!(w[1].x - (w[0].x + w[0].width) >= gap - 0.5, "{:?} and {:?} too close", w[0].text, w[1].text);
     }
+    assert!(bases.windows(2).all(|w| (w[1].x - w[0].x - 32.0).abs() < 0.01));
 }
 
 #[test]
@@ -391,7 +424,7 @@ impl TextAnnotator for Words {
 fn annotations_are_drawn_like_ruby_and_are_not_text() {
     let body = "<p>one base two base</p>";
     let mut d = annotated(body, Words::new("base", "B"));
-    let (text, ruby) = page_runs(&d);
+    let (text, ruby) = page_runs(&mut d);
     assert_eq!(ruby.len(), 2);
     for r in &ruby {
         assert_eq!(r.text, "B");
@@ -443,8 +476,8 @@ fn invalid_annotations_are_dropped() {
         Annotation::over(14..15, "sp"), // only a space: no piece of text to draw it over
         Annotation::over(15..16, "x"),
     ];
-    let d = annotated(body, Arc::new(Fixed(list)));
-    let (_, ruby) = page_runs(&d);
+    let mut d = annotated(body, Arc::new(Fixed(list)));
+    let (_, ruby) = page_runs(&mut d);
     let mut got: Vec<&str> = ruby.iter().map(|r| r.text.as_str()).collect();
     got.sort();
     assert_eq!(got, ["ok", "r", "x"]);
@@ -471,41 +504,42 @@ impl TextAnnotator for Boom {
 
 #[test]
 fn a_panicking_annotator_leaves_the_rest_of_the_book_plain() {
-    let d = annotated("<p>first</p><p>boom</p><p>third</p><p>fourth</p>", Arc::new(Boom));
-    let (text, ruby) = page_runs(&d);
+    let mut d = annotated("<p>first</p><p>boom</p><p>third</p><p>fourth</p>", Arc::new(Boom));
+    let (text, ruby) = page_runs(&mut d);
     let words: Vec<&str> = text.iter().map(|t| t.text.as_str()).collect();
-    // The annotated "f" is a piece of its own.
-    assert_eq!(words, ["f", "irst", "boom", "third", "fourth"], "every paragraph is laid out");
+    assert_eq!(words, ["first", "boom", "third", "fourth"], "every paragraph is laid out");
     assert_eq!(ruby.len(), 1, "only the paragraph before the panic is annotated: {:?}", ruby.iter().map(|r| &r.text).collect::<Vec<_>>());
-    assert!(ruby[0].baseline < run(&text, "f").baseline);
+    assert!(ruby[0].baseline < run(&text, "first").baseline);
 }
 
 #[test]
-fn a_version_change_lays_the_book_out_again() {
+fn a_version_change_redraws_without_paginating_again() {
     let a = Words::new("base", "old");
     let mut s = settings();
     s.annotators = vec![AnnotatorHandle::new(a.clone())];
     let mut d = doc_with(&["<p>one base two</p>"], "", &s);
-    assert_eq!(page_runs(&d).1[0].text, "old");
-    // The annotator changes its output and its version: settings made now differ.
+    assert_eq!(page_runs(&mut d).1[0].text, "old");
+    let pos = d.position_of_page(0).unwrap();
+    // The annotator changes its output and its version: the settings stay equal (no new
+    // pagination), the page drawn next has the new annotations.
     *a.text.lock().unwrap() = "new".into();
     a.version.store(2, Ordering::Relaxed);
     let mut s2 = s.clone();
     s2.annotators = vec![AnnotatorHandle::new(a.clone())];
-    assert_ne!(s, s2);
-    assert_ne!(s.cache_key(), s2.cache_key());
-    d.set_layout(&s2).unwrap();
-    assert_eq!(page_runs(&d).1[0].text, "new");
+    assert_eq!(s, s2);
+    assert_eq!(s.cache_key(), s2.cache_key());
+    assert_eq!(page_runs(&mut d).1[0].text, "new");
+    assert_eq!(d.position_of_page(0).unwrap(), pos);
     // Turning annotations off (no annotator) or ruby off removes them.
     let mut off = s2.clone();
     off.annotators = Vec::new();
     assert_ne!(off.cache_key(), s2.cache_key());
     d.set_layout(&off).unwrap();
-    assert!(page_runs(&d).1.is_empty());
+    assert!(page_runs(&mut d).1.is_empty());
     let mut hidden = s2.clone();
     hidden.ruby = false;
     d.set_layout(&hidden).unwrap();
-    assert!(page_runs(&d).1.is_empty());
+    assert!(page_runs(&mut d).1.is_empty());
 }
 
 #[test]
@@ -513,15 +547,18 @@ fn giant_paragraphs_keep_annotations_whole() {
     // A paragraph over the giant-paragraph limit is broken into lines in chunks; an
     // annotated range never straddles two chunks.
     let body = format!("<p>{}</p>", "base ".repeat(70_000));
-    let d = annotated(&body, Words::new("base", "B"));
-    let (text, ruby) = page_runs(&d);
+    let mut d = annotated(&body, Words::new("base", "B"));
+    let (text, ruby) = page_runs(&mut d);
     assert!(!text.is_empty());
     assert!(ruby.len() > 10 && ruby.iter().all(|r| r.text == "B"));
 }
 
-/// Gives every CJK ideograph the same short annotation (or, `idle`, wants nothing).
+/// Wants every paragraph with an ideograph (or, `idle`, none), asks for 0.15 em
+/// between ideographs, and gives each ideograph a reading of `letters` letters.
 struct EveryIdeograph {
     idle: bool,
+    letters: usize,
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl TextAnnotator for EveryIdeograph {
@@ -534,25 +571,26 @@ impl TextAnnotator for EveryIdeograph {
     fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
         !self.idle && p.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
     }
+    fn ideograph_spacing(&self, _: Option<&str>) -> f32 {
+        0.15
+    }
     fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<Annotation> {
-        p.char_indices().filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c)).map(|(i, c)| Annotation::over(i..i + c.len_utf8(), "abc")).collect()
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let reading = "a".repeat(self.letters);
+        p.char_indices().filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c)).map(|(i, c)| Annotation::over(i..i + c.len_utf8(), reading.as_str())).collect()
     }
 }
 
-/// Run with `cargo test --release -p ink-html --test ruby -- --ignored --nocapture measure`.
-#[test]
-#[ignore = "measurement: prints the pagination time of a big CJK book without an annotator, with one that wants nothing and with one that annotates every ideograph"]
-fn measure_annotator_cost_on_a_big_cjk_book() {
-    // 40 chapters of 60 paragraphs of 150 ideographs and punctuation: about 1 MB of text
-    // (characters drawn from the Thousand Character Classic, in a fixed pseudo-random
-    // order).
+/// A generated CJK book: `chapters` of 60 paragraphs of 150 ideographs and
+/// punctuation (characters of the Thousand Character Classic, fixed pseudo-random order).
+fn cjk_book(chapters: usize) -> Vec<String> {
     let pool: Vec<char> = "天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳云腾致雨露结为霜金生丽水玉出昆冈剑号巨阙珠称夜光果珍李柰菜重芥姜海咸河淡鳞潜羽翔".chars().collect();
     let mut seed = 12345u32;
     let mut next = || {
         seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
         (seed >> 16) as usize
     };
-    let chapters: Vec<String> = (0..40)
+    (0..chapters)
         .map(|_| {
             let mut body = String::new();
             for _ in 0..60 {
@@ -567,29 +605,67 @@ fn measure_annotator_cost_on_a_big_cjk_book() {
             }
             body
         })
-        .collect();
-    let refs: Vec<&str> = chapters.iter().map(String::as_str).collect();
-    let bytes: usize = chapters.iter().map(String::len).sum();
-    println!("book: {} chapters, {} KB of XHTML body", chapters.len(), bytes / 1024);
-    let variants: [(&str, Option<Arc<dyn TextAnnotator>>); 3] = [
-        ("no annotator", None),
-        ("annotator that wants nothing", Some(Arc::new(EveryIdeograph { idle: true }))),
-        ("every ideograph annotated", Some(Arc::new(EveryIdeograph { idle: false }))),
-    ];
-    for (name, a) in variants {
-        let mut times = Vec::new();
-        let mut pages = 0;
-        for _ in 0..5 {
-            let mut s = LayoutSettings::for_screen(1272, 1696);
-            s.annotators = a.clone().map(AnnotatorHandle::new).into_iter().collect();
-            let t = std::time::Instant::now();
-            let mut d = doc_with(&refs, "", &s);
-            assert!(d.wait_paginated(std::time::Duration::from_secs(600)));
-            times.push(t.elapsed().as_secs_f64() * 1000.0);
-            pages = d.page_count().pages;
+        .collect()
+}
+
+/// Run with `cargo test --release -p ink-html --test ruby -- --ignored --nocapture measure`.
+#[test]
+#[ignore = "measurement: prints pagination times of generated CJK books (1 MB and novel length) without and with annotators, and the time to draw a page's annotations"]
+fn measure_annotator_cost_on_big_cjk_books() {
+    for (label, n) in [("1 MB book (40 chapters)", 40), ("novel (96 chapters, 0.9 M characters)", 96)] {
+        let chapters = cjk_book(n);
+        let refs: Vec<&str> = chapters.iter().map(String::as_str).collect();
+        let chars: usize = chapters.iter().map(|c| c.chars().count()).sum();
+        println!("{label}: {} KB of XHTML, {chars} characters", chapters.iter().map(String::len).sum::<usize>() / 1024);
+        let variants: [(&str, Option<Arc<EveryIdeograph>>); 3] = [
+            ("no annotator", None),
+            ("annotator that wants nothing", Some(Arc::new(EveryIdeograph { idle: true, letters: 4, calls: Default::default() }))),
+            ("annotator that wants every paragraph", Some(Arc::new(EveryIdeograph { idle: false, letters: 4, calls: Default::default() }))),
+        ];
+        for (name, a) in variants {
+            let mut times = Vec::new();
+            let mut pages = 0;
+            for _ in 0..5 {
+                let mut s = LayoutSettings::for_screen(1272, 1696);
+                s.annotators = a.clone().map(|a| AnnotatorHandle::new(a as Arc<dyn TextAnnotator>)).into_iter().collect();
+                let t = std::time::Instant::now();
+                let mut d = doc_with(&refs, "", &s);
+                assert!(d.wait_paginated(std::time::Duration::from_secs(600)));
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+                pages = d.page_count().pages;
+            }
+            if let Some(a) = &a {
+                assert_eq!(a.calls.load(Ordering::Relaxed), 0, "no annotate() while paginating");
+            }
+            times.sort_by(f64::total_cmp);
+            println!("  {name}: {pages} pages, open + full pagination median {:.0} ms (min {:.0}, max {:.0}, n=5)", times[2], times[0], times[4]);
         }
-        times.sort_by(f64::total_cmp);
-        println!("{name}: {pages} pages, open + full pagination median {:.0} ms (min {:.0}, max {:.0}, n=5)", times[2], times[0], times[4]);
+        // Drawing pages with annotations: computed while drawing, then from the cache.
+        let a = Arc::new(EveryIdeograph { idle: false, letters: 4, calls: Default::default() });
+        let mut s = LayoutSettings::for_screen(1272, 1696);
+        s.annotators = vec![AnnotatorHandle::new(a.clone())];
+        let mut d = doc_with(&refs, "", &s);
+        let mut plain_s = s.clone();
+        plain_s.annotators = Vec::new();
+        let mut plain = doc_with(&refs, "", &plain_s);
+        d.set_annotations_sync(true);
+        let mut canvas = ink_device::Canvas::new(1272, 1696);
+        let pages = 20;
+        let time = |d: &mut HtmlDocument, canvas: &mut ink_device::Canvas| {
+            let t = std::time::Instant::now();
+            for p in 0..pages {
+                d.render_page(p, canvas).unwrap();
+            }
+            t.elapsed().as_secs_f64() * 1000.0 / pages as f64
+        };
+        let plain_ms = time(&mut plain, &mut canvas);
+        let first = time(&mut d, &mut canvas);
+        let cached = time(&mut d, &mut canvas);
+        d.set_record_annotations(true);
+        d.render_page(pages, &mut canvas).unwrap();
+        let on_page = d.placed_annotations().len();
+        assert!(on_page > 100, "{on_page}");
+        println!("  page draw ({on_page} annotations a page): plain {plain_ms:.2} ms, with annotations computed while drawing {first:.2} ms, from the cache {cached:.2} ms (mean of {pages} pages)");
     }
 }
 
@@ -653,14 +729,14 @@ fn several_annotators_merge_and_the_earlier_wins_an_overlap() {
     let third = lang("two", "THIRD", None);
     let mut s = settings();
     s.annotators = vec![AnnotatorHandle::new(first.clone()), AnnotatorHandle::new(second), AnnotatorHandle::new(third)];
-    let d = doc_with(&["<p>one base two</p>"], "", &s);
-    let (_, ruby) = page_runs(&d);
+    let mut d = doc_with(&["<p>one base two</p>"], "", &s);
+    let (_, ruby) = page_runs(&mut d);
     let mut got: Vec<&str> = ruby.iter().map(|r| r.text.as_str()).collect();
     got.sort();
     assert_eq!(got, ["FIRST", "THIRD"], "the second overlaps the first and is dropped");
     assert_eq!(first.seen.lock().unwrap().first().cloned().flatten().as_deref(), Some("en"), "wants gets the paragraph's language");
     // The cache key names every annotator in order.
-    assert!(s.cache_key().ends_with("-aFIRST@1,SECOND@1,THIRD@1"), "{}", s.cache_key());
+    assert!(s.cache_key().ends_with("-aFIRST@0,SECOND@0,THIRD@0"), "{}", s.cache_key());
 }
 
 #[test]
@@ -668,8 +744,8 @@ fn a_language_check_in_wants_skips_other_paragraphs() {
     let a = lang("base", "B", Some("de"));
     let mut s = settings();
     s.annotators = vec![AnnotatorHandle::new(a)];
-    let d = doc_with(&["<p>one base</p><p lang=\"de\">eine base</p>"], "", &s);
-    let (_, ruby) = page_runs(&d);
+    let mut d = doc_with(&["<p>one base</p><p lang=\"de\">eine base</p>"], "", &s);
+    let (_, ruby) = page_runs(&mut d);
     assert_eq!(ruby.len(), 1, "only the German paragraph");
 }
 
@@ -678,8 +754,8 @@ fn one_panicking_annotator_leaves_the_others_running() {
     let ok = lang("third", "T", None);
     let mut s = settings();
     s.annotators = vec![AnnotatorHandle::new(Arc::new(Boom)), AnnotatorHandle::new(ok)];
-    let d = doc_with(&["<p>boom</p><p>third</p>"], "", &s);
-    let (_, ruby) = page_runs(&d);
+    let mut d = doc_with(&["<p>boom</p><p>third</p>"], "", &s);
+    let (_, ruby) = page_runs(&mut d);
     assert!(ruby.iter().any(|r| r.text == "T"), "the second annotator goes on after the first panicked");
 }
 
@@ -700,6 +776,13 @@ impl TextAnnotator for Tiers {
     fn wants(&self, p: &str, _: Option<&str>) -> bool {
         p.contains(self.word)
     }
+    fn positions(&self) -> &[AnnotationPosition] {
+        match (self.over.is_some(), self.under.is_some()) {
+            (true, true) => &[AnnotationPosition::Over, AnnotationPosition::Under],
+            (false, true) => &[AnnotationPosition::Under],
+            _ => &[AnnotationPosition::Over],
+        }
+    }
     fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
         let mut v = Vec::new();
         for (i, w) in p.match_indices(self.word) {
@@ -712,8 +795,8 @@ impl TextAnnotator for Tiers {
 
 #[test]
 fn annotations_under_the_text_are_drawn_below_it_and_coexist_with_those_over_it() {
-    let d = annotated("<p>one base two</p>", Arc::new(Tiers { word: "base", over: Some("above"), under: Some("below") }));
-    let (text, ruby) = page_runs(&d);
+    let mut d = annotated("<p>one base two</p>", Arc::new(Tiers { word: "base", over: Some("above"), under: Some("below") }));
+    let (text, ruby) = page_runs(&mut d);
     let base = run(&text, "base");
     let (over, under) = (run(&ruby, "above"), run(&ruby, "below"));
     assert!(over.baseline < base.baseline - base.px * 0.6, "over above the base");
@@ -722,8 +805,8 @@ fn annotations_under_the_text_are_drawn_below_it_and_coexist_with_those_over_it(
     assert!(under.baseline < base.line_bottom, "inside the line box");
     // The line gets room below as well as above; a line with readings over only does not
     // grow below.
-    let only_over = annotated("<p>one base two</p>", Arc::new(Tiers { word: "base", over: Some("above"), under: None }));
-    let (t2, _) = page_runs(&only_over);
+    let mut only_over = annotated("<p>one base two</p>", Arc::new(Tiers { word: "base", over: Some("above"), under: None }));
+    let (t2, _) = page_runs(&mut only_over);
     let b2 = run(&t2, "base");
     assert!(base.line_bottom - base.baseline > b2.line_bottom - b2.baseline + 1.0);
     assert!(((base.baseline - base.line_top) - (b2.baseline - b2.line_top)).abs() < 0.01);
@@ -735,15 +818,15 @@ fn annotations_under_the_text_are_drawn_below_it_and_coexist_with_those_over_it(
 
 #[test]
 fn book_ruby_with_ruby_position_under_is_drawn_below() {
-    let d = doc("<p>one <ruby>base<rt>below</rt></ruby> two</p>", "ruby { ruby-position: under }");
-    let (text, ruby) = page_runs(&d);
+    let mut d = doc("<p>one <ruby>base<rt>below</rt></ruby> two</p>", "ruby { ruby-position: under }");
+    let (text, ruby) = page_runs(&mut d);
     let (base, r) = (run(&text, "base"), run(&ruby, "below"));
     assert!(r.baseline > base.baseline, "under the base");
     // An annotation over the same base still shows: the book's ruby takes only its tier.
     let mut s = settings();
     s.annotators = vec![AnnotatorHandle::new(Arc::new(Tiers { word: "base", over: Some("above"), under: Some("lost") }))];
-    let d = doc_with(&["<p>one <ruby>base<rt>below</rt></ruby> two</p>"], "ruby { ruby-position: under }", &s);
-    let (_, ruby) = page_runs(&d);
+    let mut d = doc_with(&["<p>one <ruby>base<rt>below</rt></ruby> two</p>"], "ruby { ruby-position: under }", &s);
+    let (_, ruby) = page_runs(&mut d);
     let mut got: Vec<&str> = ruby.iter().map(|r| r.text.as_str()).collect();
     got.sort();
     assert_eq!(got, ["above", "below"], "the annotation under the base gives way to the book's");

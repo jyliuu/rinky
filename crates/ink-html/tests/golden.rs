@@ -53,6 +53,16 @@ impl ink_doc::TextAnnotator for CodepointAnnotator {
     fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
         p.chars().any(is_ideograph)
     }
+    fn positions(&self) -> &[ink_doc::AnnotationPosition] {
+        if self.0 {
+            &[ink_doc::AnnotationPosition::Under]
+        } else {
+            &[ink_doc::AnnotationPosition::Over]
+        }
+    }
+    fn ideograph_spacing(&self, _lang: Option<&str>) -> f32 {
+        0.15
+    }
     fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<ink_doc::Annotation> {
         p.char_indices().filter(|&(_, c)| is_ideograph(c)).map(|(i, c)| {
             let (range, text) = (i..i + c.len_utf8(), format!("{:x}", c as u32));
@@ -207,6 +217,8 @@ fn golden_case(&(name, book, pages, variant): &Case, update: bool, gdir: &Path, 
         // Open once per case: layout is the slow part.
         let mut doc = ink_formats::open(&book).unwrap_or_else(|e| panic!("{}: {e}", book.display()));
         doc.set_layout(&settings(variant)).unwrap();
+        // Annotations are drawn with the page here, not in the background.
+        doc.set_annotations_sync(true);
         for &page in pages {
             let file = format!("{name}-p{:04}.png", page + 1);
             let golden = gdir.join(&file);

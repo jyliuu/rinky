@@ -172,6 +172,9 @@ pub struct ChapterLayout {
     pub links: Vec<LinkRef>,
     /// Total height.
     pub height: f32,
+    /// The paragraphs annotators want, for the annotations drawn over the page
+    /// ([`crate::annot`]); empty without annotators.
+    pub annotated: Vec<AnnotatedPara>,
 }
 
 /// What a chapter layout depends on.
@@ -222,7 +225,7 @@ impl AnnotatorState {
         AnnotatorState((0..n).map(|_| AtomicBool::new(false)).collect())
     }
 
-    fn failed(&self, i: usize) -> bool {
+    pub(crate) fn failed(&self, i: usize) -> bool {
         self.0.get(i).is_none_or(|f| f.load(Ordering::Relaxed))
     }
 
@@ -231,7 +234,7 @@ impl AnnotatorState {
     }
 
     /// Turns annotator `i` off; true the first time (the caller logs it once).
-    fn fail(&self, i: usize) -> bool {
+    pub(crate) fn fail(&self, i: usize) -> bool {
         self.0.get(i).is_some_and(|f| !f.swap(true, Ordering::Relaxed))
     }
 }
@@ -389,7 +392,7 @@ fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32) -> f32 {
 /// each, so they share the even pitch of the run around them ([`place_ruby`]); an empty
 /// ruby text draws nothing and blocks no other.
 fn fill_short_gaps(text: &str, ruby: Vec<Ruby>) -> Vec<Ruby> {
-    let ideograph = |c: char| matches!(c, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{3005}');
+    let ideograph = is_ideograph;
     let mut out: Vec<Ruby> = Vec::with_capacity(ruby.len());
     for r in ruby {
         if let Some(prev) = out.last() {
@@ -407,6 +410,74 @@ fn fill_short_gaps(text: &str, ruby: Vec<Ruby>) -> Vec<Ruby> {
         out.push(r);
     }
     out
+}
+
+/// True for a CJK ideograph.
+pub fn is_ideograph(c: char) -> bool {
+    matches!(c, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{20000}'..='\u{2ffff}' | '\u{3005}')
+}
+
+/// What the annotators want of one paragraph ([`Flow::annotation_room`]).
+#[derive(Clone, Debug, Default)]
+struct Room {
+    /// Bit `i`: annotator `i` wants the paragraph.
+    wanted: u64,
+    over: bool,
+    under: bool,
+    /// Extra space between ideographs, em.
+    spacing: f32,
+    lang: Option<String>,
+}
+
+/// A paragraph annotators want: what drawing its annotations needs ([`crate::annot`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnnotatedPara {
+    /// The paragraph text as laid out (what `annotate` gets).
+    pub text: Arc<str>,
+    /// Its language.
+    pub lang: Option<Arc<str>>,
+    /// Bit `i`: annotator `i` of the settings wants it.
+    pub wanted: u64,
+    /// Where its chars come from, in runs: (char index in `text`, text node, DOM char
+    /// offset of the run's first char).
+    pub map: Vec<(u32, NodeId, u32)>,
+    /// The byte offset of every [`AnnotatedPara::STRIDE`]th char of `text`.
+    pub stride: Vec<u32>,
+    /// The book's own ruby bases (byte ranges, drawn under): annotations give way.
+    pub book: Vec<(u32, u32, bool)>,
+}
+
+impl AnnotatedPara {
+    fn new(text: &str, src: &SrcRuns, segs: &[Seg], ruby: &[Ruby], room: Room) -> Self {
+        let mut map = Vec::with_capacity(src.runs.len());
+        let mut c = 0u32;
+        for &(seg, dom, n) in &src.runs {
+            map.push((c, segs[seg as usize].node, dom));
+            c += n;
+        }
+        let stride = text.char_indices().step_by(Self::STRIDE).map(|(b, _)| b as u32).collect();
+        AnnotatedPara {
+            text: Arc::from(text),
+            lang: room.lang.map(|l| Arc::from(l.as_str())),
+            wanted: room.wanted,
+            map,
+            stride,
+            book: ruby.iter().map(|r| (r.start as u32, r.end as u32, r.under)).collect(),
+        }
+    }
+
+    /// Chars between two entries of [`AnnotatedPara::stride`].
+    pub const STRIDE: usize = 64;
+
+    /// The text node and DOM char offset of the char at byte `b` (at most
+    /// [`AnnotatedPara::STRIDE`] chars counted).
+    pub fn source(&self, b: usize) -> Option<(NodeId, u32)> {
+        let k = self.stride.partition_point(|&o| o as usize <= b).checked_sub(1)?;
+        let c = (k * Self::STRIDE + self.text.get(self.stride[k] as usize..b)?.chars().count()) as u32;
+        let i = self.map.partition_point(|&(o, _, _)| o <= c).checked_sub(1)?;
+        let (o, node, dom) = self.map[i];
+        Some((node, dom + (c - o)))
+    }
 }
 
 /// Annotation text size as a share of the base text's size.
@@ -660,9 +731,9 @@ impl<'p> Para<'p> {
         Para { text, src, wide, segs, tiers: [Vec::new(), Vec::new()], pads: Vec::new() }
     }
 
-    /// True when the text has ruby in either tier.
+    /// True when the text has ruby in either tier or space for annotations.
     fn has_ruby(&self) -> bool {
-        !self.tiers[0].is_empty() || !self.tiers[1].is_empty()
+        !self.tiers[0].is_empty() || !self.tiers[1].is_empty() || !self.pads.is_empty()
     }
 
     /// The index of the ruby of `tier` whose base holds the bytes `start..end`.
@@ -680,8 +751,10 @@ impl<'p> Para<'p> {
         })
     }
 
-    /// The first ruby base boundary of either tier strictly inside `start..end`.
+    /// The first ruby base boundary of either tier, or char with space before it,
+    /// strictly inside `start..end`.
     fn ruby_cut(&self, start: usize, end: usize) -> Option<usize> {
+        let pad = self.pads.get(self.pads.partition_point(|&(o, _)| o <= start)).map(|&(o, _)| o).filter(|&o| o < end);
         self.tiers
             .iter()
             .filter_map(|t| {
@@ -692,6 +765,7 @@ impl<'p> Para<'p> {
                     (r.end < end).then_some(r.end)
                 }
             })
+            .chain(pad)
             .min()
     }
 
@@ -814,6 +888,8 @@ pub struct Flow<'a, 'e> {
     ruby_h: f32,
     /// Height of the tallest ruby text drawn under the text of that paragraph (0: none).
     ruby_under_h: f32,
+    /// Extra space between two ideographs of that paragraph, for annotations (px).
+    ideo_space: f32,
 }
 
 /// Where [`Flow::layout_until`] stops: once the flow is `extra` px below the first slice
@@ -951,6 +1027,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             text_items,
             ruby_h: 0.0,
             ruby_under_h: 0.0,
+            ideo_space: 0.0,
         };
         if dom.body != NONE {
             f.block(dom.body, p.left, p.content_w);
@@ -1501,95 +1578,59 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    /// The annotations of the settings' annotators for the paragraph `text` (with the
-    /// sources `src` of its chars), as ruby. Each annotator is asked in order; ranges
-    /// that are empty, out of the text, inside a char, overlapping an earlier annotation
-    /// (of this annotator or an earlier one) or a ruby of the book (`book`, sorted) are
-    /// dropped. A panic in an annotator turns that one off for the rest of the book
-    /// (logged once). Also returns whether any annotator wanted the paragraph.
-    fn annotations(&mut self, owner: NodeId, text: &str, src: &SrcRuns, segs: &[Seg], book: &[Ruby]) -> (Vec<Ruby>, bool) {
+    /// What the settings' annotators want of the paragraph `text`: the bit of each
+    /// annotator whose [`ink_doc::TextAnnotator::wants`] says yes, whether any of them
+    /// draws over and under the text, and the largest extra space between ideographs
+    /// they ask for (em). Only `wants` and the annotators' declarations: the layout never
+    /// depends on `annotate`. A panic in `wants` turns that annotator off for the rest of
+    /// the book (logged once).
+    fn annotation_room(&mut self, owner: NodeId, text: &str) -> Room {
         let s = &self.p.settings;
+        let mut room = Room::default();
         if !s.ruby || s.annotators.is_empty() {
-            return (Vec::new(), false);
+            return room;
         }
         let lang = self.lang_of(owner);
-        let mut any_wanted = false;
-        // Taken ranges by start, per tier (the book's ruby, then each accepted annotation).
-        let mut taken: [std::collections::BTreeMap<usize, usize>; 2] = Default::default();
-        for r in book {
-            taken[usize::from(r.under)].insert(r.start, r.end);
-        }
-        let mut keep: Vec<(usize, usize, String, bool)> = Vec::new();
-        for (ai, handle) in s.annotators.iter().enumerate() {
+        for (ai, handle) in s.annotators.iter().enumerate().take(64) {
             if self.p.annotator_state.failed(ai) {
                 continue;
             }
             let a = handle.annotator();
-            let mut wanted = false;
-            let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                wanted = a.wants(text, lang.as_deref());
-                if wanted {
-                    a.annotate(text, lang.as_deref())
-                } else {
-                    Vec::new()
+            let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if !a.wants(text, lang.as_deref()) {
+                    return None;
                 }
+                let (mut over, mut under) = (false, false);
+                for &p in a.positions() {
+                    match p {
+                        ink_doc::AnnotationPosition::Over => over = true,
+                        ink_doc::AnnotationPosition::Under => under = true,
+                        #[allow(unreachable_patterns)]
+                        _ => {}
+                    }
+                }
+                Some((over, under, a.ideograph_spacing(lang.as_deref())))
             }));
-            let list = match called {
-                Ok(list) => list,
+            match asked {
+                Ok(Some((over, under, spacing))) => {
+                    room.wanted |= 1 << ai;
+                    room.over |= over;
+                    room.under |= under;
+                    if spacing.is_finite() {
+                        room.spacing = room.spacing.max(spacing.clamp(0.0, 2.0));
+                    }
+                }
+                Ok(None) => {}
                 Err(e) => {
                     if self.p.annotator_state.fail(ai) {
                         let what = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
                         log::error!("ink-html: annotator {} panicked ({what}); the rest of the book is laid out without its annotations", handle.key());
                     }
-                    continue;
                 }
-            };
-            any_wanted |= wanted;
-            for an in list {
-                let (st, en) = (an.range.start, an.range.end);
-                let under = match an.position {
-                    ink_doc::AnnotationPosition::Over => false,
-                    ink_doc::AnnotationPosition::Under => true,
-                    // A position this engine does not know yet: not drawn.
-                    #[allow(unreachable_patterns)]
-                    _ => continue,
-                };
-                if st >= en || en > text.len() || !text.is_char_boundary(st) || !text.is_char_boundary(en) || an.text.trim().is_empty() {
-                    continue;
-                }
-                let taken = &mut taken[usize::from(under)];
-                if taken.range(..en).next_back().is_some_and(|(_, &e)| e > st) {
-                    continue;
-                }
-                taken.insert(st, en);
-                keep.push((st, en, an.text.trim().to_string(), under));
             }
         }
-        if keep.is_empty() {
-            return (Vec::new(), any_wanted);
-        }
-        keep.sort_by_key(|k| k.0);
-        // The segment at each start (one pass over the chars).
-        let mut out = Vec::with_capacity(keep.len());
-        let mut k = 0;
-        for ((b, _), cs) in text.char_indices().zip(src.iter()) {
-            while k < keep.len() && keep[k].0 < b {
-                k += 1;
-            }
-            while k < keep.len() && keep[k].0 == b {
-                let seg = &segs[cs.seg as usize];
-                if let SegKind::Text { face, px } = seg.kind {
-                    let (st, en, ref t, under) = keep[k];
-                    let gray = self.st(seg.style).color;
-                    out.push(Ruby { start: st, end: en, text: t.clone(), face, px: px * ANNOTATION_SCALE, gray, base_w: 0.0, ruby_w: 0.0, pad: 0.0, shift: 0.0, under });
-                }
-                k += 1;
-            }
-            if k >= keep.len() {
-                break;
-            }
-        }
-        (out, any_wanted)
+        room.lang = lang;
+        room
     }
 
     /// Baseline shift of an inline element relative to its parent.
@@ -1693,29 +1734,30 @@ impl<'a, 'e> Flow<'a, 'e> {
         // The text may have lost trailing spaces and breaks since the book's ruby was
         // collected.
         ruby.retain(|r| r.end <= text.len());
-        let mut reserve = false;
-        if !self.p.settings.annotators.is_empty() {
-            let (more, wanted) = self.annotations(owner, &text, &src, &segs, &ruby);
-            reserve = wanted;
-            if !more.is_empty() {
-                ruby.extend(more);
-                ruby.sort_by_key(|r| r.start);
-            }
-        }
-        (self.ruby_h, self.ruby_under_h) = (0.0, 0.0);
+        let room = if self.p.settings.annotators.is_empty() { Room::default() } else { self.annotation_room(owner, &text) };
+        (self.ruby_h, self.ruby_under_h, self.ideo_space) = (0.0, 0.0, 0.0);
         for r in &ruby {
             let (a, d) = self.env.fonts.vmetrics(r.face, r.px);
             let h = if r.under { &mut self.ruby_under_h } else { &mut self.ruby_h };
             *h = h.max(a - d);
         }
-        if reserve {
-            // The annotator wanted this paragraph: its lines get the room of an
-            // annotation even when it had none to give, so every paragraph it reads has
-            // the same line pitch.
+        if room.wanted != 0 {
+            // An annotator wants this paragraph: its lines get the room of an annotation
+            // in each position it draws in, whatever `annotate` returns later, so the
+            // layout never waits for it and every paragraph it reads has the same pitch.
             let ost = self.st(owner);
             let face = self.face(ost);
             let (a, d) = self.env.fonts.vmetrics(face, ost.font_size * ANNOTATION_SCALE);
-            self.ruby_h = self.ruby_h.max(a - d);
+            if room.over {
+                self.ruby_h = self.ruby_h.max(a - d);
+            }
+            if room.under {
+                self.ruby_under_h = self.ruby_under_h.max(a - d);
+            }
+            self.ideo_space = room.spacing * ost.font_size;
+            if self.text_items {
+                self.out.annotated.push(AnnotatedPara::new(&text, &src, &segs, &ruby, room));
+            }
         }
         let para_first_slice = self.out.slices.len();
         if text.len() <= GIANT_PARAGRAPH {
@@ -1756,7 +1798,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             }
             self.merge_runs = merge;
         }
-        (self.ruby_h, self.ruby_under_h) = (0.0, 0.0);
+        (self.ruby_h, self.ruby_under_h, self.ideo_space) = (0.0, 0.0, 0.0);
         // Widows and orphans: keep two lines together at both ends.
         let n = self.out.slices.len() - para_first_slice;
         if n >= 2 && !self.in_cell {
@@ -1817,7 +1859,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         let ost = self.st(owner);
         let keep_spaces = ost.white_space.keeps_spaces();
         let mut para = Para::new(text, src, segs);
-        if !ruby.is_empty() {
+        if !ruby.is_empty() || self.ideo_space > 0.0 {
             let (under, over): (Vec<Ruby>, Vec<Ruby>) = ruby.into_iter().partition(|r| r.under);
             for (t, tier) in [over, under].into_iter().enumerate() {
                 if !tier.is_empty() {
@@ -1827,6 +1869,18 @@ impl<'a, 'e> Flow<'a, 'e> {
             // The space before each char: the larger of the two tiers' (more room only
             // moves the ruby texts of the other tier apart).
             let mut pads: Vec<(usize, f32)> = para.tiers.iter().flatten().filter(|r| r.pad > 0.0).map(|r| (r.start, r.pad)).collect();
+            if self.ideo_space > 0.0 {
+                // The space annotators ask for between ideographs (before each that
+                // follows another).
+                let mut prev = false;
+                for (b, c) in text.char_indices() {
+                    let ideo = is_ideograph(c);
+                    if ideo && prev {
+                        pads.push((b, self.ideo_space));
+                    }
+                    prev = ideo;
+                }
+            }
             pads.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
             pads.dedup_by_key(|p| p.0);
             para.pads = pads;
@@ -2526,6 +2580,8 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         self.out.links.extend(lay.links);
         self.out.decor.extend(lay.decor.into_iter().map(|d| RectRun { y: d.y + dy, ..d }));
+        // Paragraphs of the cell that annotators want.
+        self.out.annotated.extend(lay.annotated);
         lay.slices
     }
 

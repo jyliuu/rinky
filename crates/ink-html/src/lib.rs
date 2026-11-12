@@ -14,6 +14,7 @@
 
 #![warn(missing_docs)]
 
+pub mod annot;
 pub mod book;
 pub mod css;
 mod doc;
