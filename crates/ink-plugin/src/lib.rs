@@ -39,8 +39,11 @@ pub use registry::{ControlTile, LibraryEntry, ReaderAction, Registrar, Registry,
 /// crates and the app use the same version without their own dependency.
 pub use serde_json;
 
+/// The text annotation API of [`Plugin::text_annotator`], re-exported for plugin crates.
+pub use ink_doc::{Annotation, TextAnnotator};
 use ink_doc::Selection;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Errors from plugins and the host.
 #[derive(Debug, thiserror::Error)]
@@ -165,6 +168,16 @@ pub trait Plugin {
     /// `Some`: collect worker results here and show them (toasts, menus, rescans).
     fn on_tick(&mut self, _cx: &mut HostCtx) -> Result<()> {
         Ok(())
+    }
+    /// A [`TextAnnotator`] whose annotations the reader draws above the text of
+    /// reflowable books, like ruby, or `None` (the default). Asked when a book opens;
+    /// the reader keeps the `Arc` and reads [`TextAnnotator::version`] again whenever it
+    /// rebuilds its layout settings (after a plugin action or a settings page closes), so
+    /// a plugin changes the annotations by bumping the version, not by returning a
+    /// different annotator. Rust plugins only: the annotator runs on the pagination
+    /// thread for every paragraph of the book, where a Lua call would be too slow.
+    fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> {
+        None
     }
 }
 

@@ -8,12 +8,15 @@
 //! - Notes: [`Link::footnote`] marks note references, [`Document::note`] returns the note.
 //! - [`LayoutSettings`]: what a reflowable layout depends on (also the page-map cache key).
 //! - [`ResourceLoader`]: images, stylesheets and fonts referenced by a book.
+//! - [`TextAnnotator`]: readings drawn above text like ruby (see [`annotate`]).
 
 #![warn(missing_docs)]
 
+pub mod annotate;
 pub mod position;
 pub mod timing;
 
+pub use annotate::{Annotation, AnnotatorHandle, TextAnnotator};
 pub use position::{FlowAnchor, Location, PagePosition, Position, Quad, Step, TextOffset, XPointer};
 
 use ink_device::{Canvas, Point, Rect};
@@ -160,6 +163,9 @@ pub struct LayoutSettings {
     pub embolden: u8,
     /// Font family override (`None` = embedded Noto Serif).
     pub font_family: Option<String>,
+    /// Annotations drawn above the text like ruby (`None` = none). Part of the cache key
+    /// as `id@version`.
+    pub annotator: Option<AnnotatorHandle>,
 }
 
 impl LayoutSettings {
@@ -182,6 +188,7 @@ impl LayoutSettings {
             paragraph_indent: None,
             embolden: 0,
             font_family: None,
+            annotator: None,
         }
     }
 
@@ -198,6 +205,9 @@ impl LayoutSettings {
         }
         if self.embolden != 0 {
             extra += &format!("-w{}", self.embolden);
+        }
+        if let Some(a) = &self.annotator {
+            extra += &format!("-a{}", a.key());
         }
         format!(
             "{}x{}-m{}_{}_{}_{}-f{}-l{}-j{}-h{}-p{}-{}{extra}",
