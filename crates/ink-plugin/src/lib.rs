@@ -404,6 +404,17 @@ impl PluginManager {
         r
     }
 
+    /// The [`TextAnnotator`] of the first enabled plugin, in load order (compiled-in
+    /// plugins in their registration order, then Lua plugins, which have none), whose
+    /// [`Plugin::text_annotator`] returns one, with that plugin's name. Only one
+    /// annotator is used at a time. A plugin that panics when asked is skipped.
+    pub fn text_annotator(&self) -> Option<(String, Arc<dyn TextAnnotator>)> {
+        self.slots.iter().filter(|s| s.enabled).find_map(|s| {
+            let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.plugin.text_annotator()));
+            Some((s.manifest.name.clone(), asked.ok().flatten()?))
+        })
+    }
+
     /// Routes a triggered registry entry to its plugin.
     pub fn action(&mut self, plugin: &str, id: &str, cx: &mut HostCtx) -> Result<()> {
         self.call(plugin, &format!("on_action({id})"), |p| p.on_action(cx, id))
@@ -532,6 +543,58 @@ mod tests {
         fn on_page_change(&mut self, _cx: &mut HostCtx, _page: usize) -> Result<()> {
             Err(if self.1 { PluginError::Limit("time limit".into()) } else { PluginError::Failed("bad".into()) })
         }
+    }
+
+    /// Offers a text annotator (or panics when asked, for `panics`).
+    struct Annotating {
+        m: PluginManifest,
+        panics: bool,
+    }
+
+    struct Nothing;
+    impl TextAnnotator for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        fn version(&self) -> u64 {
+            0
+        }
+        fn wants(&self, _: &str) -> bool {
+            false
+        }
+        fn annotate(&self, _: &str, _: Option<&str>) -> Vec<Annotation> {
+            Vec::new()
+        }
+    }
+
+    impl Plugin for Annotating {
+        fn manifest(&self) -> &PluginManifest {
+            &self.m
+        }
+        fn on_load(&mut self, _reg: &mut Registrar) -> Result<()> {
+            Ok(())
+        }
+        fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> {
+            assert!(!self.panics, "test plugin panics on purpose");
+            Some(Arc::new(Nothing))
+        }
+    }
+
+    fn annotating(name: &str, panics: bool) -> Box<dyn Plugin> {
+        Box::new(Annotating { m: PluginManifest::new(name, "1", &[]), panics })
+    }
+
+    #[test]
+    fn the_first_enabled_plugin_with_an_annotator_supplies_it() {
+        let mut mgr = PluginManager::new();
+        assert!(mgr.text_annotator().is_none());
+        mgr.load(vec![counter("plain", false), annotating("broken", true), annotating("first", false), annotating("second", false)]);
+        assert_eq!(mgr.text_annotator().map(|(n, _)| n).as_deref(), Some("first"), "plugins without one and one that panics are skipped");
+        mgr.disable("first", "test");
+        assert_eq!(mgr.text_annotator().map(|(n, _)| n).as_deref(), Some("second"), "a disabled plugin's annotator is not used");
+        let mut off = PluginManager::new();
+        off.load_disabled(vec![annotating("off", false)]);
+        assert!(off.text_annotator().is_none(), "nor one the user turned off");
     }
 
     #[test]
