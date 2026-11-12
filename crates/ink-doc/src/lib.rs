@@ -164,8 +164,12 @@ pub struct LayoutSettings {
     /// Font family override (`None` = embedded Noto Serif).
     pub font_family: Option<String>,
     /// Annotations drawn above the text like ruby (`None` = none). Part of the cache key
-    /// as `id@version`.
+    /// as `id@version`. Ignored while [`LayoutSettings::ruby`] is off.
     pub annotator: Option<AnnotatorHandle>,
+    /// Draw ruby: the text of the book's `<rt>` elements above their base text, and the
+    /// annotations of [`LayoutSettings::annotator`]. Off: the base text only, with the
+    /// `<rt>` text left out. On by default.
+    pub ruby: bool,
 }
 
 impl LayoutSettings {
@@ -189,6 +193,7 @@ impl LayoutSettings {
             embolden: 0,
             font_family: None,
             annotator: None,
+            ruby: true,
         }
     }
 
@@ -206,7 +211,9 @@ impl LayoutSettings {
         if self.embolden != 0 {
             extra += &format!("-w{}", self.embolden);
         }
-        if let Some(a) = &self.annotator {
+        if !self.ruby {
+            extra += "-r0";
+        } else if let Some(a) = &self.annotator {
             extra += &format!("-a{}", a.key());
         }
         format!(
@@ -754,5 +761,10 @@ mod tests {
         c.embolden = 1;
         let k3 = c.cache_key();
         assert!(a.cache_key() != k1 && k1 != k2 && k2 != k3);
+        // Ruby is on by default and keeps the key; off changes it.
+        let mut r = a.clone();
+        assert!(r.ruby);
+        r.ruby = false;
+        assert_ne!(a.cache_key(), r.cache_key());
     }
 }
