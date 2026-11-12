@@ -2334,3 +2334,76 @@ fn zoom_under_the_hit_bar_sharpens_too() {
     assert_eq!(h.kind(), Some(overlay::OverlayKind::Hits));
     assert!(h.reader.sharp_at.is_none() && h.reader.preview_shown.is_none(), "the sharp page came");
 }
+
+/// A test annotator: annotates every "Romeo" with "R", at the version the test sets.
+struct RomeoAnnotator(std::sync::atomic::AtomicU64);
+
+impl ink_doc::TextAnnotator for RomeoAnnotator {
+    fn id(&self) -> &str {
+        "romeo"
+    }
+    fn version(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn wants(&self, p: &str) -> bool {
+        p.contains("Romeo")
+    }
+    fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<ink_doc::Annotation> {
+        p.match_indices("Romeo").map(|(i, w)| ink_doc::Annotation::new(i..i + w.len(), "R")).collect()
+    }
+}
+
+/// A plugin that offers [`RomeoAnnotator`].
+struct AnnotatingPlugin(ink_plugin::PluginManifest, std::sync::Arc<RomeoAnnotator>);
+
+impl ink_plugin::Plugin for AnnotatingPlugin {
+    fn manifest(&self) -> &ink_plugin::PluginManifest {
+        &self.0
+    }
+    fn on_load(&mut self, _reg: &mut ink_plugin::Registrar) -> ink_plugin::Result<()> {
+        Ok(())
+    }
+    fn text_annotator(&self) -> Option<std::sync::Arc<dyn ink_doc::TextAnnotator>> {
+        Some(self.1.clone())
+    }
+}
+
+/// The plugin's annotator is in the layout of a book opened with it; a version bump
+/// lays the book out again after a plugin action; "Show ruby annotations" off for this
+/// book (Aa) or as the default takes it out of the layout.
+#[test]
+fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
+    let mut h = Harness::new("annotator", "juliet.epub");
+    let a = std::sync::Arc::new(RomeoAnnotator(std::sync::atomic::AtomicU64::new(1)));
+    h.plugins = PluginHost::new(vec![Box::new(AnnotatingPlugin(ink_plugin::PluginManifest::new("romeo", "1", &[]), a.clone()))]);
+    let p = providers();
+    h.reader = ReaderScreen::new(h.reader.path.clone());
+    h.reader.on_enter(&mut cx!(h, p)).unwrap();
+    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotator.as_ref().map(|x| x.version());
+    assert_eq!(version(&h), Some(1), "asked when the book opens");
+    // Nothing changed: an action keeps the layout.
+    let key = h.reader.doc.as_deref().unwrap().layout().cache_key();
+    h.with_cx(|r, cx| r.run_action("plugin:romeo:x", cx)).unwrap();
+    assert_eq!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key);
+    // The plugin changed its annotations: the next plugin action lays the book out again.
+    a.0.store(2, std::sync::atomic::Ordering::Relaxed);
+    h.with_cx(|r, cx| r.run_action("plugin:romeo:x", cx)).unwrap();
+    assert_eq!(version(&h), Some(2));
+    assert_ne!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key);
+    // Off for this book: neither ruby nor the annotator.
+    h.with_cx(|r, cx| {
+        r.aa_action("aa-ruby:off", cx).unwrap();
+        r.relayout(cx, RefreshClass::Gc16).unwrap();
+    });
+    let l = h.reader.doc.as_deref().unwrap().layout().clone();
+    assert!(!l.ruby && l.annotator.is_none());
+    assert_eq!(h.reader.book_settings.ruby, Some(false));
+    // Off as the default: a book without its own choice opens without them.
+    h.settings.reader.ruby = false;
+    h.reader = ReaderScreen::new(h.reader.path.clone());
+    h.reader.book_settings = BookSettings::default();
+    let _ = std::fs::remove_file(ink_store::sidecar::sidecar_path(&h.reader.path));
+    h.reader.on_enter(&mut cx!(h, p)).unwrap();
+    let l = h.reader.doc.as_deref().unwrap().layout().clone();
+    assert!(!l.ruby && l.annotator.is_none());
+}

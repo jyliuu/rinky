@@ -600,6 +600,15 @@ impl PluginHost {
         self.book = None;
     }
 
+    /// The text annotator the reader lays books out with: the first enabled plugin's
+    /// that offers one ([`PluginManager::text_annotator`]), or `None`. Asked when a book
+    /// opens.
+    pub fn text_annotator(&self) -> Option<std::sync::Arc<dyn ink_plugin::TextAnnotator>> {
+        let (plugin, a) = self.manager.text_annotator()?;
+        log::info!("plugins: text annotator {} from {plugin} (version {})", a.id(), a.version());
+        Some(a)
+    }
+
     // -- Registries ------------------------------------------------------------------------
 
     /// Reader menu entries, sorted by order.

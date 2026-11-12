@@ -1038,6 +1038,29 @@ pub struct SettingsScreen {
     plugin_page: Option<PluginPage>,
 }
 
+/// The rows of the Default layout page for the reader defaults `r`.
+fn layout_rows(r: &ink_store::settings::ReaderSettings) -> Vec<Row> {
+    let mut rows = vec![Row::header("Text size")];
+    rows.extend(FONT_SIZES.iter().map(|px| Row::choice(format!("{px} px"), (r.font_px - px).abs() < 0.5, format!("font-px:{px}"))));
+    rows.push(Row::header("Line spacing"));
+    rows.extend(LINE_SPACINGS.iter().map(|ls| Row::choice(format!("{ls:.1}"), (r.line_spacing - ls).abs() < 0.05, format!("spacing:{ls}"))));
+    rows.push(Row::header("Side margins"));
+    rows.extend(MARGINS.iter().map(|(px, name)| Row::choice(*name, (r.margin_x - px).abs() < 0.5, format!("margin:{px}"))));
+    rows.push(Row::header("Space between paragraphs"));
+    rows.extend(PARA_SPACINGS.iter().map(|(em, name)| Row::choice(*name, (r.paragraph_spacing - em).abs() < 0.01, format!("pspace:{em}"))));
+    rows.push(Row::header("First-line indent"));
+    rows.extend(INDENTS.iter().map(|(em, name)| Row::choice(*name, (r.paragraph_indent - em).abs() < 0.01, format!("indent:{em}"))));
+    rows.push(Row::header("Text weight"));
+    rows.extend(WEIGHTS.iter().map(|(lv, name)| Row::choice(*name, r.font_weight == *lv, format!("weight:{lv}"))));
+    rows.push(Row::header("Text"));
+    rows.push(Row::toggle("Justify", r.justify, "justify").icon(Icon::ListView));
+    rows.push(Row::toggle("Hyphenate", r.hyphenate, "hyph").icon(Icon::ListView));
+    rows.push(Row::toggle("Use the book's own styles", r.publisher_styles, "publisher").icon(Icon::Book));
+    rows.push(Row::toggle("Ruby annotations", r.ruby, "ruby").icon(Icon::Book));
+    rows.push(Row::note("Used for books opened from now on; Aa in a book changes that book."));
+    rows
+}
+
 impl SettingsScreen {
     /// The page shown.
     pub fn page(&self) -> &Page {
@@ -1352,24 +1375,7 @@ impl SettingsScreen {
     }
 
     fn build_layout(&mut self, cx: &mut AppCtx, content: Rect) {
-        let r = &current_settings(cx).reader;
-        let mut rows = vec![Row::header("Text size")];
-        rows.extend(FONT_SIZES.iter().map(|px| Row::choice(format!("{px} px"), (r.font_px - px).abs() < 0.5, format!("font-px:{px}"))));
-        rows.push(Row::header("Line spacing"));
-        rows.extend(LINE_SPACINGS.iter().map(|ls| Row::choice(format!("{ls:.1}"), (r.line_spacing - ls).abs() < 0.05, format!("spacing:{ls}"))));
-        rows.push(Row::header("Side margins"));
-        rows.extend(MARGINS.iter().map(|(px, name)| Row::choice(*name, (r.margin_x - px).abs() < 0.5, format!("margin:{px}"))));
-        rows.push(Row::header("Space between paragraphs"));
-        rows.extend(PARA_SPACINGS.iter().map(|(em, name)| Row::choice(*name, (r.paragraph_spacing - em).abs() < 0.01, format!("pspace:{em}"))));
-        rows.push(Row::header("First-line indent"));
-        rows.extend(INDENTS.iter().map(|(em, name)| Row::choice(*name, (r.paragraph_indent - em).abs() < 0.01, format!("indent:{em}"))));
-        rows.push(Row::header("Text weight"));
-        rows.extend(WEIGHTS.iter().map(|(lv, name)| Row::choice(*name, r.font_weight == *lv, format!("weight:{lv}"))));
-        rows.push(Row::header("Text"));
-        rows.push(Row::toggle("Justify", r.justify, "justify").icon(Icon::ListView));
-        rows.push(Row::toggle("Hyphenate", r.hyphenate, "hyph").icon(Icon::ListView));
-        rows.push(Row::toggle("Use the book's own styles", r.publisher_styles, "publisher").icon(Icon::Book));
-        rows.push(Row::note("Used for books opened from now on; Aa in a book changes that book."));
+        let rows = layout_rows(&current_settings(cx).reader);
         self.add_rows(rows, content);
     }
 
@@ -1936,12 +1942,18 @@ impl SettingsScreen {
                     _ => format!("Default text weight {}", WEIGHTS.iter().find(|(l, _)| *l as f32 == v).map_or("", |w| w.1).to_lowercase()),
                 });
             }
-            "hyph" | "publisher" => {
+            "hyph" | "publisher" | "ruby" => {
                 let on = arg == "on";
-                edit_settings(cx, |s| if verb == "hyph" { s.reader.hyphenate = on } else { s.reader.publisher_styles = on });
+                edit_settings(cx, |s| match verb {
+                    "hyph" => s.reader.hyphenate = on,
+                    "ruby" => s.reader.ruby = on,
+                    _ => s.reader.publisher_styles = on,
+                });
                 self.set_status(match (verb, on) {
                     ("hyph", true) => "Hyphenation on",
                     ("hyph", false) => "Hyphenation off",
+                    ("ruby", true) => "Ruby annotations shown",
+                    ("ruby", false) => "Ruby annotations hidden",
                     (_, true) => "The book's own styles are used",
                     _ => "The book's own styles are ignored",
                 });

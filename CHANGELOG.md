@@ -12,6 +12,11 @@ All notable changes to rinky are listed here. The format is based on
   characters instead of after them, and are left out of search and of selected text.
   A reading wider than its characters spaces them apart rather than
   running into its neighbours, and lines with readings get the room they need.
+- *Ruby annotations* in Aa › Layout shows or hides those readings for the open book,
+  and in Settings › Default layout for the books you open from then on. It also
+  shows or hides readings that a plugin adds above the text: compiled-in plugins can
+  now annotate the text of reflowable books, and the book is laid out again when a
+  plugin changes its annotations.
 
 ## [0.7.0] - 2026-11-12
 

@@ -78,6 +78,7 @@ pub fn stored_layout(settings: &ink_store::Settings, w: u32, h: u32) -> LayoutSe
         justify: r.justify,
         hyphenate: r.hyphenate,
         publisher_styles: r.publisher_styles,
+        ruby: r.ruby,
         paragraph_spacing: r.paragraph_spacing,
         paragraph_indent: indent_em(r.paragraph_indent),
         embolden: r.font_weight.min(ink_store::settings::WEIGHT_MAX),
@@ -576,6 +577,8 @@ pub struct ReaderScreen {
     listed_marks: Vec<Bookmark>,
     /// The book's own reading settings (Aa panel), over the global ones.
     book_settings: BookSettings,
+    /// The plugins' text annotator, asked when the book opens ([`ReaderScreen::layout`]).
+    annotator: Option<std::sync::Arc<dyn ink_doc::TextAnnotator>>,
     /// Links of a page (page, links), read when a tap needs them.
     links: Option<(usize, Vec<Link>)>,
     /// Where jumps came from, latest last: the menu's "Go back" returns to the last one,
@@ -731,6 +734,7 @@ impl ReaderScreen {
             marks: Vec::new(),
             listed_marks: Vec::new(),
             book_settings: BookSettings::default(),
+            annotator: None,
             links: None,
             back: Vec::new(),
             back_pill: false,
@@ -1845,12 +1849,37 @@ impl ReaderScreen {
         self.overlay = Some(o);
     }
 
+    /// The layout for this book on a screen of `size`: [`aa::book_layout`] with the
+    /// plugins' annotator when ruby is on. The handle reads the annotator's version now,
+    /// so a plugin that changed its annotations (and bumped the version) gets the book
+    /// laid out again by the next [`ReaderScreen::relayout`]: after a plugin action, when
+    /// a screen above (a settings page) closes, on rotation.
+    fn layout(&self, cx: &AppCtx, size: Size) -> LayoutSettings {
+        let mut l = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
+        if l.ruby {
+            l.annotator = self.annotator.clone().map(ink_doc::AnnotatorHandle::new);
+        }
+        l
+    }
+
+    /// After a plugin action: the plugin may have changed its annotations.
+    fn relayout_after_plugin(&mut self, cx: &mut AppCtx) {
+        if self.annotator.is_some() {
+            if let Err(e) = self.relayout(cx, RefreshClass::Gc16) {
+                log::warn!("reader: layout after a plugin action: {e:#}");
+            }
+        }
+    }
+
     /// Lays the book out again for the current screen size and settings, keeping the
     /// reading position (Aa changes, rotation).
     fn relayout(&mut self, cx: &mut AppCtx, class: RefreshClass) -> anyhow::Result<()> {
-        let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
+        if self.doc.is_none() {
+            return Ok(());
+        }
         let size = cx.screen.size();
-        let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
+        let layout = self.layout(cx, size);
+        let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
         // A fixed-layout book's view options (Aa › View) changed.
         let view = doc.fixed_view().map(|v| aa::fixed_view(v, &self.book_settings)).filter(|v| Some(*v) != doc.fixed_view());
         if &layout != doc.layout() || view.is_some() {
@@ -2004,6 +2033,7 @@ impl ReaderScreen {
                     cx.plugins.trigger(&plugin, &id, doc);
                 }
                 self.close_overlay();
+                self.relayout_after_plugin(cx);
             }
             "sel-cancel" => self.close_overlay(),
             "sel-highlight" => {
@@ -2270,7 +2300,8 @@ impl AppScreen for ReaderScreen {
         if self.book_settings.migrate_margins(&cx.settings.status_bars) && (self.book_settings.margin_top.is_some() || self.book_settings.margin_bottom.is_some()) {
             log::info!("reader: book margins now measured from the status bars: top {:?}, bottom {:?}", self.book_settings.margin_top, self.book_settings.margin_bottom);
         }
-        let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
+        self.annotator = cx.plugins.text_annotator();
+        let layout = self.layout(cx, size);
         // The font faces of the first page are parsed on another core while the book is
         // read (MD5, zip, spine, TOC); the first layout takes them parsed. PDF, CBZ and
         // XPS pages are drawn by MuPDF and use none of them.
