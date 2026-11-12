@@ -2407,3 +2407,43 @@ fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
     let l = h.reader.doc.as_deref().unwrap().layout().clone();
     assert!(!l.ruby && l.annotator.is_none());
 }
+
+/// A plugin that sets its annotations up in `on_book_open` (bumps the version) and
+/// counts the calls.
+struct OpenTimeAnnotator(ink_plugin::PluginManifest, std::sync::Arc<RomeoAnnotator>, std::rc::Rc<std::cell::Cell<u32>>);
+
+impl ink_plugin::Plugin for OpenTimeAnnotator {
+    fn manifest(&self) -> &ink_plugin::PluginManifest {
+        &self.0
+    }
+    fn on_load(&mut self, _reg: &mut ink_plugin::Registrar) -> ink_plugin::Result<()> {
+        Ok(())
+    }
+    fn on_book_open(&mut self, _cx: &mut ink_plugin::HostCtx) -> ink_plugin::Result<()> {
+        self.2.set(self.2.get() + 1);
+        self.1 .0.store(7, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn text_annotator(&self) -> Option<std::sync::Arc<dyn ink_doc::TextAnnotator>> {
+        Some(self.1.clone())
+    }
+}
+
+/// With an annotator, the plugins hear `on_book_open` before the first page and the
+/// book is laid out with the version they leave; the first paint does not send it again.
+#[test]
+fn annotator_version_set_in_on_book_open_is_used_from_the_first_page() {
+    let mut h = Harness::new("annotator-open", "juliet.epub");
+    let a = std::sync::Arc::new(RomeoAnnotator(std::sync::atomic::AtomicU64::new(1)));
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0));
+    h.plugins = PluginHost::new(vec![Box::new(OpenTimeAnnotator(ink_plugin::PluginManifest::new("romeo", "1", &[]), a, opens.clone()))]);
+    let p = providers();
+    h.reader = ReaderScreen::new(h.reader.path.clone());
+    h.reader.on_enter(&mut cx!(h, p)).unwrap();
+    assert_eq!(opens.get(), 1, "told before the first page");
+    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotator.as_ref().map(|x| x.version());
+    assert_eq!(version(&h), Some(7), "laid out with the version set in on_book_open");
+    h.paint();
+    assert_eq!(opens.get(), 1, "the first paint does not send it again");
+    assert_eq!(version(&h), Some(7));
+}

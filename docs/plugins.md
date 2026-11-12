@@ -426,6 +426,11 @@ fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator
   first annotator it gets; only one annotator is active. A plugin that panics there is
   skipped. With *Ruby annotations* off (Aa › Layout for the book, Settings › Default
   layout for new books) no annotator is used.
+- **`on_book_open` comes first:** while an annotator is in use the reader sends
+  `on_book_open` before the book's first page (otherwise it comes after it), then
+  reads `version()` again and lays the book out anew if it moved. So a plugin can learn
+  the book (its language, its own per-book settings) in `on_book_open`, set its
+  annotations up and bump the version there, and the first page already shows them.
 - **The text:** `annotate` gets one paragraph as it is laid out (whitespace collapsed,
   without the text of `<rt>` and `<rp>`) and its language (`lang`/`xml:lang`, else the
   book's). Ranges are byte ranges of that text. The engine drops ranges that are empty,
@@ -507,7 +512,7 @@ without and once with the overlay.
 
 | When | Call |
 | --- | --- |
-| after the first page is on the panel | `cx.plugins.book_open(doc, &path)`, then `cx.plugins.page_change` for that page |
+| after the first page is on the panel (before it, while a plugin annotator is in use; see [Text annotations](#text-annotations-plugintext_annotator)) | `cx.plugins.book_open(doc, &path)`, then `cx.plugins.page_change` for that page |
 | `paint` of a new page, after `doc.set_current_page(page)` and before `render_page` (status texts then land in the same update) | `cx.plugins.page_change(doc, page)` |
 | a selection was made | `cx.plugins.selection(doc, &sel)`; the popup adds `cx.plugins.selection_actions()` |
 | reader menu | add `hooks::entries(cx.plugins, EntryKind::ReaderMenu)` (show `entry.label`) |

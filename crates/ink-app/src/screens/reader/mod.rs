@@ -657,6 +657,9 @@ pub struct ReaderScreen {
     open_trace: Option<crate::perf::OpenTrace>,
     /// `on_book_open` is still to be sent (after the first page is shown).
     plugins_pending: bool,
+    /// `on_book_open` went out before the first page (a plugin annotator is in use):
+    /// the first paint sends only the page change.
+    book_open_sent: bool,
     /// The plugin dialog shown as a card in the selection overlay (`(plugin, request
     /// id)`; the widget is `ids["dict"]`): the dictionary card of a long-press lookup.
     dict_card: Option<(String, u32)>,
@@ -767,6 +770,7 @@ impl ReaderScreen {
             turn_wave: None,
             open_trace: None,
             plugins_pending: false,
+            book_open_sent: false,
             dict_card: None,
             dict_cancel: Vec::new(),
             position_unsaved: None,
@@ -1862,6 +1866,26 @@ impl ReaderScreen {
         l
     }
 
+    /// With a plugin annotator: the plugins hear `on_book_open` before the first page,
+    /// since a plugin may set its annotations up there (and bump their version), and the
+    /// book is laid out again at once when the version moved, so the first page and the
+    /// pagination use the annotations the plugin settled on. Without an annotator the
+    /// plugins hear about the book after its first page, as before.
+    fn book_open_before_first_page(&mut self, cx: &mut AppCtx) -> anyhow::Result<()> {
+        let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
+        cx.plugins.book_open(doc, &self.path);
+        self.book_open_sent = true;
+        let layout = self.layout(cx, cx.screen.size());
+        let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
+        if &layout != doc.layout() {
+            log::info!("reader: the annotator changed in on_book_open; laid out again before the first page");
+            doc.set_current_page(self.page);
+            doc.set_layout(&layout)?;
+            self.page = doc.current_page();
+        }
+        Ok(())
+    }
+
     /// After a plugin action: the plugin may have changed its annotations.
     fn relayout_after_plugin(&mut self, cx: &mut AppCtx) {
         if self.annotator.is_some() {
@@ -2356,6 +2380,11 @@ impl AppScreen for ReaderScreen {
         // Plugins (statistics database, sync) hear about the book after the first page
         // is on the panel (`paint_screen`), so the page does not wait for them.
         self.plugins_pending = true;
+        self.book_open_sent = false;
+        if self.annotator.is_some() {
+            self.book_open_before_first_page(cx)?;
+            trace.step("plugins told before the first page (annotator)");
+        }
         self.open_trace = Some(trace);
         self.rerender = true;
         self.dirty = Some(RefreshClass::Gc16);
@@ -2368,7 +2397,7 @@ impl AppScreen for ReaderScreen {
         BARS_TOGGLE.with(|c| c.set(false));
         // Plugins that never heard of the book (closed before its first paint) are not
         // told it closed.
-        if std::mem::take(&mut self.plugins_pending) {
+        if std::mem::take(&mut self.plugins_pending) && !std::mem::take(&mut self.book_open_sent) {
             return;
         }
         if let Some(doc) = self.doc.as_deref_mut() {
@@ -2838,9 +2867,12 @@ impl ReaderScreen {
             self.finish_open_trace();
             let first = std::mem::take(&mut self.plugins_pending);
             if first {
+                let sent = std::mem::take(&mut self.book_open_sent);
                 if let Some(doc) = self.doc.as_deref_mut() {
                     let t = Instant::now();
-                    cx.plugins.book_open(doc, &self.path);
+                    if !sent {
+                        cx.plugins.book_open(doc, &self.path);
+                    }
                     cx.plugins.page_change(doc, self.page);
                     log::info!("reader: plugins told about the book after the first page ({} ms)", t.elapsed().as_millis());
                 }
