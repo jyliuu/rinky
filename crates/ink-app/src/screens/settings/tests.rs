@@ -26,7 +26,11 @@ struct Run {
 }
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ink-settings-{name}-{}", std::process::id()));
+    // A new folder for every call: reusing one name raced with the background threads of
+    // an earlier run still writing into it (mkdir then failed with "File exists").
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("ink-settings-{name}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
