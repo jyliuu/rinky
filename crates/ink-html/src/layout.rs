@@ -10,10 +10,11 @@
 //! - Ruby: the text of `<rt>` drawn centred above its base at a reduced size (the `rt`
 //!   font size, 50 % by default), and the annotations of the settings' annotator laid
 //!   out the same way ([`Ruby`]). A base is never broken across lines. A ruby wider than
-//!   its base reaches over the text beside it (overhang, a little off centre when that
-//!   keeps the bases' pitch); readings that still do not fit are condensed, one size
-//!   for the paragraph down to 70 %; only then do bases move apart, by one pitch for a
-//!   run of annotated characters ([`place_ruby`]). A paragraph with ruby gets the same
+//!   its base reaches over the text beside it (overhang, as little off centre as keeps
+//!   the bases' pitch) with a little more than a space to the next reading; readings
+//!   that still do not fit are condensed, one size for the paragraph down to 70 %; only
+//!   then do bases move apart, by one pitch for a run of annotated characters (one or
+//!   two characters without a reading inside a run share it) ([`place_ruby`]). A paragraph with ruby gets the same
 //!   extra space above every line. Ruby text is drawn only: it has no DOM position, so
 //!   selection, search and page text never see it.
 //! - Output: [`ChapterLayout`] with slices (the units the paginator places), draw items
@@ -242,8 +243,9 @@ struct Ruby {
     shift: f32,
 }
 
-/// Least space between two ruby texts side by side, in em of the ruby text.
-const RUBY_GAP: f32 = 0.25;
+/// Least space between two ruby texts side by side, in em of the ruby text: a little
+/// more than a space, so two readings side by side never read as one word.
+const RUBY_GAP: f32 = 0.35;
 /// Smallest size ruby text is condensed to (share of its normal size) so it fits over
 /// its bases without moving them apart.
 const RUBY_MIN_SCALE: f32 = 0.7;
@@ -260,8 +262,8 @@ const RUBY_SHIFT: f32 = 0.25;
 /// [`RUBY_GAP`] from the ruby text before it. A run of bases with nothing between them
 /// (one reading per character) keeps one pitch: every base of the run but the first gets
 /// the same pad, the smallest that lets each ruby text sit within [`RUBY_SHIFT`] of its
-/// base's centre without coming too close to the one before (a ruby text sits centred
-/// unless the one before pushes it right). The first base of a run moves only if the
+/// base's centre without coming too close to the one before (the ruby texts sit as
+/// close to their centres as their spacing allows, see `try_place`). The first base of a run moves only if the
 /// ruby text before the run reaches too far. `before[i]` is the raw width of the text
 /// between ruby `i - 1` and ruby `i`, and whether a forced line break lies in it (the
 /// readings start afresh there). The edges of the lines the text is broken into are the
@@ -281,22 +283,60 @@ fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32) -> f32 {
         }
         let run = &mut ruby[i..j];
         // Places the run with pad `u` before every base but the first; Some(reach after
-        // it) when every ruby text fits, the shifts written into the run.
+        // it) when every ruby text fits within RUBY_SHIFT of its base's centre, the
+        // shifts written into the run. The ruby texts are put as close to their centres
+        // as their spacing allows (least squares: pool-adjacent-violators on the
+        // positions less the spacing before them), then pushed right where the ruby
+        // text before the run reaches too far. A base without a reading (an empty ruby
+        // text) only keeps the pitch.
         let try_place = |run: &mut [Ruby], pad0: f32, u: f32| -> Option<f32> {
-            let (mut left, mut reach) = (x + pad0, reach);
+            // (index, ideal left edge, width, gap after) of the ruby texts.
+            let mut items: Vec<(usize, f32, f32, f32)> = Vec::with_capacity(run.len());
+            let mut left = x + pad0;
             for (k, r) in run.iter_mut().enumerate() {
                 if k > 0 {
                     left += u;
                 }
-                let rw = r.ruby_w * scale;
-                let centred = left + (r.base_w - rw) / 2.0;
-                let at = reach.max(centred);
-                if at > centred + RUBY_SHIFT * r.base_w + 0.01 {
-                    return None;
+                r.shift = 0.0;
+                if !r.text.is_empty() {
+                    let rw = r.ruby_w * scale;
+                    items.push((k, left + (r.base_w - rw) / 2.0, rw, RUBY_GAP * r.px * scale));
                 }
-                r.shift = at - centred;
-                reach = at + rw + RUBY_GAP * r.px * scale;
                 left += r.base_w;
+            }
+            // Pool adjacent violators on the targets less the spacing before each text.
+            let mut blocks: Vec<(f32, usize)> = Vec::with_capacity(items.len());
+            let mut spacing = 0.0;
+            let mut offsets = Vec::with_capacity(items.len());
+            for &(_, ideal, rw, gap) in &items {
+                offsets.push(spacing);
+                let mut b = (ideal - spacing, 1usize);
+                while let Some(&(sum, n)) = blocks.last() {
+                    if sum / n as f32 > b.0 / b.1 as f32 {
+                        blocks.pop();
+                        b = (b.0 + sum, b.1 + n);
+                    } else {
+                        break;
+                    }
+                }
+                blocks.push(b);
+                spacing += rw + gap;
+            }
+            let mut reach = reach;
+            let mut k = 0;
+            for (sum, n) in blocks {
+                let q = sum / n as f32;
+                for _ in 0..n {
+                    let (ri, ideal, rw, gap) = items[k];
+                    let at = (q + offsets[k]).max(reach);
+                    let r = &mut run[ri];
+                    if (at - ideal).abs() > RUBY_SHIFT * r.base_w + 0.01 {
+                        return None;
+                    }
+                    r.shift = at - ideal;
+                    reach = at + rw + gap;
+                    k += 1;
+                }
             }
             Some(reach)
         };
@@ -304,7 +344,7 @@ fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32) -> f32 {
         let pad0 = (reach - (x + (first.base_w - first.ruby_w * scale) / 2.0 + RUBY_SHIFT * first.base_w)).max(0.0);
         let mut u = 0.0;
         if run.len() > 1 && try_place(run, pad0, 0.0).is_none() {
-            let mut hi = run.iter().map(|r| r.ruby_w * scale + RUBY_GAP * r.px * scale).fold(0.0, f32::max);
+            let mut hi = run.iter().map(|r| r.ruby_w * scale + RUBY_GAP * r.px * scale).fold(0.0, f32::max) * 2.0;
             let mut lo = 0.0;
             for _ in 0..14 {
                 let mid = (lo + hi) / 2.0;
@@ -316,7 +356,7 @@ fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32) -> f32 {
             }
             u = hi;
         }
-        reach = try_place(run, pad0, u).unwrap_or(f32::NEG_INFINITY);
+        reach = try_place(run, pad0, u).unwrap_or(reach);
         for (k, r) in run.iter_mut().enumerate() {
             r.pad = if k == 0 { pad0 } else { u };
         }
@@ -326,6 +366,30 @@ fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32) -> f32 {
         i = j;
     }
     total
+}
+
+/// One or two ideographs without a reading between two with readings get an empty ruby
+/// each, so they share the even pitch of the run around them ([`place_ruby`]); an empty
+/// ruby text draws nothing and blocks no other.
+fn fill_short_gaps(text: &str, ruby: Vec<Ruby>) -> Vec<Ruby> {
+    let ideograph = |c: char| matches!(c, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{3005}');
+    let mut out: Vec<Ruby> = Vec::with_capacity(ruby.len());
+    for r in ruby {
+        if let Some(prev) = out.last() {
+            let between = &text[prev.end..r.start];
+            let n = between.chars().count();
+            if (1..=2).contains(&n) && between.chars().all(ideograph) {
+                let mut at = prev.end;
+                for c in between.chars() {
+                    let e = at + c.len_utf8();
+                    out.push(Ruby { start: at, end: e, text: String::new(), ..r.clone() });
+                    at = e;
+                }
+            }
+        }
+        out.push(r);
+    }
+    out
 }
 
 /// Annotation text size as a share of the base text's size.
@@ -1644,7 +1708,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         let keep_spaces = ost.white_space.keeps_spaces();
         let mut para = Para::new(text, src, segs);
         if !ruby.is_empty() {
-            let mut ruby = ruby;
+            let mut ruby = fill_short_gaps(text, ruby);
             for r in &mut ruby {
                 r.base_w = self.width(&para, r.start, r.end);
                 r.ruby_w = self.env.fonts.width(r.face, r.px, &r.text);
@@ -2078,7 +2142,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             let ci = p.char_index(pc.start);
             if !p.ruby.is_empty() && self.text_items {
                 if let Some(i) = p.ruby_at(pc.start, pc.end) {
-                    if p.ruby[i].start == pc.start && p.ruby[i].end <= line_end {
+                    if p.ruby[i].start == pc.start && p.ruby[i].end <= line_end && !p.ruby[i].text.is_empty() {
                         ruby_cells.push((i, px_x));
                     }
                 }

@@ -169,7 +169,7 @@ fn neighbouring_wide_rubies_are_condensed_then_keep_a_gap() {
         assert!(r.px >= normal * 0.7 - 0.01 && r.px < normal, "condensed, not below 70 %: {} of {normal}", r.px);
         assert_eq!(r.px, ruby[0].px, "one size for the paragraph");
     }
-    let gap = ruby[0].px * 0.25;
+    let gap = ruby[0].px * 0.35;
     for w in ruby.windows(2) {
         assert!(w[1].x - (w[0].x + w[0].width) >= gap - 0.5, "{:?} and {:?} too close", w[0].text, w[1].text);
     }
@@ -264,7 +264,7 @@ fn per_character_readings_of_mixed_width_keep_one_pitch() {
     println!("character pitch: min {lo:.1} max {hi:.1} mean {mean:.1} sd {sd:.1} px; reading size {} px", ruby[0].px);
     assert_eq!(ruby.len(), 10);
     assert!(bases.iter().all(|b| b.line_top == bases[0].line_top), "one line");
-    let gap = ruby[0].px * 0.25;
+    let gap = ruby[0].px * 0.35;
     for w in ruby.windows(2) {
         assert!(w[1].x - (w[0].x + w[0].width) >= gap - 0.5, "{:?} and {:?} too close", w[0].text, w[1].text);
     }
@@ -303,6 +303,50 @@ fn cjk_annotated(body: &str, texts: Vec<&'static str>) -> HtmlDocument {
     let mut s = settings();
     s.annotator = Some(AnnotatorHandle::new(Arc::new(ByPosition(texts))));
     cjk_doc(body, &s)
+}
+
+/// Pitch from one character's left edge to the next.
+fn pitches(bases: &[TextRun]) -> Vec<f32> {
+    let xs: Vec<f32> = bases.iter().flat_map(|b| {
+        // A run of several characters: its characters at the plain advance.
+        let n = b.text.chars().count();
+        (0..n).map(move |k| b.x + b.width * k as f32 / n as f32)
+    }).collect();
+    xs.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+#[test]
+fn one_or_two_characters_without_a_reading_keep_the_run_pitch() {
+    // Readings too wide to fit even condensed: the bases move apart.
+    let texts = vec!["aaaaaaaaaa", "", "aaaaaaaaaa", "aaaaaaaaaa", "", "", "aaaaaaaaaa", "aaaaaaaaaa"];
+    let d = cjk_annotated("<p>床前明月光疑是地</p>", texts);
+    let (bases, ruby) = page_runs(&d);
+    assert_eq!(ruby.len(), 5, "empty readings draw nothing");
+    let p = pitches(&bases);
+    let (lo, hi) = p.iter().fold((f32::MAX, f32::MIN), |(a, b), &g| (a.min(g), b.max(g)));
+    println!("partly annotated pitch: min {lo:.1} max {hi:.1} px");
+    assert!(lo > 33.0, "the readings needed room: {p:?}");
+    assert!(hi - lo < 0.5, "one pitch with gaps of one and two characters: {p:?}");
+}
+
+#[test]
+fn readings_stay_centred_when_they_fit_and_shift_little_otherwise() {
+    // Narrow readings: every one centred.
+    let d = cjk_annotated("<p>床前明</p>", vec!["a", "bb", "ccc"]);
+    let (bases, ruby) = page_runs(&d);
+    for (r, b) in ruby.iter().zip(&bases) {
+        assert!((mid(r) - mid(b)).abs() < 0.5, "{:?} off centre", r.text);
+    }
+    // A wide reading in the middle moves its neighbours a little; the readings far from
+    // it stay centred.
+    let d = cjk_annotated("<p>床前明月光疑</p>", vec!["a", "a", "ccccccc", "a", "a", "a"]);
+    let (bases, ruby) = page_runs(&d);
+    let (first, last) = (ruby.first().unwrap(), ruby.last().unwrap());
+    assert!((mid(first) - mid(&bases[0])).abs() < 0.5 && (mid(last) - mid(bases.last().unwrap())).abs() < 0.5, "{ruby:?}");
+    let gap = ruby[0].px * 0.35;
+    for w in ruby.windows(2) {
+        assert!(w[1].x - (w[0].x + w[0].width) >= gap - 0.5, "{:?} and {:?} too close", w[0].text, w[1].text);
+    }
 }
 
 #[test]
