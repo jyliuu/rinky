@@ -169,6 +169,9 @@ fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, sav
 /// estimated total.
 const COUNTING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How often the reader looks whether the annotations a page waits for are ready.
+const ANNOTATION_POLL: Duration = Duration::from_millis(100);
+
 /// Longest a percent jump waits for pagination to finish.
 const PERCENT_WAIT: Duration = Duration::from_secs(10);
 
@@ -579,6 +582,10 @@ pub struct ReaderScreen {
     book_settings: BookSettings,
     /// The plugins' text annotators, asked when the book opens ([`ReaderScreen::layout`]).
     annotators: Vec<std::sync::Arc<dyn ink_doc::TextAnnotator>>,
+    /// The annotators' `version()` the page shown was drawn with.
+    annot_versions: Vec<u64>,
+    /// The page shown lacks annotations still being computed: drawn again when ready.
+    annot_wait: bool,
     /// Links of a page (page, links), read when a tap needs them.
     links: Option<(usize, Vec<Link>)>,
     /// Where jumps came from, latest last: the menu's "Go back" returns to the last one,
@@ -738,6 +745,8 @@ impl ReaderScreen {
             listed_marks: Vec::new(),
             book_settings: BookSettings::default(),
             annotators: Vec::new(),
+            annot_versions: Vec::new(),
+            annot_wait: false,
             links: None,
             back: Vec::new(),
             back_pill: false,
@@ -1877,6 +1886,8 @@ impl ReaderScreen {
         let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
         cx.plugins.book_open(doc, &self.path);
         self.book_open_sent = true;
+        // What the plugins set up there is what the first page is drawn with.
+        self.annot_versions = self.annotators.iter().map(|a| a.version()).collect();
         let layout = self.layout(cx, cx.screen.size());
         let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
         if &layout != doc.layout() {
@@ -1888,24 +1899,45 @@ impl ReaderScreen {
         Ok(())
     }
 
-    /// True when an annotator's version is not the one the book is laid out with (a
-    /// plugin changed its annotations). One version read each: cheap enough for every
-    /// frame.
+    /// True when an annotator's layout version is not the one the book is laid out with
+    /// (a plugin changed what it annotates). One read each: cheap enough for every frame.
     fn annotator_moved(&self) -> bool {
         let Some(doc) = self.doc.as_deref() else { return false };
         let laid = &doc.layout().annotators;
-        laid.len() == self.annotators.len() && laid.iter().zip(&self.annotators).any(|(h, a)| h.version() != a.version())
+        laid.len() == self.annotators.len() && laid.iter().zip(&self.annotators).any(|(h, a)| h.layout_version() != a.layout_version())
     }
 
     /// After plugin code ran (an action, a dialog or card answer, a tick, a network
-    /// result, a selection action): lays the book out again when the plugin changed its
-    /// annotations.
+    /// result, a selection action), and before every frame: lays the book out again when
+    /// an annotator's layout version moved; draws the page again (no flash) when only its
+    /// annotations changed (`version()`), or when annotations the page waited for are
+    /// ready.
     fn relayout_after_plugin(&mut self, cx: &mut AppCtx) {
+        if self.annotators.is_empty() {
+            return;
+        }
         if self.annotator_moved() {
-            log::info!("reader: an annotator's version changed; laying the book out again");
+            log::info!("reader: an annotator's layout changed; laying the book out again");
             if let Err(e) = self.relayout(cx, RefreshClass::Gc16) {
                 log::warn!("reader: layout after a plugin call: {e:#}");
             }
+        }
+        if self.overlay.is_some() {
+            // Not under an open menu or card: once it closes.
+            return;
+        }
+        let changed = self.annotators.len() != self.annot_versions.len() || self.annotators.iter().zip(&self.annot_versions).any(|(a, &v)| a.version() != v);
+        let ready = self.annot_wait && !self.doc.as_deref().is_some_and(|d| d.annotations_pending());
+        if changed || ready {
+            if changed {
+                self.annot_versions = self.annotators.iter().map(|a| a.version()).collect();
+                log::info!("reader: annotations changed; drawing the page again");
+            } else {
+                log::info!("reader: annotations of page {} ready; drawing it again", self.page + 1);
+            }
+            self.annot_wait = false;
+            self.rerender = true;
+            self.dirty.get_or_insert(RefreshClass::Gl16);
         }
     }
 
@@ -2339,6 +2371,7 @@ impl AppScreen for ReaderScreen {
             log::info!("reader: book margins now measured from the status bars: top {:?}, bottom {:?}", self.book_settings.margin_top, self.book_settings.margin_bottom);
         }
         self.annotators = cx.plugins.text_annotators();
+        self.annot_versions = self.annotators.iter().map(|a| a.version()).collect();
         let layout = self.layout(cx, size);
         // The font faces of the first page are parsed on another core while the book is
         // read (MD5, zip, spine, TOC); the first layout takes them parsed. PDF, CBZ and
@@ -2525,10 +2558,12 @@ impl AppScreen for ReaderScreen {
         let prefetch = self.prefetch_due().map(|d| d.saturating_duration_since(Instant::now()));
         // The sharp page after a zoom preview.
         let sharp = self.sharp_due().map(|d| d.saturating_duration_since(Instant::now()));
+        // Annotations the page waits for, being computed in the background.
+        let annotations = self.annot_wait.then_some(ANNOTATION_POLL);
         let expiry = self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout());
         // aa: debounce; statusbar: minute tick; position save; selection edge; page count; prefetch; zoom
         let timers = expiry.into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting);
-        timers.chain(prefetch).chain(sharp).min()
+        timers.chain(prefetch).chain(sharp).chain(annotations).min()
     }
 }
 
@@ -2798,6 +2833,7 @@ impl ReaderScreen {
                         preview = asked && doc.render_zoom_preview(self.page, cx.canvas);
                         if !preview {
                             doc.render_page(self.page, cx.canvas)?;
+                            self.annot_wait = doc.annotations_pending();
                         }
                         draw_highlights(doc, self.page, cx.canvas, &self.saved_hl, &self.session_hl);
                     }

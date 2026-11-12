@@ -2383,7 +2383,17 @@ fn zoom_under_the_hit_bar_sharpens_too() {
 }
 
 /// A test annotator: annotates every "Romeo" with "R", at the version the test sets.
-struct RomeoAnnotator(std::sync::atomic::AtomicU64);
+/// The test sets its version (`.0`) and layout version (`.1`); `annotate` takes `.2` ms.
+struct RomeoAnnotator(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64, u64);
+
+impl RomeoAnnotator {
+    fn new(version: u64) -> std::sync::Arc<Self> {
+        Self::slow(version, 0)
+    }
+    fn slow(version: u64, ms: u64) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(RomeoAnnotator(version.into(), 0.into(), ms))
+    }
+}
 
 impl ink_doc::TextAnnotator for RomeoAnnotator {
     fn id(&self) -> &str {
@@ -2392,10 +2402,14 @@ impl ink_doc::TextAnnotator for RomeoAnnotator {
     fn version(&self) -> u64 {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
+    fn layout_version(&self) -> u64 {
+        self.1.load(std::sync::atomic::Ordering::Relaxed)
+    }
     fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
         p.contains("Romeo")
     }
     fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<ink_doc::Annotation> {
+        std::thread::sleep(std::time::Duration::from_millis(self.2));
         p.match_indices("Romeo").map(|(i, w)| ink_doc::Annotation::over(i..i + w.len(), "R")).collect()
     }
 }
@@ -2416,12 +2430,12 @@ impl ink_plugin::Plugin for AnnotatingPlugin {
 }
 
 /// The plugin's annotator is in the layout of a book opened with it; a version bump
-/// lays the book out again after a plugin action; "Annotations" off for this
-/// book (Aa) or as the default takes it out of the layout.
+/// draws the page again, a layout version bump lays the book out again; "Annotations"
+/// off for this book (Aa) or as the default takes it out of the layout.
 #[test]
 fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
     let mut h = Harness::new("annotator", "juliet.epub");
-    let a = std::sync::Arc::new(RomeoAnnotator(std::sync::atomic::AtomicU64::new(1)));
+    let a = RomeoAnnotator::new(1);
     h.plugins = PluginHost::new(vec![Box::new(AnnotatingPlugin(ink_plugin::PluginManifest::new("romeo", "1", &[]), a.clone()))]);
     let p = providers();
     h.reader = ReaderScreen::new(h.reader.path.clone());
@@ -2432,11 +2446,17 @@ fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
     let key = h.reader.doc.as_deref().unwrap().layout().cache_key();
     h.with_cx(|r, cx| r.run_action("plugin:romeo:x", cx)).unwrap();
     assert_eq!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key);
-    // The plugin changed its annotations: the next plugin action lays the book out again.
+    // The plugin changed its annotations: the page is drawn again, the pages stay.
     a.0.store(2, std::sync::atomic::Ordering::Relaxed);
     h.with_cx(|r, cx| r.run_action("plugin:romeo:x", cx)).unwrap();
-    assert_eq!(version(&h), Some(2));
+    h.paint();
+    assert_eq!(h.reader.annot_versions, [2]);
+    assert_eq!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key, "not paginated again");
+    // It changed what it annotates (layout version): the book is laid out again.
+    a.1.store(1, std::sync::atomic::Ordering::Relaxed);
+    h.with_cx(|r, cx| r.run_action("plugin:romeo:x", cx)).unwrap();
     assert_ne!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key);
+    let _ = version;
     // Off for this book: neither ruby nor the annotator.
     h.with_cx(|r, cx| {
         r.aa_action("aa-annotations:off", cx).unwrap();
@@ -2469,6 +2489,7 @@ impl ink_plugin::Plugin for OpenTimeAnnotator {
     fn on_book_open(&mut self, _cx: &mut ink_plugin::HostCtx) -> ink_plugin::Result<()> {
         self.2.set(self.2.get() + 1);
         self.1 .0.store(7, std::sync::atomic::Ordering::Relaxed);
+        self.1 .1.store(7, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     fn text_annotator(&self) -> Option<std::sync::Arc<dyn ink_doc::TextAnnotator>> {
@@ -2481,15 +2502,16 @@ impl ink_plugin::Plugin for OpenTimeAnnotator {
 #[test]
 fn annotator_version_set_in_on_book_open_is_used_from_the_first_page() {
     let mut h = Harness::new("annotator-open", "juliet.epub");
-    let a = std::sync::Arc::new(RomeoAnnotator(std::sync::atomic::AtomicU64::new(1)));
+    let a = RomeoAnnotator::new(1);
     let opens = std::rc::Rc::new(std::cell::Cell::new(0));
     h.plugins = PluginHost::new(vec![Box::new(OpenTimeAnnotator(ink_plugin::PluginManifest::new("romeo", "1", &[]), a, opens.clone()))]);
     let p = providers();
     h.reader = ReaderScreen::new(h.reader.path.clone());
     h.reader.on_enter(&mut cx!(h, p)).unwrap();
     assert_eq!(opens.get(), 1, "told before the first page");
-    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotators.first().map(|x| x.version());
-    assert_eq!(version(&h), Some(7), "laid out with the version set in on_book_open");
+    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotators.first().map(|x| x.layout_version());
+    assert_eq!(version(&h), Some(7), "laid out with the layout set in on_book_open");
+    assert_eq!(h.reader.annot_versions, [7], "and drawn with its annotations");
     h.paint();
     assert_eq!(opens.get(), 1, "the first paint does not send it again");
     assert_eq!(version(&h), Some(7));
@@ -2517,23 +2539,77 @@ impl ink_plugin::Plugin for AnswerAnnotator {
 }
 
 /// A version bump inside `on_ui_result` (a card or dialog answer, a settings menu)
-/// lays the book out again by the next frame; an answer that changes nothing does not.
+/// draws the page again by the next frame, without paginating; an answer that changes
+/// nothing draws nothing.
 #[test]
-fn annotator_version_bumped_in_a_ui_answer_repaginates() {
+fn annotator_version_bumped_in_a_ui_answer_redraws_the_page() {
     let mut h = Harness::new("annotator-answer", "juliet.epub");
-    let a = std::sync::Arc::new(RomeoAnnotator(std::sync::atomic::AtomicU64::new(1)));
+    let a = RomeoAnnotator::new(1);
     h.plugins = PluginHost::new(vec![Box::new(AnswerAnnotator(ink_plugin::PluginManifest::new("romeo", "1", &[]), a))]);
     let p = providers();
     h.reader = ReaderScreen::new(h.reader.path.clone());
     h.reader.on_enter(&mut cx!(h, p)).unwrap();
     h.paint();
-    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotators.first().map(|x| x.version());
+    let page = {
+        let d = h.reader.doc.as_deref_mut().unwrap();
+        d.search("Romeo", 50).unwrap().into_iter().filter_map(|hit| hit.page.or_else(|| d.page_of(&hit.position).ok())).find(|&pg| pg > 5).unwrap()
+    };
+    h.reader.go_to_page(page);
+    h.paint();
+    // The page's annotations arrive (computed in the background) and it is drawn again.
+    for _ in 0..200 {
+        if !h.reader.annot_wait {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.paint();
+    }
     let key = h.reader.doc.as_deref().unwrap().layout().cache_key();
+    let n = h.probe.updates().len();
     h.with_cx(|r, cx| cx.plugins.answer("romeo", 1, "ok", r.document()));
     h.paint();
-    assert_eq!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key, "nothing changed");
+    assert_eq!(h.probe.updates().len(), n, "nothing changed, nothing drawn");
+    let t = std::time::Instant::now();
     h.with_cx(|r, cx| cx.plugins.answer("romeo", 1, "more", r.document()));
     h.paint();
-    assert_eq!(version(&h), Some(2), "laid out again with the new version");
-    assert_ne!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key);
+    println!("version bump to the page drawn again: {:?}", t.elapsed());
+    assert_eq!(h.reader.annot_versions, [2]);
+    let ups = &h.probe.updates()[n..];
+    assert!(!ups.is_empty() && ups.iter().all(|u| !u.class.flashes()), "drawn again without a flash: {:?}", ups.iter().map(|u| u.class).collect::<Vec<_>>());
+    assert_eq!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key, "not paginated again");
+}
+
+/// Annotations that are not ready when a page is drawn: the page shows without them,
+/// and once they arrive it is drawn again, once, without a flash.
+#[test]
+fn a_page_drawn_before_its_annotations_are_ready_is_drawn_again_once() {
+    let mut h = Harness::new("annotator-slow", "juliet.epub");
+    let a = RomeoAnnotator::slow(1, 150);
+    h.plugins = PluginHost::new(vec![Box::new(AnnotatingPlugin(ink_plugin::PluginManifest::new("romeo", "1", &[]), a))]);
+    let p = providers();
+    h.reader = ReaderScreen::new(h.reader.path.clone());
+    h.reader.on_enter(&mut cx!(h, p)).unwrap();
+    h.paint();
+    // A page with Romeo in it, not drawn yet.
+    let page = {
+        let d = h.reader.doc.as_deref_mut().unwrap();
+        d.search("Romeo", 50).unwrap().into_iter().filter_map(|hit| hit.page.or_else(|| d.page_of(&hit.position).ok())).find(|&pg| pg > 5).unwrap()
+    };
+    h.reader.go_to_page(page);
+    h.paint();
+    assert!(h.reader.annot_wait, "drawn before the annotations were ready");
+    assert!(h.reader.timeout().is_some_and(|t| t <= std::time::Duration::from_millis(100)), "the reader looks again soon");
+    let n = h.probe.updates().len();
+    let t = std::time::Instant::now();
+    while h.reader.doc.as_deref().unwrap().annotations_pending() && t.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    println!("annotations of the page ready after {:?}", t.elapsed());
+    h.paint();
+    let ups: Vec<_> = h.probe.updates()[n..].iter().map(|u| u.class).collect();
+    assert!(!ups.is_empty() && ups.iter().all(|c| !c.flashes()), "{ups:?}");
+    assert!(!h.reader.annot_wait);
+    let m = h.probe.updates().len();
+    h.paint();
+    assert_eq!(h.probe.updates().len(), m, "drawn again once");
 }
