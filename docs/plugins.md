@@ -396,6 +396,60 @@ impl Plugin for Hello {
   on the host against a fake configfs tree and a shell-script dropbear; both undo what
   they started in `on_exit`.
 
+### Text annotations (`Plugin::text_annotator`)
+
+A Rust plugin can draw short texts above the text of reflowable books, laid out like
+`<ruby>` readings: the annotated range is the base, the annotation is drawn centred
+above it at half its size. Return an `Arc<dyn TextAnnotator>` from
+`Plugin::text_annotator` (default `None`):
+
+```rust
+use ink_plugin::{Annotation, TextAnnotator};
+
+struct Shout;
+
+impl TextAnnotator for Shout {
+    fn id(&self) -> &str { "shout" }
+    fn version(&self) -> u64 { 1 }
+    fn wants(&self, paragraph: &str) -> bool { paragraph.contains('!') }
+    fn annotate(&self, paragraph: &str, _lang: Option<&str>) -> Vec<Annotation> {
+        paragraph.match_indices('!').map(|(i, _)| Annotation::new(i..i + 1, "loud")).collect()
+    }
+}
+
+// in impl Plugin for MyPlugin:
+fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator.clone()) }
+```
+
+- **Who is asked:** when a book opens the reader asks the enabled plugins in load order
+  (compiled-in plugins in the order of `crates/ink-app/src/plugins.rs`) and uses the
+  first annotator it gets; only one annotator is active. A plugin that panics there is
+  skipped. With *Ruby annotations* off (Aa › Layout for the book, Settings › Default
+  layout for new books) no annotator is used.
+- **The text:** `annotate` gets one paragraph as it is laid out (whitespace collapsed,
+  without the text of `<rt>` and `<rp>`) and its language (`lang`/`xml:lang`, else the
+  book's). Ranges are byte ranges of that text. The engine drops ranges that are empty,
+  out of bounds, inside a character, overlapping an earlier annotation of the list or a
+  `<ruby>` base of the book (the book's ruby wins), and annotations with no text. It
+  never breaks a line inside an annotated range.
+- **Drawing only:** annotations are not document text. Positions, selection, search,
+  highlights and the text plugins read stay as without them.
+- **Threads and cost:** the pagination threads call the annotator for every paragraph
+  of the book, so it is `Send + Sync`, must not block, and `wants` should be a cheap
+  test that lets most paragraphs through untouched.
+- **Changing the output:** the output must be a function of (paragraph, language,
+  version). To change it (a new mode, another word list), bump `version()`: the reader
+  reads it whenever it rebuilds its layout (after a plugin action, when a settings page
+  closes, when a book opens), and a new version paginates the book again, like a font
+  size change. Returning a different annotator later has no effect until the book is
+  opened again.
+- **Failures:** a panic in `wants` or `annotate` is caught; the engine logs it once and
+  lays the rest of the book out without annotations.
+- **Rust only:** a Lua plugin cannot offer an annotator. The annotator runs on the
+  pagination threads, for every paragraph of the book, while the Lua state belongs to
+  the UI thread and every Lua call goes through the host's sandbox and time limits;
+  calling it per paragraph would make pagination many times slower.
+
 ### Example: Wikipedia (`plugins/wikipedia`)
 
 A network plugin with a selection action. Worth reading for these patterns:

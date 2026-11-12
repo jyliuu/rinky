@@ -177,6 +177,14 @@ get wrong:
   (`Document::fixed_view`, `set_fixed_view`); `FixedOptions::view` and `with_view`
   are the one mapping between the two. The reader keeps a book's choices in its
   sidecar and puts them over the defaults (`screens/reader/aa.rs`, `fixed_view`).
+- **Ruby and annotations are drawing only.** `ink-html` draws the text of `<rt>`
+  above its base, and the annotations of `LayoutSettings::annotator` (an
+  `ink_doc::TextAnnotator`, from a plugin) the same way (`layout.rs`, `Ruby`). Both are
+  draw items without a DOM node: positions, selection, search and `read_around` never
+  see them. `LayoutSettings::ruby` off leaves both out. The annotator's id and the
+  version read when its `AnnotatorHandle` was made are part of the settings' equality
+  and cache key, so a version bump repaginates; it runs on the pagination threads, and
+  a panic in it is caught and turns it off for the rest of that layout.
 
 ## Device layer
 
@@ -352,6 +360,10 @@ calls `on_action` when the user picks one. Rust plugins are crates in `plugins/<
 with one line in `crates/ink-app/src/plugins.rs`. Lua plugins are folders with
 `plugin.toml` and `main.lua` in the install folder's `plugins/`, loaded by
 `ink_plugin::lua::LuaHost` through the same registry and host services.
+
+A Rust plugin can also offer a `TextAnnotator` (`Plugin::text_annotator`): the reader
+asks the plugin host for one when a book opens (the first enabled plugin that offers
+one) and passes it to the engine in `LayoutSettings::annotator`.
 
 Plugins never block the reader: UI requests are queued and answered in `on_ui_result`,
 network requests run in worker threads and report through `on_http`. A plugin that
