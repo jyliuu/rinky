@@ -186,7 +186,8 @@ get wrong:
   `annot.rs` computes the annotations on a background thread, keeps them in a small
   cache and places them when a page is drawn, without moving the text.
   `Document::annotations_pending` tells the reader to draw the page again when they
-  arrive. Neither is a draw item with a DOM node: positions, selection, search and
+  arrive; the thread wakes the app loop for that through `ink_device::wake` (a pipe
+  the input backends poll), so nothing polls while it waits. Neither is a draw item with a DOM node: positions, selection, search and
   `read_around` never see them. `LayoutSettings::ruby` off leaves both out. Each
   annotator's id and the `layout_version` read when its `AnnotatorHandle` was made are
   part of the settings' equality and cache key (a bump repaginates); `version` only

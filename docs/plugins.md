@@ -441,8 +441,10 @@ calls `annotate` and never depends on what it returns. A paragraph `wants` says 
 gets the room of an annotation on every line, in each of `positions()`, and
 `ideograph_spacing` em between its ideographs. `annotate` runs when pages are drawn,
 on a background thread at the lowest priority: the page shown first, then the two
-pages before and after it. A page drawn before its annotations are ready shows
-without them and is drawn again, without a flash, when they arrive. Results are kept
+pages before and after it (across a chapter break when the next or previous chapter is
+laid out already). A page drawn before its annotations are ready shows without them;
+the thread wakes the app loop when they are done and the page is drawn again, without
+a flash. No timer runs while it waits. Results are kept
 in a small cache (a few hundred paragraphs).
 
 - **Who is asked:** when a book opens the reader asks the enabled plugins in load order
