@@ -10,8 +10,9 @@ All notable changes to rinky are listed here. The format is based on
 - Ruby: readings that a book marks up with `<ruby>` (furigana in Japanese books,
   readings in Chinese textbooks) are drawn in small type centred above their
   characters instead of after them, and are left out of search and of selected text.
-  A reading wider than its characters spaces them apart rather than
-  running into its neighbours, and lines with readings get the room they need.
+  A reading wider than its characters reaches over the characters beside it where
+  their readings leave room, so the text stays evenly spaced; characters move apart
+  only where two readings would touch. Lines with readings get the room they need.
 - *Ruby annotations* in Aa › Layout shows or hides those readings for the open book,
   and in Settings › Default layout for the books you open from then on. It also
   shows or hides readings that a plugin adds above the text: compiled-in plugins can

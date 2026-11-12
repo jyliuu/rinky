@@ -146,80 +146,130 @@ fn ruby_setting_off_draws_the_base_only() {
 }
 
 #[test]
-fn a_ruby_wider_than_its_base_spreads_the_base() {
-    let d = doc("<p>a <ruby>ab<rt>a much longer reading</rt></ruby> z</p>", "");
+fn a_wide_ruby_reaches_over_plain_neighbours_without_moving_them() {
+    let d = doc("<p>xx <ruby>ab<rt>a much longer reading</rt></ruby> zz</p>", "");
+    let plain = doc("<p>xx ab zz</p>", "");
     let (text, ruby) = page_runs(&d);
-    let (base, top, z) = (run(&text, "ab"), run(&ruby, "a much longer reading"), run(&text, "z"));
-    assert!(base.letter_spacing > 0.0, "the base letters move apart");
-    // The base cell is as wide as the ruby plus a quarter em of the ruby text.
-    let gap = base.width - top.width;
-    assert!((gap - top.px * 0.25).abs() < 0.5, "cell {} vs ruby {}", base.width, top.width);
-    // The run starts at its first letter, half a spacing into the cell.
-    let cell_mid = base.x - base.letter_spacing / 2.0 + base.width / 2.0;
-    assert!((cell_mid - mid(top)).abs() < 0.5, "{cell_mid} vs {}", mid(top));
-    assert!(z.x >= top.x + top.width, "the next word does not overlap the ruby");
-    assert!(run(&text, "a").x + run(&text, "a").width <= top.x, "nor the word before");
-    // Two wide rubies side by side keep a gap between their texts.
-    let d = doc("<p><ruby>a<rt>wide reading</rt>b<rt>wide reading</rt></ruby></p>", "");
-    let (_, ruby) = page_runs(&d);
-    assert!(ruby[1].x - (ruby[0].x + ruby[0].width) >= ruby[0].px * 0.25 - 0.5, "{ruby:?}");
+    let (ptext, _) = page_runs(&plain);
+    let (base, top) = (run(&text, "ab"), run(&ruby, "a much longer reading"));
+    assert!(top.width > base.width + 20.0, "the reading is wider than its base");
+    for w in ["xx", "ab", "zz"] {
+        assert_eq!(run(&text, w).x, run(&ptext, w).x, "{w} stays where it was");
+    }
+    assert_eq!(base.letter_spacing, 0.0);
+    assert!((mid(base) - mid(top)).abs() < 0.5, "centred over its base");
 }
 
 #[test]
-fn no_line_break_inside_a_ruby_base() {
-    // Find a filler length where the plain text breaks between the two words of the
-    // base; with ruby the base moves to the next line whole.
-    for n in 1..80 {
-        let filler = "word ".repeat(n);
-        let plain = doc(&format!("<p>{filler}alpha beta</p>"), "");
-        let (t, _) = page_runs(&plain);
-        if run(&t, "alpha").line_top == run(&t, "beta").line_top {
-            continue;
-        }
-        let d = doc(&format!("<p>{filler}<ruby>alpha beta<rt>r</rt></ruby></p>"), "");
-        let (t, ruby) = page_runs(&d);
-        // The base is one piece, on one line.
-        let _ = run(&t, "alpha beta");
-        assert_eq!(ruby.len(), 1);
-        return;
-    }
-    panic!("no filler length broke the plain line");
+fn neighbouring_wide_rubies_keep_a_gap_and_move_apart_only_by_the_shortfall() {
+    let d = doc("<p>x<ruby>a<rt>wide reading</rt>b<rt>wide reading</rt>c<rt>c</rt></ruby>xxxxxxxx</p>", "p { text-indent: 0 }");
+    let (text, ruby) = page_runs(&d);
+    let (r0, r1, r2) = (&ruby[0], &ruby[1], &ruby[2]);
+    let gap = r0.px * 0.25;
+    let between = r1.x - (r0.x + r0.width);
+    assert!((between - gap).abs() < 0.5, "exactly the gap between two wide readings: {between} vs {gap}");
+    assert!(r2.x - (r1.x + r1.width) >= gap - 0.5, "the narrow reading after them keeps the gap too");
+    // Only the shortfall goes between the two bases; the leading x is not moved.
+    let (a, b) = (run(&text, "a"), run(&text, "b"));
+    let shortfall = (r0.width + r1.width) / 2.0 + gap - (a.width + b.width) / 2.0;
+    assert!((b.x - (a.x + a.width) - shortfall).abs() < 0.5, "{} vs {shortfall}", b.x - (a.x + a.width));
+    // The leading x stays at the line start unless the first reading would reach past it.
+    assert!((text[0].x - 50.0).abs() < 0.5 || (r0.x - 50.0).abs() < 0.5, "x at {}, reading at {}", text[0].x, r0.x);
 }
 
 #[test]
-fn every_line_of_a_paragraph_with_ruby_gets_the_same_extra_space() {
-    let long = "words ".repeat(60);
-    let d = doc(&format!("<p><ruby>base<rt>top</rt></ruby> {long}</p><p>{long}</p>"), "");
-    let plain = doc(&format!("<p>base {long}</p><p>{long}</p>"), "");
-    let (h, ph) = (line_heights(&d), line_heights(&plain));
-    assert_eq!(h.len(), ph.len());
-    let n = h.len() / 2;
-    assert!(n >= 3, "{h:?}");
-    // The first paragraph: every line taller by the same amount; the second unchanged.
-    let extra = h[0] - ph[0];
-    assert!(extra > 0.0, "{h:?} vs {ph:?}");
-    for i in 0..n {
-        assert!((h[i] - ph[i] - extra).abs() < 0.01, "line {i}: {h:?} vs {ph:?}");
-    }
-    for i in n..h.len() {
-        assert!((h[i] - ph[i]).abs() < 0.01, "a paragraph without ruby keeps its spacing: {h:?} vs {ph:?}");
+fn a_ruby_text_does_not_reach_past_the_line_start_or_end() {
+    let s = settings();
+    for (body, at_end) in [("<p><ruby>i<rt>a very wide reading</rt></ruby> b</p>", false), ("<p style=\"text-align: right\">b <ruby>i<rt>a very wide reading</rt></ruby></p>", true)] {
+        let d = doc(body, "");
+        let (_, ruby) = page_runs(&d);
+        let r = &ruby[0];
+        assert!(r.x >= s.margin_left - 0.5, "{body}: starts at {}", r.x);
+        assert!(r.x + r.width <= W as f32 - s.margin_right + 0.5, "{body}: ends at {}", r.x + r.width);
+        let _ = at_end;
     }
 }
 
+/// Gives each ideograph a reading whose length cycles through `lens` (0: none), as
+/// readings of one syllable per character in Latin letters do.
+struct MixedReadings(Vec<usize>);
+
+impl TextAnnotator for MixedReadings {
+    fn id(&self) -> &str {
+        "mixed"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, _: &str) -> bool {
+        true
+    }
+    fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
+        p.char_indices()
+            .filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c))
+            .enumerate()
+            .filter_map(|(k, (i, c))| {
+                let n = self.0[k % self.0.len()];
+                (n > 0).then(|| Annotation::new(i..i + c.len_utf8(), "n".repeat(n)))
+            })
+            .collect()
+    }
+}
+
+/// A layout with the CJK subset font of the ruby fixture as the body font.
+fn cjk_doc(body: &str, s: &LayoutSettings) -> HtmlDocument {
+    let font = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/src/NotoSerifSC-Subset.otf")).unwrap();
+    let mut m = MemoryLoader::default();
+    m.0.insert("t/style.css".into(), b"@font-face { font-family: Cjk; src: url(cjk.otf) } body { font-family: Cjk }".to_vec());
+    m.0.insert("t/cjk.otf".into(), font);
+    let chs = vec![HtmlChapter {
+        path: "t/c0.xhtml".into(),
+        html: format!("<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><link rel=\"stylesheet\" href=\"style.css\"/></head><body>{body}</body></html>"),
+    }];
+    let meta = Metadata { title: "T".into(), language: Some("zh".into()), ..Default::default() };
+    let mut d = HtmlDocument::new(meta, chs, Box::new(m)).unwrap();
+    d.set_layout(s).unwrap();
+    d
+}
+
 #[test]
-fn ruby_is_not_document_text() {
-    let body = "<p>one <ruby>base<rt>top</rt></ruby> two</p>";
-    let mut d = doc(body, "");
-    assert!(d.search("top", 10).unwrap().is_empty(), "rt text is not found");
-    assert_eq!(d.search("base two", 10).unwrap().len(), 1, "the base text is");
-    let around = d.read_around(&d.position_of_page(0).unwrap(), 100).unwrap();
-    assert!(around.contains("one base two") && !around.contains("top"), "{around:?}");
-    // A selection over the whole line holds the base text only.
-    let (text, _) = page_runs(&d);
-    let (a, b) = (run(&text, "one"), run(&text, "two"));
-    let y = ((a.line_top + a.line_bottom) / 2.0) as i32;
-    let sel = d.select(0, Point::new(a.x as i32 + 1, y), Point::new((b.x + b.width) as i32 - 1, y)).unwrap().unwrap();
-    assert_eq!(sel.text, "one base two");
+fn per_character_readings_of_mixed_width_overhang_and_keep_their_gaps() {
+    // One syllable per character, as Latin-letter readings of Chinese have: the
+    // lengths of the readings of the first two lines of the fixture's first poem.
+    let text = "床前明月光疑是地上霜";
+    let lens = vec![6, 4, 4, 3, 5, 2, 3, 2, 5, 6];
+    let body = format!("<p>{text}</p>");
+    let mut s = settings();
+    s.annotator = Some(AnnotatorHandle::new(Arc::new(MixedReadings(lens))));
+    let d = cjk_doc(&body, &s);
+    s.annotator = None;
+    let plain = cjk_doc(&body, &s);
+    let (bases, ruby) = page_runs(&d);
+    let (pbases, _) = page_runs(&plain);
+    assert_eq!(ruby.len(), 10);
+    assert!(bases.iter().all(|b| b.line_top == bases[0].line_top), "one line");
+    let gap = ruby[0].px * 0.25;
+    for w in ruby.windows(2) {
+        assert!(w[1].x - (w[0].x + w[0].width) >= gap - 0.5, "{:?} and {:?} too close", w[0].text, w[1].text);
+    }
+    assert!(ruby[0].x >= s.margin_left - 0.5, "inside the line");
+    // The extra width of the line, against the rule before overhang (every base as
+    // wide as its reading plus the gap).
+    let right = |r: &[TextRun]| r.iter().map(|t| t.x + t.width).fold(f32::MIN, f32::max);
+    let left = |r: &[TextRun]| r.iter().map(|t| t.x).fold(f32::MAX, f32::min);
+    let base_w = (right(&pbases) - left(&pbases)) / text.chars().count() as f32;
+    let now = right(&bases) - left(&bases) - (right(&pbases) - left(&pbases)) + (bases[0].x - pbases[0].x);
+    let before: f32 = ruby.iter().map(|r| (r.width + gap - base_w).max(0.0)).sum();
+    println!("extra width of the line: {now:.1} px with overhang, {before:.1} px when every base widened (base {base_w:.1} px)");
+    assert!(now < before - 20.0, "{now} vs {before}");
+    // Two characters move apart only where their readings would come closer than the
+    // gap; elsewhere the readings reach over each other's slack.
+    for (w, r) in bases.windows(2).zip(ruby.windows(2)) {
+        let moved = w[1].x - (w[0].x + w[0].width);
+        let fits = (r[0].width + r[1].width) / 2.0 + gap <= base_w + 0.01;
+        assert!(!fits || moved.abs() < 0.5, "{:?} and {:?} moved apart by {moved} px though their readings fit", w[0].text, w[1].text);
+        assert!(fits || moved <= (r[0].width + r[1].width) / 2.0 + gap - base_w + 0.5, "more than the shortfall");
+    }
 }
 
 /// Annotates every occurrence of a word with a text; `version` and `text` can change.

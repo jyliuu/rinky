@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 /// Bump when layout results change (invalidates cached page maps). The golden test
 /// `page_maps_match_engine_version` fails when page breaks change without a bump.
-pub const ENGINE_VERSION: u32 = 3;
+pub const ENGINE_VERSION: u32 = 4;
 
 /// One page of a chapter.
 #[derive(Clone, Copy, Debug, PartialEq)]
