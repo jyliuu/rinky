@@ -143,8 +143,7 @@ fn count_diff(a: &Canvas, b: &Canvas) -> Option<usize> {
 fn write_diff(expected: &Canvas, actual: &Canvas, path: &Path) {
     let (w, h) = (actual.width, actual.height);
     let mut rgb = Vec::with_capacity(w * h * 3);
-    for i in 0..w * h {
-        let a = actual.pixels[i];
+    for (i, &a) in actual.pixels.iter().enumerate().take(w * h) {
         let e = expected.pixels.get(i).copied().unwrap_or(255);
         if a != e || (expected.width, expected.height) != (w, h) {
             rgb.extend_from_slice(&[255, 0, 0]);
