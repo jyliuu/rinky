@@ -1616,6 +1616,34 @@ mod lookup_stub {
     }
 
     /// Both stubs sharing one log.
+    /// A lookup provider for one language only; logs `picky:<selection>` when used.
+    pub struct Picky(pub PluginManifest, pub Log, pub &'static str);
+
+    impl Plugin for Picky {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        fn on_load(&mut self, reg: &mut Registrar) -> ink_plugin::Result<()> {
+            reg.selection_action("lookup", "Look up");
+            Ok(())
+        }
+        fn on_action(&mut self, cx: &mut HostCtx, _id: &str) -> ink_plugin::Result<()> {
+            let t = cx.document()?.selection().map(|s| s.text.clone()).unwrap_or_default();
+            self.1.lock().unwrap().push(format!("picky:{t}"));
+            Ok(())
+        }
+        fn claims_lookup(&self, _text: &str, lang: Option<&str>) -> bool {
+            lang.is_some_and(|l| l.starts_with(self.2))
+        }
+    }
+
+    /// [`new`] with a [`Picky`] provider for `lang` before the dictionary.
+    pub fn with_picky(lang: &'static str) -> (Vec<Box<dyn Plugin>>, Log) {
+        let (mut plugins, log) = new();
+        plugins.insert(0, Box::new(Picky(PluginManifest::new("picky", "1", &[Permission::Document]), log.clone(), lang)));
+        (plugins, log)
+    }
+
     pub fn new() -> (Vec<Box<dyn Plugin>>, Log) {
         let log = Log::default();
         let dict = Dict(PluginManifest::new("dictionary", "1", &[Permission::Document, Permission::Ui]), log.clone(), 0, String::new());
@@ -1660,6 +1688,25 @@ impl Harness {
             self.frame(30, from.x + dx * k / 4, from.y, TouchPhase::Move);
         }
         self.frame(30, from.x + dx, from.y, TouchPhase::Up);
+    }
+}
+
+/// A lookup provider for another language placed before the dictionary does not take
+/// the long press; one for the book's language does.
+#[test]
+fn long_press_lookup_goes_to_the_first_provider_that_claims_it() {
+    for (lang, want) in [("de", "action:lookup:"), ("en", "picky:")] {
+        let mut h = Harness::new(&format!("lookup-chain-{lang}"), "juliet.epub");
+        let (plugins, log) = lookup_stub::with_picky(lang);
+        h.plugins = PluginHost::new(plugins);
+        h.reader.go_to_page(30);
+        h.paint();
+        let p = h.text_point();
+        h.frame(400, p.x, p.y, TouchPhase::Down);
+        h.tick(700);
+        h.frame(100, p.x, p.y, TouchPhase::Up);
+        let word = h.reader.sel.as_ref().map(|s| s.text.clone()).unwrap_or_default();
+        assert_eq!(log.lock().unwrap().as_slice(), [format!("{want}{word}")], "provider for {lang}");
     }
 }
 

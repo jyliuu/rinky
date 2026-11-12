@@ -182,7 +182,19 @@ pub trait Plugin {
     fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> {
         None
     }
+    /// Whether this plugin takes the dictionary lookup of `text` (`lang`: the book's
+    /// language, if known). Every plugin that registers the selection action
+    /// [`LOOKUP_ACTION`] is a lookup provider; the reader's long press gives the lookup to
+    /// the first provider, in plugin order, that claims it. The default claims every
+    /// lookup, so a plugin for one language returns false for the others and the general
+    /// dictionary after it gets them. Lua plugins always claim (the default).
+    fn claims_lookup(&self, _text: &str, _lang: Option<&str>) -> bool {
+        true
+    }
 }
+
+/// The selection action id of a dictionary lookup ([`Plugin::claims_lookup`]).
+pub const LOOKUP_ACTION: &str = "lookup";
 
 /// Lifecycle events the manager broadcasts.
 #[derive(Clone, Debug, PartialEq)]
@@ -423,6 +435,26 @@ impl PluginManager {
             .collect()
     }
 
+    /// The plugin that takes the dictionary lookup of `text`: the first enabled plugin,
+    /// in registration (plugin) order, that registered the selection action
+    /// [`LOOKUP_ACTION`] and claims it ([`Plugin::claims_lookup`]). A plugin that panics
+    /// when asked does not claim.
+    pub fn lookup_provider(&self, text: &str, lang: Option<&str>) -> Option<String> {
+        let mut seen: Vec<&str> = Vec::new();
+        for a in self.registry.selection_actions.iter().filter(|a| a.id == LOOKUP_ACTION) {
+            if seen.contains(&a.plugin.as_str()) {
+                continue;
+            }
+            seen.push(&a.plugin);
+            let Some(slot) = self.enabled(&a.plugin) else { continue };
+            let claims = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.plugin.claims_lookup(text, lang))).unwrap_or(false);
+            if claims {
+                return Some(a.plugin.clone());
+            }
+        }
+        None
+    }
+
     /// Routes a triggered registry entry to its plugin.
     pub fn action(&mut self, plugin: &str, id: &str, cx: &mut HostCtx) -> Result<()> {
         self.call(plugin, &format!("on_action({id})"), |p| p.on_action(cx, id))
@@ -604,6 +636,44 @@ mod tests {
         let mut off = PluginManager::new();
         off.load_disabled(vec![annotating("off", false)]);
         assert!(off.text_annotators().is_empty(), "nor one the user turned off");
+    }
+
+    /// A lookup provider for one language (`None`: every lookup).
+    struct Lookup(PluginManifest, Option<&'static str>, bool);
+
+    impl Plugin for Lookup {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        fn on_load(&mut self, reg: &mut Registrar) -> Result<()> {
+            reg.selection_action(LOOKUP_ACTION, "Look up");
+            Ok(())
+        }
+        fn claims_lookup(&self, _text: &str, lang: Option<&str>) -> bool {
+            assert!(!self.2, "test plugin panics on purpose");
+            self.1.is_none_or(|l| Some(l) == lang)
+        }
+    }
+
+    fn lookup(name: &str, lang: Option<&'static str>, panics: bool) -> Box<dyn Plugin> {
+        Box::new(Lookup(PluginManifest::new(name, "1", &[]), lang, panics))
+    }
+
+    #[test]
+    fn the_first_lookup_provider_that_claims_a_lookup_takes_it() {
+        let mut mgr = PluginManager::new();
+        assert_eq!(mgr.lookup_provider("x", None), None);
+        // One provider: it takes every lookup, as before.
+        mgr.load(vec![lookup("dictionary", None, false)]);
+        assert_eq!(mgr.lookup_provider("word", Some("en")).as_deref(), Some("dictionary"));
+        // A provider for one language placed before it takes only its language.
+        let mut mgr = PluginManager::new();
+        mgr.load(vec![lookup("broken", None, true), lookup("german", Some("de"), false), counter("plain", false), lookup("dictionary", None, false)]);
+        assert_eq!(mgr.lookup_provider("Wort", Some("de")).as_deref(), Some("german"));
+        assert_eq!(mgr.lookup_provider("word", Some("en")).as_deref(), Some("dictionary"));
+        assert_eq!(mgr.lookup_provider("word", None).as_deref(), Some("dictionary"), "a panicking provider does not claim");
+        mgr.disable("german", "test");
+        assert_eq!(mgr.lookup_provider("Wort", Some("de")).as_deref(), Some("dictionary"));
     }
 
     #[test]

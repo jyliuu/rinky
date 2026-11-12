@@ -137,6 +137,15 @@ Gesture names (`ink_plugin::registry::GESTURES`): `two_finger_tap`, `double_tap`
 Holds (`long_press`, `corner_hold:*`, a tile's `on_hold`) fire after the app's one hold
 time, `ink_ui::LONG_PRESS` (400 ms), like every other hold in the app; plugins get the
 gesture, never raw touches, so they have no hold timer of their own.
+
+**Dictionary lookup.** A selection action with the id `lookup`
+(`ink_plugin::LOOKUP_ACTION`) makes the plugin a lookup provider. A long press (with the
+gesture set to the dictionary) gives the selected word to the first provider, in plugin
+order, that claims it: Rust plugins answer `Plugin::claims_lookup(text, lang)` (`lang`:
+the book's language; default true), Lua plugins always claim. A provider for one
+language placed before the general dictionary therefore takes only its language, and
+the dictionary still gets every other word. With one provider nothing changes.
+
 Status-widget text changes with `ink.ui.status(id, text)` (Rust:
 `cx.ui()?.status(id, text)`); an empty text hides it.
 
@@ -489,8 +498,8 @@ A network plugin with a selection action. Worth reading for these patterns:
   not replace an open one (only viewer text replaces in place). So the plugin shows a
   toast while loading (the next modal replaces it) and sends the card when the answer
   arrives; a swipe on a paged card closes it and the plugin answers with the next page.
-- **Selection action id**: not `lookup` (the reader's long-press dictionary looks for
-  that id).
+- **Selection action id**: not `lookup` (that id makes a plugin a dictionary lookup
+  provider, see [Registries](#registries)).
 - Tests use a fake `NetHost` that records `Request`s and feed `on_http` by hand; no thread
   and no network. The card text is checked against `CardDialog::parse` in
   `crates/ink-app/src/plugin_card.rs`.

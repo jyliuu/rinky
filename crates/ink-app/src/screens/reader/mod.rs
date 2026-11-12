@@ -1437,7 +1437,9 @@ impl ReaderScreen {
                 // the page closes both).
                 let mut card = None;
                 if one_word && cx.settings.gestures.action("long_press") == "dictionary" {
-                    match cx.plugins.selection_actions().iter().find(|a| a.id == "lookup").map(|a| (a.plugin.clone(), a.id.clone())) {
+                    // The first lookup provider (in plugin order) that claims the word.
+                    let lang = doc.metadata().language.clone();
+                    match cx.plugins.lookup_provider(&sel.text, lang.as_deref()).map(|p| (p, ink_plugin::LOOKUP_ACTION.to_string())) {
                         Some((plugin, id)) => {
                             log::info!("reader: long press looks up {:?} with {plugin}", sel.text);
                             cx.plugins.trigger(&plugin, &id, Some(doc));

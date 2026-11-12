@@ -614,6 +614,11 @@ impl PluginHost {
             .collect()
     }
 
+    /// The plugin that takes the dictionary lookup of `text` ([`PluginManager::lookup_provider`]).
+    pub fn lookup_provider(&self, text: &str, lang: Option<&str>) -> Option<String> {
+        self.manager.lookup_provider(text, lang)
+    }
+
     // -- Registries ------------------------------------------------------------------------
 
     /// Reader menu entries, sorted by order.
