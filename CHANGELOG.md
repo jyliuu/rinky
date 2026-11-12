@@ -27,6 +27,9 @@ All notable changes to rinky are listed here. The format is based on
   gets it.
 
 ### Fixed
+- The card that opens on selected text no longer has a wide empty band between the
+  quoted text and its buttons: it is as tall as what it shows, and grows only when
+  More opens the list of other actions.
 - Chinese, Japanese and Korean text in menus, cards, messages and title bars shows
   in the Kindle's own sans fonts instead of as empty boxes.
 
