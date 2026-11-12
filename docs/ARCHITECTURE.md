@@ -178,7 +178,7 @@ get wrong:
   are the one mapping between the two. The reader keeps a book's choices in its
   sidecar and puts them over the defaults (`screens/reader/aa.rs`, `fixed_view`).
 - **Ruby and annotations are drawing only.** `ink-html` draws the text of `<rt>`
-  above its base, and the annotations of `LayoutSettings::annotators` (each an
+  above its base (below with `ruby-position: under`), and the annotations of `LayoutSettings::annotators` (each an
   `ink_doc::TextAnnotator`, from a plugin) the same way (`layout.rs`, `Ruby`). Both are
   draw items without a DOM node: positions, selection, search and `read_around` never
   see them. `LayoutSettings::ruby` off leaves both out. Each annotator's id and the

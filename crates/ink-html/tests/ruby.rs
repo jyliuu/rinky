@@ -682,3 +682,69 @@ fn one_panicking_annotator_leaves_the_others_running() {
     let (_, ruby) = page_runs(&d);
     assert!(ruby.iter().any(|r| r.text == "T"), "the second annotator goes on after the first panicked");
 }
+
+/// Annotates every occurrence of `word` over and/or under it.
+struct Tiers {
+    word: &'static str,
+    over: Option<&'static str>,
+    under: Option<&'static str>,
+}
+
+impl TextAnnotator for Tiers {
+    fn id(&self) -> &str {
+        "tiers"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, p: &str, _: Option<&str>) -> bool {
+        p.contains(self.word)
+    }
+    fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
+        let mut v = Vec::new();
+        for (i, w) in p.match_indices(self.word) {
+            v.extend(self.over.map(|t| Annotation::over(i..i + w.len(), t)));
+            v.extend(self.under.map(|t| Annotation::under(i..i + w.len(), t)));
+        }
+        v
+    }
+}
+
+#[test]
+fn annotations_under_the_text_are_drawn_below_it_and_coexist_with_those_over_it() {
+    let d = annotated("<p>one base two</p>", Arc::new(Tiers { word: "base", over: Some("above"), under: Some("below") }));
+    let (text, ruby) = page_runs(&d);
+    let base = run(&text, "base");
+    let (over, under) = (run(&ruby, "above"), run(&ruby, "below"));
+    assert!(over.baseline < base.baseline - base.px * 0.6, "over above the base");
+    assert!(under.baseline > base.baseline + under.px * 0.5, "under below the base: {} vs {}", under.baseline, base.baseline);
+    assert!((mid(over) - mid(base)).abs() < 0.5 && (mid(under) - mid(base)).abs() < 0.5, "both centred");
+    assert!(under.baseline < base.line_bottom, "inside the line box");
+    // The line gets room below as well as above; a line with readings over only does not
+    // grow below.
+    let only_over = annotated("<p>one base two</p>", Arc::new(Tiers { word: "base", over: Some("above"), under: None }));
+    let (t2, _) = page_runs(&only_over);
+    let b2 = run(&t2, "base");
+    assert!(base.line_bottom - base.baseline > b2.line_bottom - b2.baseline + 1.0);
+    assert!(((base.baseline - base.line_top) - (b2.baseline - b2.line_top)).abs() < 0.01);
+    // The text is the same as without them.
+    let mut d = d;
+    let around = d.read_around(&d.position_of_page(0).unwrap(), 100).unwrap();
+    assert_eq!(around.trim(), "one base two");
+}
+
+#[test]
+fn book_ruby_with_ruby_position_under_is_drawn_below() {
+    let d = doc("<p>one <ruby>base<rt>below</rt></ruby> two</p>", "ruby { ruby-position: under }");
+    let (text, ruby) = page_runs(&d);
+    let (base, r) = (run(&text, "base"), run(&ruby, "below"));
+    assert!(r.baseline > base.baseline, "under the base");
+    // An annotation over the same base still shows: the book's ruby takes only its tier.
+    let mut s = settings();
+    s.annotators = vec![AnnotatorHandle::new(Arc::new(Tiers { word: "base", over: Some("above"), under: Some("lost") }))];
+    let d = doc_with(&["<p>one <ruby>base<rt>below</rt></ruby> two</p>"], "ruby { ruby-position: under }", &s);
+    let (_, ruby) = page_runs(&d);
+    let mut got: Vec<&str> = ruby.iter().map(|r| r.text.as_str()).collect();
+    got.sort();
+    assert_eq!(got, ["above", "below"], "the annotation under the base gives way to the book's");
+}

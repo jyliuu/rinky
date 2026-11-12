@@ -338,6 +338,8 @@ pub struct ComputedStyle {
     pub color: u8,
     /// Language from `lang` / `xml:lang` (inherited), lowercase.
     pub lang: Option<Arc<str>>,
+    /// `ruby-position: under` (inherited): ruby text is drawn below its base.
+    pub ruby_under: bool,
 }
 
 impl ComputedStyle {
@@ -1006,6 +1008,7 @@ impl Cascade {
                 }
             }
             "visibility" => s.hidden = matches!(kw.as_deref(), Some("hidden" | "collapse")),
+            "ruby-position" | "-epub-ruby-position" | "-webkit-ruby-position" => s.ruby_under = matches!(kw.as_deref(), Some("under" | "after")),
             "color" => set(&mut s.color, parse_color(v)),
             _ => {}
         }

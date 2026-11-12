@@ -35,10 +35,13 @@ enum Variant {
     NoPublisher,
     /// Annotations of [`CodepointAnnotator`].
     Annotated,
+    /// The code points drawn under the text ([`CodepointAnnotator`] with `under`).
+    AnnotatedUnder,
 }
 
-/// A test annotator: every CJK ideograph gets its code point in hex.
-struct CodepointAnnotator;
+/// A test annotator: every CJK ideograph gets its code point in hex, over the text or
+/// (`.0`) under it.
+struct CodepointAnnotator(bool);
 
 impl ink_doc::TextAnnotator for CodepointAnnotator {
     fn id(&self) -> &str {
@@ -51,7 +54,14 @@ impl ink_doc::TextAnnotator for CodepointAnnotator {
         p.chars().any(is_ideograph)
     }
     fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<ink_doc::Annotation> {
-        p.char_indices().filter(|&(_, c)| is_ideograph(c)).map(|(i, c)| ink_doc::Annotation::over(i..i + c.len_utf8(), format!("{:x}", c as u32))).collect()
+        p.char_indices().filter(|&(_, c)| is_ideograph(c)).map(|(i, c)| {
+            let (range, text) = (i..i + c.len_utf8(), format!("{:x}", c as u32));
+            if self.0 {
+                ink_doc::Annotation::under(range, text)
+            } else {
+                ink_doc::Annotation::over(range, text)
+            }
+        }).collect()
     }
 }
 
@@ -78,6 +88,7 @@ const CASES: &[(&str, &str, &[usize], Variant)] = &[
     ("malformed", "crates/ink-html/tests/fixtures/malformed.epub", &[0, 1, 2], Variant::Default),
     ("ruby", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::Default),
     ("ruby-annotated", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::Annotated),
+    ("ruby-under", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::AnnotatedUnder),
 ];
 
 fn settings(v: Variant) -> LayoutSettings {
@@ -90,7 +101,8 @@ fn settings(v: Variant) -> LayoutSettings {
             s.publisher_styles = false;
         }
         Variant::NoPublisher => s.publisher_styles = false,
-        Variant::Annotated => s.annotators = vec![ink_doc::AnnotatorHandle::new(std::sync::Arc::new(CodepointAnnotator))],
+        Variant::Annotated => s.annotators = vec![ink_doc::AnnotatorHandle::new(std::sync::Arc::new(CodepointAnnotator(false)))],
+        Variant::AnnotatedUnder => s.annotators = vec![ink_doc::AnnotatorHandle::new(std::sync::Arc::new(CodepointAnnotator(true)))],
     }
     s
 }

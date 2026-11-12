@@ -398,9 +398,11 @@ impl Plugin for Hello {
 
 ### Text annotations (`Plugin::text_annotator`)
 
-A Rust plugin can draw short texts above the text of reflowable books, laid out like
-`<ruby>` readings: the annotated range is the base, the annotation is drawn centred
-above it at half its size. Return an `Arc<dyn TextAnnotator>` from
+A Rust plugin can draw short texts above or below the text of reflowable books, laid
+out like `<ruby>`: the annotated range is the base, the annotation is drawn centred
+above it (`Annotation::over`, readings) or below it (`Annotation::under`, glosses) at
+half its size. The two tiers are laid out separately with the same rules (overhang,
+condensing, even pitch, no line break inside a base); one range can have both. Return an `Arc<dyn TextAnnotator>` from
 `Plugin::text_annotator` (default `None`):
 
 ```rust
@@ -444,7 +446,8 @@ fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator
   wins), and annotations with no text. It
   never breaks a line inside an annotated range.
 - **Line rhythm:** every paragraph for which `wants` returns true gets the room of an
-  annotation above all its lines, even when `annotate` then returns nothing for it, so
+  annotation above all its lines (room below comes only with annotations under the
+  text), even when `annotate` then returns nothing for it, so
   a page of text the annotator reads keeps one line pitch whether or not a paragraph
   has annotations. `wants` is therefore also the switch for that room: return false for
   paragraphs the annotator never annotates (another script, say). Book `<ruby>` keeps
