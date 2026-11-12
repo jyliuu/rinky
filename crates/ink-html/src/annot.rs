@@ -307,11 +307,11 @@ impl Layer {
         let mut lists: Vec<(usize, usize, Arc<Vec<Annotation>>)> = Vec::new();
         let mut jobs = Vec::new();
         for &p in &paras {
-            for ai in 0..s.annotators.len().min(64) {
+            for (ai, h) in s.annotators.iter().enumerate().take(64) {
                 if lay.annotated[p].wanted & (1 << ai) == 0 || state.failed(ai) {
                     continue;
                 }
-                let version = s.annotators[ai].annotator().version();
+                let version = h.annotator().version();
                 let got = self.get(key(p, ai), version);
                 match got {
                     Some((list, true)) => lists.push((p, ai, list)),
@@ -335,8 +335,8 @@ impl Layer {
         }
         if !sync {
             for &p in around {
-                for ai in 0..s.annotators.len().min(64) {
-                    let version = s.annotators[ai].annotator().version();
+                for (ai, h) in s.annotators.iter().enumerate().take(64) {
+                    let version = h.annotator().version();
                     if lay.annotated[p].wanted & (1 << ai) != 0 && !state.failed(ai) && !self.fresh(key(p, ai), version) && !paras.contains(&p) {
                         jobs.push(job(p, ai));
                     }
@@ -363,8 +363,8 @@ impl Layer {
         let mut jobs = Vec::new();
         for p in paragraphs_on(lay, span) {
             let para = &lay.annotated[p];
-            for ai in 0..s.annotators.len().min(64) {
-                let a = s.annotators[ai].annotator();
+            for (ai, h) in s.annotators.iter().enumerate().take(64) {
+                let a = h.annotator();
                 let key = (self.generation, chapter as u32, p as u32, ai as u8);
                 if para.wanted & (1 << ai) != 0 && !state.failed(ai) && !self.fresh(key, a.version()) {
                     jobs.push(Job { key, text: para.text.clone(), lang: para.lang.clone(), version: a.version(), annotator: a.clone(), state: state.clone() });
