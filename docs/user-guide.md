@@ -423,6 +423,19 @@ rinky lists the closest matches.
 *Settings > Plugins > Wikipedia* sets the language (default `en`) and extra languages
 to swipe between on the card.
 
+### Translate
+
+Select a word or passage and tap *Translate* on the card (under *More* if it does not
+fit). You need Wi-Fi; the text is sent to Google Translate, as KOReader does. A card
+shows the translation and, for a single word, its meanings by part of speech; *Full
+view* shows the whole text with other translations and definitions. Selections longer
+than 1500 characters are cut there.
+
+*Settings > Plugins > Translate* sets the language to translate into (default English)
+and from (default *Auto-detect*; *Book language* uses the language the book declares).
+Google may refuse requests for a while when a network sends many; the card then says
+so.
+
 ### USB network and SSH
 
 These two plugins let you reach a Kindle from a computer; they are made for the Kindle.

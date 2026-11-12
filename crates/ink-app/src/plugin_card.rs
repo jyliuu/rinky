@@ -367,4 +367,35 @@ mod unit {
         assert!(c.lines.len() <= MAX_LINES && c.lines.len() >= 5, "{} lines", c.lines.len());
         assert!(r.h < 1680 && r.y > 0, "{r:?}");
     }
+
+    /// The Translate plugin's cards are cards of this host: the direction as the
+    /// subtitle, the Google footer, close in the corner and Full view as the button; a
+    /// long translation is cut to the card's 8 lines.
+    #[test]
+    fn translate_cards_parse_and_fit() {
+        use ink_device::Canvas;
+        use ink_text::Fonts;
+        use ink_ui::Theme;
+        let b = |l: &str, a: &str| (l.to_string(), a.to_string());
+        let buttons = vec![b("Close", "close"), b("Full view", "full")];
+        let word = translate::api::Translation {
+            text: "House".into(),
+            source_lang: Some("de".into()),
+            dictionary: vec![("noun".into(), vec!["house".into(), "home".into()])],
+            ..Default::default()
+        };
+        let (title, body) = translate::card("Haus", &word, "auto", "en");
+        let c = CardDialog::parse(&title, &body, &buttons).expect("a card");
+        assert_eq!((c.title.as_str(), c.subtitle.as_deref(), c.footer.as_deref()), ("Haus", Some("German to English"), Some("Google Translate")));
+        assert_eq!(c.body, "House\nnoun: house, home");
+        assert_eq!((c.close.as_deref(), c.buttons.len()), (Some("close"), 1));
+        let long = translate::api::Translation { text: "He walked home slowly through the rain, thinking of nothing at all. ".repeat(8), source_lang: Some("de".into()), ..Default::default() };
+        let (title, body) = translate::card(&"Er ging langsam nach Hause. ".repeat(8), &long, "auto", "en");
+        let mut c = CardDialog::parse(&title, &body, &buttons).unwrap();
+        let (theme, mut canvas, mut fonts) = (Theme::day(), Canvas::new(1264, 1680), Fonts::load());
+        let r = c.frame(&mut PaintCx::new(&mut canvas, &mut fonts, &theme), Size { w: 1264, h: 1680 });
+        assert_eq!(c.lines.len(), MAX_LINES, "{:?}", c.lines);
+        assert!(c.lines[MAX_LINES - 1].text.ends_with('…'));
+        assert!(r.h < 1680 && r.y > 0, "{r:?}");
+    }
 }

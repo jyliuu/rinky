@@ -4,6 +4,14 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Translate: select a word or passage and tap *Translate* to see it translated by
+  Google Translate (with Wi-Fi), with a word's meanings and other translations in the
+  full view. The languages to translate from and into are under Settings › Plugins ›
+  Translate.
+
 ## [0.6.1] - 2026-11-09
 
 ### Changed
