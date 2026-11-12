@@ -16,7 +16,7 @@ pub mod annotate;
 pub mod position;
 pub mod timing;
 
-pub use annotate::{Annotation, AnnotatorHandle, TextAnnotator};
+pub use annotate::{Annotation, AnnotationPosition, AnnotatorHandle, TextAnnotator};
 pub use position::{FlowAnchor, Location, PagePosition, Position, Quad, Step, TextOffset, XPointer};
 
 use ink_device::{Canvas, Point, Rect};
@@ -163,11 +163,12 @@ pub struct LayoutSettings {
     pub embolden: u8,
     /// Font family override (`None` = embedded Noto Serif).
     pub font_family: Option<String>,
-    /// Annotations drawn above the text like ruby (`None` = none). Part of the cache key
-    /// as `id@version`. Ignored while [`LayoutSettings::ruby`] is off.
-    pub annotator: Option<AnnotatorHandle>,
+    /// Annotators whose annotations are drawn above or below the text like ruby, in
+    /// order (an earlier one wins where two overlap; empty = none). Part of the cache key
+    /// as `id@version` each. Ignored while [`LayoutSettings::ruby`] is off.
+    pub annotators: Vec<AnnotatorHandle>,
     /// Draw ruby: the text of the book's `<rt>` elements above their base text, and the
-    /// annotations of [`LayoutSettings::annotator`]. Off: the base text only, with the
+    /// annotations of [`LayoutSettings::annotators`]. Off: the base text only, with the
     /// `<rt>` text left out. On by default.
     pub ruby: bool,
 }
@@ -192,7 +193,7 @@ impl LayoutSettings {
             paragraph_indent: None,
             embolden: 0,
             font_family: None,
-            annotator: None,
+            annotators: Vec::new(),
             ruby: true,
         }
     }
@@ -213,8 +214,9 @@ impl LayoutSettings {
         }
         if !self.ruby {
             extra += "-r0";
-        } else if let Some(a) = &self.annotator {
-            extra += &format!("-a{}", a.key());
+        } else if !self.annotators.is_empty() {
+            extra += "-a";
+            extra += &self.annotators.iter().map(AnnotatorHandle::key).collect::<Vec<_>>().join(",");
         }
         format!(
             "{}x{}-m{}_{}_{}_{}-f{}-l{}-j{}-h{}-p{}-{}{extra}",

@@ -600,13 +600,18 @@ impl PluginHost {
         self.book = None;
     }
 
-    /// The text annotator the reader lays books out with: the first enabled plugin's
-    /// that offers one ([`PluginManager::text_annotator`]), or `None`. Asked when a book
-    /// opens.
-    pub fn text_annotator(&self) -> Option<std::sync::Arc<dyn ink_plugin::TextAnnotator>> {
-        let (plugin, a) = self.manager.text_annotator()?;
-        log::info!("plugins: text annotator {} from {plugin} (version {})", a.id(), a.version());
-        Some(a)
+    /// The text annotators the reader lays books out with: those of every enabled plugin
+    /// that offers one, in plugin order ([`PluginManager::text_annotators`]). Asked when
+    /// a book opens.
+    pub fn text_annotators(&self) -> Vec<std::sync::Arc<dyn ink_plugin::TextAnnotator>> {
+        self.manager
+            .text_annotators()
+            .into_iter()
+            .map(|(plugin, a)| {
+                log::info!("plugins: text annotator {} from {plugin} (version {})", a.id(), a.version());
+                a
+            })
+            .collect()
     }
 
     // -- Registries ------------------------------------------------------------------------

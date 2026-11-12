@@ -2345,11 +2345,11 @@ impl ink_doc::TextAnnotator for RomeoAnnotator {
     fn version(&self) -> u64 {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
-    fn wants(&self, p: &str) -> bool {
+    fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
         p.contains("Romeo")
     }
     fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<ink_doc::Annotation> {
-        p.match_indices("Romeo").map(|(i, w)| ink_doc::Annotation::new(i..i + w.len(), "R")).collect()
+        p.match_indices("Romeo").map(|(i, w)| ink_doc::Annotation::over(i..i + w.len(), "R")).collect()
     }
 }
 
@@ -2379,7 +2379,7 @@ fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
     let p = providers();
     h.reader = ReaderScreen::new(h.reader.path.clone());
     h.reader.on_enter(&mut cx!(h, p)).unwrap();
-    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotator.as_ref().map(|x| x.version());
+    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotators.first().map(|x| x.version());
     assert_eq!(version(&h), Some(1), "asked when the book opens");
     // Nothing changed: an action keeps the layout.
     let key = h.reader.doc.as_deref().unwrap().layout().cache_key();
@@ -2396,7 +2396,7 @@ fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
         r.relayout(cx, RefreshClass::Gc16).unwrap();
     });
     let l = h.reader.doc.as_deref().unwrap().layout().clone();
-    assert!(!l.ruby && l.annotator.is_none());
+    assert!(!l.ruby && l.annotators.is_empty());
     assert_eq!(h.reader.book_settings.ruby, Some(false));
     // Off as the default: a book without its own choice opens without them.
     h.settings.reader.ruby = false;
@@ -2405,7 +2405,7 @@ fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
     let _ = std::fs::remove_file(ink_store::sidecar::sidecar_path(&h.reader.path));
     h.reader.on_enter(&mut cx!(h, p)).unwrap();
     let l = h.reader.doc.as_deref().unwrap().layout().clone();
-    assert!(!l.ruby && l.annotator.is_none());
+    assert!(!l.ruby && l.annotators.is_empty());
 }
 
 /// A plugin that sets its annotations up in `on_book_open` (bumps the version) and
@@ -2441,7 +2441,7 @@ fn annotator_version_set_in_on_book_open_is_used_from_the_first_page() {
     h.reader = ReaderScreen::new(h.reader.path.clone());
     h.reader.on_enter(&mut cx!(h, p)).unwrap();
     assert_eq!(opens.get(), 1, "told before the first page");
-    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotator.as_ref().map(|x| x.version());
+    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotators.first().map(|x| x.version());
     assert_eq!(version(&h), Some(7), "laid out with the version set in on_book_open");
     h.paint();
     assert_eq!(opens.get(), 1, "the first paint does not send it again");
@@ -2480,7 +2480,7 @@ fn annotator_version_bumped_in_a_ui_answer_repaginates() {
     h.reader = ReaderScreen::new(h.reader.path.clone());
     h.reader.on_enter(&mut cx!(h, p)).unwrap();
     h.paint();
-    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotator.as_ref().map(|x| x.version());
+    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotators.first().map(|x| x.version());
     let key = h.reader.doc.as_deref().unwrap().layout().cache_key();
     h.with_cx(|r, cx| cx.plugins.answer("romeo", 1, "ok", r.document()));
     h.paint();

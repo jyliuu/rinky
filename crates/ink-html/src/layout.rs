@@ -8,7 +8,7 @@
 //!   breaking at UAX #14 opportunities, hyphenation by language, soft hyphens,
 //!   justification, sub/superscript, inline images.
 //! - Ruby: the text of `<rt>` drawn centred above its base at a reduced size (the `rt`
-//!   font size, 50 % by default), and the annotations of the settings' annotator laid
+//!   font size, 50 % by default), and the annotations of the settings' annotators laid
 //!   out the same way ([`Ruby`]). A base is never broken across lines. A ruby wider than
 //!   its base reaches over the text beside it (overhang, as little off centre as keeps
 //!   the bases' pitch) with a little more than a space to the next reading; readings
@@ -183,7 +183,7 @@ pub struct Params {
     pub content_w: f32,
     /// Settings.
     pub settings: LayoutSettings,
-    /// Whether the settings' annotator failed (shared by the clones of these params).
+    /// Which of the settings' annotators failed (shared by the clones of these params).
     pub(crate) annotator_state: AnnotatorState,
 }
 
@@ -192,21 +192,22 @@ impl Params {
     pub fn new(s: &LayoutSettings) -> Self {
         let content_w = (s.width as f32 - s.margin_left - s.margin_right).max(50.0);
         let content_h = (s.height as f32 - s.margin_top - s.margin_bottom).max(50.0);
-        Params { content_h, left: s.margin_left, content_w, settings: s.clone(), annotator_state: AnnotatorState::default() }
+        Params { content_h, left: s.margin_left, content_w, settings: s.clone(), annotator_state: AnnotatorState::new(s.annotators.len()) }
     }
 
-    /// True once the annotator of these settings panicked: the layouts made with these
-    /// params from then on have no annotations.
+    /// True once an annotator of these settings panicked: the layouts made with these
+    /// params from then on have none of its annotations.
     pub fn annotator_failed(&self) -> bool {
-        self.annotator_state.failed()
+        self.annotator_state.any()
     }
 }
 
-/// Whether the annotator of one layout still runs. Every clone of one [`Params`] (the
-/// foreground and the pagination threads) shares it; after a panic in the annotator it
-/// is off for the rest of the book. Always equal: it is state, not a setting.
+/// Which annotators of one layout still run. Every clone of one [`Params`] (the
+/// foreground and the pagination threads) shares it; after a panic in an annotator that
+/// one is off for the rest of the book, the others go on. Always equal: it is state, not
+/// a setting.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct AnnotatorState(Arc<AtomicBool>);
+pub(crate) struct AnnotatorState(Arc<[AtomicBool]>);
 
 impl PartialEq for AnnotatorState {
     fn eq(&self, _: &Self) -> bool {
@@ -215,18 +216,26 @@ impl PartialEq for AnnotatorState {
 }
 
 impl AnnotatorState {
-    fn failed(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+    fn new(n: usize) -> Self {
+        AnnotatorState((0..n).map(|_| AtomicBool::new(false)).collect())
     }
 
-    /// Turns the annotator off; true the first time (the caller logs it once).
-    fn fail(&self) -> bool {
-        !self.0.swap(true, Ordering::Relaxed)
+    fn failed(&self, i: usize) -> bool {
+        self.0.get(i).is_none_or(|f| f.load(Ordering::Relaxed))
+    }
+
+    fn any(&self) -> bool {
+        self.0.iter().any(|f| f.load(Ordering::Relaxed))
+    }
+
+    /// Turns annotator `i` off; true the first time (the caller logs it once).
+    fn fail(&self, i: usize) -> bool {
+        self.0.get(i).is_some_and(|f| !f.swap(true, Ordering::Relaxed))
     }
 }
 
 /// Text drawn above a base: the text of an `<rt>` element, or an annotation of the
-/// settings' annotator.
+/// settings' annotators.
 #[derive(Clone, Debug)]
 struct Ruby {
     /// Byte range of the base in the paragraph (or chunk) text.
@@ -1462,54 +1471,64 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    /// The annotations of the settings' annotator for the paragraph `text` (with the
-    /// sources `src` of its chars), as ruby. Ranges that are empty, out of the text,
-    /// inside a char, overlapping an earlier annotation or a ruby of the book (`book`,
-    /// sorted) are dropped. A panic in the annotator turns it off for the rest of the
-    /// book (logged once). Also returns whether the annotator wanted the paragraph.
+    /// The annotations of the settings' annotators for the paragraph `text` (with the
+    /// sources `src` of its chars), as ruby. Each annotator is asked in order; ranges
+    /// that are empty, out of the text, inside a char, overlapping an earlier annotation
+    /// (of this annotator or an earlier one) or a ruby of the book (`book`, sorted) are
+    /// dropped. A panic in an annotator turns that one off for the rest of the book
+    /// (logged once). Also returns whether any annotator wanted the paragraph.
     fn annotations(&mut self, owner: NodeId, text: &str, src: &SrcRuns, segs: &[Seg], book: &[Ruby]) -> (Vec<Ruby>, bool) {
         let s = &self.p.settings;
-        let Some(handle) = s.annotator.as_ref().filter(|_| s.ruby) else { return (Vec::new(), false) };
-        if self.p.annotator_state.failed() {
+        if !s.ruby || s.annotators.is_empty() {
             return (Vec::new(), false);
         }
-        let a = handle.annotator();
         let lang = self.lang_of(owner);
-        let mut wanted = false;
-        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wanted = a.wants(text);
-            if wanted {
-                a.annotate(text, lang.as_deref())
-            } else {
-                Vec::new()
-            }
-        }));
-        let list = match called {
-            Ok(list) => list,
-            Err(e) => {
-                if self.p.annotator_state.fail() {
-                    let what = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
-                    log::error!("ink-html: annotator {} panicked ({what}); the rest of the book is laid out without annotations", handle.key());
-                }
-                return (Vec::new(), false);
-            }
-        };
-        if list.is_empty() {
-            return (Vec::new(), wanted);
-        }
+        let mut any_wanted = false;
         // Taken ranges by start (the book's ruby, then each accepted annotation).
         let mut taken: std::collections::BTreeMap<usize, usize> = book.iter().map(|r| (r.start, r.end)).collect();
         let mut keep: Vec<(usize, usize, String)> = Vec::new();
-        for an in list {
-            let (st, en) = (an.range.start, an.range.end);
-            if st >= en || en > text.len() || !text.is_char_boundary(st) || !text.is_char_boundary(en) || an.text.trim().is_empty() {
+        for (ai, handle) in s.annotators.iter().enumerate() {
+            if self.p.annotator_state.failed(ai) {
                 continue;
             }
-            if taken.range(..en).next_back().is_some_and(|(_, &e)| e > st) {
-                continue;
+            let a = handle.annotator();
+            let mut wanted = false;
+            let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                wanted = a.wants(text, lang.as_deref());
+                if wanted {
+                    a.annotate(text, lang.as_deref())
+                } else {
+                    Vec::new()
+                }
+            }));
+            let list = match called {
+                Ok(list) => list,
+                Err(e) => {
+                    if self.p.annotator_state.fail(ai) {
+                        let what = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
+                        log::error!("ink-html: annotator {} panicked ({what}); the rest of the book is laid out without its annotations", handle.key());
+                    }
+                    continue;
+                }
+            };
+            any_wanted |= wanted;
+            for an in list {
+                let (st, en) = (an.range.start, an.range.end);
+                if an.position != ink_doc::AnnotationPosition::Over {
+                    continue;
+                }
+                if st >= en || en > text.len() || !text.is_char_boundary(st) || !text.is_char_boundary(en) || an.text.trim().is_empty() {
+                    continue;
+                }
+                if taken.range(..en).next_back().is_some_and(|(_, &e)| e > st) {
+                    continue;
+                }
+                taken.insert(st, en);
+                keep.push((st, en, an.text.trim().to_string()));
             }
-            taken.insert(st, en);
-            keep.push((st, en, an.text.trim().to_string()));
+        }
+        if keep.is_empty() {
+            return (Vec::new(), any_wanted);
         }
         keep.sort_by_key(|k| k.0);
         // The segment at each start (one pass over the chars).
@@ -1532,7 +1551,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 break;
             }
         }
-        (out, wanted)
+        (out, any_wanted)
     }
 
     /// Baseline shift of an inline element relative to its parent.
@@ -1637,7 +1656,7 @@ impl<'a, 'e> Flow<'a, 'e> {
         // collected.
         ruby.retain(|r| r.end <= text.len());
         let mut reserve = false;
-        if self.p.settings.annotator.is_some() {
+        if !self.p.settings.annotators.is_empty() {
             let (more, wanted) = self.annotations(owner, &text, &src, &segs, &ruby);
             reserve = wanted;
             if !more.is_empty() {

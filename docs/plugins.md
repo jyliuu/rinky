@@ -411,9 +411,9 @@ struct Shout;
 impl TextAnnotator for Shout {
     fn id(&self) -> &str { "shout" }
     fn version(&self) -> u64 { 1 }
-    fn wants(&self, paragraph: &str) -> bool { paragraph.contains('!') }
+    fn wants(&self, paragraph: &str, _lang: Option<&str>) -> bool { paragraph.contains('!') }
     fn annotate(&self, paragraph: &str, _lang: Option<&str>) -> Vec<Annotation> {
-        paragraph.match_indices('!').map(|(i, _)| Annotation::new(i..i + 1, "loud")).collect()
+        paragraph.match_indices('!').map(|(i, _)| Annotation::over(i..i + 1, "loud")).collect()
     }
 }
 
@@ -422,20 +422,26 @@ fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator
 ```
 
 - **Who is asked:** when a book opens the reader asks the enabled plugins in load order
-  (compiled-in plugins in the order of `crates/ink-app/src/plugins.rs`) and uses the
-  first annotator it gets; only one annotator is active. A plugin that panics there is
-  skipped. With *Ruby annotations* off (Aa › Layout for the book, Settings › Default
+  (compiled-in plugins in the order of `crates/ink-app/src/plugins.rs`) and uses every
+  annotator it gets, in that order. The engine asks each about every paragraph and
+  merges the results: where two annotations of the same position overlap, the earlier
+  plugin's wins; one over a range and one under it both show. A plugin that panics
+  there is skipped. With *Ruby annotations* off (Aa › Layout for the book, Settings › Default
   layout for new books) no annotator is used.
 - **`on_book_open` comes first:** while an annotator is in use the reader sends
   `on_book_open` before the book's first page (otherwise it comes after it), then
   reads `version()` again and lays the book out anew if it moved. So a plugin can learn
   the book (its language, its own per-book settings) in `on_book_open`, set its
   annotations up and bump the version there, and the first page already shows them.
-- **The text:** `annotate` gets one paragraph as it is laid out (whitespace collapsed,
-  without the text of `<rt>` and `<rp>`) and its language (`lang`/`xml:lang`, else the
-  book's). Ranges are byte ranges of that text. The engine drops ranges that are empty,
-  out of bounds, inside a character, overlapping an earlier annotation of the list or a
-  `<ruby>` base of the book (the book's ruby wins), and annotations with no text. It
+- **The text:** `wants` and `annotate` get one paragraph as it is laid out (whitespace
+  collapsed, without the text of `<rt>` and `<rp>`) and its language (`lang`/`xml:lang`,
+  else the book's), so an annotator for one language says no to the others in `wants`.
+  Ranges are byte ranges of that text. Build annotations with `Annotation::over` (above
+  the text) or `Annotation::under` (below it); the type is `#[non_exhaustive]` so fields
+  can be added later. The engine drops ranges that are empty, out of bounds, inside a
+  character, overlapping an earlier annotation of the same position (this annotator's
+  or an earlier one's) or a `<ruby>` base of the book in that position (the book's ruby
+  wins), and annotations with no text. It
   never breaks a line inside an annotated range.
 - **Line rhythm:** every paragraph for which `wants` returns true gets the room of an
   annotation above all its lines, even when `annotate` then returns nothing for it, so
@@ -456,7 +462,8 @@ fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator
   font size change. Returning a different annotator later has no effect until the book is
   opened again.
 - **Failures:** a panic in `wants` or `annotate` is caught; the engine logs it once and
-  lays the rest of the book out without annotations.
+  lays the rest of the book out without that annotator's annotations. The other
+  annotators go on.
 - **Rust only:** a Lua plugin cannot offer an annotator. The annotator runs on the
   pagination threads, for every paragraph of the book, while the Lua state belongs to
   the UI thread and every Lua call goes through the host's sandbox and time limits;

@@ -178,13 +178,14 @@ get wrong:
   are the one mapping between the two. The reader keeps a book's choices in its
   sidecar and puts them over the defaults (`screens/reader/aa.rs`, `fixed_view`).
 - **Ruby and annotations are drawing only.** `ink-html` draws the text of `<rt>`
-  above its base, and the annotations of `LayoutSettings::annotator` (an
+  above its base, and the annotations of `LayoutSettings::annotators` (each an
   `ink_doc::TextAnnotator`, from a plugin) the same way (`layout.rs`, `Ruby`). Both are
   draw items without a DOM node: positions, selection, search and `read_around` never
-  see them. `LayoutSettings::ruby` off leaves both out. The annotator's id and the
+  see them. `LayoutSettings::ruby` off leaves both out. Each annotator's id and the
   version read when its `AnnotatorHandle` was made are part of the settings' equality
-  and cache key, so a version bump repaginates; it runs on the pagination threads, and
-  a panic in it is caught and turns it off for the rest of that layout.
+  and cache key, so a version bump repaginates; annotators run on the pagination
+  threads, and a panic in one is caught and turns that one off for the rest of that
+  layout.
 
 ## Device layer
 
@@ -362,8 +363,8 @@ with one line in `crates/ink-app/src/plugins.rs`. Lua plugins are folders with
 `ink_plugin::lua::LuaHost` through the same registry and host services.
 
 A Rust plugin can also offer a `TextAnnotator` (`Plugin::text_annotator`): the reader
-asks the plugin host for one when a book opens (the first enabled plugin that offers
-one) and passes it to the engine in `LayoutSettings::annotator`.
+asks the plugin host for them when a book opens (every enabled plugin that offers
+one, in plugin order) and passes them to the engine in `LayoutSettings::annotators`.
 
 Plugins never block the reader: UI requests are queued and answered in `on_ui_result`,
 network requests run in worker threads and report through `on_http`. A plugin that

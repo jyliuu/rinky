@@ -40,7 +40,7 @@ pub use registry::{ControlTile, LibraryEntry, ReaderAction, Registrar, Registry,
 pub use serde_json;
 
 /// The text annotation API of [`Plugin::text_annotator`], re-exported for plugin crates.
-pub use ink_doc::{Annotation, TextAnnotator};
+pub use ink_doc::{Annotation, AnnotationPosition, TextAnnotator};
 use ink_doc::Selection;
 use std::path::Path;
 use std::sync::Arc;
@@ -169,8 +169,10 @@ pub trait Plugin {
     fn on_tick(&mut self, _cx: &mut HostCtx) -> Result<()> {
         Ok(())
     }
-    /// A [`TextAnnotator`] whose annotations the reader draws above the text of
-    /// reflowable books, like ruby, or `None` (the default). Asked when a book opens;
+    /// A [`TextAnnotator`] whose annotations the reader draws above or below the text of
+    /// reflowable books, like ruby, or `None` (the default). Every enabled plugin's
+    /// annotator is used, in plugin order (an earlier one wins where two overlap). Asked
+    /// when a book opens;
     /// the reader keeps the `Arc` and reads [`TextAnnotator::version`] again before
     /// every frame (after any plugin callback: actions, dialog and card answers, ticks,
     /// network results) and whenever it rebuilds its layout settings, so
@@ -405,15 +407,20 @@ impl PluginManager {
         r
     }
 
-    /// The [`TextAnnotator`] of the first enabled plugin, in load order (compiled-in
-    /// plugins in their registration order, then Lua plugins, which have none), whose
-    /// [`Plugin::text_annotator`] returns one, with that plugin's name. Only one
-    /// annotator is used at a time. A plugin that panics when asked is skipped.
-    pub fn text_annotator(&self) -> Option<(String, Arc<dyn TextAnnotator>)> {
-        self.slots.iter().filter(|s| s.enabled).find_map(|s| {
-            let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.plugin.text_annotator()));
-            Some((s.manifest.name.clone(), asked.ok().flatten()?))
-        })
+    /// The [`TextAnnotator`]s of the enabled plugins whose [`Plugin::text_annotator`]
+    /// returns one, with each plugin's name, in load order (compiled-in plugins in their
+    /// registration order, then Lua plugins, which have none). The engine uses them all;
+    /// where two annotations of the same position overlap, the earlier plugin's wins. A
+    /// plugin that panics when asked is skipped.
+    pub fn text_annotators(&self) -> Vec<(String, Arc<dyn TextAnnotator>)> {
+        self.slots
+            .iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| {
+                let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.plugin.text_annotator()));
+                Some((s.manifest.name.clone(), asked.ok().flatten()?))
+            })
+            .collect()
     }
 
     /// Routes a triggered registry entry to its plugin.
@@ -560,7 +567,7 @@ mod tests {
         fn version(&self) -> u64 {
             0
         }
-        fn wants(&self, _: &str) -> bool {
+        fn wants(&self, _: &str, _: Option<&str>) -> bool {
             false
         }
         fn annotate(&self, _: &str, _: Option<&str>) -> Vec<Annotation> {
@@ -586,16 +593,17 @@ mod tests {
     }
 
     #[test]
-    fn the_first_enabled_plugin_with_an_annotator_supplies_it() {
+    fn every_enabled_plugin_with_an_annotator_supplies_it_in_order() {
         let mut mgr = PluginManager::new();
-        assert!(mgr.text_annotator().is_none());
+        assert!(mgr.text_annotators().is_empty());
         mgr.load(vec![counter("plain", false), annotating("broken", true), annotating("first", false), annotating("second", false)]);
-        assert_eq!(mgr.text_annotator().map(|(n, _)| n).as_deref(), Some("first"), "plugins without one and one that panics are skipped");
+        let names = |m: &PluginManager| m.text_annotators().into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(names(&mgr), ["first", "second"], "plugins without one and one that panics are skipped");
         mgr.disable("first", "test");
-        assert_eq!(mgr.text_annotator().map(|(n, _)| n).as_deref(), Some("second"), "a disabled plugin's annotator is not used");
+        assert_eq!(names(&mgr), ["second"], "a disabled plugin's annotator is not used");
         let mut off = PluginManager::new();
         off.load_disabled(vec![annotating("off", false)]);
-        assert!(off.text_annotator().is_none(), "nor one the user turned off");
+        assert!(off.text_annotators().is_empty(), "nor one the user turned off");
     }
 
     #[test]

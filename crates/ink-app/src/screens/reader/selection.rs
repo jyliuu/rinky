@@ -943,13 +943,13 @@ pub(super) mod tests {
         fn version(&self) -> u64 {
             1
         }
-        fn wants(&self, _: &str) -> bool {
+        fn wants(&self, _: &str, _lang: Option<&str>) -> bool {
             true
         }
         fn annotate(&self, p: &str, _: Option<&str>) -> Vec<ink_doc::Annotation> {
             p.char_indices()
                 .filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c))
-                .map(|(i, c)| ink_doc::Annotation::new(i..i + c.len_utf8(), "aaaaaaaaaaaaaa"))
+                .map(|(i, c)| ink_doc::Annotation::over(i..i + c.len_utf8(), "aaaaaaaaaaaaaa"))
                 .collect()
         }
     }
@@ -967,7 +967,7 @@ pub(super) mod tests {
             let mut s = ink_doc::LayoutSettings::for_screen(1272, 1696);
             s.ruby = ruby;
             if annotate {
-                s.annotator = Some(ink_doc::AnnotatorHandle::new(std::sync::Arc::new(WideReadings)));
+                s.annotators = vec![ink_doc::AnnotatorHandle::new(std::sync::Arc::new(WideReadings))];
             }
             d.set_layout(&s).unwrap();
             let (l, span) = d.page_layout(0).unwrap();

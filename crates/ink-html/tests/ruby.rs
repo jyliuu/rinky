@@ -48,7 +48,7 @@ fn doc(body: &str, css: &str) -> HtmlDocument {
 
 fn annotated(body: &str, a: Arc<dyn TextAnnotator>) -> HtmlDocument {
     let mut s = settings();
-    s.annotator = Some(AnnotatorHandle::new(a));
+    s.annotators = vec![AnnotatorHandle::new(a)];
     doc_with(&[body], "", &s)
 }
 
@@ -209,7 +209,7 @@ impl TextAnnotator for MixedReadings {
     fn version(&self) -> u64 {
         1
     }
-    fn wants(&self, _: &str) -> bool {
+    fn wants(&self, _: &str, _lang: Option<&str>) -> bool {
         true
     }
     fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
@@ -218,7 +218,7 @@ impl TextAnnotator for MixedReadings {
             .enumerate()
             .filter_map(|(k, (i, c))| {
                 let n = self.0[k % self.0.len()];
-                (n > 0).then(|| Annotation::new(i..i + c.len_utf8(), "n".repeat(n)))
+                (n > 0).then(|| Annotation::over(i..i + c.len_utf8(), "n".repeat(n)))
             })
             .collect()
     }
@@ -248,9 +248,9 @@ fn per_character_readings_of_mixed_width_keep_one_pitch() {
     let lens = vec![6, 4, 4, 3, 5, 2, 3, 2, 5, 6];
     let body = format!("<p>{text}</p>");
     let mut s = settings();
-    s.annotator = Some(AnnotatorHandle::new(Arc::new(MixedReadings(lens))));
+    s.annotators = vec![AnnotatorHandle::new(Arc::new(MixedReadings(lens)))];
     let d = cjk_doc(&body, &s);
-    s.annotator = None;
+    s.annotators = Vec::new();
     let plain = cjk_doc(&body, &s);
     let (bases, ruby) = page_runs(&d);
     let (pbases, _) = page_runs(&plain);
@@ -287,21 +287,21 @@ impl TextAnnotator for ByPosition {
     fn version(&self) -> u64 {
         1
     }
-    fn wants(&self, p: &str) -> bool {
+    fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
         p.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
     }
     fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
         p.char_indices()
             .filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c))
             .enumerate()
-            .filter_map(|(k, (i, c))| self.0.get(k).filter(|t| !t.is_empty()).map(|t| Annotation::new(i..i + c.len_utf8(), *t)))
+            .filter_map(|(k, (i, c))| self.0.get(k).filter(|t| !t.is_empty()).map(|t| Annotation::over(i..i + c.len_utf8(), *t)))
             .collect()
     }
 }
 
 fn cjk_annotated(body: &str, texts: Vec<&'static str>) -> HtmlDocument {
     let mut s = settings();
-    s.annotator = Some(AnnotatorHandle::new(Arc::new(ByPosition(texts))));
+    s.annotators = vec![AnnotatorHandle::new(Arc::new(ByPosition(texts)))];
     cjk_doc(body, &s)
 }
 
@@ -378,12 +378,12 @@ impl TextAnnotator for Words {
     fn version(&self) -> u64 {
         self.version.load(Ordering::Relaxed)
     }
-    fn wants(&self, p: &str) -> bool {
+    fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
         p.contains(self.word)
     }
     fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<Annotation> {
         let t = self.text.lock().unwrap().clone();
-        p.match_indices(self.word).map(|(i, w)| Annotation::new(i..i + w.len(), t.clone())).collect()
+        p.match_indices(self.word).map(|(i, w)| Annotation::over(i..i + w.len(), t.clone())).collect()
     }
 }
 
@@ -420,7 +420,7 @@ impl TextAnnotator for Fixed {
     fn version(&self) -> u64 {
         1
     }
-    fn wants(&self, _: &str) -> bool {
+    fn wants(&self, _: &str, _lang: Option<&str>) -> bool {
         true
     }
     fn annotate(&self, _: &str, _: Option<&str>) -> Vec<Annotation> {
@@ -433,15 +433,15 @@ fn invalid_annotations_are_dropped() {
     // The paragraph text is "café base end x".
     let body = "<p>café <ruby>base<rt>r</rt></ruby> end x</p>";
     let list = vec![
-        Annotation::new(0..0, "empty"),
-        Annotation::new(10..400, "out"),
-        Annotation::new(0..4, "mid-char"), // é is bytes 3..5
-        Annotation::new(11..14, "ok"),     // "end"
-        Annotation::new(12..15, "overlap"),
-        Annotation::new(6..9, "book"), // inside the book's ruby base "base" (6..10)
-        Annotation::new(14..15, "  "), // nothing to draw
-        Annotation::new(14..15, "sp"), // only a space: no piece of text to draw it over
-        Annotation::new(15..16, "x"),
+        Annotation::over(0..0, "empty"),
+        Annotation::over(10..400, "out"),
+        Annotation::over(0..4, "mid-char"), // é is bytes 3..5
+        Annotation::over(11..14, "ok"),     // "end"
+        Annotation::over(12..15, "overlap"),
+        Annotation::over(6..9, "book"), // inside the book's ruby base "base" (6..10)
+        Annotation::over(14..15, "  "), // nothing to draw
+        Annotation::over(14..15, "sp"), // only a space: no piece of text to draw it over
+        Annotation::over(15..16, "x"),
     ];
     let d = annotated(body, Arc::new(Fixed(list)));
     let (_, ruby) = page_runs(&d);
@@ -460,12 +460,12 @@ impl TextAnnotator for Boom {
     fn version(&self) -> u64 {
         1
     }
-    fn wants(&self, _: &str) -> bool {
+    fn wants(&self, _: &str, _lang: Option<&str>) -> bool {
         true
     }
     fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
         assert!(!p.contains("boom"), "test annotator panics on purpose");
-        vec![Annotation::new(0..1, "a")]
+        vec![Annotation::over(0..1, "a")]
     }
 }
 
@@ -484,21 +484,21 @@ fn a_panicking_annotator_leaves_the_rest_of_the_book_plain() {
 fn a_version_change_lays_the_book_out_again() {
     let a = Words::new("base", "old");
     let mut s = settings();
-    s.annotator = Some(AnnotatorHandle::new(a.clone()));
+    s.annotators = vec![AnnotatorHandle::new(a.clone())];
     let mut d = doc_with(&["<p>one base two</p>"], "", &s);
     assert_eq!(page_runs(&d).1[0].text, "old");
     // The annotator changes its output and its version: settings made now differ.
     *a.text.lock().unwrap() = "new".into();
     a.version.store(2, Ordering::Relaxed);
     let mut s2 = s.clone();
-    s2.annotator = Some(AnnotatorHandle::new(a.clone()));
+    s2.annotators = vec![AnnotatorHandle::new(a.clone())];
     assert_ne!(s, s2);
     assert_ne!(s.cache_key(), s2.cache_key());
     d.set_layout(&s2).unwrap();
     assert_eq!(page_runs(&d).1[0].text, "new");
     // Turning annotations off (no annotator) or ruby off removes them.
     let mut off = s2.clone();
-    off.annotator = None;
+    off.annotators = Vec::new();
     assert_ne!(off.cache_key(), s2.cache_key());
     d.set_layout(&off).unwrap();
     assert!(page_runs(&d).1.is_empty());
@@ -531,11 +531,11 @@ impl TextAnnotator for EveryIdeograph {
     fn version(&self) -> u64 {
         1
     }
-    fn wants(&self, p: &str) -> bool {
+    fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
         !self.idle && p.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
     }
     fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<Annotation> {
-        p.char_indices().filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c)).map(|(i, c)| Annotation::new(i..i + c.len_utf8(), "abc")).collect()
+        p.char_indices().filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c)).map(|(i, c)| Annotation::over(i..i + c.len_utf8(), "abc")).collect()
     }
 }
 
@@ -581,7 +581,7 @@ fn measure_annotator_cost_on_a_big_cjk_book() {
         let mut pages = 0;
         for _ in 0..5 {
             let mut s = LayoutSettings::for_screen(1272, 1696);
-            s.annotator = a.clone().map(AnnotatorHandle::new);
+            s.annotators = a.clone().map(AnnotatorHandle::new).into_iter().collect();
             let t = std::time::Instant::now();
             let mut d = doc_with(&refs, "", &s);
             assert!(d.wait_paginated(std::time::Duration::from_secs(600)));
@@ -615,4 +615,70 @@ fn selected_text_is_the_same_with_and_without_readings() {
     assert_eq!(p, text);
     assert_eq!(select_line(&mut annotated), p, "annotations add nothing to selected text");
     assert_eq!(select_line(&mut book), p, "nor book ruby");
+}
+
+/// Gives every occurrence of `word` the text `text`, for paragraphs in `lang` (any when
+/// `None`); counts its `wants` calls with the language it was given.
+struct Lang {
+    word: &'static str,
+    text: &'static str,
+    lang: Option<&'static str>,
+    seen: std::sync::Mutex<Vec<Option<String>>>,
+}
+
+impl TextAnnotator for Lang {
+    fn id(&self) -> &str {
+        self.text
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, p: &str, lang: Option<&str>) -> bool {
+        self.seen.lock().unwrap().push(lang.map(str::to_string));
+        p.contains(self.word) && self.lang.is_none_or(|l| Some(l) == lang)
+    }
+    fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
+        p.match_indices(self.word).map(|(i, w)| Annotation::over(i..i + w.len(), self.text)).collect()
+    }
+}
+
+fn lang(word: &'static str, text: &'static str, lang: Option<&'static str>) -> Arc<Lang> {
+    Arc::new(Lang { word, text, lang, seen: Default::default() })
+}
+
+#[test]
+fn several_annotators_merge_and_the_earlier_wins_an_overlap() {
+    let first = lang("base", "FIRST", None);
+    let second = lang("base two", "SECOND", None);
+    let third = lang("two", "THIRD", None);
+    let mut s = settings();
+    s.annotators = vec![AnnotatorHandle::new(first.clone()), AnnotatorHandle::new(second), AnnotatorHandle::new(third)];
+    let d = doc_with(&["<p>one base two</p>"], "", &s);
+    let (_, ruby) = page_runs(&d);
+    let mut got: Vec<&str> = ruby.iter().map(|r| r.text.as_str()).collect();
+    got.sort();
+    assert_eq!(got, ["FIRST", "THIRD"], "the second overlaps the first and is dropped");
+    assert_eq!(first.seen.lock().unwrap().first().cloned().flatten().as_deref(), Some("en"), "wants gets the paragraph's language");
+    // The cache key names every annotator in order.
+    assert!(s.cache_key().ends_with("-aFIRST@1,SECOND@1,THIRD@1"), "{}", s.cache_key());
+}
+
+#[test]
+fn a_language_check_in_wants_skips_other_paragraphs() {
+    let a = lang("base", "B", Some("de"));
+    let mut s = settings();
+    s.annotators = vec![AnnotatorHandle::new(a)];
+    let d = doc_with(&["<p>one base</p><p lang=\"de\">eine base</p>"], "", &s);
+    let (_, ruby) = page_runs(&d);
+    assert_eq!(ruby.len(), 1, "only the German paragraph");
+}
+
+#[test]
+fn one_panicking_annotator_leaves_the_others_running() {
+    let ok = lang("third", "T", None);
+    let mut s = settings();
+    s.annotators = vec![AnnotatorHandle::new(Arc::new(Boom)), AnnotatorHandle::new(ok)];
+    let d = doc_with(&["<p>boom</p><p>third</p>"], "", &s);
+    let (_, ruby) = page_runs(&d);
+    assert!(ruby.iter().any(|r| r.text == "T"), "the second annotator goes on after the first panicked");
 }

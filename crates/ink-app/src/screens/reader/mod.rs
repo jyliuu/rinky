@@ -577,8 +577,8 @@ pub struct ReaderScreen {
     listed_marks: Vec<Bookmark>,
     /// The book's own reading settings (Aa panel), over the global ones.
     book_settings: BookSettings,
-    /// The plugins' text annotator, asked when the book opens ([`ReaderScreen::layout`]).
-    annotator: Option<std::sync::Arc<dyn ink_doc::TextAnnotator>>,
+    /// The plugins' text annotators, asked when the book opens ([`ReaderScreen::layout`]).
+    annotators: Vec<std::sync::Arc<dyn ink_doc::TextAnnotator>>,
     /// Links of a page (page, links), read when a tap needs them.
     links: Option<(usize, Vec<Link>)>,
     /// Where jumps came from, latest last: the menu's "Go back" returns to the last one,
@@ -737,7 +737,7 @@ impl ReaderScreen {
             marks: Vec::new(),
             listed_marks: Vec::new(),
             book_settings: BookSettings::default(),
-            annotator: None,
+            annotators: Vec::new(),
             links: None,
             back: Vec::new(),
             back_pill: false,
@@ -1854,14 +1854,14 @@ impl ReaderScreen {
     }
 
     /// The layout for this book on a screen of `size`: [`aa::book_layout`] with the
-    /// plugins' annotator when ruby is on. The handle reads the annotator's version now,
+    /// plugins' annotators when ruby is on. Each handle reads its annotator's version now,
     /// so a plugin that changed its annotations (and bumped the version) gets the book
     /// laid out again by the next [`ReaderScreen::relayout`]: after a plugin action, when
     /// a screen above (a settings page) closes, on rotation.
     fn layout(&self, cx: &AppCtx, size: Size) -> LayoutSettings {
         let mut l = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
         if l.ruby {
-            l.annotator = self.annotator.clone().map(ink_doc::AnnotatorHandle::new);
+            l.annotators = self.annotators.iter().cloned().map(ink_doc::AnnotatorHandle::new).collect();
         }
         l
     }
@@ -1886,11 +1886,13 @@ impl ReaderScreen {
         Ok(())
     }
 
-    /// True when the annotator's version is not the one the book is laid out with (a
-    /// plugin changed its annotations). One version read: cheap enough for every frame.
+    /// True when an annotator's version is not the one the book is laid out with (a
+    /// plugin changed its annotations). One version read each: cheap enough for every
+    /// frame.
     fn annotator_moved(&self) -> bool {
-        let (Some(a), Some(doc)) = (self.annotator.as_ref(), self.doc.as_deref()) else { return false };
-        doc.layout().annotator.as_ref().is_some_and(|h| h.version() != a.version())
+        let Some(doc) = self.doc.as_deref() else { return false };
+        let laid = &doc.layout().annotators;
+        laid.len() == self.annotators.len() && laid.iter().zip(&self.annotators).any(|(h, a)| h.version() != a.version())
     }
 
     /// After plugin code ran (an action, a dialog or card answer, a tick, a network
@@ -1898,7 +1900,7 @@ impl ReaderScreen {
     /// annotations.
     fn relayout_after_plugin(&mut self, cx: &mut AppCtx) {
         if self.annotator_moved() {
-            log::info!("reader: the annotator's version changed; laying the book out again");
+            log::info!("reader: an annotator's version changed; laying the book out again");
             if let Err(e) = self.relayout(cx, RefreshClass::Gc16) {
                 log::warn!("reader: layout after a plugin call: {e:#}");
             }
@@ -2334,7 +2336,7 @@ impl AppScreen for ReaderScreen {
         if self.book_settings.migrate_margins(&cx.settings.status_bars) && (self.book_settings.margin_top.is_some() || self.book_settings.margin_bottom.is_some()) {
             log::info!("reader: book margins now measured from the status bars: top {:?}, bottom {:?}", self.book_settings.margin_top, self.book_settings.margin_bottom);
         }
-        self.annotator = cx.plugins.text_annotator();
+        self.annotators = cx.plugins.text_annotators();
         let layout = self.layout(cx, size);
         // The font faces of the first page are parsed on another core while the book is
         // read (MD5, zip, spine, TOC); the first layout takes them parsed. PDF, CBZ and
@@ -2391,7 +2393,7 @@ impl AppScreen for ReaderScreen {
         // is on the panel (`paint_screen`), so the page does not wait for them.
         self.plugins_pending = true;
         self.book_open_sent = false;
-        if self.annotator.is_some() {
+        if !self.annotators.is_empty() {
             self.book_open_before_first_page(cx)?;
             trace.step("plugins told before the first page (annotator)");
         }

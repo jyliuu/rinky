@@ -47,11 +47,11 @@ impl ink_doc::TextAnnotator for CodepointAnnotator {
     fn version(&self) -> u64 {
         1
     }
-    fn wants(&self, p: &str) -> bool {
+    fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
         p.chars().any(is_ideograph)
     }
     fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<ink_doc::Annotation> {
-        p.char_indices().filter(|&(_, c)| is_ideograph(c)).map(|(i, c)| ink_doc::Annotation::new(i..i + c.len_utf8(), format!("{:x}", c as u32))).collect()
+        p.char_indices().filter(|&(_, c)| is_ideograph(c)).map(|(i, c)| ink_doc::Annotation::over(i..i + c.len_utf8(), format!("{:x}", c as u32))).collect()
     }
 }
 
@@ -90,7 +90,7 @@ fn settings(v: Variant) -> LayoutSettings {
             s.publisher_styles = false;
         }
         Variant::NoPublisher => s.publisher_styles = false,
-        Variant::Annotated => s.annotator = Some(ink_doc::AnnotatorHandle::new(std::sync::Arc::new(CodepointAnnotator))),
+        Variant::Annotated => s.annotators = vec![ink_doc::AnnotatorHandle::new(std::sync::Arc::new(CodepointAnnotator))],
     }
     s
 }
