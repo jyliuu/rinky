@@ -7,6 +7,11 @@
 //! - Inline content: whitespace collapsing per `white-space`, `text-transform`, line
 //!   breaking at UAX #14 opportunities, hyphenation by language, soft hyphens,
 //!   justification, sub/superscript, inline images.
+//! - Ruby: the text of `<rt>` drawn centred above its base at a reduced size (the `rt`
+//!   font size, 50 % by default) ([`Ruby`]). A base is never broken across lines; a ruby wider than
+//!   its base spreads the base's letters apart. A paragraph with ruby gets the same
+//!   extra space above every line. Ruby text is drawn only: it has no DOM position, so
+//!   selection, search and page text never see it.
 //! - Output: [`ChapterLayout`] with slices (the units the paginator places), draw items
 //!   (text, images) per slice and border rectangles in flow coordinates.
 
@@ -177,7 +182,37 @@ impl Params {
         let content_h = (s.height as f32 - s.margin_top - s.margin_bottom).max(50.0);
         Params { content_h, left: s.margin_left, content_w, settings: s.clone() }
     }
+
 }
+
+/// Text drawn above a base: the text of an `<rt>` element.
+#[derive(Clone, Debug)]
+struct Ruby {
+    /// Byte range of the base in the paragraph (or chunk) text.
+    start: usize,
+    end: usize,
+    /// The text drawn above.
+    text: String,
+    face: FaceKey,
+    px: f32,
+    gray: u8,
+    /// Width of the base text and of the ruby text (measured by [`Flow::lay_lines`]).
+    base_w: f32,
+    ruby_w: f32,
+    /// Chars of the base.
+    chars: u32,
+}
+
+impl Ruby {
+    /// Width the base cell gains so the ruby text fits over it, with [`RUBY_GAP`] to
+    /// the ruby next to it.
+    fn extra(&self) -> f32 {
+        (self.ruby_w + RUBY_GAP * self.px - self.base_w).max(0.0)
+    }
+}
+
+/// Least space between two ruby texts side by side, in em of the ruby text.
+const RUBY_GAP: f32 = 0.25;
 
 /// Things layout needs from outside.
 pub struct Env<'a> {
@@ -308,6 +343,8 @@ struct InlineText {
     text: String,
     src: SrcRuns,
     segs: Vec<Seg>,
+    /// Ruby of the book's markup, in text order.
+    ruby: Vec<Ruby>,
 }
 
 impl InlineText {
@@ -356,6 +393,9 @@ struct Piece {
     start: usize,
     end: usize,
     width: f32,
+    /// Letter spacing added inside a ruby base wider than its text, and the shift of the
+    /// piece's first letter (half of it).
+    spread: f32,
 }
 
 /// An unbreakable box: text between two break opportunities.
@@ -396,6 +436,8 @@ struct Para<'p> {
     /// together: plain ASCII text needs no table and no search.
     wide: Vec<(u32, u32)>,
     segs: &'p [Seg],
+    /// Ruby bases in this text, sorted, not overlapping (usually none).
+    ruby: Vec<Ruby>,
 }
 
 impl<'p> Para<'p> {
@@ -408,7 +450,35 @@ impl<'p> Para<'p> {
                 }
             }
         }
-        Para { text, src, wide, segs }
+        Para { text, src, wide, segs, ruby: Vec::new() }
+    }
+
+    /// The index of the ruby whose base holds the bytes `start..end`.
+    fn ruby_at(&self, start: usize, end: usize) -> Option<usize> {
+        let i = self.ruby.partition_point(|r| r.end <= start);
+        self.ruby.get(i).filter(|r| r.start <= start && end <= r.end).map(|_| i)
+    }
+
+    /// True when byte `b` is strictly inside a ruby base (no line break there).
+    fn inside_ruby(&self, b: usize) -> bool {
+        let i = self.ruby.partition_point(|r| r.end <= b);
+        self.ruby.get(i).is_some_and(|r| r.start < b)
+    }
+
+    /// The first ruby base boundary strictly inside `start..end`.
+    fn ruby_cut(&self, start: usize, end: usize) -> Option<usize> {
+        let r = self.ruby[self.ruby.partition_point(|r| r.end <= start)..].first()?;
+        if r.start > start {
+            (r.start < end).then_some(r.start)
+        } else {
+            (r.end < end).then_some(r.end)
+        }
+    }
+
+    /// Extra width of the ruby bases wholly inside `start..end`.
+    fn ruby_extra(&self, start: usize, end: usize) -> f32 {
+        let i = self.ruby.partition_point(|r| r.start < start);
+        self.ruby[i..].iter().take_while(|r| r.start < end).filter(|r| r.end <= end).map(Ruby::extra).sum()
     }
 
     /// Index of the char at byte `b` (or of the first char after it).
@@ -455,6 +525,25 @@ impl<'p> Para<'p> {
             Some(run)
         })
     }
+
+    /// [`Para::runs`] cut also at ruby base boundaries, so a base is its own pieces.
+    fn pieces(&self, start: usize, end: usize) -> impl Iterator<Item = (u32, usize, usize)> + '_ {
+        let mut runs = self.runs(start, end);
+        let mut rest: Option<(u32, usize, usize)> = None;
+        std::iter::from_fn(move || {
+            let (seg, s, e) = match rest.take() {
+                Some(r) => r,
+                None => runs.next()?,
+            };
+            if !self.ruby.is_empty() {
+                if let Some(cut) = self.ruby_cut(s, e) {
+                    rest = Some((seg, cut, e));
+                    return Some((seg, s, cut));
+                }
+            }
+            Some((seg, s, e))
+        })
+    }
 }
 
 /// Layout state of a chapter flow.
@@ -495,6 +584,8 @@ pub struct Flow<'a, 'e> {
     /// Lines make text draw items. False for a page-map layout ([`Flow::layout_slices`]),
     /// which needs only the slices: their geometry and keys do not depend on the items.
     text_items: bool,
+    /// Height of the tallest ruby text of the paragraph being laid out (0: no ruby).
+    ruby_h: f32,
 }
 
 /// Where [`Flow::layout_until`] stops: once the flow is `extra` px below the first slice
@@ -630,6 +721,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             stop,
             stopped: false,
             text_items,
+            ruby_h: 0.0,
         };
         if dom.body != NONE {
             f.block(dom.body, p.left, p.content_w);
@@ -1091,6 +1183,12 @@ impl<'a, 'e> Flow<'a, 'e> {
                     }
                     let kids = &dom.node(n).children;
                     let sh = shift + self.valign_shift(n);
+                    if name == "ruby" && self.p.settings.ruby && self.depth <= 400 {
+                        self.depth += 1;
+                        self.collect_ruby(kids, owner, out, l, w, sh);
+                        self.depth -= 1;
+                        continue;
+                    }
                     if self.depth > 400 {
                         // Too deep: the rest of the subtree is plain text.
                         let mut stack: Vec<NodeId> = kids.iter().rev().copied().collect();
@@ -1106,6 +1204,69 @@ impl<'a, 'e> Flow<'a, 'e> {
                     self.collect(kids, owner, out, l, w, sh);
                     self.depth -= 1;
                 }
+            }
+        }
+    }
+
+    /// Collects the children `kids` of a `<ruby>` element: the base text goes into the
+    /// paragraph text, each `<rt>` becomes a [`Ruby`] over its base. Bases are `<rb>`
+    /// elements or the content between two `<rt>`s; the `<rt>`s pair with the bases in
+    /// order (`<rb>a</rb><rb>b</rb><rt>x</rt><rt>y</rt>` pairs a-x and b-y). `<rp>` is
+    /// left out, and an `<rt>` that is `display: none` or hidden draws nothing.
+    fn collect_ruby(&mut self, kids: &[NodeId], owner: NodeId, out: &mut InlineText, link: u32, w: f32, shift: f32) {
+        let dom = self.dom;
+        let mut bases: Vec<(usize, usize)> = Vec::new();
+        let mut next = 0usize;
+        let mut anon = out.text.len();
+        // The base text since `from`, without the spaces around it.
+        let base = |out: &InlineText, from: usize| -> Option<(usize, usize)> {
+            let t = &out.text[from..];
+            let lead = t.len() - t.trim_start_matches(' ').len();
+            let s = from + lead;
+            let e = from + t.trim_end_matches(' ').len();
+            (e > s).then_some((s, e))
+        };
+        for &k in kids {
+            match &dom.node(k).kind {
+                NodeKind::Text(t) => {
+                    // Spaces between the parts of a ruby are not text.
+                    if !t.trim().is_empty() {
+                        self.push_text(k, out, link, shift);
+                    }
+                }
+                NodeKind::Element(e) => match e.name.as_str() {
+                    "rp" | "rtc" => {}
+                    "rt" => {
+                        if let Some(b) = base(out, anon) {
+                            bases.push(b);
+                        }
+                        anon = out.text.len();
+                        let Some(&(bs, be)) = bases.get(next) else { continue };
+                        next += 1;
+                        let st = self.st(k);
+                        if st.display == Display::None || st.hidden {
+                            continue;
+                        }
+                        let text = self.dom.text_content(k).split_whitespace().collect::<Vec<_>>().join(" ");
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let face = self.face(st);
+                        out.ruby.push(Ruby { start: bs, end: be, text, face, px: st.font_size, gray: st.color, base_w: 0.0, ruby_w: 0.0, chars: 0 });
+                    }
+                    "rb" => {
+                        if let Some(b) = base(out, anon) {
+                            bases.push(b);
+                        }
+                        let from = out.text.len();
+                        self.collect(&[k], owner, out, link, w, shift);
+                        if let Some(b) = base(out, from) {
+                            bases.push(b);
+                        }
+                        anon = out.text.len();
+                    }
+                    _ => self.collect(&[k], owner, out, link, w, shift),
+                },
             }
         }
     }
@@ -1171,9 +1332,15 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    /// Width of the bytes `start..end` of a paragraph.
+    /// Width of the bytes `start..end` of a paragraph (ruby bases in it as wide as their
+    /// ruby text, when that is wider).
     fn width(&mut self, p: &Para, start: usize, end: usize) -> f32 {
-        p.runs(start, end).map(|r| self.run_width(p, r)).sum()
+        let w: f32 = p.runs(start, end).map(|r| self.run_width(p, r)).sum();
+        if p.ruby.is_empty() {
+            w
+        } else {
+            w + p.ruby_extra(start, end)
+        }
     }
 
     /// Lays out an inline run as one paragraph owned by block `owner`.
@@ -1195,16 +1362,27 @@ impl<'a, 'e> Flow<'a, 'e> {
             // A final line break (or newline in pre text) makes no empty line.
             out.pop();
         }
-        let InlineText { text, src, segs } = out;
+        let InlineText { text, src, segs, mut ruby } = out;
         if text.is_empty() {
             return;
+        }
+        if only_breaks {
+            ruby.clear();
+        }
+        // The text may have lost trailing spaces and breaks since the book's ruby was
+        // collected.
+        ruby.retain(|r| r.end <= text.len());
+        self.ruby_h = 0.0;
+        for r in &ruby {
+            let (a, d) = self.env.fonts.vmetrics(r.face, r.px);
+            self.ruby_h = self.ruby_h.max(a - d);
         }
         let para_first_slice = self.out.slices.len();
         if text.len() <= GIANT_PARAGRAPH {
             let mut chars = Vec::with_capacity(src.n);
             chars.extend(src.iter());
             let src = chars;
-            self.lay_lines(owner, &text, &src, &segs, x, w);
+            self.lay_lines(owner, &text, &src, &segs, ruby, x, w);
         } else {
             let mut src_iter = src.iter();
             let merge = std::mem::replace(&mut self.merge_runs, true);
@@ -1223,14 +1401,21 @@ impl<'a, 'e> Flow<'a, 'e> {
                     if let Some(sp) = text[lo..end].rfind([' ', '\n']) {
                         end = lo + sp + 1;
                     }
+                    // Never inside a ruby base.
+                    if let Some(r) = ruby.iter().find(|r| r.start < end && end < r.end) {
+                        end = if r.start > start { r.start } else { r.end };
+                    }
                 }
                 let n = text[start..end].chars().count();
                 let chunk_src: Vec<CharSrc> = src_iter.by_ref().take(n).collect();
-                self.lay_lines(owner, &text[start..end], &chunk_src, &segs, x, w);
+                let chunk_ruby: Vec<Ruby> =
+                    ruby.iter().filter(|r| r.start >= start && r.end <= end).map(|r| Ruby { start: r.start - start, end: r.end - start, ..r.clone() }).collect();
+                self.lay_lines(owner, &text[start..end], &chunk_src, &segs, chunk_ruby, x, w);
                 start = end;
             }
             self.merge_runs = merge;
         }
+        self.ruby_h = 0.0;
         // Widows and orphans: keep two lines together at both ends.
         let n = self.out.slices.len() - para_first_slice;
         if n >= 2 && !self.in_cell {
@@ -1241,10 +1426,20 @@ impl<'a, 'e> Flow<'a, 'e> {
 
     /// Breaks the display text of a paragraph (or of one chunk of a giant paragraph)
     /// into lines and places them.
-    fn lay_lines(&mut self, owner: NodeId, text: &str, src: &[CharSrc], segs: &[Seg], x: f32, w: f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn lay_lines(&mut self, owner: NodeId, text: &str, src: &[CharSrc], segs: &[Seg], ruby: Vec<Ruby>, x: f32, w: f32) {
         let ost = self.st(owner);
         let keep_spaces = ost.white_space.keeps_spaces();
-        let para = Para::new(text, src, segs);
+        let mut para = Para::new(text, src, segs);
+        if !ruby.is_empty() {
+            let mut ruby = ruby;
+            for r in &mut ruby {
+                r.base_w = self.width(&para, r.start, r.end);
+                r.ruby_w = self.env.fonts.width(r.face, r.px, &r.text);
+                r.chars = text[r.start..r.end].chars().count() as u32;
+            }
+            para.ruby = ruby;
+        }
         // Break opportunities.
         let wraps = ost.white_space.wraps() || keep_spaces;
         let mut ops: Vec<(usize, Break)> = break_opportunities(text);
@@ -1261,6 +1456,10 @@ impl<'a, 'e> Flow<'a, 'e> {
             }
         }
         ops.retain(|(b, _)| *b > 0);
+        if !para.ruby.is_empty() {
+            // No break inside a ruby base.
+            ops.retain(|(b, k)| *k == Break::Mandatory || !para.inside_ruby(*b));
+        }
         ops.sort_by_key(|o| (o.0, o.1 == Break::Allowed));
         ops.dedup_by_key(|o| o.0);
         // Boxes.
@@ -1388,6 +1587,9 @@ impl<'a, 'e> Flow<'a, 'e> {
                 }
             }
         }
+        if !p.ruby.is_empty() {
+            points.retain(|&pt| !p.inside_ruby(bx.start + pt));
+        }
         if points.is_empty() {
             return None;
         }
@@ -1463,10 +1665,19 @@ impl<'a, 'e> Flow<'a, 'e> {
         // gives the same metrics, so the next pieces of a run of words skip them).
         let mut measured_seg = None;
         for (bi, b) in boxes.iter().enumerate() {
-            for run in p.runs(b.start, b.end) {
+            for run in p.pieces(b.start, b.end) {
                 // Widths only place the pieces across the line.
-                let width = if self.text_items { self.run_width(p, run) } else { 0.0 };
-                let pc = Piece { seg: run.0, start: run.1, end: run.2, width };
+                let mut width = if self.text_items { self.run_width(p, run) } else { 0.0 };
+                let mut spread = 0.0;
+                if self.text_items && !p.ruby.is_empty() {
+                    // A base narrower than its ruby: its letters move apart, half the
+                    // spacing before the first and after the last.
+                    if let Some(r) = p.ruby_at(run.1, run.2).map(|i| &p.ruby[i]).filter(|r| r.extra() > 0.0) {
+                        spread = r.extra() / r.chars.max(1) as f32;
+                        width += spread * p.text[run.1..run.2].chars().count() as f32;
+                    }
+                }
+                let pc = Piece { seg: run.0, start: run.1, end: run.2, width, spread };
                 if measured_seg != Some(pc.seg) {
                     measured_seg = Some(pc.seg);
                     let seg = &segs[pc.seg as usize];
@@ -1513,6 +1724,11 @@ impl<'a, 'e> Flow<'a, 'e> {
                     spaces += 1;
                 }
             }
+        }
+        if self.ruby_h > 0.0 {
+            // Room for the ruby above every line of the paragraph: what the half-leading
+            // does not give already.
+            asc += (self.ruby_h - half).max(0.0);
         }
         let line_w = pen;
         let first_indent = if line.first { indent } else { 0.0 };
@@ -1579,6 +1795,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut gaps = boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
         let mut add = 0.0f32;
         let mut key: Option<(u32, u32)> = None;
+        // (ruby, left edge of its base cell) of the ruby bases that start on this line.
+        let mut ruby_cells: Vec<(usize, f32)> = Vec::new();
+        let line_end = boxes.last().map_or(0, |b| b.end);
         for (pc, off, hyphen) in placed {
             if !self.text_items && key.is_some() {
                 // A page-map layout needs only the key of the first piece.
@@ -1590,10 +1809,18 @@ impl<'a, 'e> Flow<'a, 'e> {
                     add += per_space;
                 }
             }
-            let px_x = x0 + off + add;
+            let mut px_x = x0 + off + add;
             let seg = &segs[pc.seg as usize];
             let st = self.st(seg.style);
             let ci = p.char_index(pc.start);
+            if !p.ruby.is_empty() && self.text_items {
+                if let Some(i) = p.ruby_at(pc.start, pc.end) {
+                    if p.ruby[i].start == pc.start && p.ruby[i].end <= line_end {
+                        ruby_cells.push((i, px_x));
+                    }
+                }
+                px_x += pc.spread / 2.0;
+            }
             match &seg.kind {
                 SegKind::Image { src, w, h } => {
                     let y = baseline - image_ascent(st.vertical_align, *h, sa) - seg.shift;
@@ -1631,7 +1858,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                     if shown.trim().is_empty() && !st.white_space.keeps_spaces() {
                         continue;
                     }
-                    if self.merge_runs && st.letter_spacing == 0.0 && st.word_spacing == 0.0 && self.out.items.len() > first_item {
+                    if self.merge_runs && st.letter_spacing == 0.0 && st.word_spacing == 0.0 && pc.spread == 0.0 && self.out.items.len() > first_item {
                         // Giant paragraph: extend the previous run of this line (same text
                         // node and style) instead of adding one run per word.
                         if let Some(Draw::Text(prev)) = self.out.items.last_mut() {
@@ -1673,7 +1900,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                         underline: st.underline,
                         strike: st.line_through,
                         gray: st.color,
-                        letter_spacing: st.letter_spacing,
+                        letter_spacing: st.letter_spacing + pc.spread,
                         deco_w: width,
                         line_top: top,
                         line_bottom: bottom,
@@ -1689,6 +1916,31 @@ impl<'a, 'e> Flow<'a, 'e> {
                     ta.deco_w = tb.x - ta.x;
                 }
             }
+        }
+        // Ruby text centred over its base cell, its bottom on the top of the base's
+        // glyphs. Drawn only: no DOM node, so selection and page text skip it.
+        for (i, left) in ruby_cells {
+            let r = &p.ruby[i];
+            let seg = p.seg_at(r.start);
+            let (bface, bpx) = self.seg_face(seg);
+            let (a, _) = self.env.fonts.vmetrics(bface, bpx);
+            let (_, rd) = self.env.fonts.vmetrics(r.face, r.px);
+            let x = left + (r.base_w + r.extra() - r.ruby_w) / 2.0;
+            self.out.items.push(Draw::Text(TextRun {
+                x,
+                baseline: baseline - seg.shift - a + rd,
+                face: r.face,
+                px: r.px,
+                text: r.text.clone(),
+                width: r.ruby_w,
+                node: NONE,
+                link: NO_LINK,
+                gray: r.gray,
+                deco_w: r.ruby_w,
+                line_top: top,
+                line_bottom: bottom,
+                ..Default::default()
+            }));
         }
         self.y = bottom;
         let key = key.unwrap_or((self.dom.node(owner).order, 0));

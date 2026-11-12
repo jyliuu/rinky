@@ -637,7 +637,7 @@ impl HtmlDocument {
             }
             let Some(t) = dom.text(n) else { continue };
             let p = dom.node(n).parent;
-            if dom.element(p).is_some_and(|e| e.in_svg_tree() || matches!(e.name.as_str(), "script" | "style")) {
+            if dom.element(p).is_some_and(|e| e.in_svg_tree() || matches!(e.name.as_str(), "script" | "style")) || in_ruby_text(dom, p) {
                 continue;
             }
             // A new block starts a new line.
@@ -1657,6 +1657,20 @@ impl Drop for HtmlDocument {
 }
 
 /// Adds `r` to `rects`, merged with the last one when it is on the same line.
+/// True when element `p` is or is inside an `<rt>` or `<rp>`: ruby text, drawn above
+/// its base but not part of the document text (search, page text).
+fn in_ruby_text(dom: &crate::dom::Dom, mut p: crate::dom::NodeId) -> bool {
+    while let Some(e) = dom.element(p) {
+        match e.name.as_str() {
+            "rt" | "rp" => return true,
+            "ruby" | "p" | "div" | "body" => return false,
+            _ => {}
+        }
+        p = dom.node(p).parent;
+    }
+    false
+}
+
 fn push_line_rect(rects: &mut Vec<Rect>, r: Rect) {
     match rects.last_mut() {
         Some(last) if last.y == r.y => *last = last.union(&r),

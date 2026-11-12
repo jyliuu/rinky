@@ -52,6 +52,7 @@ const CASES: &[(&str, &str, &[usize], Variant)] = &[
     ("lang", "crates/ink-html/tests/fixtures/lang.epub", &[0], Variant::Hyphenate),
     ("pagelist", "crates/ink-html/tests/fixtures/pagelist.epub", &[0, 1], Variant::Default),
     ("malformed", "crates/ink-html/tests/fixtures/malformed.epub", &[0, 1, 2], Variant::Default),
+    ("ruby", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::Default),
 ];
 
 fn settings(v: Variant) -> LayoutSettings {

@@ -439,6 +439,7 @@ table[border="0"] td, table[border="0"] th { border: none }
 caption { text-align: center; padding: 4px }
 center { text-align: center }
 a[href] { text-decoration: underline }
+rt { font-size: 50%; text-indent: 0 }
 "#;
 
 /// Origins in cascade order (later wins at equal importance).

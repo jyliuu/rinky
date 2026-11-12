@@ -4,6 +4,15 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Ruby: readings that a book marks up with `<ruby>` (furigana in Japanese books,
+  readings in Chinese textbooks) are drawn in small type centred above their
+  characters instead of after them, and are left out of search and of selected text.
+  A reading wider than its characters spaces them apart rather than
+  running into its neighbours, and lines with readings get the room they need.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added
