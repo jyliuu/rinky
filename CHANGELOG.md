@@ -19,8 +19,9 @@ All notable changes to rinky are listed here. The format is based on
 - *Annotations* in Aa › Layout shows or hides those annotations for the open book,
   and in Settings › Default layout for the books you open from then on. It also
   shows or hides annotations that plugins add above or below the text: compiled-in
-  plugins can now annotate the text of reflowable books (several at once), and the
-  book is laid out again when a plugin changes its annotations.
+  plugins can now annotate the text of reflowable books (several at once). Their
+  annotations are worked out in the background while you read, never hold up
+  opening a book or turning a page, and appear on a page as soon as they are ready.
 - A long press can look a word up with a plugin made for the book's language while
   the dictionary still takes every other word: the first plugin that takes the word
   gets it.

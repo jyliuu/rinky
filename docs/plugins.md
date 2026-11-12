@@ -407,15 +407,14 @@ impl Plugin for Hello {
 
 ### Text annotations (`Plugin::text_annotator`)
 
-A Rust plugin can draw short texts above or below the text of reflowable books, laid
-out like `<ruby>`: the annotated range is the base, the annotation is drawn centred
-above it (`Annotation::over`, readings) or below it (`Annotation::under`, glosses) at
-half its size. The two tiers are laid out separately with the same rules (overhang,
-condensing, even pitch, no line break inside a base); one range can have both. Return an `Arc<dyn TextAnnotator>` from
+A Rust plugin can draw short texts above or below the text of reflowable books, like
+`<ruby>`: the annotated range is the base, the annotation is drawn centred above it
+(`Annotation::over`, readings) or below it (`Annotation::under`, glosses) at half its
+size. One range can have both. Return an `Arc<dyn TextAnnotator>` from
 `Plugin::text_annotator` (default `None`):
 
 ```rust
-use ink_plugin::{Annotation, TextAnnotator};
+use ink_plugin::{Annotation, AnnotationPosition, TextAnnotator};
 
 struct Shout;
 
@@ -426,60 +425,79 @@ impl TextAnnotator for Shout {
     fn annotate(&self, paragraph: &str, _lang: Option<&str>) -> Vec<Annotation> {
         paragraph.match_indices('!').map(|(i, _)| Annotation::over(i..i + 1, "loud")).collect()
     }
+    // Optional, with these defaults:
+    fn layout_version(&self) -> u64 { 0 }
+    fn positions(&self) -> &[AnnotationPosition] { &[AnnotationPosition::Over] }
+    fn ideograph_spacing(&self, _lang: Option<&str>) -> f32 { 0.0 }
 }
 
 // in impl Plugin for MyPlugin:
 fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator.clone()) }
 ```
 
+**Layout and drawing are separate.** Pagination asks only `wants` (once per paragraph)
+and the declarations (`positions`, `ideograph_spacing`, `layout_version`); it never
+calls `annotate` and never depends on what it returns. A paragraph `wants` says yes to
+gets the room of an annotation on every line, in each of `positions()`, and
+`ideograph_spacing` em between its ideographs. `annotate` runs when pages are drawn,
+on a background thread at the lowest priority: the page shown first, then the two
+pages before and after it. A page drawn before its annotations are ready shows
+without them and is drawn again, without a flash, when they arrive. Results are kept
+in a small cache (a few hundred paragraphs).
+
 - **Who is asked:** when a book opens the reader asks the enabled plugins in load order
   (compiled-in plugins in the order of `crates/ink-app/src/plugins.rs`) and uses every
-  annotator it gets, in that order. The engine asks each about every paragraph and
-  merges the results: where two annotations of the same position overlap, the earlier
-  plugin's wins; one over a range and one under it both show. A plugin that panics
-  there is skipped. With *Annotations* off (Aa › Layout for the book, Settings › Default
-  layout for new books) no annotator is used.
+  annotator it gets, in that order. Where two annotations of the same position
+  overlap, the earlier plugin's wins; one over a range and one under it both show. A
+  plugin that panics there is skipped. With *Annotations* off (Aa › Layout for the
+  book, Settings › Default layout for new books) no annotator is used.
 - **`on_book_open` comes first:** while an annotator is in use the reader sends
-  `on_book_open` before the book's first page (otherwise it comes after it), then
-  reads `version()` again and lays the book out anew if it moved. So a plugin can learn
-  the book (its language, its own per-book settings) in `on_book_open`, set its
-  annotations up and bump the version there, and the first page already shows them.
+  `on_book_open` before the book's first page (otherwise it comes after it), then reads
+  the versions again. So a plugin can learn the book (its language, its own per-book
+  settings) in `on_book_open` and set itself up there; the first page already uses it.
 - **The text:** `wants` and `annotate` get one paragraph as it is laid out (whitespace
   collapsed, without the text of `<rt>` and `<rp>`) and its language (`lang`/`xml:lang`,
   else the book's), so an annotator for one language says no to the others in `wants`.
-  Ranges are byte ranges of that text. Build annotations with `Annotation::over` (above
-  the text) or `Annotation::under` (below it); the type is `#[non_exhaustive]` so fields
-  can be added later. The engine drops ranges that are empty, out of bounds, inside a
-  character, overlapping an earlier annotation of the same position (this annotator's
-  or an earlier one's) or a `<ruby>` base of the book in that position (the book's ruby
-  wins), and annotations with no text. It
-  never breaks a line inside an annotated range.
-- **Line rhythm:** every paragraph for which `wants` returns true gets the room of an
-  annotation above all its lines (room below comes only with annotations under the
-  text), even when `annotate` then returns nothing for it, so
-  a page of text the annotator reads keeps one line pitch whether or not a paragraph
-  has annotations. `wants` is therefore also the switch for that room: return false for
-  paragraphs the annotator never annotates (another script, say). Book `<ruby>` keeps
-  its own rule: only paragraphs with ruby get the room.
+  Ranges are byte ranges of that text. Build annotations with `Annotation::over` or
+  `Annotation::under` (the types are `#[non_exhaustive]` so fields can be added later).
+  The engine drops ranges that are empty, out of bounds, inside a character, across
+  two lines, overlapping an earlier annotation of the same position (this annotator's
+  or an earlier one's) or a `<ruby>` base of the book in that position (the book's
+  ruby wins), annotations with no text, and annotations in a position the annotator
+  did not declare in `positions()`.
+- **Placement:** annotations never move the text. Each sits centred over its
+  characters; all of a paragraph's annotations on a page share one size, the largest
+  (up to half the text size) that keeps 0.35 em between neighbours and inside the line,
+  at least 55 % of the normal size. Where even that does not fit, they are pushed
+  apart, off centre. Ask for `ideograph_spacing` (for example 0.15 em for readings in
+  Latin letters over Chinese) so most fit at full size. Book `<ruby>` markup is part of
+  the document and keeps its own rules (it may move characters apart).
+- **Line rhythm:** the room is reserved whatever `annotate` returns, so a page of text
+  the annotator reads keeps one line pitch whether or not a paragraph gets annotations.
+  `wants` is also the switch for that room: return false for paragraphs the annotator
+  never annotates (another script, say).
 - **Drawing only:** annotations are not document text. Positions, selection, search,
   highlights and the text plugins read stay as without them.
-- **Threads and cost:** the pagination threads call the annotator for every paragraph
-  of the book, so it is `Send + Sync`, must not block, and `wants` should be a cheap
-  test that lets most paragraphs through untouched.
-- **Changing the output:** the output must be a function of (paragraph, language,
-  version). To change it (a new mode, another word list), bump `version()` from any
-  callback (`on_action`, `on_ui_result` for a dialog, card or settings menu answer,
-  `on_tick`, `on_http`, `on_book_open`): the reader reads it before every frame and
-  whenever it rebuilds its layout, and a new version paginates the book again, like a
-  font size change. Returning a different annotator later has no effect until the book is
-  opened again.
+- **Threads and cost:** `wants` runs on the pagination threads for every paragraph of
+  the book: keep it a cheap check. `annotate` runs on a background thread for the
+  paragraphs of the pages shown and around them; it may take a little time but should
+  not block. Both must be `Send + Sync`.
+- **Two versions:** the output must be a function of (paragraph, language, versions).
+  Bump `version()` when only what `annotate` returns changes (another word list): the
+  annotations are computed again and the page shown is drawn again, the pages stay.
+  Bump `layout_version()` when `wants`, `positions` or `ideograph_spacing` change (a mode
+  that turns annotations on or off): the book is paginated again, like a font size
+  change. The reader reads both before every frame, so any callback can bump them
+  (`on_action`, `on_ui_result` for a dialog, card or settings menu answer, `on_tick`,
+  `on_http`, `on_book_open`). Returning a different annotator later has no effect until
+  the book is opened again.
 - **Failures:** a panic in `wants` or `annotate` is caught; the engine logs it once and
-  lays the rest of the book out without that annotator's annotations. The other
+  goes on without that annotator's annotations for the rest of the book. The other
   annotators go on.
-- **Rust only:** a Lua plugin cannot offer an annotator. The annotator runs on the
-  pagination threads, for every paragraph of the book, while the Lua state belongs to
-  the UI thread and every Lua call goes through the host's sandbox and time limits;
-  calling it per paragraph would make pagination many times slower.
+- **Rust only:** a Lua plugin cannot offer an annotator. `wants` runs on the pagination
+  threads for every paragraph of the book, and `annotate` on a background thread, while
+  the Lua state belongs to the UI thread and every Lua call goes through the host's
+  sandbox and time limits.
 
 ### Example: Wikipedia (`plugins/wikipedia`)
 

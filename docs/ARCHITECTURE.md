@@ -177,15 +177,21 @@ get wrong:
   (`Document::fixed_view`, `set_fixed_view`); `FixedOptions::view` and `with_view`
   are the one mapping between the two. The reader keeps a book's choices in its
   sidecar and puts them over the defaults (`screens/reader/aa.rs`, `fixed_view`).
-- **Ruby and annotations are drawing only.** `ink-html` draws the text of `<rt>`
-  above its base (below with `ruby-position: under`), and the annotations of `LayoutSettings::annotators` (each an
-  `ink_doc::TextAnnotator`, from a plugin) the same way (`layout.rs`, `Ruby`). Both are
-  draw items without a DOM node: positions, selection, search and `read_around` never
-  see them. `LayoutSettings::ruby` off leaves both out. Each annotator's id and the
-  version read when its `AnnotatorHandle` was made are part of the settings' equality
-  and cache key, so a version bump repaginates; annotators run on the pagination
-  threads, and a panic in one is caught and turns that one off for the rest of that
-  layout.
+- **Ruby and annotations are drawing only.** `ink-html` lays out the text of `<rt>`
+  above its base (below with `ruby-position: under`) as part of the page
+  (`layout.rs`, `Ruby`). The annotations of `LayoutSettings::annotators` (each an
+  `ink_doc::TextAnnotator`, from a plugin) are a layer drawn over the page: the layout
+  only reserves room in the paragraphs an annotator `wants` (and the extra space it
+  declares between ideographs) and records those paragraphs (`AnnotatedPara`);
+  `annot.rs` computes the annotations on a background thread, keeps them in a small
+  cache and places them when a page is drawn, without moving the text.
+  `Document::annotations_pending` tells the reader to draw the page again when they
+  arrive. Neither is a draw item with a DOM node: positions, selection, search and
+  `read_around` never see them. `LayoutSettings::ruby` off leaves both out. Each
+  annotator's id and the `layout_version` read when its `AnnotatorHandle` was made are
+  part of the settings' equality and cache key (a bump repaginates); `version` only
+  invalidates the cached annotations. A panic in an annotator is caught and turns that
+  one off for the rest of that layout.
 
 ## Device layer
 
