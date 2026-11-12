@@ -19,6 +19,10 @@ All notable changes to rinky are listed here. The format is based on
   now annotate the text of reflowable books, and the book is laid out again when a
   plugin changes its annotations.
 
+### Fixed
+- Chinese, Japanese and Korean text in menus, cards, messages and title bars shows
+  in the Kindle's own sans fonts instead of as empty boxes.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added
