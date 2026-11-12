@@ -92,6 +92,15 @@ pub struct HtmlDocument {
     positions_dirty: Cell<bool>,
     /// Positions whose pages the paginators work out (see [`HtmlDocument::set_interest_positions`]).
     interest: Interest,
+    /// Annotations of the settings' annotators drawn over pages, and their cache.
+    annot: crate::annot::Layer,
+    /// Compute missing annotations while drawing ([`HtmlDocument::set_annotations_sync`]).
+    annot_sync: bool,
+    /// Paragraph annotations the page drawn last waits for: (cache key, version).
+    annot_waiting: RefCell<Vec<(crate::annot::Key, u64)>>,
+    /// Keep the annotations of the page drawn last ([`HtmlDocument::placed_annotations`]).
+    annot_record: bool,
+    annot_placed: RefCell<Vec<crate::annot::Placed>>,
 }
 
 impl std::fmt::Debug for HtmlDocument {
@@ -174,6 +183,11 @@ impl HtmlDocument {
             positions: RefCell::new(HashMap::new()),
             positions_dirty: Cell::new(false),
             interest: Arc::new(Vec::new()),
+            annot: crate::annot::Layer::default(),
+            annot_sync: false,
+            annot_waiting: RefCell::new(Vec::new()),
+            annot_record: false,
+            annot_placed: RefCell::new(Vec::new()),
         }
     }
 
@@ -340,6 +354,11 @@ impl HtmlDocument {
             return;
         }
         let Some(path) = &self.cache_path else { return };
+        if self.params.as_ref().is_some_and(Params::annotator_failed) {
+            // Laid out partly with annotations and partly without: not the map the
+            // settings give.
+            return;
+        }
         let (chapters, known) = {
             let m = self.shared.map.lock().unwrap_or_else(|e| e.into_inner());
             let (known, n) = (m.chapters.iter().filter(|c| c.is_some()).count(), m.chapters.len());
@@ -637,7 +656,7 @@ impl HtmlDocument {
             }
             let Some(t) = dom.text(n) else { continue };
             let p = dom.node(n).parent;
-            if dom.element(p).is_some_and(|e| e.in_svg_tree() || matches!(e.name.as_str(), "script" | "style")) {
+            if dom.element(p).is_some_and(|e| e.in_svg_tree() || matches!(e.name.as_str(), "script" | "style")) || in_ruby_text(dom, p) {
                 continue;
             }
             // A new block starts a new line.
@@ -802,7 +821,8 @@ impl HtmlDocument {
     /// x position of char boundary `i` of a run (0: its left edge).
     fn char_x(&self, t: &TextRun, i: usize) -> f32 {
         if i == 0 {
-            return t.x;
+            // The cell of the first character takes in the room the layout made for ruby.
+            return t.x - t.pad_before;
         }
         let end = t.text.char_indices().nth(i).map_or(t.text.len(), |(b, _)| b);
         t.x + self.fonts.borrow_mut().width(t.face, t.px, &t.text[..end]) + t.letter_spacing * i as f32
@@ -819,7 +839,8 @@ impl HtmlDocument {
         let mut best: Option<(f32, usize)> = None;
         for (k, (_, t)) in items.iter().enumerate() {
             let dyv = if py < t.line_top { t.line_top - py } else if py > t.line_bottom { py - t.line_bottom } else { 0.0 };
-            let dxv = if px < t.x { t.x - px } else if px > t.x + t.width { px - t.x - t.width } else { 0.0 };
+            let cell = t.x - t.pad_before;
+            let dxv = if px < cell { cell - px } else if px > t.x + t.width { px - t.x - t.width } else { 0.0 };
             let d = dyv * 4.0 + dxv;
             if best.is_none_or(|b| d < b.0) {
                 best = Some((d, k));
@@ -948,6 +969,28 @@ impl HtmlDocument {
         }
     }
 
+    /// Draws pages with their annotations computed while drawing instead of in the
+    /// background (tests, tools and golden images: the page is complete at once).
+    pub fn set_annotations_sync(&mut self, on: bool) {
+        self.annot_sync = on;
+    }
+
+    /// Keep the annotations of each page drawn ([`HtmlDocument::placed_annotations`]).
+    pub fn set_record_annotations(&mut self, on: bool) {
+        self.annot_record = on;
+    }
+
+    /// The annotations of the page drawn last, as placed (with
+    /// [`HtmlDocument::set_record_annotations`]; tests and tools).
+    pub fn placed_annotations(&self) -> Vec<crate::annot::Placed> {
+        self.annot_placed.borrow().clone()
+    }
+
+    /// Paragraphs whose annotations are cached (tests).
+    pub fn annotations_cached(&self) -> usize {
+        self.annot.cached()
+    }
+
     /// The flow layout of the chapter holding `page` (for tests and tools).
     pub fn page_layout(&self, page: usize) -> Result<(ChapterLayout, PageSpan)> {
         let (_, laid, span, _) = self.page_items(page)?;
@@ -1005,6 +1048,8 @@ impl Document for HtmlDocument {
         self.worker = None;
         self.layout = settings.clone();
         self.params = Some(Params::new(settings));
+        self.annot.reset();
+        self.annot_waiting.borrow_mut().clear();
         self.laid.borrow_mut().clear();
         self.save_positions();
         self.positions.borrow_mut().clear();
@@ -1128,6 +1173,10 @@ impl Document for HtmlDocument {
         PageCount { pages, complete }
     }
 
+    fn annotations_pending(&self) -> bool {
+        self.annot_waiting.borrow().iter().any(|&(key, version)| !self.annot.fresh(key, version))
+    }
+
     fn render_page(&mut self, page: usize, canvas: &mut Canvas) -> Result<()> {
         let t = Instant::now();
         let (c, laid, span, _) = self.page_items(page)?;
@@ -1136,6 +1185,7 @@ impl Document for HtmlDocument {
         let images = &self.images;
         let mut fonts = self.fonts.borrow_mut();
         fonts.set_embolden(self.layout.embolden);
+        let annotate = self.layout.ruby && !self.layout.annotators.is_empty();
         let mut img = |src: &str, w: u32, h: u32| -> Option<Arc<Canvas>> {
             // An inline SVG is named by its node, which is only unique in its chapter.
             let name = if src.starts_with("#svg:") { std::borrow::Cow::Owned(format!("{src}@{c}")) } else { std::borrow::Cow::Borrowed(src) };
@@ -1160,6 +1210,47 @@ impl Document for HtmlDocument {
             })
         };
         crate::render::draw_page(canvas, &mut fonts, &laid.lay, &span, self.layout.margin_top, &mut img);
+        if annotate {
+            let ta = Instant::now();
+            // The paragraphs of the pages around this one, for the background thread.
+            let lp = self.locate(page).map(|(_, lp)| lp).unwrap_or(0);
+            let mut around: Vec<usize> = Vec::new();
+            for k in [1isize, -1, 2, -2] {
+                if let Some(sp) = lp.checked_add_signed(k).and_then(|p| laid.pages.get(p)) {
+                    for p in crate::annot::paragraphs_on(&laid.lay, sp) {
+                        if !around.contains(&p) {
+                            around.push(p);
+                        }
+                    }
+                }
+            }
+            let state = self.params()?.annotator_state.clone();
+            let dy = self.layout.margin_top - span.y0;
+            let stats = self.annot.draw_page(canvas, &mut fonts, &self.layout, &state, c, &laid.lay, &span, dy, &around, self.annot_sync, self.annot_record);
+            if self.annot_record {
+                *self.annot_placed.borrow_mut() = stats.placed;
+            }
+            log::debug!("ink-html: page {} annotations: {} drawn, {} paragraphs waited for, {:?}", page + 1, stats.drawn, stats.missing.len(), ta.elapsed());
+            *self.annot_waiting.borrow_mut() = stats.missing;
+            // Near the chapter's end or start: the adjacent chapter's first or last page,
+            // when that chapter is laid out already (no layout work for this).
+            if !self.annot_sync {
+                let near = [(lp + 2 >= laid.pages.len(), c + 1, true), (lp < 2 && c > 0, c.wrapping_sub(1), false)];
+                for (is_near, other, first) in near {
+                    if !is_near {
+                        continue;
+                    }
+                    let Some(ol) = self.laid.borrow().get(&other).cloned() else { continue };
+                    let span = if first { ol.pages.first() } else { ol.pages.last().filter(|_| ol.complete) };
+                    if let Some(sp) = span {
+                        self.annot.prefetch(&self.layout, &state, other, &ol.lay, sp);
+                    }
+                }
+            }
+        } else {
+            self.annot_waiting.borrow_mut().clear();
+            self.annot_placed.borrow_mut().clear();
+        }
         let ms = t.elapsed().as_millis();
         if ms > 300 {
             log::info!("ink-html: page {} drawn in {ms} ms", page + 1);
@@ -1380,7 +1471,7 @@ impl Document for HtmlDocument {
             }
             match last_line {
                 Some(l) if joins_next && l != t.line_top => {}
-                Some(l) if l == t.line_top && t.x > prev_right + 0.5 => text.push(' '),
+                Some(l) if l == t.line_top && t.x - t.pad_before > prev_right + 0.5 => text.push(' '),
                 Some(l) if l == t.line_top => {}
                 Some(_) => text.push('\n'),
                 None => {}
@@ -1657,6 +1748,20 @@ impl Drop for HtmlDocument {
 }
 
 /// Adds `r` to `rects`, merged with the last one when it is on the same line.
+/// True when element `p` is or is inside an `<rt>` or `<rp>`: ruby text, drawn above
+/// its base but not part of the document text (search, page text).
+fn in_ruby_text(dom: &crate::dom::Dom, mut p: crate::dom::NodeId) -> bool {
+    while let Some(e) = dom.element(p) {
+        match e.name.as_str() {
+            "rt" | "rp" => return true,
+            "ruby" | "p" | "div" | "body" => return false,
+            _ => {}
+        }
+        p = dom.node(p).parent;
+    }
+    false
+}
+
 fn push_line_rect(rects: &mut Vec<Rect>, r: Rect) {
     match rects.last_mut() {
         Some(last) if last.y == r.y => *last = last.union(&r),

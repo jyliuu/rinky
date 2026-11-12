@@ -69,6 +69,10 @@ pub struct ReaderSettings {
     /// Use the book's own CSS (new books; a book's own choice wins). Off: the reader's
     /// plain style and the settings above only.
     pub publisher_styles: bool,
+    /// Show annotations: texts drawn above or below the text, from the book's ruby
+    /// markup (`<ruby>`) or from plugins' text annotators (new books; a book's own
+    /// choice wins).
+    pub annotations: bool,
 }
 
 /// [`ReaderSettings::paragraph_indent`] value for "use the book's indent".
@@ -167,6 +171,7 @@ impl Default for ReaderSettings {
             font_weight: 0,
             hyphenate: false,
             publisher_styles: true,
+            annotations: true,
         }
     }
 }
@@ -494,7 +499,7 @@ mod tests {
         let old = parse_settings(b"[reader]\nfont_px = 44.0\njustify = false\n").unwrap();
         let d = ReaderSettings::default();
         assert_eq!((old.reader.paragraph_spacing, old.reader.paragraph_indent, old.reader.font_weight), (0.0, INDENT_BOOK, 0));
-        assert!(!old.reader.hyphenate && old.reader.publisher_styles);
+        assert!(!old.reader.hyphenate && old.reader.publisher_styles && old.reader.annotations);
         assert_eq!(old.reader.font_px, 44.0);
         assert_eq!(parse_settings(b"").unwrap().reader, d);
         // Set values survive a save and load.
@@ -504,6 +509,7 @@ mod tests {
         s.reader.font_weight = 2;
         s.reader.hyphenate = true;
         s.reader.publisher_styles = false;
+        s.reader.annotations = false;
         let out = toml::to_string_pretty(&s).unwrap();
         assert_eq!(parse_settings(out.as_bytes()).unwrap().reader, s.reader);
     }

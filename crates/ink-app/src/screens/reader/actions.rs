@@ -346,6 +346,7 @@ impl ReaderScreen {
                 log::info!("reader: plugin {plugin} item {item}");
                 let doc = self.doc.as_deref_mut().map(|d| d as &mut dyn ink_doc::Document);
                 cx.plugins.trigger(plugin, item, doc);
+                self.relayout_after_plugin(cx);
             }
             _ => log::warn!("reader: unknown gesture action {action:?}"),
         }

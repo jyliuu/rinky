@@ -26,7 +26,11 @@ struct Run {
 }
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ink-settings-{name}-{}", std::process::id()));
+    // A new folder for every call: reusing one name raced with the background threads of
+    // an earlier run still writing into it (mkdir then failed with "File exists").
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("ink-settings-{name}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -959,4 +963,12 @@ fn plugin_settings_open_as_a_page_built_from_the_plugin_menu() {
     let content = content_rect(PORTRAIT);
     assert!(u.iter().any(|d| d.rect.h <= rows::ROW_H && d.rect.y >= content.y), "one row repainted: {u:?}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn annotations_default_is_saved() {
+    let d = Settings::default();
+    assert!(d.reader.annotations);
+    let r = run("annotations", &format!("{}{}shot annotations-off\n", main_tap("page:layout"), tap_row(layout_rows(&d.reader), "annotations")));
+    assert!(!saved(&r).reader.annotations);
 }

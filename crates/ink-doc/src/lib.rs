@@ -8,12 +8,15 @@
 //! - Notes: [`Link::footnote`] marks note references, [`Document::note`] returns the note.
 //! - [`LayoutSettings`]: what a reflowable layout depends on (also the page-map cache key).
 //! - [`ResourceLoader`]: images, stylesheets and fonts referenced by a book.
+//! - [`TextAnnotator`]: readings drawn above text like ruby (see [`annotate`]).
 
 #![warn(missing_docs)]
 
+pub mod annotate;
 pub mod position;
 pub mod timing;
 
+pub use annotate::{Annotation, AnnotationPosition, AnnotatorHandle, TextAnnotator};
 pub use position::{FlowAnchor, Location, PagePosition, Position, Quad, Step, TextOffset, XPointer};
 
 use ink_device::{Canvas, Point, Rect};
@@ -160,6 +163,14 @@ pub struct LayoutSettings {
     pub embolden: u8,
     /// Font family override (`None` = embedded Noto Serif).
     pub font_family: Option<String>,
+    /// Annotators whose annotations are drawn above or below the text like ruby, in
+    /// order (an earlier one wins where two overlap; empty = none). Part of the cache key
+    /// as `id@version` each. Ignored while [`LayoutSettings::ruby`] is off.
+    pub annotators: Vec<AnnotatorHandle>,
+    /// Draw ruby: the text of the book's `<rt>` elements above their base text, and the
+    /// annotations of [`LayoutSettings::annotators`]. Off: the base text only, with the
+    /// `<rt>` text left out. On by default.
+    pub ruby: bool,
 }
 
 impl LayoutSettings {
@@ -182,6 +193,8 @@ impl LayoutSettings {
             paragraph_indent: None,
             embolden: 0,
             font_family: None,
+            annotators: Vec::new(),
+            ruby: true,
         }
     }
 
@@ -198,6 +211,12 @@ impl LayoutSettings {
         }
         if self.embolden != 0 {
             extra += &format!("-w{}", self.embolden);
+        }
+        if !self.ruby {
+            extra += "-r0";
+        } else if !self.annotators.is_empty() {
+            extra += "-a";
+            extra += &self.annotators.iter().map(AnnotatorHandle::key).collect::<Vec<_>>().join(",");
         }
         format!(
             "{}x{}-m{}_{}_{}_{}-f{}-l{}-j{}-h{}-p{}-{}{extra}",
@@ -396,6 +415,13 @@ pub trait Document {
     /// Returns true when work was done; false when `page` was ready already, is out of
     /// range, or the document has nothing to prepare. Default: nothing.
     fn prefetch_page(&mut self, _page: usize) -> bool {
+        false
+    }
+
+    /// True while the page drawn last lacks annotations that are being computed (see
+    /// [`annotate`]): draw it again when this turns false. The reader asks while it
+    /// shows such a page. Default: never.
+    fn annotations_pending(&self) -> bool {
         false
     }
 
@@ -744,5 +770,10 @@ mod tests {
         c.embolden = 1;
         let k3 = c.cache_key();
         assert!(a.cache_key() != k1 && k1 != k2 && k2 != k3);
+        // Ruby is on by default and keeps the key; off changes it.
+        let mut r = a.clone();
+        assert!(r.ruby);
+        r.ruby = false;
+        assert_ne!(a.cache_key(), r.cache_key());
     }
 }

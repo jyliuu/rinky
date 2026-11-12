@@ -39,8 +39,11 @@ pub use registry::{ControlTile, LibraryEntry, ReaderAction, Registrar, Registry,
 /// crates and the app use the same version without their own dependency.
 pub use serde_json;
 
+/// The text annotation API of [`Plugin::text_annotator`], re-exported for plugin crates.
+pub use ink_doc::{Annotation, AnnotationPosition, TextAnnotator};
 use ink_doc::Selection;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Errors from plugins and the host.
 #[derive(Debug, thiserror::Error)]
@@ -166,7 +169,32 @@ pub trait Plugin {
     fn on_tick(&mut self, _cx: &mut HostCtx) -> Result<()> {
         Ok(())
     }
+    /// A [`TextAnnotator`] whose annotations the reader draws above or below the text of
+    /// reflowable books, like ruby, or `None` (the default). Every enabled plugin's
+    /// annotator is used, in plugin order (an earlier one wins where two overlap). Asked
+    /// when a book opens;
+    /// the reader keeps the `Arc` and reads [`TextAnnotator::version`] again before
+    /// every frame (after any plugin callback: actions, dialog and card answers, ticks,
+    /// network results) and whenever it rebuilds its layout settings, so
+    /// a plugin changes the annotations by bumping the version, not by returning a
+    /// different annotator. Rust plugins only: the annotator runs on the pagination
+    /// thread for every paragraph of the book, where a Lua call would be too slow.
+    fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> {
+        None
+    }
+    /// Whether this plugin takes the dictionary lookup of `text` (`lang`: the book's
+    /// language, if known). Every plugin that registers the selection action
+    /// [`LOOKUP_ACTION`] is a lookup provider; the reader's long press gives the lookup to
+    /// the first provider, in plugin order, that claims it. The default claims every
+    /// lookup, so a plugin for one language returns false for the others and the general
+    /// dictionary after it gets them. Lua plugins always claim (the default).
+    fn claims_lookup(&self, _text: &str, _lang: Option<&str>) -> bool {
+        true
+    }
 }
+
+/// The selection action id of a dictionary lookup ([`Plugin::claims_lookup`]).
+pub const LOOKUP_ACTION: &str = "lookup";
 
 /// Lifecycle events the manager broadcasts.
 #[derive(Clone, Debug, PartialEq)]
@@ -391,6 +419,42 @@ impl PluginManager {
         r
     }
 
+    /// The [`TextAnnotator`]s of the enabled plugins whose [`Plugin::text_annotator`]
+    /// returns one, with each plugin's name, in load order (compiled-in plugins in their
+    /// registration order, then Lua plugins, which have none). The engine uses them all;
+    /// where two annotations of the same position overlap, the earlier plugin's wins. A
+    /// plugin that panics when asked is skipped.
+    pub fn text_annotators(&self) -> Vec<(String, Arc<dyn TextAnnotator>)> {
+        self.slots
+            .iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| {
+                let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.plugin.text_annotator()));
+                Some((s.manifest.name.clone(), asked.ok().flatten()?))
+            })
+            .collect()
+    }
+
+    /// The plugin that takes the dictionary lookup of `text`: the first enabled plugin,
+    /// in registration (plugin) order, that registered the selection action
+    /// [`LOOKUP_ACTION`] and claims it ([`Plugin::claims_lookup`]). A plugin that panics
+    /// when asked does not claim.
+    pub fn lookup_provider(&self, text: &str, lang: Option<&str>) -> Option<String> {
+        let mut seen: Vec<&str> = Vec::new();
+        for a in self.registry.selection_actions.iter().filter(|a| a.id == LOOKUP_ACTION) {
+            if seen.contains(&a.plugin.as_str()) {
+                continue;
+            }
+            seen.push(&a.plugin);
+            let Some(slot) = self.enabled(&a.plugin) else { continue };
+            let claims = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.plugin.claims_lookup(text, lang))).unwrap_or(false);
+            if claims {
+                return Some(a.plugin.clone());
+            }
+        }
+        None
+    }
+
     /// Routes a triggered registry entry to its plugin.
     pub fn action(&mut self, plugin: &str, id: &str, cx: &mut HostCtx) -> Result<()> {
         self.call(plugin, &format!("on_action({id})"), |p| p.on_action(cx, id))
@@ -519,6 +583,97 @@ mod tests {
         fn on_page_change(&mut self, _cx: &mut HostCtx, _page: usize) -> Result<()> {
             Err(if self.1 { PluginError::Limit("time limit".into()) } else { PluginError::Failed("bad".into()) })
         }
+    }
+
+    /// Offers a text annotator (or panics when asked, for `panics`).
+    struct Annotating {
+        m: PluginManifest,
+        panics: bool,
+    }
+
+    struct Nothing;
+    impl TextAnnotator for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        fn version(&self) -> u64 {
+            0
+        }
+        fn wants(&self, _: &str, _: Option<&str>) -> bool {
+            false
+        }
+        fn annotate(&self, _: &str, _: Option<&str>) -> Vec<Annotation> {
+            Vec::new()
+        }
+    }
+
+    impl Plugin for Annotating {
+        fn manifest(&self) -> &PluginManifest {
+            &self.m
+        }
+        fn on_load(&mut self, _reg: &mut Registrar) -> Result<()> {
+            Ok(())
+        }
+        fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> {
+            assert!(!self.panics, "test plugin panics on purpose");
+            Some(Arc::new(Nothing))
+        }
+    }
+
+    fn annotating(name: &str, panics: bool) -> Box<dyn Plugin> {
+        Box::new(Annotating { m: PluginManifest::new(name, "1", &[]), panics })
+    }
+
+    #[test]
+    fn every_enabled_plugin_with_an_annotator_supplies_it_in_order() {
+        let mut mgr = PluginManager::new();
+        assert!(mgr.text_annotators().is_empty());
+        mgr.load(vec![counter("plain", false), annotating("broken", true), annotating("first", false), annotating("second", false)]);
+        let names = |m: &PluginManager| m.text_annotators().into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(names(&mgr), ["first", "second"], "plugins without one and one that panics are skipped");
+        mgr.disable("first", "test");
+        assert_eq!(names(&mgr), ["second"], "a disabled plugin's annotator is not used");
+        let mut off = PluginManager::new();
+        off.load_disabled(vec![annotating("off", false)]);
+        assert!(off.text_annotators().is_empty(), "nor one the user turned off");
+    }
+
+    /// A lookup provider for one language (`None`: every lookup).
+    struct Lookup(PluginManifest, Option<&'static str>, bool);
+
+    impl Plugin for Lookup {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        fn on_load(&mut self, reg: &mut Registrar) -> Result<()> {
+            reg.selection_action(LOOKUP_ACTION, "Look up");
+            Ok(())
+        }
+        fn claims_lookup(&self, _text: &str, lang: Option<&str>) -> bool {
+            assert!(!self.2, "test plugin panics on purpose");
+            self.1.is_none_or(|l| Some(l) == lang)
+        }
+    }
+
+    fn lookup(name: &str, lang: Option<&'static str>, panics: bool) -> Box<dyn Plugin> {
+        Box::new(Lookup(PluginManifest::new(name, "1", &[]), lang, panics))
+    }
+
+    #[test]
+    fn the_first_lookup_provider_that_claims_a_lookup_takes_it() {
+        let mut mgr = PluginManager::new();
+        assert_eq!(mgr.lookup_provider("x", None), None);
+        // One provider: it takes every lookup, as before.
+        mgr.load(vec![lookup("dictionary", None, false)]);
+        assert_eq!(mgr.lookup_provider("word", Some("en")).as_deref(), Some("dictionary"));
+        // A provider for one language placed before it takes only its language.
+        let mut mgr = PluginManager::new();
+        mgr.load(vec![lookup("broken", None, true), lookup("german", Some("de"), false), counter("plain", false), lookup("dictionary", None, false)]);
+        assert_eq!(mgr.lookup_provider("Wort", Some("de")).as_deref(), Some("german"));
+        assert_eq!(mgr.lookup_provider("word", Some("en")).as_deref(), Some("dictionary"));
+        assert_eq!(mgr.lookup_provider("word", None).as_deref(), Some("dictionary"), "a panicking provider does not claim");
+        mgr.disable("german", "test");
+        assert_eq!(mgr.lookup_provider("Wort", Some("de")).as_deref(), Some("dictionary"));
     }
 
     #[test]

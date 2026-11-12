@@ -263,7 +263,7 @@ pub enum UiFallback {
 /// dictionary pronunciations, combining double macrons and breves, math and dingbats):
 /// Noto Sans Regular shipped in rinky's `fonts` folder (all IPA of the Oxford
 /// dictionaries, a sans face like most UI fonts), the embedded Noto Serif, then the
-/// system's symbol fonts ([`ink_platform::Platform::symbol_fonts`]).
+/// system's symbol and CJK fonts ([`ink_platform::Platform::symbol_fonts`]).
 pub fn default_ui_fallbacks() -> Vec<UiFallback> {
     let p = ink_platform::current();
     let mut v = vec![UiFallback::File(p.install_root().join("fonts/NotoSans-Regular.ttf")), UiFallback::Builtin];

@@ -1146,6 +1146,10 @@ impl Input for ReaderInput {
             if let Some(ev) = self.queue.pop_front() {
                 return Ok(Some(ev));
             }
+            // Background work done (`crate::wake`): the loop paints once more.
+            if crate::wake::take() {
+                return Ok(None);
+            }
             let wait = match crate::input::wait_step(caller, self.next_deadline(caller, now), now, polled) {
                 crate::input::WaitStep::Return => return Ok(None),
                 crate::input::WaitStep::Poll(d) => d,
@@ -1168,6 +1172,7 @@ impl Input for ReaderInput {
                 raw(self.udc.as_ref().map(|f| f.as_raw_fd()), libc::POLLPRI | libc::POLLERR),
                 raw(stop_fd, libc::POLLIN),
                 raw(self.net.as_ref().map(|(_, rd)| rd.as_raw_fd()), libc::POLLIN),
+                raw(crate::wake::fd(), libc::POLLIN),
             ];
             let ms = wait.as_millis().min(i32::MAX as u128) as i32;
             // SAFETY: fds is a valid array of pollfd.

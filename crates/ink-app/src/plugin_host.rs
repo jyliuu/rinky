@@ -600,6 +600,25 @@ impl PluginHost {
         self.book = None;
     }
 
+    /// The text annotators the reader lays books out with: those of every enabled plugin
+    /// that offers one, in plugin order ([`PluginManager::text_annotators`]). Asked when
+    /// a book opens.
+    pub fn text_annotators(&self) -> Vec<std::sync::Arc<dyn ink_plugin::TextAnnotator>> {
+        self.manager
+            .text_annotators()
+            .into_iter()
+            .map(|(plugin, a)| {
+                log::info!("plugins: text annotator {} from {plugin} (version {})", a.id(), a.version());
+                a
+            })
+            .collect()
+    }
+
+    /// The plugin that takes the dictionary lookup of `text` ([`PluginManager::lookup_provider`]).
+    pub fn lookup_provider(&self, text: &str, lang: Option<&str>) -> Option<String> {
+        self.manager.lookup_provider(text, lang)
+    }
+
     // -- Registries ------------------------------------------------------------------------
 
     /// Reader menu entries, sorted by order.

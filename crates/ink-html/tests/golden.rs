@@ -33,6 +33,50 @@ enum Variant {
     SmallNoPublisher,
     /// Publisher styles off.
     NoPublisher,
+    /// Annotations of [`CodepointAnnotator`].
+    Annotated,
+    /// The code points drawn under the text ([`CodepointAnnotator`] with `under`).
+    AnnotatedUnder,
+}
+
+/// A test annotator: every CJK ideograph gets its code point in hex, over the text or
+/// (`.0`) under it.
+struct CodepointAnnotator(bool);
+
+impl ink_doc::TextAnnotator for CodepointAnnotator {
+    fn id(&self) -> &str {
+        "codepoints"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, p: &str, _lang: Option<&str>) -> bool {
+        p.chars().any(is_ideograph)
+    }
+    fn positions(&self) -> &[ink_doc::AnnotationPosition] {
+        if self.0 {
+            &[ink_doc::AnnotationPosition::Under]
+        } else {
+            &[ink_doc::AnnotationPosition::Over]
+        }
+    }
+    fn ideograph_spacing(&self, _lang: Option<&str>) -> f32 {
+        0.15
+    }
+    fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<ink_doc::Annotation> {
+        p.char_indices().filter(|&(_, c)| is_ideograph(c)).map(|(i, c)| {
+            let (range, text) = (i..i + c.len_utf8(), format!("{:x}", c as u32));
+            if self.0 {
+                ink_doc::Annotation::under(range, text)
+            } else {
+                ink_doc::Annotation::over(range, text)
+            }
+        }).collect()
+    }
+}
+
+fn is_ideograph(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c)
 }
 
 /// (golden name prefix, book under the repo root, 0-based pages, layout).
@@ -52,6 +96,9 @@ const CASES: &[(&str, &str, &[usize], Variant)] = &[
     ("lang", "crates/ink-html/tests/fixtures/lang.epub", &[0], Variant::Hyphenate),
     ("pagelist", "crates/ink-html/tests/fixtures/pagelist.epub", &[0, 1], Variant::Default),
     ("malformed", "crates/ink-html/tests/fixtures/malformed.epub", &[0, 1, 2], Variant::Default),
+    ("ruby", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::Default),
+    ("ruby-annotated", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::Annotated),
+    ("ruby-under", "crates/ink-html/tests/fixtures/ruby.epub", &[0], Variant::AnnotatedUnder),
 ];
 
 fn settings(v: Variant) -> LayoutSettings {
@@ -64,6 +111,8 @@ fn settings(v: Variant) -> LayoutSettings {
             s.publisher_styles = false;
         }
         Variant::NoPublisher => s.publisher_styles = false,
+        Variant::Annotated => s.annotators = vec![ink_doc::AnnotatorHandle::new(std::sync::Arc::new(CodepointAnnotator(false)))],
+        Variant::AnnotatedUnder => s.annotators = vec![ink_doc::AnnotatorHandle::new(std::sync::Arc::new(CodepointAnnotator(true)))],
     }
     s
 }
@@ -94,8 +143,7 @@ fn count_diff(a: &Canvas, b: &Canvas) -> Option<usize> {
 fn write_diff(expected: &Canvas, actual: &Canvas, path: &Path) {
     let (w, h) = (actual.width, actual.height);
     let mut rgb = Vec::with_capacity(w * h * 3);
-    for i in 0..w * h {
-        let a = actual.pixels[i];
+    for (i, &a) in actual.pixels.iter().enumerate().take(w * h) {
         let e = expected.pixels.get(i).copied().unwrap_or(255);
         if a != e || (expected.width, expected.height) != (w, h) {
             rgb.extend_from_slice(&[255, 0, 0]);
@@ -168,6 +216,8 @@ fn golden_case(&(name, book, pages, variant): &Case, update: bool, gdir: &Path, 
         // Open once per case: layout is the slow part.
         let mut doc = ink_formats::open(&book).unwrap_or_else(|e| panic!("{}: {e}", book.display()));
         doc.set_layout(&settings(variant)).unwrap();
+        // Annotations are drawn with the page here, not in the background.
+        doc.set_annotations_sync(true);
         for &page in pages {
             let file = format!("{name}-p{:04}.png", page + 1);
             let golden = gdir.join(&file);

@@ -8,7 +8,9 @@
 //! - Layout: line spacing, side, top and bottom margins as sliders over a live preview.
 //!   Side margins are measured from the screen edges; the top and bottom margins from
 //!   the inner edge of their status bar (from the screen edge when that bar is off). The
-//!   margins never move the bars ([`super::footer::text_layout`]).
+//!   margins never move the bars ([`super::footer::text_layout`]). Then paragraph
+//!   spacing, first-line indent and "Annotations" (the book's `<ruby>`
+//!   readings and the annotations of a plugin's text annotator; off hides both).
 //! - Page: page turn wave on/off (the panel's hardware sweep), "Status bars...", full
 //!   refresh interval, night mode.
 //! - View (PDF, CBZ, XPS only): fit (whole page or page width), columns (two for
@@ -38,7 +40,8 @@
 //! Actions: `aa-size:PX`, `aa-spacing:F`, `aa-margin:PX`, `aa-mtop:PX`, `aa-mbottom:PX`,
 //! `aa-justify:on|off`, `aa-hyph:on|off`, `aa-publisher:on|off` (the book's CSS),
 //! `aa-pspace:EM` (space after paragraphs; Layout tab), `aa-indent:EM` (first-line indent,
-//! negative: the book's own; Layout tab), `aa-weight:N` (darker text 0..=2; Text tab),
+//! negative: the book's own; Layout tab), `aa-annotations:on|off` (book ruby and plugin annotations; Layout
+//! tab), `aa-weight:N` (darker text 0..=2; Text tab),
 //! `aa-preset:I`, `aa-font:NAME` (empty: the
 //! default family), `aa-anim:on|off`, `aa-night:on|off`, `aa-flash:N`, `aa-statusbars`,
 //! `aa-linkback`, `aa-global`, `close`, the View tab's `aa-fit:page|width`,
@@ -267,6 +270,8 @@ pub struct Shown {
     pub weight: u8,
     /// The book's own CSS is used.
     pub publisher: bool,
+    /// Annotations (book ruby and plugin annotations) are drawn.
+    pub annotations: bool,
     /// Font family (`None`: built-in).
     pub font: Option<String>,
     /// Page tab values.
@@ -307,6 +312,7 @@ impl Shown {
             indent: l.paragraph_indent.unwrap_or(INDENT_BOOK),
             weight: l.embolden,
             publisher: l.publisher_styles,
+            annotations: l.ruby,
             font: l.font_family.as_deref().and_then(family_value),
             extras: extras.clone(),
         }
@@ -334,6 +340,7 @@ impl Shown {
             ("aa-justify", _) => self.justify = on,
             ("aa-hyph", _) => self.hyph = on,
             ("aa-publisher", _) => self.publisher = on,
+            ("aa-annotations", _) => self.annotations = on,
             ("aa-pspace", Some(v)) => self.para_space = v.clamp(0.0, 3.0),
             ("aa-indent", Some(v)) => self.indent = indent_value(v),
             ("aa-weight", Some(v)) => self.weight = weight_value(v),
@@ -449,6 +456,7 @@ pub fn stored_book_layout(settings: &Settings, book: &BookSettings, w: u32, h: u
     l.justify = book.justify.unwrap_or(l.justify);
     l.hyphenate = book.hyphenation.unwrap_or(l.hyphenate);
     l.publisher_styles = book.publisher_styles.unwrap_or(l.publisher_styles);
+    l.ruby = book.annotations.unwrap_or(l.ruby);
     l.paragraph_spacing = book.paragraph_spacing.unwrap_or(l.paragraph_spacing);
     l.paragraph_indent = book.paragraph_indent.map_or(l.paragraph_indent, super::indent_em);
     l.embolden = book.font_weight.map_or(l.embolden, |v| v.min(WEIGHT_MAX));
@@ -487,6 +495,7 @@ pub fn apply(action: &str, l: &LayoutSettings, book: &mut BookSettings) -> bool 
         ("aa-justify", _) => book.justify = Some(on),
         ("aa-hyph", _) => book.hyphenation = Some(on),
         ("aa-publisher", _) => book.publisher_styles = Some(on),
+        ("aa-annotations", _) => book.annotations = Some(on),
         ("aa-pspace", Some(v)) => book.paragraph_spacing = Some(v.clamp(0.0, 3.0)),
         ("aa-indent", Some(v)) => book.paragraph_indent = Some(indent_value(v)),
         ("aa-weight", Some(v)) => book.font_weight = Some(weight_value(v)),
@@ -606,6 +615,7 @@ pub fn make_global(settings: &mut Settings, l: &LayoutSettings, book: &BookSetti
     r.justify = l.justify;
     r.hyphenate = l.hyphenate;
     r.publisher_styles = l.publisher_styles;
+    r.annotations = l.ruby;
     r.paragraph_spacing = l.paragraph_spacing;
     r.paragraph_indent = l.paragraph_indent.unwrap_or(INDENT_BOOK);
     r.font_weight = l.embolden;
@@ -1408,6 +1418,7 @@ fn rows(tab: Tab, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
             Row::one("sliders", None, SliderPanel::height(4, PREVIEW_H), Box::new(SliderPanel::new(vec![1, 2, 3, 4], shown, screen_w))),
             Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, seg(chips(&PARA_SPACINGS, "aa-pspace"), |s| s.para_space)),
             Row::one("indent", Some("First-line indent"), CONTROL_H, seg(chips(&INDENTS, "aa-indent"), |s| s.indent)),
+            Row::one("annotations", None, CONTROL_H, toggle("Annotations", "aa-annotations", |s| s.annotations)),
         ],
         Tab::View => vec![
             Row::one("fit", Some("Fit"), CONTROL_H, seg(named_chips(&FITS, "aa-fit"), |s| named_index(&FITS, fit_name(s.view().fit)))),
@@ -1594,6 +1605,28 @@ mod tests {
         assert_eq!(SLIDERS[0].shown_text(SLIDERS[0].snap(47.0)), "48 px");
     }
 
+    /// "Annotations": on by default, the book's choice over the global
+    /// default, shown by the sheet, and "Use for all books" makes it the default.
+    #[test]
+    fn annotations_choice_per_book_over_the_global_default() {
+        let mut s = Settings::default();
+        let mut b = BookSettings::default();
+        assert!(book_layout(&s, &b, 1272, 1696).ruby, "on by default");
+        s.reader.annotations = false;
+        let base = book_layout(&s, &b, 1272, 1696);
+        assert!(!base.ruby, "a book without its own choice follows the default");
+        assert!(apply("aa-annotations:on", &base, &mut b));
+        assert_eq!(b.annotations, Some(true));
+        let l = book_layout(&s, &b, 1272, 1696);
+        assert!(l.ruby, "the book's choice wins");
+        let mut shown = Shown::new(&base, &AaExtras::default());
+        assert!(!shown.annotations);
+        shown.apply("aa-annotations:on");
+        assert!(shown.annotations);
+        make_global(&mut s, &l, &b);
+        assert!(s.reader.annotations);
+    }
+
     #[test]
     fn typography_actions_reach_the_layout_and_the_defaults() {
         let s = Settings::default();
@@ -1640,7 +1673,7 @@ mod tests {
                 let keys: &[&str] = match (tab, extras.fixed.is_some()) {
                     (0, true) => &["fit", "columns", "contrast", "spreads", "crop", "rtl"],
                     (0, _) => &["preset", "size", "font", "justify", "hyph", "publisher", "weight", "global"],
-                    (1, _) => &["sliders", "pspace", "indent", "global"],
+                    (1, _) => &["sliders", "pspace", "indent", "annotations", "global"],
                     _ => &["statusbars", "flash", "night"],
                 };
                 let mut seen: Vec<Rect> = Vec::new();

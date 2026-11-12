@@ -58,6 +58,7 @@ pub mod sleep;
 pub mod sysfs;
 pub mod trace;
 pub mod usb;
+pub mod wake;
 pub mod wifi;
 
 #[cfg(target_os = "linux")]

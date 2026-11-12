@@ -7,6 +7,18 @@
 //! - Inline content: whitespace collapsing per `white-space`, `text-transform`, line
 //!   breaking at UAX #14 opportunities, hyphenation by language, soft hyphens,
 //!   justification, sub/superscript, inline images.
+//! - Ruby: the text of `<rt>` drawn centred above its base at a reduced size (the `rt`
+//!   font size, 50 % by default), or below it with `ruby-position: under`, and the
+//!   annotations of the settings' annotators laid out the same way ([`Ruby`]); the tiers
+//!   above and below are laid out separately. A base is never broken across lines. A
+//!   ruby wider than its base reaches over the text beside it (overhang, as little off
+//!   centre as keeps the bases' pitch) with a little more than a space to the next
+//!   reading; readings that still do not fit are condensed, one size for the tier down
+//!   to 70 %; only then do bases move apart, by one pitch for a run of annotated
+//!   characters (one or two characters without a reading inside a run share it)
+//!   ([`place_ruby`]). A paragraph with ruby gets the same extra space above (and below,
+//!   for ruby under the text) every line. Ruby text is drawn only: it has no DOM
+//!   position, so selection, search and page text never see it.
 //! - Output: [`ChapterLayout`] with slices (the units the paginator places), draw items
 //!   (text, images) per slice and border rectangles in flow coordinates.
 
@@ -20,6 +32,7 @@ use crate::style::{
 use ink_doc::{resolve_href, LayoutSettings};
 use ink_text::linebreak::{break_opportunities, Break};
 use ink_text::Hyphenator;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// No link.
@@ -65,6 +78,10 @@ pub struct TextRun {
     /// The line breaks inside a word here: the `-` that ends `text` was added by the
     /// layout (hyphenation or a soft hyphen), it is not in the book.
     pub hyphenated: bool,
+    /// Space the layout put right before this run's first character to make room for
+    /// ruby text (not a space of the text): the run's character cell starts this much
+    /// left of `x`, so selection and word finding see no gap there.
+    pub pad_before: f32,
 }
 
 /// An image drawn at a rectangle.
@@ -155,6 +172,9 @@ pub struct ChapterLayout {
     pub links: Vec<LinkRef>,
     /// Total height.
     pub height: f32,
+    /// The paragraphs annotators want, for the annotations drawn over the page
+    /// ([`crate::annot`]); empty without annotators.
+    pub annotated: Vec<AnnotatedPara>,
 }
 
 /// What a chapter layout depends on.
@@ -168,6 +188,8 @@ pub struct Params {
     pub content_w: f32,
     /// Settings.
     pub settings: LayoutSettings,
+    /// Which of the settings' annotators failed (shared by the clones of these params).
+    pub(crate) annotator_state: AnnotatorState,
 }
 
 impl Params {
@@ -175,9 +197,349 @@ impl Params {
     pub fn new(s: &LayoutSettings) -> Self {
         let content_w = (s.width as f32 - s.margin_left - s.margin_right).max(50.0);
         let content_h = (s.height as f32 - s.margin_top - s.margin_bottom).max(50.0);
-        Params { content_h, left: s.margin_left, content_w, settings: s.clone() }
+        Params { content_h, left: s.margin_left, content_w, settings: s.clone(), annotator_state: AnnotatorState::new(s.annotators.len()) }
+    }
+
+    /// True once an annotator of these settings panicked: the layouts made with these
+    /// params from then on have none of its annotations.
+    pub fn annotator_failed(&self) -> bool {
+        self.annotator_state.any()
     }
 }
+
+/// Which annotators of one layout still run. Every clone of one [`Params`] (the
+/// foreground and the pagination threads) shares it; after a panic in an annotator that
+/// one is off for the rest of the book, the others go on. Always equal: it is state, not
+/// a setting.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AnnotatorState(Arc<[AtomicBool]>);
+
+impl PartialEq for AnnotatorState {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl AnnotatorState {
+    fn new(n: usize) -> Self {
+        AnnotatorState((0..n).map(|_| AtomicBool::new(false)).collect())
+    }
+
+    pub(crate) fn failed(&self, i: usize) -> bool {
+        self.0.get(i).is_none_or(|f| f.load(Ordering::Relaxed))
+    }
+
+    fn any(&self) -> bool {
+        self.0.iter().any(|f| f.load(Ordering::Relaxed))
+    }
+
+    /// Turns annotator `i` off; true the first time (the caller logs it once).
+    pub(crate) fn fail(&self, i: usize) -> bool {
+        self.0.get(i).is_some_and(|f| !f.swap(true, Ordering::Relaxed))
+    }
+}
+
+/// Text drawn above a base: the text of an `<rt>` element, or an annotation of the
+/// settings' annotators.
+#[derive(Clone, Debug)]
+struct Ruby {
+    /// Byte range of the base in the paragraph (or chunk) text.
+    start: usize,
+    end: usize,
+    /// The text drawn above.
+    text: String,
+    face: FaceKey,
+    px: f32,
+    gray: u8,
+    /// Width of the base text and of the ruby text (measured by [`Flow::lay_lines`]).
+    base_w: f32,
+    ruby_w: f32,
+    /// Space added before the base so its ruby text keeps [`RUBY_GAP`] from the ruby
+    /// text before it, and the offset of the ruby text from the centre of its base (set
+    /// by [`place_ruby`]).
+    pad: f32,
+    shift: f32,
+    /// Drawn below the base (`ruby-position: under`, [`ink_doc::AnnotationPosition::Under`]).
+    under: bool,
+}
+
+/// Least space between two ruby texts side by side, in em of the ruby text: a little
+/// more than a space, so two readings side by side never read as one word.
+const RUBY_GAP: f32 = 0.35;
+/// Smallest size ruby text is condensed to (share of its normal size) so it fits over
+/// its bases without moving them apart.
+const RUBY_MIN_SCALE: f32 = 0.7;
+
+/// How far a ruby text may sit off the centre of its base (share of the base width) so
+/// that its neighbours keep their pitch.
+const RUBY_SHIFT: f32 = 0.25;
+
+/// One ruby text of a run being placed: its index in the run, its centred left edge
+/// with no space added, its width, the gap after it and how far it may sit off centre.
+#[derive(Clone, Copy)]
+struct RunText {
+    k: usize,
+    ideal: f32,
+    w: f32,
+    gap: f32,
+    slack: f32,
+}
+
+/// Buffers [`place_ruby`] reuses from run to run.
+#[derive(Default)]
+struct RubyScratch {
+    texts: Vec<RunText>,
+    /// Pool-adjacent-violators blocks: (sum, count).
+    blocks: Vec<(f32, usize)>,
+    /// Spacing before each text of the run (sum of widths and gaps).
+    offsets: Vec<f32>,
+    /// Upper bounds of the positions, from the right.
+    upper: Vec<f32>,
+}
+
+/// True when every ruby text of the tier fits at `scale` without space added before
+/// any base: each within [`RUBY_SHIFT`] of its base's centre, [`RUBY_GAP`] from the one
+/// before. One pass: placing each text as far left as allowed is the test.
+fn ruby_fits(ruby: &[Ruby], before: &[(f32, bool)], scale: f32) -> bool {
+    let (mut x, mut reach) = (0.0f32, f32::NEG_INFINITY);
+    for (r, &(w, brk)) in ruby.iter().zip(before) {
+        if brk {
+            reach = f32::NEG_INFINITY;
+        }
+        x += w;
+        if !r.text.is_empty() {
+            let rw = r.ruby_w * scale;
+            let ideal = x + (r.base_w - rw) / 2.0;
+            let at = reach.max(ideal - RUBY_SHIFT * r.base_w);
+            if at > ideal + RUBY_SHIFT * r.base_w + 0.01 {
+                return false;
+            }
+            reach = at + rw + RUBY_GAP * r.px * scale;
+        }
+        x += r.base_w;
+    }
+    true
+}
+
+/// Places the ruby texts of a paragraph over their bases at `scale` of their size:
+/// sets [`Ruby::pad`] (space before the base) and [`Ruby::shift`] (offset of the ruby
+/// text from the centre of its base). Returns the space added in all.
+///
+/// Overhang: a ruby text may reach over the text beside it, as long as it keeps
+/// [`RUBY_GAP`] from the ruby text before it, and sit up to [`RUBY_SHIFT`] of its base's
+/// width off centre. A run of bases with nothing between them (one reading per
+/// character) keeps one pitch: every base of the run but the first gets the same pad
+/// `u`, the smallest that lets the texts fit (a binary search over a one-pass test, only
+/// for runs that do not fit as they are). The first base of a run moves only if the
+/// ruby text before the run reaches too far. The texts are then put as close to their
+/// centres as their spacing allows (least squares: pool-adjacent-violators on the
+/// positions less the spacing before each), within the bounds the fit allows.
+/// `before[i]` is the raw width of the text between ruby `i - 1` and ruby `i`, and
+/// whether a forced line break lies in it (the readings start afresh there). The edges
+/// of the lines the text is broken into are the boxes' lead and trail.
+fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32, sc: &mut RubyScratch) -> f32 {
+    let n = ruby.len();
+    let (mut x, mut reach, mut total) = (0.0f32, f32::NEG_INFINITY, 0.0f32);
+    let mut i = 0;
+    while i < n {
+        if before[i].1 {
+            reach = f32::NEG_INFINITY;
+        }
+        x += before[i].0;
+        let mut j = i + 1;
+        while j < n && before[j].0 == 0.0 && !before[j].1 {
+            j += 1;
+        }
+        let run = &mut ruby[i..j];
+        sc.texts.clear();
+        let mut left = x;
+        for (k, r) in run.iter_mut().enumerate() {
+            r.shift = 0.0;
+            r.pad = 0.0;
+            if !r.text.is_empty() {
+                let w = r.ruby_w * scale;
+                sc.texts.push(RunText { k, ideal: left + (r.base_w - w) / 2.0, w, gap: RUBY_GAP * r.px * scale, slack: RUBY_SHIFT * r.base_w });
+            }
+            left += r.base_w;
+        }
+        let run_w = left - x;
+        let (mut pad0, mut u) = (0.0f32, 0.0f32);
+        if let Some(first) = sc.texts.first() {
+            pad0 = (reach - (first.ideal + first.slack)).max(0.0);
+            let fits = |texts: &[RunText], u: f32| {
+                let mut end = reach;
+                texts.iter().all(|t| {
+                    let ideal = t.ideal + pad0 + t.k as f32 * u;
+                    let at = end.max(ideal - t.slack);
+                    end = at + t.w + t.gap;
+                    at <= ideal + t.slack + 0.01
+                })
+            };
+            if !fits(&sc.texts, 0.0) {
+                let mut hi = sc.texts.iter().map(|t| t.w + t.gap).fold(0.0, f32::max) * 2.0;
+                while !fits(&sc.texts, hi) {
+                    hi *= 2.0;
+                }
+                let mut lo = 0.0;
+                for _ in 0..14 {
+                    let mid = (lo + hi) / 2.0;
+                    if fits(&sc.texts, mid) {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                u = hi;
+            }
+            sc.blocks.clear();
+            sc.offsets.clear();
+            let mut spacing = 0.0;
+            for t in &sc.texts {
+                sc.offsets.push(spacing);
+                let mut b = (t.ideal + pad0 + t.k as f32 * u - spacing, 1usize);
+                while let Some(&(sum, cnt)) = sc.blocks.last() {
+                    if sum / cnt as f32 > b.0 / b.1 as f32 {
+                        sc.blocks.pop();
+                        b = (b.0 + sum, b.1 + cnt);
+                    } else {
+                        break;
+                    }
+                }
+                sc.blocks.push(b);
+                spacing += t.w + t.gap;
+            }
+            sc.upper.clear();
+            sc.upper.resize(sc.texts.len(), 0.0);
+            let mut up = f32::INFINITY;
+            for m in (0..sc.texts.len()).rev() {
+                let t = sc.texts[m];
+                up = up.min(t.ideal + pad0 + t.k as f32 * u + t.slack);
+                sc.upper[m] = up;
+                if m > 0 {
+                    up -= sc.texts[m - 1].w + sc.texts[m - 1].gap;
+                }
+            }
+            let mut m = 0;
+            let mut end = reach;
+            for &(sum, cnt) in &sc.blocks {
+                let q = sum / cnt as f32;
+                for _ in 0..cnt {
+                    let t = sc.texts[m];
+                    let ideal = t.ideal + pad0 + t.k as f32 * u;
+                    let lo = end.max(ideal - t.slack);
+                    let at = (q + sc.offsets[m]).max(lo).min(sc.upper[m].max(lo));
+                    run[t.k].shift = at - ideal;
+                    end = at + t.w + t.gap;
+                    m += 1;
+                }
+            }
+            reach = end;
+        }
+        for (k, r) in run.iter_mut().enumerate() {
+            r.pad = if k == 0 { pad0 } else { u };
+        }
+        let added = pad0 + u * (run.len() - 1) as f32;
+        total += added;
+        x += added + run_w;
+        i = j;
+    }
+    total
+}
+
+/// One or two ideographs without a reading between two with readings get an empty ruby
+/// each, so they share the even pitch of the run around them ([`place_ruby`]); an empty
+/// ruby text draws nothing and blocks no other.
+fn fill_short_gaps(text: &str, ruby: Vec<Ruby>) -> Vec<Ruby> {
+    let ideograph = is_ideograph;
+    let mut out: Vec<Ruby> = Vec::with_capacity(ruby.len());
+    for r in ruby {
+        if let Some(prev) = out.last() {
+            let between = &text[prev.end..r.start];
+            let n = between.chars().count();
+            if (1..=2).contains(&n) && between.chars().all(ideograph) {
+                let mut at = prev.end;
+                for c in between.chars() {
+                    let e = at + c.len_utf8();
+                    out.push(Ruby { start: at, end: e, text: String::new(), ..r.clone() });
+                    at = e;
+                }
+            }
+        }
+        out.push(r);
+    }
+    out
+}
+
+/// True for a CJK ideograph.
+pub fn is_ideograph(c: char) -> bool {
+    matches!(c, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{20000}'..='\u{2ffff}' | '\u{3005}')
+}
+
+/// What the annotators want of one paragraph ([`Flow::annotation_room`]).
+#[derive(Clone, Debug, Default)]
+struct Room {
+    /// Bit `i`: annotator `i` wants the paragraph.
+    wanted: u64,
+    over: bool,
+    under: bool,
+    /// Extra space between ideographs, em.
+    spacing: f32,
+    lang: Option<String>,
+}
+
+/// A paragraph annotators want: what drawing its annotations needs ([`crate::annot`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnnotatedPara {
+    /// The paragraph text as laid out (what `annotate` gets).
+    pub text: Arc<str>,
+    /// Its language.
+    pub lang: Option<Arc<str>>,
+    /// Bit `i`: annotator `i` of the settings wants it.
+    pub wanted: u64,
+    /// Where its chars come from, in runs: (char index in `text`, text node, DOM char
+    /// offset of the run's first char).
+    pub map: Vec<(u32, NodeId, u32)>,
+    /// The byte offset of every [`AnnotatedPara::STRIDE`]th char of `text`.
+    pub stride: Vec<u32>,
+    /// The book's own ruby bases (byte ranges, drawn under): annotations give way.
+    pub book: Vec<(u32, u32, bool)>,
+}
+
+impl AnnotatedPara {
+    fn new(text: &str, src: &SrcRuns, segs: &[Seg], ruby: &[Ruby], room: Room) -> Self {
+        let mut map = Vec::with_capacity(src.runs.len());
+        let mut c = 0u32;
+        for &(seg, dom, n) in &src.runs {
+            map.push((c, segs[seg as usize].node, dom));
+            c += n;
+        }
+        let stride = text.char_indices().step_by(Self::STRIDE).map(|(b, _)| b as u32).collect();
+        AnnotatedPara {
+            text: Arc::from(text),
+            lang: room.lang.map(|l| Arc::from(l.as_str())),
+            wanted: room.wanted,
+            map,
+            stride,
+            book: ruby.iter().map(|r| (r.start as u32, r.end as u32, r.under)).collect(),
+        }
+    }
+
+    /// Chars between two entries of [`AnnotatedPara::stride`].
+    pub const STRIDE: usize = 64;
+
+    /// The text node and DOM char offset of the char at byte `b` (at most
+    /// [`AnnotatedPara::STRIDE`] chars counted).
+    pub fn source(&self, b: usize) -> Option<(NodeId, u32)> {
+        let k = self.stride.partition_point(|&o| o as usize <= b).checked_sub(1)?;
+        let c = (k * Self::STRIDE + self.text.get(self.stride[k] as usize..b)?.chars().count()) as u32;
+        let i = self.map.partition_point(|&(o, _, _)| o <= c).checked_sub(1)?;
+        let (o, node, dom) = self.map[i];
+        Some((node, dom + (c - o)))
+    }
+}
+
+/// Annotation text size as a share of the base text's size.
+const ANNOTATION_SCALE: f32 = 0.5;
 
 /// Things layout needs from outside.
 pub struct Env<'a> {
@@ -308,6 +670,8 @@ struct InlineText {
     text: String,
     src: SrcRuns,
     segs: Vec<Seg>,
+    /// Ruby of the book's markup, in text order.
+    ruby: Vec<Ruby>,
 }
 
 impl InlineText {
@@ -356,6 +720,8 @@ struct Piece {
     start: usize,
     end: usize,
     width: f32,
+    /// Space before the piece for ruby text ([`TextRun::pad_before`]).
+    pad_before: f32,
 }
 
 /// An unbreakable box: text between two break opportunities.
@@ -369,12 +735,19 @@ struct WordBox {
     forced: bool,
     /// The line may end here with a hyphen (soft hyphen or dictionary split).
     hyphen: bool,
+    /// Room the box needs before it when it starts a line, and after it when it ends
+    /// one: its ruby text reaching over the line's edge (0 without ruby).
+    lead: f32,
+    trail: f32,
 }
 
 impl WordBox {
     /// The box cut at byte `cut` into a head `head` wide and the rest `rest` wide.
     fn split(&self, cut: usize, head: f32, hyphen: bool, rest: f32) -> (WordBox, WordBox) {
-        (WordBox { start: self.start, end: cut, width: head, space: 0.0, forced: false, hyphen }, WordBox { start: cut, width: rest, ..*self })
+        (
+            WordBox { start: self.start, end: cut, width: head, space: 0.0, forced: false, hyphen, lead: self.lead, trail: 0.0 },
+            WordBox { start: cut, width: rest, lead: 0.0, ..*self },
+        )
     }
 }
 
@@ -396,6 +769,11 @@ struct Para<'p> {
     /// together: plain ASCII text needs no table and no search.
     wide: Vec<(u32, u32)>,
     segs: &'p [Seg],
+    /// Ruby bases in this text, per tier (over, under), each sorted and not overlapping
+    /// (usually none).
+    tiers: [Vec<Ruby>; 2],
+    /// Space before the char at each byte offset for ruby text (both tiers), sorted.
+    pads: Vec<(usize, f32)>,
 }
 
 impl<'p> Para<'p> {
@@ -408,7 +786,57 @@ impl<'p> Para<'p> {
                 }
             }
         }
-        Para { text, src, wide, segs }
+        Para { text, src, wide, segs, tiers: [Vec::new(), Vec::new()], pads: Vec::new() }
+    }
+
+    /// True when the text has ruby in either tier or space for annotations.
+    fn has_ruby(&self) -> bool {
+        !self.tiers[0].is_empty() || !self.tiers[1].is_empty() || !self.pads.is_empty()
+    }
+
+    /// The index of the ruby of `tier` whose base holds the bytes `start..end`.
+    fn ruby_at(&self, tier: usize, start: usize, end: usize) -> Option<usize> {
+        let t = &self.tiers[tier];
+        let i = t.partition_point(|r| r.end <= start);
+        t.get(i).filter(|r| r.start <= start && end <= r.end).map(|_| i)
+    }
+
+    /// True when byte `b` is strictly inside a ruby base (no line break there).
+    fn inside_ruby(&self, b: usize) -> bool {
+        self.tiers.iter().any(|t| {
+            let i = t.partition_point(|r| r.end <= b);
+            t.get(i).is_some_and(|r| r.start < b)
+        })
+    }
+
+    /// The first ruby base boundary of either tier, or char with space before it,
+    /// strictly inside `start..end`.
+    fn ruby_cut(&self, start: usize, end: usize) -> Option<usize> {
+        let pad = self.pads.get(self.pads.partition_point(|&(o, _)| o <= start)).map(|&(o, _)| o).filter(|&o| o < end);
+        self.tiers
+            .iter()
+            .filter_map(|t| {
+                let r = t[t.partition_point(|r| r.end <= start)..].first()?;
+                if r.start > start {
+                    (r.start < end).then_some(r.start)
+                } else {
+                    (r.end < end).then_some(r.end)
+                }
+            })
+            .chain(pad)
+            .min()
+    }
+
+    /// Space added for ruby before the chars of `start..end`.
+    fn ruby_pads(&self, start: usize, end: usize) -> f32 {
+        let i = self.pads.partition_point(|&(o, _)| o < start);
+        self.pads[i..].iter().take_while(|&&(o, _)| o < end).map(|&(_, p)| p).sum()
+    }
+
+    /// Space added for ruby right before the char at byte `b`.
+    fn pad_at(&self, b: usize) -> f32 {
+        let i = self.pads.partition_point(|&(o, _)| o < b);
+        self.pads.get(i).filter(|&&(o, _)| o == b).map_or(0.0, |&(_, p)| p)
     }
 
     /// Index of the char at byte `b` (or of the first char after it).
@@ -455,6 +883,25 @@ impl<'p> Para<'p> {
             Some(run)
         })
     }
+
+    /// [`Para::runs`] cut also at ruby base boundaries, so a base is its own pieces.
+    fn pieces(&self, start: usize, end: usize) -> impl Iterator<Item = (u32, usize, usize)> + '_ {
+        let mut runs = self.runs(start, end);
+        let mut rest: Option<(u32, usize, usize)> = None;
+        std::iter::from_fn(move || {
+            let (seg, s, e) = match rest.take() {
+                Some(r) => r,
+                None => runs.next()?,
+            };
+            if self.has_ruby() {
+                if let Some(cut) = self.ruby_cut(s, e) {
+                    rest = Some((seg, cut, e));
+                    return Some((seg, s, cut));
+                }
+            }
+            Some((seg, s, e))
+        })
+    }
 }
 
 /// Layout state of a chapter flow.
@@ -495,6 +942,14 @@ pub struct Flow<'a, 'e> {
     /// Lines make text draw items. False for a page-map layout ([`Flow::layout_slices`]),
     /// which needs only the slices: their geometry and keys do not depend on the items.
     text_items: bool,
+    /// Height of the tallest ruby text of the paragraph being laid out (0: no ruby).
+    ruby_h: f32,
+    /// Height of the tallest ruby text drawn under the text of that paragraph (0: none).
+    ruby_under_h: f32,
+    /// Extra space between two ideographs of that paragraph, for annotations (px).
+    ideo_space: f32,
+    /// Buffers of [`place_ruby`].
+    ruby_scratch: RubyScratch,
 }
 
 /// Where [`Flow::layout_until`] stops: once the flow is `extra` px below the first slice
@@ -630,6 +1085,10 @@ impl<'a, 'e> Flow<'a, 'e> {
             stop,
             stopped: false,
             text_items,
+            ruby_h: 0.0,
+            ruby_under_h: 0.0,
+            ideo_space: 0.0,
+            ruby_scratch: RubyScratch::default(),
         };
         if dom.body != NONE {
             f.block(dom.body, p.left, p.content_w);
@@ -1091,6 +1550,12 @@ impl<'a, 'e> Flow<'a, 'e> {
                     }
                     let kids = &dom.node(n).children;
                     let sh = shift + self.valign_shift(n);
+                    if name == "ruby" && self.p.settings.ruby && self.depth <= 400 {
+                        self.depth += 1;
+                        self.collect_ruby(kids, owner, out, l, w, sh);
+                        self.depth -= 1;
+                        continue;
+                    }
                     if self.depth > 400 {
                         // Too deep: the rest of the subtree is plain text.
                         let mut stack: Vec<NodeId> = kids.iter().rev().copied().collect();
@@ -1108,6 +1573,125 @@ impl<'a, 'e> Flow<'a, 'e> {
                 }
             }
         }
+    }
+
+    /// Collects the children `kids` of a `<ruby>` element: the base text goes into the
+    /// paragraph text, each `<rt>` becomes a [`Ruby`] over its base. Bases are `<rb>`
+    /// elements or the content between two `<rt>`s; the `<rt>`s pair with the bases in
+    /// order (`<rb>a</rb><rb>b</rb><rt>x</rt><rt>y</rt>` pairs a-x and b-y). `<rp>` is
+    /// left out, and an `<rt>` that is `display: none` or hidden draws nothing.
+    fn collect_ruby(&mut self, kids: &[NodeId], owner: NodeId, out: &mut InlineText, link: u32, w: f32, shift: f32) {
+        let dom = self.dom;
+        let mut bases: Vec<(usize, usize)> = Vec::new();
+        let mut next = 0usize;
+        let mut anon = out.text.len();
+        // The base text since `from`, without the spaces around it.
+        let base = |out: &InlineText, from: usize| -> Option<(usize, usize)> {
+            let t = &out.text[from..];
+            let lead = t.len() - t.trim_start_matches(' ').len();
+            let s = from + lead;
+            let e = from + t.trim_end_matches(' ').len();
+            (e > s).then_some((s, e))
+        };
+        for &k in kids {
+            match &dom.node(k).kind {
+                NodeKind::Text(t) => {
+                    // Spaces between the parts of a ruby are not text.
+                    if !t.trim().is_empty() {
+                        self.push_text(k, out, link, shift);
+                    }
+                }
+                NodeKind::Element(e) => match e.name.as_str() {
+                    "rp" | "rtc" => {}
+                    "rt" => {
+                        if let Some(b) = base(out, anon) {
+                            bases.push(b);
+                        }
+                        anon = out.text.len();
+                        let Some(&(bs, be)) = bases.get(next) else { continue };
+                        next += 1;
+                        let st = self.st(k);
+                        if st.display == Display::None || st.hidden {
+                            continue;
+                        }
+                        let text = self.dom.text_content(k).split_whitespace().collect::<Vec<_>>().join(" ");
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let face = self.face(st);
+                        let under = st.ruby_under;
+                        out.ruby.push(Ruby { start: bs, end: be, text, face, px: st.font_size, gray: st.color, base_w: 0.0, ruby_w: 0.0, pad: 0.0, shift: 0.0, under });
+                    }
+                    "rb" => {
+                        if let Some(b) = base(out, anon) {
+                            bases.push(b);
+                        }
+                        let from = out.text.len();
+                        self.collect(&[k], owner, out, link, w, shift);
+                        if let Some(b) = base(out, from) {
+                            bases.push(b);
+                        }
+                        anon = out.text.len();
+                    }
+                    _ => self.collect(&[k], owner, out, link, w, shift),
+                },
+            }
+        }
+    }
+
+    /// What the settings' annotators want of the paragraph `text`: the bit of each
+    /// annotator whose [`ink_doc::TextAnnotator::wants`] says yes, whether any of them
+    /// draws over and under the text, and the largest extra space between ideographs
+    /// they ask for (em). Only `wants` and the annotators' declarations: the layout never
+    /// depends on `annotate`. A panic in `wants` turns that annotator off for the rest of
+    /// the book (logged once).
+    fn annotation_room(&mut self, owner: NodeId, text: &str) -> Room {
+        let s = &self.p.settings;
+        let mut room = Room::default();
+        if !s.ruby || s.annotators.is_empty() {
+            return room;
+        }
+        let lang = self.lang_of(owner);
+        for (ai, handle) in s.annotators.iter().enumerate().take(64) {
+            if self.p.annotator_state.failed(ai) {
+                continue;
+            }
+            let a = handle.annotator();
+            let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if !a.wants(text, lang.as_deref()) {
+                    return None;
+                }
+                let (mut over, mut under) = (false, false);
+                for &p in a.positions() {
+                    match p {
+                        ink_doc::AnnotationPosition::Over => over = true,
+                        ink_doc::AnnotationPosition::Under => under = true,
+                        #[allow(unreachable_patterns)]
+                        _ => {}
+                    }
+                }
+                Some((over, under, a.ideograph_spacing(lang.as_deref())))
+            }));
+            match asked {
+                Ok(Some((over, under, spacing))) => {
+                    room.wanted |= 1 << ai;
+                    room.over |= over;
+                    room.under |= under;
+                    if spacing.is_finite() {
+                        room.spacing = room.spacing.max(spacing.clamp(0.0, 2.0));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    if self.p.annotator_state.fail(ai) {
+                        let what = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
+                        log::error!("ink-html: annotator {} panicked ({what}); the rest of the book is laid out without its annotations", handle.key());
+                    }
+                }
+            }
+        }
+        room.lang = lang;
+        room
     }
 
     /// Baseline shift of an inline element relative to its parent.
@@ -1171,9 +1755,15 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
-    /// Width of the bytes `start..end` of a paragraph.
+    /// Width of the bytes `start..end` of a paragraph (with the space added before the
+    /// ruby bases in it).
     fn width(&mut self, p: &Para, start: usize, end: usize) -> f32 {
-        p.runs(start, end).map(|r| self.run_width(p, r)).sum()
+        let w: f32 = p.runs(start, end).map(|r| self.run_width(p, r)).sum();
+        if p.pads.is_empty() {
+            w
+        } else {
+            w + p.ruby_pads(start, end)
+        }
     }
 
     /// Lays out an inline run as one paragraph owned by block `owner`.
@@ -1195,16 +1785,47 @@ impl<'a, 'e> Flow<'a, 'e> {
             // A final line break (or newline in pre text) makes no empty line.
             out.pop();
         }
-        let InlineText { text, src, segs } = out;
+        let InlineText { text, src, segs, mut ruby } = out;
         if text.is_empty() {
             return;
+        }
+        if only_breaks {
+            ruby.clear();
+        }
+        // The text may have lost trailing spaces and breaks since the book's ruby was
+        // collected.
+        ruby.retain(|r| r.end <= text.len());
+        let room = if self.p.settings.annotators.is_empty() { Room::default() } else { self.annotation_room(owner, &text) };
+        (self.ruby_h, self.ruby_under_h, self.ideo_space) = (0.0, 0.0, 0.0);
+        for r in &ruby {
+            let (a, d) = self.env.fonts.vmetrics(r.face, r.px);
+            let h = if r.under { &mut self.ruby_under_h } else { &mut self.ruby_h };
+            *h = h.max(a - d);
+        }
+        if room.wanted != 0 {
+            // An annotator wants this paragraph: its lines get the room of an annotation
+            // in each position it draws in, whatever `annotate` returns later, so the
+            // layout never waits for it and every paragraph it reads has the same pitch.
+            let ost = self.st(owner);
+            let face = self.face(ost);
+            let (a, d) = self.env.fonts.vmetrics(face, ost.font_size * ANNOTATION_SCALE);
+            if room.over {
+                self.ruby_h = self.ruby_h.max(a - d);
+            }
+            if room.under {
+                self.ruby_under_h = self.ruby_under_h.max(a - d);
+            }
+            self.ideo_space = room.spacing * ost.font_size;
+            if self.text_items {
+                self.out.annotated.push(AnnotatedPara::new(&text, &src, &segs, &ruby, room));
+            }
         }
         let para_first_slice = self.out.slices.len();
         if text.len() <= GIANT_PARAGRAPH {
             let mut chars = Vec::with_capacity(src.n);
             chars.extend(src.iter());
             let src = chars;
-            self.lay_lines(owner, &text, &src, &segs, x, w);
+            self.lay_lines(owner, &text, &src, &segs, ruby, x, w);
         } else {
             let mut src_iter = src.iter();
             let merge = std::mem::replace(&mut self.merge_runs, true);
@@ -1223,14 +1844,22 @@ impl<'a, 'e> Flow<'a, 'e> {
                     if let Some(sp) = text[lo..end].rfind([' ', '\n']) {
                         end = lo + sp + 1;
                     }
+                    // Never inside a ruby base (of either tier).
+                    for _ in 0..4 {
+                        let Some(r) = ruby.iter().find(|r| r.start < end && end < r.end) else { break };
+                        end = if r.start > start { r.start } else { r.end };
+                    }
                 }
                 let n = text[start..end].chars().count();
                 let chunk_src: Vec<CharSrc> = src_iter.by_ref().take(n).collect();
-                self.lay_lines(owner, &text[start..end], &chunk_src, &segs, x, w);
+                let chunk_ruby: Vec<Ruby> =
+                    ruby.iter().filter(|r| r.start >= start && r.end <= end).map(|r| Ruby { start: r.start - start, end: r.end - start, ..r.clone() }).collect();
+                self.lay_lines(owner, &text[start..end], &chunk_src, &segs, chunk_ruby, x, w);
                 start = end;
             }
             self.merge_runs = merge;
         }
+        (self.ruby_h, self.ruby_under_h, self.ideo_space) = (0.0, 0.0, 0.0);
         // Widows and orphans: keep two lines together at both ends.
         let n = self.out.slices.len() - para_first_slice;
         if n >= 2 && !self.in_cell {
@@ -1239,12 +1868,84 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
     }
 
+    /// Measures and places the ruby of one tier of a paragraph ([`place_ruby`]):
+    /// overhang, then condensing (one size for the tier, at least [`RUBY_MIN_SCALE`]),
+    /// then space before bases. Returns the tier, sorted, with widths, pads and shifts.
+    fn place_tier(&mut self, para: &Para, text: &str, tier: Vec<Ruby>) -> Vec<Ruby> {
+        let mut ruby = fill_short_gaps(text, tier);
+        for r in &mut ruby {
+            r.base_w = self.width(para, r.start, r.end);
+            r.ruby_w = self.env.fonts.width(r.face, r.px, &r.text);
+        }
+        // The text before each base since the last one (raw widths), and whether a
+        // forced line break lies in it.
+        let mut before = Vec::with_capacity(ruby.len());
+        let mut at = 0usize;
+        for r in &ruby {
+            before.push((self.width(para, at, r.start), text[at..r.start].contains('\n')));
+            at = r.end;
+        }
+        // When the readings do not fit over their bases (overhang below), they are
+        // condensed first: one smaller size for every ruby text of the tier (a uniform
+        // look), as large as lets them fit, at least RUBY_MIN_SCALE of the normal size.
+        // Only what is still missing then moves bases apart.
+        if !ruby_fits(&ruby, &before, 1.0) {
+            let scale = if !ruby_fits(&ruby, &before, RUBY_MIN_SCALE) {
+                RUBY_MIN_SCALE
+            } else {
+                let (mut lo, mut hi) = (RUBY_MIN_SCALE, 1.0f32);
+                for _ in 0..8 {
+                    let mid = (lo + hi) / 2.0;
+                    if ruby_fits(&ruby, &before, mid) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                lo
+            };
+            for r in &mut ruby {
+                r.px *= scale;
+                r.ruby_w = self.env.fonts.width(r.face, r.px, &r.text);
+            }
+        }
+        place_ruby(&mut ruby, &before, 1.0, &mut self.ruby_scratch);
+        ruby
+    }
+
     /// Breaks the display text of a paragraph (or of one chunk of a giant paragraph)
     /// into lines and places them.
-    fn lay_lines(&mut self, owner: NodeId, text: &str, src: &[CharSrc], segs: &[Seg], x: f32, w: f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn lay_lines(&mut self, owner: NodeId, text: &str, src: &[CharSrc], segs: &[Seg], ruby: Vec<Ruby>, x: f32, w: f32) {
         let ost = self.st(owner);
         let keep_spaces = ost.white_space.keeps_spaces();
-        let para = Para::new(text, src, segs);
+        let mut para = Para::new(text, src, segs);
+        if !ruby.is_empty() || self.ideo_space > 0.0 {
+            let (under, over): (Vec<Ruby>, Vec<Ruby>) = ruby.into_iter().partition(|r| r.under);
+            for (t, tier) in [over, under].into_iter().enumerate() {
+                if !tier.is_empty() {
+                    para.tiers[t] = self.place_tier(&para, text, tier);
+                }
+            }
+            // The space before each char: the larger of the two tiers' (more room only
+            // moves the ruby texts of the other tier apart).
+            let mut pads: Vec<(usize, f32)> = para.tiers.iter().flatten().filter(|r| r.pad > 0.0).map(|r| (r.start, r.pad)).collect();
+            if self.ideo_space > 0.0 {
+                // The space annotators ask for between ideographs (before each that
+                // follows another).
+                let mut prev = false;
+                for (b, c) in text.char_indices() {
+                    let ideo = is_ideograph(c);
+                    if ideo && prev {
+                        pads.push((b, self.ideo_space));
+                    }
+                    prev = ideo;
+                }
+            }
+            pads.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+            pads.dedup_by_key(|p| p.0);
+            para.pads = pads;
+        }
         // Break opportunities.
         let wraps = ost.white_space.wraps() || keep_spaces;
         let mut ops: Vec<(usize, Break)> = break_opportunities(text);
@@ -1261,6 +1962,10 @@ impl<'a, 'e> Flow<'a, 'e> {
             }
         }
         ops.retain(|(b, _)| *b > 0);
+        if para.has_ruby() {
+            // No break inside a ruby base.
+            ops.retain(|(b, k)| *k == Break::Mandatory || !para.inside_ruby(*b));
+        }
         ops.sort_by_key(|o| (o.0, o.1 == Break::Allowed));
         ops.dedup_by_key(|o| o.0);
         // Boxes.
@@ -1294,8 +1999,32 @@ impl<'a, 'e> Flow<'a, 'e> {
                 0.0
             };
             let hyphen = trimmed.ends_with(SOFT_HYPHEN);
-            boxes.push(WordBox { start: prev, end, width, space, forced, hyphen });
+            boxes.push(WordBox { start: prev, end, width, space, forced, hyphen, lead: 0.0, trail: 0.0 });
             prev = b;
+        }
+        if para.has_ruby() {
+            // How far the ruby text of each box reaches past its start and end: room the
+            // box needs at the start and the end of a line.
+            for b in &mut boxes {
+                for t in 0..2 {
+                    let first = para.tiers[t].partition_point(|r| r.start < b.start);
+                    for i in first..para.tiers[t].len() {
+                        let (rs, re, shift, bw, rw) = {
+                            let r = &para.tiers[t][i];
+                            (r.start, r.end, r.shift, r.base_w, r.ruby_w)
+                        };
+                        if rs >= b.end {
+                            break;
+                        }
+                        if re > b.end || rw == 0.0 {
+                            continue;
+                        }
+                        let left = self.width(&para, b.start, rs) + para.pad_at(rs) + shift;
+                        b.lead = b.lead.max(-(left + (bw - rw) / 2.0));
+                        b.trail = b.trail.max(left + (bw + rw) / 2.0 - b.width);
+                    }
+                }
+            }
         }
         // Lines.
         let indent = if self.first_line_pending { ost.text_indent.resolve(w, 0.0) } else { 0.0 };
@@ -1312,8 +2041,9 @@ impl<'a, 'e> Flow<'a, 'e> {
             let avail = if first_line { w - indent.max(0.0) } else { w };
             let empty = kept.len() == cur;
             let gap = if empty { 0.0 } else { kept[kept.len() - 1].space };
-            let need = cur_w + gap + bx.width;
-            if wraps && empty && need > avail + 0.01 && bx.width > 0.0 {
+            let lead = if empty { bx.lead } else { 0.0 };
+            let need = cur_w + gap + lead + bx.width;
+            if wraps && empty && need + bx.trail > avail + 0.01 && bx.width > 0.0 {
                 // Alone at the start of a line and still too wide (a long URL or word):
                 // hyphenate or cut it.
                 if let Some((a, b)) = self.split_box(&para, &bx, avail, hyph_ok).or_else(|| self.cut_box(&para, &bx, avail)) {
@@ -1324,7 +2054,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                     continue;
                 }
             }
-            if empty || need <= avail + 0.01 {
+            if empty || need + bx.trail <= avail + 0.01 {
                 cur_w = need;
                 let forced = bx.forced;
                 kept.push(bx);
@@ -1387,6 +2117,9 @@ impl<'a, 'e> Flow<'a, 'e> {
                     }
                 }
             }
+        }
+        if p.has_ruby() {
+            points.retain(|&pt| !p.inside_ruby(bx.start + pt));
         }
         if points.is_empty() {
             return None;
@@ -1457,16 +2190,23 @@ impl<'a, 'e> Flow<'a, 'e> {
         // (piece, x offset, a hyphen is drawn after it)
         let n_boxes = boxes.len();
         let mut placed: Vec<(Piece, f32, bool)> = Vec::with_capacity(n_boxes);
-        let mut pen = 0.0f32;
+        // A ruby text at the start of the line stays inside it.
+        let mut pen = boxes.first().map_or(0.0, |b| b.lead);
         let mut spaces = 0usize;
         // The segment whose metrics are in `asc` and `desc` already (the same segment
         // gives the same metrics, so the next pieces of a run of words skip them).
         let mut measured_seg = None;
         for (bi, b) in boxes.iter().enumerate() {
-            for run in p.runs(b.start, b.end) {
+            for run in p.pieces(b.start, b.end) {
                 // Widths only place the pieces across the line.
                 let width = if self.text_items { self.run_width(p, run) } else { 0.0 };
-                let pc = Piece { seg: run.0, start: run.1, end: run.2, width };
+                let mut pad_before = 0.0;
+                if self.text_items && !p.pads.is_empty() {
+                    // The space before a base its ruby text needs (overhang in lay_lines).
+                    pad_before = p.pad_at(run.1);
+                    pen += pad_before;
+                }
+                let pc = Piece { seg: run.0, start: run.1, end: run.2, width, pad_before };
                 if measured_seg != Some(pc.seg) {
                     measured_seg = Some(pc.seg);
                     let seg = &segs[pc.seg as usize];
@@ -1514,7 +2254,17 @@ impl<'a, 'e> Flow<'a, 'e> {
                 }
             }
         }
-        let line_w = pen;
+        if self.ruby_h > 0.0 {
+            // Room for the ruby above every line of the paragraph: what the half-leading
+            // does not give already.
+            asc += (self.ruby_h - half).max(0.0);
+        }
+        if self.ruby_under_h > 0.0 {
+            // And below, for ruby drawn under the text.
+            desc += (self.ruby_under_h - half).max(0.0);
+        }
+        // A ruby text at the end of the line stays inside it too.
+        let line_w = pen + boxes.last().map_or(0.0, |b| b.trail);
         let first_indent = if line.first { indent } else { 0.0 };
         let avail = w - first_indent.max(0.0);
         let align = ost.text_align;
@@ -1579,6 +2329,9 @@ impl<'a, 'e> Flow<'a, 'e> {
         let mut gaps = boxes[..n_boxes.saturating_sub(1)].iter().map(|b| (b.end, b.space > 0.0)).peekable();
         let mut add = 0.0f32;
         let mut key: Option<(u32, u32)> = None;
+        // (ruby, left edge of its base) of the ruby bases that start on this line.
+        let mut ruby_cells: Vec<(usize, usize, f32)> = Vec::new();
+        let line_end = boxes.last().map_or(0, |b| b.end);
         for (pc, off, hyphen) in placed {
             if !self.text_items && key.is_some() {
                 // A page-map layout needs only the key of the first piece.
@@ -1594,6 +2347,16 @@ impl<'a, 'e> Flow<'a, 'e> {
             let seg = &segs[pc.seg as usize];
             let st = self.st(seg.style);
             let ci = p.char_index(pc.start);
+            if self.text_items && p.has_ruby() {
+                for t in 0..2 {
+                    if let Some(i) = p.ruby_at(t, pc.start, pc.end) {
+                        let r = &p.tiers[t][i];
+                        if r.start == pc.start && r.end <= line_end && !r.text.is_empty() {
+                            ruby_cells.push((t, i, px_x));
+                        }
+                    }
+                }
+            }
             match &seg.kind {
                 SegKind::Image { src, w, h } => {
                     let y = baseline - image_ascent(st.vertical_align, *h, sa) - seg.shift;
@@ -1678,6 +2441,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                         line_top: top,
                         line_bottom: bottom,
                         hyphenated: hyphen,
+                        pad_before: pc.pad_before,
                     }));
                 }
             }
@@ -1689,6 +2453,33 @@ impl<'a, 'e> Flow<'a, 'e> {
                     ta.deco_w = tb.x - ta.x;
                 }
             }
+        }
+        // Ruby text over its base (centred unless shifted by place_ruby), its bottom on
+        // the top of the base's glyphs, or under it, its top on their bottom. Drawn only:
+        // no DOM node, so selection and page text skip it.
+        for (t, i, left) in ruby_cells {
+            let r = &p.tiers[t][i];
+            let seg = p.seg_at(r.start);
+            let (bface, bpx) = self.seg_face(seg);
+            let (a, d) = self.env.fonts.vmetrics(bface, bpx);
+            let (ra, rd) = self.env.fonts.vmetrics(r.face, r.px);
+            let x = left + (r.base_w - r.ruby_w) / 2.0 + r.shift;
+            let ruby_baseline = if r.under { baseline - seg.shift - d + ra } else { baseline - seg.shift - a + rd };
+            self.out.items.push(Draw::Text(TextRun {
+                x,
+                baseline: ruby_baseline,
+                face: r.face,
+                px: r.px,
+                text: r.text.clone(),
+                width: r.ruby_w,
+                node: NONE,
+                link: NO_LINK,
+                gray: r.gray,
+                deco_w: r.ruby_w,
+                line_top: top,
+                line_bottom: bottom,
+                ..Default::default()
+            }));
         }
         self.y = bottom;
         let key = key.unwrap_or((self.dom.node(owner).order, 0));
@@ -1850,6 +2641,8 @@ impl<'a, 'e> Flow<'a, 'e> {
         }
         self.out.links.extend(lay.links);
         self.out.decor.extend(lay.decor.into_iter().map(|d| RectRun { y: d.y + dy, ..d }));
+        // Paragraphs of the cell that annotators want.
+        self.out.annotated.extend(lay.annotated);
         lay.slices
     }
 

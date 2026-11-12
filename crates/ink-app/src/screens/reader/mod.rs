@@ -78,6 +78,7 @@ pub fn stored_layout(settings: &ink_store::Settings, w: u32, h: u32) -> LayoutSe
         justify: r.justify,
         hyphenate: r.hyphenate,
         publisher_styles: r.publisher_styles,
+        ruby: r.annotations,
         paragraph_spacing: r.paragraph_spacing,
         paragraph_indent: indent_em(r.paragraph_indent),
         embolden: r.font_weight.min(ink_store::settings::WEIGHT_MAX),
@@ -576,6 +577,13 @@ pub struct ReaderScreen {
     listed_marks: Vec<Bookmark>,
     /// The book's own reading settings (Aa panel), over the global ones.
     book_settings: BookSettings,
+    /// The plugins' text annotators, asked when the book opens ([`ReaderScreen::layout`]).
+    annotators: Vec<std::sync::Arc<dyn ink_doc::TextAnnotator>>,
+    /// The annotators' `version()` the page shown was drawn with.
+    annot_versions: Vec<u64>,
+    /// The page shown lacks annotations still being computed: drawn again when ready
+    /// (the annotation thread wakes the app loop, `ink_device::wake`).
+    annot_wait: bool,
     /// Links of a page (page, links), read when a tap needs them.
     links: Option<(usize, Vec<Link>)>,
     /// Where jumps came from, latest last: the menu's "Go back" returns to the last one,
@@ -654,6 +662,9 @@ pub struct ReaderScreen {
     open_trace: Option<crate::perf::OpenTrace>,
     /// `on_book_open` is still to be sent (after the first page is shown).
     plugins_pending: bool,
+    /// `on_book_open` went out before the first page (a plugin annotator is in use):
+    /// the first paint sends only the page change.
+    book_open_sent: bool,
     /// The plugin dialog shown as a card in the selection overlay (`(plugin, request
     /// id)`; the widget is `ids["dict"]`): the dictionary card of a long-press lookup.
     dict_card: Option<(String, u32)>,
@@ -731,6 +742,9 @@ impl ReaderScreen {
             marks: Vec::new(),
             listed_marks: Vec::new(),
             book_settings: BookSettings::default(),
+            annotators: Vec::new(),
+            annot_versions: Vec::new(),
+            annot_wait: false,
             links: None,
             back: Vec::new(),
             back_pill: false,
@@ -763,6 +777,7 @@ impl ReaderScreen {
             turn_wave: None,
             open_trace: None,
             plugins_pending: false,
+            book_open_sent: false,
             dict_card: None,
             dict_cancel: Vec::new(),
             position_unsaved: None,
@@ -1429,7 +1444,9 @@ impl ReaderScreen {
                 // the page closes both).
                 let mut card = None;
                 if one_word && cx.settings.gestures.action("long_press") == "dictionary" {
-                    match cx.plugins.selection_actions().iter().find(|a| a.id == "lookup").map(|a| (a.plugin.clone(), a.id.clone())) {
+                    // The first lookup provider (in plugin order) that claims the word.
+                    let lang = doc.metadata().language.clone();
+                    match cx.plugins.lookup_provider(&sel.text, lang.as_deref()).map(|p| (p, ink_plugin::LOOKUP_ACTION.to_string())) {
                         Some((plugin, id)) => {
                             log::info!("reader: long press looks up {:?} with {plugin}", sel.text);
                             cx.plugins.trigger(&plugin, &id, Some(doc));
@@ -1845,12 +1862,92 @@ impl ReaderScreen {
         self.overlay = Some(o);
     }
 
+    /// The layout for this book on a screen of `size`: [`aa::book_layout`] with the
+    /// plugins' annotators when ruby is on. Each handle reads its annotator's version now,
+    /// so a plugin that changed its annotations (and bumped the version) gets the book
+    /// laid out again by the next [`ReaderScreen::relayout`]: after a plugin action, when
+    /// a screen above (a settings page) closes, on rotation.
+    fn layout(&self, cx: &AppCtx, size: Size) -> LayoutSettings {
+        let mut l = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
+        if l.ruby {
+            l.annotators = self.annotators.iter().cloned().map(ink_doc::AnnotatorHandle::new).collect();
+        }
+        l
+    }
+
+    /// With a plugin annotator: the plugins hear `on_book_open` before the first page,
+    /// since a plugin may set its annotations up there (and bump their version), and the
+    /// book is laid out again at once when the version moved, so the first page and the
+    /// pagination use the annotations the plugin settled on. Without an annotator the
+    /// plugins hear about the book after its first page, as before.
+    fn book_open_before_first_page(&mut self, cx: &mut AppCtx) -> anyhow::Result<()> {
+        let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
+        cx.plugins.book_open(doc, &self.path);
+        self.book_open_sent = true;
+        // What the plugins set up there is what the first page is drawn with.
+        self.annot_versions = self.annotators.iter().map(|a| a.version()).collect();
+        let layout = self.layout(cx, cx.screen.size());
+        let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
+        if &layout != doc.layout() {
+            log::info!("reader: the annotator changed in on_book_open; laid out again before the first page");
+            doc.set_current_page(self.page);
+            doc.set_layout(&layout)?;
+            self.page = doc.current_page();
+        }
+        Ok(())
+    }
+
+    /// True when an annotator's layout version is not the one the book is laid out with
+    /// (a plugin changed what it annotates). One read each: cheap enough for every frame.
+    fn annotator_moved(&self) -> bool {
+        let Some(doc) = self.doc.as_deref() else { return false };
+        let laid = &doc.layout().annotators;
+        laid.len() == self.annotators.len() && laid.iter().zip(&self.annotators).any(|(h, a)| h.layout_version() != a.layout_version())
+    }
+
+    /// After plugin code ran (an action, a dialog or card answer, a tick, a network
+    /// result, a selection action), and before every frame: lays the book out again when
+    /// an annotator's layout version moved; draws the page again (no flash) when only its
+    /// annotations changed (`version()`), or when annotations the page waited for are
+    /// ready.
+    fn relayout_after_plugin(&mut self, cx: &mut AppCtx) {
+        if self.annotators.is_empty() {
+            return;
+        }
+        if self.annotator_moved() {
+            log::info!("reader: an annotator's layout changed; laying the book out again");
+            if let Err(e) = self.relayout(cx, RefreshClass::Gc16) {
+                log::warn!("reader: layout after a plugin call: {e:#}");
+            }
+        }
+        if self.overlay.is_some() {
+            // Not under an open menu or card: once it closes.
+            return;
+        }
+        let changed = self.annotators.len() != self.annot_versions.len() || self.annotators.iter().zip(&self.annot_versions).any(|(a, &v)| a.version() != v);
+        let ready = self.annot_wait && !self.doc.as_deref().is_some_and(|d| d.annotations_pending());
+        if changed || ready {
+            if changed {
+                self.annot_versions = self.annotators.iter().map(|a| a.version()).collect();
+                log::info!("reader: annotations changed; drawing the page again");
+            } else {
+                log::info!("reader: annotations of page {} ready; drawing it again", self.page + 1);
+            }
+            self.annot_wait = false;
+            self.rerender = true;
+            self.dirty.get_or_insert(RefreshClass::Gl16);
+        }
+    }
+
     /// Lays the book out again for the current screen size and settings, keeping the
     /// reading position (Aa changes, rotation).
     fn relayout(&mut self, cx: &mut AppCtx, class: RefreshClass) -> anyhow::Result<()> {
-        let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
+        if self.doc.is_none() {
+            return Ok(());
+        }
         let size = cx.screen.size();
-        let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
+        let layout = self.layout(cx, size);
+        let Some(doc) = self.doc.as_deref_mut() else { return Ok(()) };
         // A fixed-layout book's view options (Aa › View) changed.
         let view = doc.fixed_view().map(|v| aa::fixed_view(v, &self.book_settings)).filter(|v| Some(*v) != doc.fixed_view());
         if &layout != doc.layout() || view.is_some() {
@@ -2004,6 +2101,7 @@ impl ReaderScreen {
                     cx.plugins.trigger(&plugin, &id, doc);
                 }
                 self.close_overlay();
+                self.relayout_after_plugin(cx);
             }
             "sel-cancel" => self.close_overlay(),
             "sel-highlight" => {
@@ -2270,7 +2368,9 @@ impl AppScreen for ReaderScreen {
         if self.book_settings.migrate_margins(&cx.settings.status_bars) && (self.book_settings.margin_top.is_some() || self.book_settings.margin_bottom.is_some()) {
             log::info!("reader: book margins now measured from the status bars: top {:?}, bottom {:?}", self.book_settings.margin_top, self.book_settings.margin_bottom);
         }
-        let layout = aa::book_layout(cx.settings, &self.book_settings, size.w, size.h);
+        self.annotators = cx.plugins.text_annotators();
+        self.annot_versions = self.annotators.iter().map(|a| a.version()).collect();
+        let layout = self.layout(cx, size);
         // The font faces of the first page are parsed on another core while the book is
         // read (MD5, zip, spine, TOC); the first layout takes them parsed. PDF, CBZ and
         // XPS pages are drawn by MuPDF and use none of them.
@@ -2325,6 +2425,11 @@ impl AppScreen for ReaderScreen {
         // Plugins (statistics database, sync) hear about the book after the first page
         // is on the panel (`paint_screen`), so the page does not wait for them.
         self.plugins_pending = true;
+        self.book_open_sent = false;
+        if !self.annotators.is_empty() {
+            self.book_open_before_first_page(cx)?;
+            trace.step("plugins told before the first page (annotator)");
+        }
         self.open_trace = Some(trace);
         self.rerender = true;
         self.dirty = Some(RefreshClass::Gc16);
@@ -2337,7 +2442,7 @@ impl AppScreen for ReaderScreen {
         BARS_TOGGLE.with(|c| c.set(false));
         // Plugins that never heard of the book (closed before its first paint) are not
         // told it closed.
-        if std::mem::take(&mut self.plugins_pending) {
+        if std::mem::take(&mut self.plugins_pending) && !std::mem::take(&mut self.book_open_sent) {
             return;
         }
         if let Some(doc) = self.doc.as_deref_mut() {
@@ -2414,6 +2519,10 @@ impl AppScreen for ReaderScreen {
     }
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {
+        // The app loop ran the plugins' ticks, network results and event handlers (dialog
+        // and menu answers) before this frame, and the reader its own plugin calls (card
+        // answers, actions): one of them may have changed the annotations.
+        self.relayout_after_plugin(cx);
         // The plugin overlay is drawn over this by the app loop (hooks::app_paint).
         self.paint_screen(cx)
     }
@@ -2720,6 +2829,7 @@ impl ReaderScreen {
                         preview = asked && doc.render_zoom_preview(self.page, cx.canvas);
                         if !preview {
                             doc.render_page(self.page, cx.canvas)?;
+                            self.annot_wait = doc.annotations_pending();
                         }
                         draw_highlights(doc, self.page, cx.canvas, &self.saved_hl, &self.session_hl);
                     }
@@ -2807,9 +2917,12 @@ impl ReaderScreen {
             self.finish_open_trace();
             let first = std::mem::take(&mut self.plugins_pending);
             if first {
+                let sent = std::mem::take(&mut self.book_open_sent);
                 if let Some(doc) = self.doc.as_deref_mut() {
                     let t = Instant::now();
-                    cx.plugins.book_open(doc, &self.path);
+                    if !sent {
+                        cx.plugins.book_open(doc, &self.path);
+                    }
                     cx.plugins.page_change(doc, self.page);
                     log::info!("reader: plugins told about the book after the first page ({} ms)", t.elapsed().as_millis());
                 }

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 /// Bump when layout results change (invalidates cached page maps). The golden test
 /// `page_maps_match_engine_version` fails when page breaks change without a bump.
-pub const ENGINE_VERSION: u32 = 2;
+pub const ENGINE_VERSION: u32 = 9;
 
 /// One page of a chapter.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -567,7 +567,10 @@ impl Worker {
             // Every thread gets the path: whichever ends last writes the file (when the
             // map is complete), marks the map complete and logs the total time.
             let (cache, n) = (cache.clone(), book.chapters.len());
-            let last: LastWork = Box::new(move |sh: &Shared| finish_map(sh, cache, n, started));
+            // A map made while the annotator failed partway is not the one the
+            // annotator gives; it is not kept.
+            let annotated = params.clone();
+            let last: LastWork = Box::new(move |sh: &Shared| finish_map(sh, cache.filter(|_| !annotated.annotator_failed()), n, started));
             // The guard moves into the thread; a thread that cannot start drops it at
             // once, so the running count never waits for it.
             let guard = RunGuard { shared: sh.clone(), last: Some(last) };

@@ -713,6 +713,9 @@ impl Document for BookDocument {
     fn render_page(&mut self, page: usize, canvas: &mut Canvas) -> Result<()> {
         self.doc.render_page(page, canvas)
     }
+    fn annotations_pending(&self) -> bool {
+        self.doc.annotations_pending()
+    }
     fn position_of_page(&self, page: usize) -> Result<Position> {
         self.doc.position_of_page(page)
     }

@@ -933,6 +933,64 @@ pub(super) mod tests {
         assert_eq!(split_word(lines, 1, 0), "of");
     }
 
+    /// Gives every ideograph a reading wider than the ideograph.
+    struct WideReadings;
+
+    impl ink_doc::TextAnnotator for WideReadings {
+        fn id(&self) -> &str {
+            "wide"
+        }
+        fn version(&self) -> u64 {
+            1
+        }
+        fn wants(&self, _: &str, _lang: Option<&str>) -> bool {
+            true
+        }
+        fn annotate(&self, p: &str, _: Option<&str>) -> Vec<ink_doc::Annotation> {
+            p.char_indices()
+                .filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c))
+                .map(|(i, c)| ink_doc::Annotation::over(i..i + c.len_utf8(), "aaaaaaaaaaaaaa"))
+                .collect()
+        }
+    }
+
+    /// A long press on a character selects the same characters, and the same text,
+    /// whatever ruby the layout draws: none, the book's, or wide readings of an annotator
+    /// (which move the characters apart). Compared by character, not by pixel.
+    #[test]
+    fn a_long_press_selects_the_same_characters_with_and_without_readings() {
+        use ink_doc::Document;
+        let book = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ink-html/tests/fixtures/ruby.epub");
+        let mut words = Vec::new();
+        for (ruby, annotate) in [(false, false), (true, false), (true, true)] {
+            let mut d = ink_formats::open(&book).unwrap();
+            let mut s = ink_doc::LayoutSettings::for_screen(1272, 1696);
+            s.ruby = ruby;
+            if annotate {
+                s.annotators = vec![ink_doc::AnnotatorHandle::new(std::sync::Arc::new(WideReadings))];
+            }
+            d.set_layout(&s).unwrap();
+            let (l, span) = d.page_layout(0).unwrap();
+            let dy = s.margin_top - span.y0;
+            // The centre of 依 (third poem: its book ruby is hidden, so the annotator's
+            // readings go there).
+            let at = l.items.iter().find_map(|i| match i {
+                ink_html::layout::Draw::Text(t) if t.node != u32::MAX && t.text.contains('依') => {
+                    let n = t.text.chars().count() as f32;
+                    let k = t.text.chars().position(|c| c == '依').unwrap() as f32;
+                    let cell = (t.width - t.letter_spacing * n) / n;
+                    Some(Point::new((t.x + cell * (k + 0.5)) as i32, ((t.line_top + t.line_bottom) / 2.0 + dy) as i32))
+                }
+                _ => None,
+            });
+            let w = word_at(&mut d, 0, at.unwrap()).unwrap();
+            words.push(w.text);
+        }
+        assert_eq!(words[0], "白日依山尽", "the run up to the comma");
+        assert_eq!(words[1], words[0], "with the book's ruby");
+        assert_eq!(words[2], words[0], "with wide readings");
+    }
+
     /// In a book laid out by ink-html, a long press on either part of a word the layout
     /// hyphenated selects the whole word.
     #[test]

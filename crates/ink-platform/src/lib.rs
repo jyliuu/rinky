@@ -89,11 +89,21 @@ impl Platform {
         vec![PathBuf::from(system), PathBuf::from(user), self.install_root().join("fonts")]
     }
 
-    /// System fonts used as UI fallbacks for symbols the UI font lacks (Kindle:
-    /// `Kindle_Symbol` for arrows, ▪, suits; `code2000` for ∫ ≠ ◇ ✗ and the rest).
+    /// System fonts used as UI fallbacks, in order, for characters the UI font lacks.
+    /// Kindle: `Kindle_Symbol` for arrows, ▪, suits; the firmware's sans faces for
+    /// Chinese (simplified, then traditional), Japanese and Korean, so CJK text in
+    /// menus, cards and titles is not drawn as boxes; `code2000` last for ∫ ≠ ◇ ✗ and
+    /// the rest. Kobo: none known (its firmware fonts are not named here).
     pub fn symbol_fonts(self) -> &'static [&'static str] {
         match self {
-            Platform::Kindle => &["/usr/java/lib/fonts/Kindle_Symbol.ttf", "/usr/java/lib/fonts/code2000.ttf"],
+            Platform::Kindle => &[
+                "/usr/java/lib/fonts/Kindle_Symbol.ttf",
+                "/usr/java/lib/fonts/STHeitiMedium.ttf",
+                "/usr/java/lib/fonts/STHeitiTC.ttf",
+                "/usr/java/lib/fonts/TBGothicMed_213.ttf",
+                "/usr/java/lib/fonts/NotoSansKR-Regular.otf",
+                "/usr/java/lib/fonts/code2000.ttf",
+            ],
             Platform::Kobo => &[],
         }
     }
@@ -131,5 +141,15 @@ mod tests {
         assert_eq!(Platform::Kobo.font_dirs()[0], PathBuf::from("/usr/local/Kobo/fonts"));
         assert!(Platform::Kobo.koreader_dir().starts_with(Platform::Kobo.user_root()));
         assert_ne!(Platform::Kindle.package_suffix(), Platform::Kobo.package_suffix());
+    }
+
+    /// The Kindle's UI fallbacks: symbols first, then the CJK sans faces (simplified
+    /// Chinese, traditional Chinese, Japanese, Korean), the catch-all code2000 last.
+    #[test]
+    fn kindle_ui_fallbacks_put_cjk_before_code2000() {
+        let names: Vec<&str> = Platform::Kindle.symbol_fonts().iter().map(|p| p.rsplit('/').next().unwrap()).collect();
+        assert_eq!(names, ["Kindle_Symbol.ttf", "STHeitiMedium.ttf", "STHeitiTC.ttf", "TBGothicMed_213.ttf", "NotoSansKR-Regular.otf", "code2000.ttf"]);
+        assert!(Platform::Kindle.symbol_fonts().iter().all(|p| p.starts_with("/usr/java/lib/fonts/")));
+        assert!(Platform::Kobo.symbol_fonts().is_empty());
     }
 }

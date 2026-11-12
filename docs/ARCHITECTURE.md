@@ -177,6 +177,22 @@ get wrong:
   (`Document::fixed_view`, `set_fixed_view`); `FixedOptions::view` and `with_view`
   are the one mapping between the two. The reader keeps a book's choices in its
   sidecar and puts them over the defaults (`screens/reader/aa.rs`, `fixed_view`).
+- **Ruby and annotations are drawing only.** `ink-html` lays out the text of `<rt>`
+  above its base (below with `ruby-position: under`) as part of the page
+  (`layout.rs`, `Ruby`). The annotations of `LayoutSettings::annotators` (each an
+  `ink_doc::TextAnnotator`, from a plugin) are a layer drawn over the page: the layout
+  only reserves room in the paragraphs an annotator `wants` (and the extra space it
+  declares between ideographs) and records those paragraphs (`AnnotatedPara`);
+  `annot.rs` computes the annotations on a background thread, keeps them in a small
+  cache and places them when a page is drawn, without moving the text.
+  `Document::annotations_pending` tells the reader to draw the page again when they
+  arrive; the thread wakes the app loop for that through `ink_device::wake` (a pipe
+  the input backends poll), so nothing polls while it waits. Neither is a draw item with a DOM node: positions, selection, search and
+  `read_around` never see them. `LayoutSettings::ruby` off leaves both out. Each
+  annotator's id and the `layout_version` read when its `AnnotatorHandle` was made are
+  part of the settings' equality and cache key (a bump repaginates); `version` only
+  invalidates the cached annotations. A panic in an annotator is caught and turns that
+  one off for the rest of that layout.
 
 ## Device layer
 
@@ -352,6 +368,10 @@ calls `on_action` when the user picks one. Rust plugins are crates in `plugins/<
 with one line in `crates/ink-app/src/plugins.rs`. Lua plugins are folders with
 `plugin.toml` and `main.lua` in the install folder's `plugins/`, loaded by
 `ink_plugin::lua::LuaHost` through the same registry and host services.
+
+A Rust plugin can also offer a `TextAnnotator` (`Plugin::text_annotator`): the reader
+asks the plugin host for them when a book opens (every enabled plugin that offers
+one, in plugin order) and passes them to the engine in `LayoutSettings::annotators`.
 
 Plugins never block the reader: UI requests are queued and answered in `on_ui_result`,
 network requests run in worker threads and report through `on_http`. A plugin that

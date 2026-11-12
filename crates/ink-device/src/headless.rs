@@ -206,6 +206,10 @@ impl Input for HeadlessInput {
             if crate::trace::stop_requested().is_some() {
                 return Ok(Some(InputEvent::Quit));
             }
+            // Background work done (`crate::wake`): the loop paints once more.
+            if crate::wake::take() {
+                return Ok(None);
+            }
             match self.player.next_item() {
                 Played::Shot(name) => self.shared.borrow().save(&name)?,
                 Played::Event(ev) => return Ok(Some(ev)),

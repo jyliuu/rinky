@@ -4,6 +4,32 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Annotations: readings that a book marks up as ruby (furigana in Japanese books,
+  readings in Chinese textbooks) are drawn in small type centred above their
+  characters (or below them, where the book asks for that) instead of after them, and
+  are left out of search, selected text and look-ups.
+  The characters keep an even spacing: a reading wider than its character reaches
+  over the characters beside it where their readings leave room, readings that still
+  do not fit are set a little smaller (down to 70 %, the same size for the whole
+  paragraph), and only after that do the characters move apart, all by the same
+  amount. Lines with readings get the room they need.
+- *Annotations* in Aa › Layout shows or hides those annotations for the open book,
+  and in Settings › Default layout for the books you open from then on. It also
+  shows or hides annotations that plugins add above or below the text: compiled-in
+  plugins can now annotate the text of reflowable books (several at once). Their
+  annotations are worked out in the background while you read, never hold up
+  opening a book or turning a page, and appear on a page as soon as they are ready.
+- A long press can look a word up with a plugin made for the book's language while
+  the dictionary still takes every other word: the first plugin that takes the word
+  gets it.
+
+### Fixed
+- Chinese, Japanese and Korean text in menus, cards, messages and title bars shows
+  in the Kindle's own sans fonts instead of as empty boxes.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

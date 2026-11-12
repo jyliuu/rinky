@@ -212,6 +212,9 @@ impl Input for SimInput {
             if let Some(ev) = self.queue.pop_front() {
                 return Ok(Some(ev));
             }
+            if crate::wake::take() {
+                return Ok(None);
+            }
             if let Some(player) = &mut self.player {
                 std::thread::sleep(self.script_delay);
                 match player.next_item() {

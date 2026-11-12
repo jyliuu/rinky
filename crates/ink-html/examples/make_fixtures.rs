@@ -1,8 +1,9 @@
 //! Writes the synthetic feature fixtures in `crates/ink-html/tests/fixtures/*.epub`.
 //!
 //! Run: `cargo run -p ink-html --example make_fixtures [OUT_DIR]`. Every fixture is
-//! generated here (text, CSS, images), except the embedded Noto Sans font of
-//! `fonts.epub`, which is read from `crates/ink-html/tests/fixtures/src/` (SIL OFL).
+//! generated here (text, CSS, images), except the embedded fonts of `fonts.epub` (Noto
+//! Sans) and `ruby.epub` (a subset of Noto Serif SC), which are read from
+//! `crates/ink-html/tests/fixtures/src/` (SIL OFL).
 //! The output is deterministic: zip timestamps are fixed.
 
 use image::{DynamicImage, GrayImage, ImageFormat, Luma, Rgb, RgbImage};
@@ -683,10 +684,45 @@ fn malformed() -> Epub {
     e
 }
 
+/// Three Tang dynasty poems (public domain: written in the 8th century) with readings in
+/// `<ruby>` markup: bases between `<rt>`s, `<rb>` with `<rp>` fallbacks, several `<rb>`
+/// then their `<rt>`s, and a poem whose `<rt>` are `display: none`. The Chinese text is
+/// drawn with a subset of Noto Serif SC (SIL OFL) read from `tests/fixtures/src/`.
+const RUBY_BODY: &str = r#"<h1>静夜思</h1>
+<p class="by">李白（701–762）</p>
+<p class="poem"><ruby>床<rt>chuáng</rt>前<rt>qián</rt>明<rt>míng</rt>月<rt>yuè</rt>光<rt>guāng</rt></ruby>，<ruby>疑<rt>yí</rt>是<rt>shì</rt>地<rt>dì</rt>上<rt>shàng</rt>霜<rt>shuāng</rt></ruby>。<br/>
+<ruby>举<rt>jǔ</rt>头<rt>tóu</rt>望<rt>wàng</rt>明<rt>míng</rt>月<rt>yuè</rt></ruby>，<ruby>低<rt>dī</rt>头<rt>tóu</rt>思<rt>sī</rt>故<rt>gù</rt>乡<rt>xiāng</rt></ruby>。</p>
+<h2>春晓</h2>
+<p class="by">孟浩然（689–740）</p>
+<p class="poem"><ruby><rb>春</rb><rp>(</rp><rt>chūn</rt><rp>)</rp></ruby><ruby><rb>眠</rb><rp>(</rp><rt>mián</rt><rp>)</rp></ruby><ruby><rb>不</rb><rb>觉</rb><rb>晓</rb><rt>bù</rt><rt>jué</rt><rt>xiǎo</rt></ruby>，处处闻啼鸟。<br/>
+夜来风雨声，花落知多少。</p>
+<h2>登鹳雀楼</h2>
+<p class="by">王之涣（688–742）</p>
+<p class="poem hidden-rt"><ruby>白<rt>bái</rt>日<rt>rì</rt>依<rt>yī</rt>山<rt>shān</rt>尽<rt>jìn</rt></ruby>，<ruby>黄<rt>huáng</rt>河<rt>hé</rt>入<rt>rù</rt>海<rt>hǎi</rt>流<rt>liú</rt></ruby>。<br/>
+欲穷千里目，更上一层楼。</p>"#;
+
+fn ruby() -> Epub {
+    let mut e = Epub::new("ruby", "Ruby", "zh");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/src");
+    e.file("fonts/NotoSerifSC-Subset.otf", std::fs::read(dir.join("NotoSerifSC-Subset.otf")).unwrap(), "font/otf");
+    let css = r#"
+@font-face { font-family: "Ruby Test Serif"; src: url(fonts/NotoSerifSC-Subset.otf); }
+body { font-family: "Ruby Test Serif", serif }
+p { text-indent: 0; margin: 0.4em 0 }
+.by { text-align: center; font-size: 80% }
+.poem { text-align: center }
+.hidden-rt rt { display: none }
+"#;
+    e.file("style.css", format!("{CSS_COMMON}{css}").into_bytes(), "text/css");
+    e.chapter("poems.xhtml", RUBY_BODY, "");
+    e.toc("静夜思", "poems.xhtml", 0);
+    e
+}
+
 fn main() -> std::io::Result<()> {
     let dir = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"));
     std::fs::create_dir_all(&dir)?;
-    for e in [ws(), selectors(), text_props(), box_props(), fonts(), images(), tables_lists(), notes(), lang(), pagelist(), malformed()] {
+    for e in [ws(), selectors(), text_props(), box_props(), fonts(), images(), tables_lists(), notes(), lang(), pagelist(), malformed(), ruby()] {
         let p = write_epub(&e, &dir)?;
         println!("{} ({} bytes)", p.display(), std::fs::metadata(&p)?.len());
     }

@@ -137,6 +137,15 @@ Gesture names (`ink_plugin::registry::GESTURES`): `two_finger_tap`, `double_tap`
 Holds (`long_press`, `corner_hold:*`, a tile's `on_hold`) fire after the app's one hold
 time, `ink_ui::LONG_PRESS` (400 ms), like every other hold in the app; plugins get the
 gesture, never raw touches, so they have no hold timer of their own.
+
+**Dictionary lookup.** A selection action with the id `lookup`
+(`ink_plugin::LOOKUP_ACTION`) makes the plugin a lookup provider. A long press (with the
+gesture set to the dictionary) gives the selected word to the first provider, in plugin
+order, that claims it: Rust plugins answer `Plugin::claims_lookup(text, lang)` (`lang`:
+the book's language; default true), Lua plugins always claim. A provider for one
+language placed before the general dictionary therefore takes only its language, and
+the dictionary still gets every other word. With one provider nothing changes.
+
 Status-widget text changes with `ink.ui.status(id, text)` (Rust:
 `cx.ui()?.status(id, text)`); an empty text hides it.
 
@@ -396,6 +405,102 @@ impl Plugin for Hello {
   on the host against a fake configfs tree and a shell-script dropbear; both undo what
   they started in `on_exit`.
 
+### Text annotations (`Plugin::text_annotator`)
+
+A Rust plugin can draw short texts above or below the text of reflowable books, like
+`<ruby>`: the annotated range is the base, the annotation is drawn centred above it
+(`Annotation::over`, readings) or below it (`Annotation::under`, glosses) at half its
+size. One range can have both. Return an `Arc<dyn TextAnnotator>` from
+`Plugin::text_annotator` (default `None`):
+
+```rust
+use ink_plugin::{Annotation, AnnotationPosition, TextAnnotator};
+
+struct Shout;
+
+impl TextAnnotator for Shout {
+    fn id(&self) -> &str { "shout" }
+    fn version(&self) -> u64 { 1 }
+    fn wants(&self, paragraph: &str, _lang: Option<&str>) -> bool { paragraph.contains('!') }
+    fn annotate(&self, paragraph: &str, _lang: Option<&str>) -> Vec<Annotation> {
+        paragraph.match_indices('!').map(|(i, _)| Annotation::over(i..i + 1, "loud")).collect()
+    }
+    // Optional, with these defaults:
+    fn layout_version(&self) -> u64 { 0 }
+    fn positions(&self) -> &[AnnotationPosition] { &[AnnotationPosition::Over] }
+    fn ideograph_spacing(&self, _lang: Option<&str>) -> f32 { 0.0 }
+}
+
+// in impl Plugin for MyPlugin:
+fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator.clone()) }
+```
+
+**Layout and drawing are separate.** Pagination asks only `wants` (once per paragraph)
+and the declarations (`positions`, `ideograph_spacing`, `layout_version`); it never
+calls `annotate` and never depends on what it returns. A paragraph `wants` says yes to
+gets the room of an annotation on every line, in each of `positions()`, and
+`ideograph_spacing` em between its ideographs. `annotate` runs when pages are drawn,
+on a background thread at the lowest priority: the page shown first, then the two
+pages before and after it (across a chapter break when the next or previous chapter is
+laid out already). A page drawn before its annotations are ready shows without them;
+the thread wakes the app loop when they are done and the page is drawn again, without
+a flash. No timer runs while it waits. Results are kept
+in a small cache (a few hundred paragraphs).
+
+- **Who is asked:** when a book opens the reader asks the enabled plugins in load order
+  (compiled-in plugins in the order of `crates/ink-app/src/plugins.rs`) and uses every
+  annotator it gets, in that order. Where two annotations of the same position
+  overlap, the earlier plugin's wins; one over a range and one under it both show. A
+  plugin that panics there is skipped. With *Annotations* off (Aa › Layout for the
+  book, Settings › Default layout for new books) no annotator is used.
+- **`on_book_open` comes first:** while an annotator is in use the reader sends
+  `on_book_open` before the book's first page (otherwise it comes after it), then reads
+  the versions again. So a plugin can learn the book (its language, its own per-book
+  settings) in `on_book_open` and set itself up there; the first page already uses it.
+- **The text:** `wants` and `annotate` get one paragraph as it is laid out (whitespace
+  collapsed, without the text of `<rt>` and `<rp>`) and its language (`lang`/`xml:lang`,
+  else the book's), so an annotator for one language says no to the others in `wants`.
+  Ranges are byte ranges of that text. Build annotations with `Annotation::over` or
+  `Annotation::under` (the types are `#[non_exhaustive]` so fields can be added later).
+  The engine drops ranges that are empty, out of bounds, inside a character, across
+  two lines, overlapping an earlier annotation of the same position (this annotator's
+  or an earlier one's) or a `<ruby>` base of the book in that position (the book's
+  ruby wins), annotations with no text, and annotations in a position the annotator
+  did not declare in `positions()`.
+- **Placement:** annotations never move the text. Each sits centred over its
+  characters; all of a paragraph's annotations on a page share one size, the largest
+  (up to half the text size) that keeps 0.35 em between neighbours and inside the line,
+  at least 55 % of the normal size. Where even that does not fit, they are pushed
+  apart, off centre. Ask for `ideograph_spacing` (for example 0.15 em for readings in
+  Latin letters over Chinese) so most fit at full size. Book `<ruby>` markup is part of
+  the document and keeps its own rules (it may move characters apart).
+- **Line rhythm:** the room is reserved whatever `annotate` returns, so a page of text
+  the annotator reads keeps one line pitch whether or not a paragraph gets annotations.
+  `wants` is also the switch for that room: return false for paragraphs the annotator
+  never annotates (another script, say).
+- **Drawing only:** annotations are not document text. Positions, selection, search,
+  highlights and the text plugins read stay as without them.
+- **Threads and cost:** `wants` runs on the pagination threads for every paragraph of
+  the book: keep it a cheap check. `annotate` runs on a background thread for the
+  paragraphs of the pages shown and around them; it may take a little time but should
+  not block. Both must be `Send + Sync`.
+- **Two versions:** the output must be a function of (paragraph, language, versions).
+  Bump `version()` when only what `annotate` returns changes (another word list): the
+  annotations are computed again and the page shown is drawn again, the pages stay.
+  Bump `layout_version()` when `wants`, `positions` or `ideograph_spacing` change (a mode
+  that turns annotations on or off): the book is paginated again, like a font size
+  change. The reader reads both before every frame, so any callback can bump them
+  (`on_action`, `on_ui_result` for a dialog, card or settings menu answer, `on_tick`,
+  `on_http`, `on_book_open`). Returning a different annotator later has no effect until
+  the book is opened again.
+- **Failures:** a panic in `wants` or `annotate` is caught; the engine logs it once and
+  goes on without that annotator's annotations for the rest of the book. The other
+  annotators go on.
+- **Rust only:** a Lua plugin cannot offer an annotator. `wants` runs on the pagination
+  threads for every paragraph of the book, and `annotate` on a background thread, while
+  the Lua state belongs to the UI thread and every Lua call goes through the host's
+  sandbox and time limits.
+
 ### Example: Wikipedia (`plugins/wikipedia`)
 
 A network plugin with a selection action. Worth reading for these patterns:
@@ -413,8 +518,8 @@ A network plugin with a selection action. Worth reading for these patterns:
   not replace an open one (only viewer text replaces in place). So the plugin shows a
   toast while loading (the next modal replaces it) and sends the card when the answer
   arrives; a swipe on a paged card closes it and the plugin answers with the next page.
-- **Selection action id**: not `lookup` (the reader's long-press dictionary looks for
-  that id).
+- **Selection action id**: not `lookup` (that id makes a plugin a dictionary lookup
+  provider, see [Registries](#registries)).
 - Tests use a fake `NetHost` that records `Request`s and feed `on_http` by hand; no thread
   and no network. The card text is checked against `CardDialog::parse` in
   `crates/ink-app/src/plugin_card.rs`.
@@ -453,7 +558,7 @@ without and once with the overlay.
 
 | When | Call |
 | --- | --- |
-| after the first page is on the panel | `cx.plugins.book_open(doc, &path)`, then `cx.plugins.page_change` for that page |
+| after the first page is on the panel (before it, while a plugin annotator is in use; see [Text annotations](#text-annotations-plugintext_annotator)) | `cx.plugins.book_open(doc, &path)`, then `cx.plugins.page_change` for that page |
 | `paint` of a new page, after `doc.set_current_page(page)` and before `render_page` (status texts then land in the same update) | `cx.plugins.page_change(doc, page)` |
 | a selection was made | `cx.plugins.selection(doc, &sel)`; the popup adds `cx.plugins.selection_actions()` |
 | reader menu | add `hooks::entries(cx.plugins, EntryKind::ReaderMenu)` (show `entry.label`) |
