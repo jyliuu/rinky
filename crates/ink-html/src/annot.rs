@@ -56,6 +56,9 @@ struct Job {
 struct State {
     cache: HashMap<Key, Entry>,
     queue: VecDeque<Job>,
+    /// The paragraphs the page drawn last waits for: when the last of them is done the
+    /// app loop is woken ([`ink_device::wake`]) to draw the page again.
+    watch: Vec<Key>,
     clock: u64,
     stop: bool,
     running: bool,
@@ -128,6 +131,12 @@ impl Layer {
 
     fn insert(shared: &Shared, key: Key, version: u64, list: Vec<Annotation>) {
         let mut st = shared.state.lock().unwrap();
+        if let Some(i) = st.watch.iter().position(|k| *k == key) {
+            st.watch.swap_remove(i);
+            if st.watch.is_empty() {
+                ink_device::wake::wake();
+            }
+        }
         st.clock += 1;
         let used = st.clock;
         st.cache.insert(key, Entry { version, list: Arc::new(list), used });
@@ -146,9 +155,11 @@ impl Layer {
     }
 
     /// Replaces the queue with `jobs` (the page shown first, then those around it): work
-    /// for pages left behind is dropped. Starts the thread when needed.
-    fn queue(&self, jobs: Vec<Job>) {
+    /// for pages left behind is dropped. `watch`: the paragraphs the page shown waits for.
+    /// Starts the thread when needed.
+    fn queue(&self, jobs: Vec<Job>, watch: Vec<Key>) {
         let mut st = self.shared.state.lock().unwrap();
+        st.watch = watch;
         st.queue.clear();
         st.queue.extend(jobs);
         if !st.running && !st.queue.is_empty() {
@@ -332,7 +343,7 @@ impl Layer {
                 }
             }
             if !jobs.is_empty() {
-                self.queue(jobs);
+                self.queue(jobs, stats.missing.iter().map(|m| m.0).collect());
             }
         }
         if !lists.is_empty() {
@@ -341,6 +352,46 @@ impl Layer {
             stats.placed = placed.unwrap_or_default();
         }
         stats
+    }
+}
+
+impl Layer {
+    /// Queues, after the work already queued, the paragraphs of page `span` of another
+    /// chapter (the next chapter's first page or the previous one's last, when the page
+    /// shown is near the chapter's end or start) that are not cached yet.
+    pub(crate) fn prefetch(&self, s: &LayoutSettings, state: &AnnotatorState, chapter: usize, lay: &ChapterLayout, span: &PageSpan) {
+        let mut jobs = Vec::new();
+        for p in paragraphs_on(lay, span) {
+            let para = &lay.annotated[p];
+            for ai in 0..s.annotators.len().min(64) {
+                let a = s.annotators[ai].annotator();
+                let key = (self.generation, chapter as u32, p as u32, ai as u8);
+                if para.wanted & (1 << ai) != 0 && !state.failed(ai) && !self.fresh(key, a.version()) {
+                    jobs.push(Job { key, text: para.text.clone(), lang: para.lang.clone(), version: a.version(), annotator: a.clone(), state: state.clone() });
+                }
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        let mut st = self.shared.state.lock().unwrap();
+        let running = st.running;
+        st.queue.extend(jobs);
+        drop(st);
+        if running {
+            self.shared.wake.notify_all();
+        } else {
+            self.queue_keep();
+        }
+    }
+
+    /// Starts the thread on the queue as it is.
+    fn queue_keep(&self) {
+        let (jobs, watch) = {
+            let mut st = self.shared.state.lock().unwrap();
+            (st.queue.drain(..).collect(), std::mem::take(&mut st.watch))
+        };
+        self.queue(jobs, watch);
     }
 }
 

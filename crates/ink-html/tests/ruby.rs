@@ -831,3 +831,113 @@ fn book_ruby_with_ruby_position_under_is_drawn_below() {
     got.sort();
     assert_eq!(got, ["above", "below"], "the annotation under the base gives way to the book's");
 }
+
+#[test]
+fn the_next_chapter_s_first_page_is_annotated_ahead_when_it_is_laid_out() {
+    let ch = "<p>base one</p><p>base two</p><p>base three</p>";
+    let wait_for = |d: &HtmlDocument, n: usize| {
+        let t = std::time::Instant::now();
+        while d.annotations_cached() < n && t.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        d.annotations_cached()
+    };
+    let mut s = settings();
+    s.annotators = vec![AnnotatorHandle::new(Words::new("base", "B"))];
+    let mut canvas = ink_device::Canvas::new(W as usize, H as usize);
+    // The next chapter is laid out already: its first page's paragraphs are queued too.
+    let mut d = doc_with(&[ch, ch], "", &s);
+    d.page_layout(1).unwrap();
+    d.render_page(0, &mut canvas).unwrap();
+    assert_eq!(wait_for(&d, 6), 6);
+    // It is not: nothing is laid out for it.
+    let mut d = doc_with(&[ch, ch], "", &s);
+    d.render_page(0, &mut canvas).unwrap();
+    assert_eq!(wait_for(&d, 3), 3);
+}
+
+/// CPU time of this process so far (`ps`, 10 ms steps).
+fn cpu_ms() -> f64 {
+    let out = std::process::Command::new("ps").args(["-o", "time=", "-p", &std::process::id().to_string()]).output().unwrap();
+    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // [[hh:]mm:]ss.cc
+    t.split(':').fold(0.0, |acc, part| acc * 60.0 + part.trim().parse::<f64>().unwrap_or(0.0)) * 1000.0
+}
+
+/// Run alone: `cargo test --release -p ink-html --test ruby -- --ignored --nocapture idle`.
+#[test]
+#[ignore = "measurement: prints the CPU the annotation thread uses while idle"]
+fn measure_idle_annotation_thread() {
+    let mut s = settings();
+    s.annotators = vec![AnnotatorHandle::new(Words::new("base", "B"))];
+    let mut d = doc_with(&["<p>base one</p>".repeat(200).as_str()], "", &s);
+    let mut canvas = ink_device::Canvas::new(W as usize, H as usize);
+    d.render_page(0, &mut canvas).unwrap();
+    while d.annotations_pending() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(d.wait_paginated(std::time::Duration::from_secs(30)));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let before = cpu_ms();
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let used = cpu_ms() - before;
+    println!("process CPU over 5 s with the annotation thread idle: {used:.0} ms");
+}
+
+/// Run with `cargo test --release -p ink-html --test ruby -- --ignored --nocapture heavy`.
+#[test]
+#[ignore = "measurement: prints the pagination time of a generated book with <ruby> on every ideograph"]
+fn measure_heavy_book_ruby() {
+    let plain = cjk_book(20);
+    let ruby: Vec<String> = plain
+        .iter()
+        .map(|ch| {
+            let mut out = String::with_capacity(ch.len() * 4);
+            for c in ch.chars() {
+                if ('\u{4e00}'..='\u{9fff}').contains(&c) {
+                    out.push_str(&format!("<ruby>{c}<rt>abcd</rt></ruby>"));
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        })
+        .collect();
+    for (name, book) in [("plain", &plain), ("ruby on every ideograph", &ruby)] {
+        let refs: Vec<&str> = book.iter().map(String::as_str).collect();
+        let mut times = Vec::new();
+        let mut pages = 0;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let mut d = doc_with(&refs, "", &LayoutSettings::for_screen(1272, 1696));
+            assert!(d.wait_paginated(std::time::Duration::from_secs(600)));
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+            pages = d.page_count().pages;
+        }
+        times.sort_by(f64::total_cmp);
+        println!("{name}: {pages} pages, open + full pagination median {:.0} ms (min {:.0}, max {:.0}, n=5)", times[2], times[0], times[4]);
+    }
+}
+
+/// The space an annotator asks for between ideographs goes by character, whichever face
+/// draws them (here the book's font has no CJK glyphs, so another face or the missing
+/// glyph box does), and pagination counts it.
+#[test]
+fn ideograph_spacing_applies_to_text_in_any_face_and_paginates() {
+    let body = format!("<p>{}</p>", "天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏".repeat(6)).repeat(60);
+    let pitch_and_pages = |spacing: f32| {
+        let mut s = settings();
+        s.annotators = vec![AnnotatorHandle::new(Arc::new(Counting(Default::default(), 2, spacing)))];
+        let mut d = doc_with(&[body.as_str()], "", &s);
+        assert!(d.wait_paginated(std::time::Duration::from_secs(60)));
+        let (bases, _) = page_runs(&mut d);
+        let line: Vec<&TextRun> = bases.iter().filter(|b| b.line_top == bases[0].line_top).collect();
+        (line[1].x - line[0].x, d.page_count().pages)
+    };
+    let (p0, n0) = pitch_and_pages(0.0);
+    let (p1, n1) = pitch_and_pages(0.25);
+    println!("pitch {p0:.1} -> {p1:.1} px, pages {n0} -> {n1}");
+    assert!((p1 - p0 - 0.25 * 32.0).abs() < 0.5, "a quarter em more: {p0} -> {p1}");
+    assert!(n1 > n0, "more pages: {n0} -> {n1}");
+}

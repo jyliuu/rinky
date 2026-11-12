@@ -1232,6 +1232,21 @@ impl Document for HtmlDocument {
             }
             log::debug!("ink-html: page {} annotations: {} drawn, {} paragraphs waited for, {:?}", page + 1, stats.drawn, stats.missing.len(), ta.elapsed());
             *self.annot_waiting.borrow_mut() = stats.missing;
+            // Near the chapter's end or start: the adjacent chapter's first or last page,
+            // when that chapter is laid out already (no layout work for this).
+            if !self.annot_sync {
+                let near = [(lp + 2 >= laid.pages.len(), c + 1, true), (lp < 2 && c > 0, c.wrapping_sub(1), false)];
+                for (is_near, other, first) in near {
+                    if !is_near {
+                        continue;
+                    }
+                    let Some(ol) = self.laid.borrow().get(&other).cloned() else { continue };
+                    let span = if first { ol.pages.first() } else { ol.pages.last().filter(|_| ol.complete) };
+                    if let Some(sp) = span {
+                        self.annot.prefetch(&self.layout, &state, other, &ol.lay, sp);
+                    }
+                }
+            }
         } else {
             self.annot_waiting.borrow_mut().clear();
             self.annot_placed.borrow_mut().clear();

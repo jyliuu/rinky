@@ -169,9 +169,6 @@ fn draw_highlights(doc: &mut dyn Document, page: usize, canvas: &mut Canvas, sav
 /// estimated total.
 const COUNTING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How often the reader looks whether the annotations a page waits for are ready.
-const ANNOTATION_POLL: Duration = Duration::from_millis(100);
-
 /// Longest a percent jump waits for pagination to finish.
 const PERCENT_WAIT: Duration = Duration::from_secs(10);
 
@@ -584,7 +581,8 @@ pub struct ReaderScreen {
     annotators: Vec<std::sync::Arc<dyn ink_doc::TextAnnotator>>,
     /// The annotators' `version()` the page shown was drawn with.
     annot_versions: Vec<u64>,
-    /// The page shown lacks annotations still being computed: drawn again when ready.
+    /// The page shown lacks annotations still being computed: drawn again when ready
+    /// (the annotation thread wakes the app loop, `ink_device::wake`).
     annot_wait: bool,
     /// Links of a page (page, links), read when a tap needs them.
     links: Option<(usize, Vec<Link>)>,
@@ -2558,12 +2556,10 @@ impl AppScreen for ReaderScreen {
         let prefetch = self.prefetch_due().map(|d| d.saturating_duration_since(Instant::now()));
         // The sharp page after a zoom preview.
         let sharp = self.sharp_due().map(|d| d.saturating_duration_since(Instant::now()));
-        // Annotations the page waits for, being computed in the background.
-        let annotations = self.annot_wait.then_some(ANNOTATION_POLL);
         let expiry = self.overlay.as_ref().and_then(|o| o.tree.next_expiry()).or_else(|| self.bars_timeout());
         // aa: debounce; statusbar: minute tick; position save; selection edge; page count; prefetch; zoom
         let timers = expiry.into_iter().chain(aa::relayout_timeout()).chain(save).chain(edge).chain(counting);
-        timers.chain(prefetch).chain(sharp).chain(annotations).min()
+        timers.chain(prefetch).chain(sharp).min()
     }
 }
 

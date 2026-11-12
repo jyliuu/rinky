@@ -2598,13 +2598,16 @@ fn a_page_drawn_before_its_annotations_are_ready_is_drawn_again_once() {
     h.reader.go_to_page(page);
     h.paint();
     assert!(h.reader.annot_wait, "drawn before the annotations were ready");
-    assert!(h.reader.timeout().is_some_and(|t| t <= std::time::Duration::from_millis(100)), "the reader looks again soon");
+    // No timer while waiting: the annotation thread wakes the app loop when it is done.
+    assert!(h.reader.timeout().is_none_or(|t| t > std::time::Duration::from_secs(1)), "{:?}", h.reader.timeout());
+    ink_device::wake::take();
     let n = h.probe.updates().len();
     let t = std::time::Instant::now();
     while h.reader.doc.as_deref().unwrap().annotations_pending() && t.elapsed() < std::time::Duration::from_secs(10) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     println!("annotations of the page ready after {:?}", t.elapsed());
+    assert!(ink_device::wake::take(), "the app loop was woken");
     h.paint();
     let ups: Vec<_> = h.probe.updates()[n..].iter().map(|u| u.class).collect();
     assert!(!ups.is_empty() && ups.iter().all(|c| !c.flashes()), "{ups:?}");

@@ -249,7 +249,8 @@ impl ScriptPlayer {
     pub fn sleep(&mut self, d: Duration, timeout: Option<Duration>) -> bool {
         let start = std::time::Instant::now();
         let end = timeout.map_or(d, |t| t.min(d));
-        while start.elapsed() < end && crate::trace::stop_requested().is_none() {
+        // A wake (`crate::wake`) ends the wait early, as input would: the loop paints.
+        while start.elapsed() < end && crate::trace::stop_requested().is_none() && !crate::wake::pending() {
             std::thread::sleep(end.saturating_sub(start.elapsed()).min(Duration::from_millis(10)));
         }
         let slept = start.elapsed();
