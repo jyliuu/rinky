@@ -962,9 +962,9 @@ fn plugin_settings_open_as_a_page_built_from_the_plugin_menu() {
 }
 
 #[test]
-fn ruby_annotations_default_is_saved() {
+fn annotations_default_is_saved() {
     let d = Settings::default();
-    assert!(d.reader.ruby);
-    let r = run("ruby", &format!("{}{}shot ruby-off\n", main_tap("page:layout"), tap_row(layout_rows(&d.reader), "ruby")));
-    assert!(!saved(&r).reader.ruby);
+    assert!(d.reader.annotations);
+    let r = run("annotations", &format!("{}{}shot annotations-off\n", main_tap("page:layout"), tap_row(layout_rows(&d.reader), "annotations")));
+    assert!(!saved(&r).reader.annotations);
 }

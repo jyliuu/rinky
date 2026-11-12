@@ -437,7 +437,7 @@ fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator
   annotator it gets, in that order. The engine asks each about every paragraph and
   merges the results: where two annotations of the same position overlap, the earlier
   plugin's wins; one over a range and one under it both show. A plugin that panics
-  there is skipped. With *Ruby annotations* off (Aa › Layout for the book, Settings › Default
+  there is skipped. With *Annotations* off (Aa › Layout for the book, Settings › Default
   layout for new books) no annotator is used.
 - **`on_book_open` comes first:** while an annotator is in use the reader sends
   `on_book_open` before the book's first page (otherwise it comes after it), then

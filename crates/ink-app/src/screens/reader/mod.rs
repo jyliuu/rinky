@@ -78,7 +78,7 @@ pub fn stored_layout(settings: &ink_store::Settings, w: u32, h: u32) -> LayoutSe
         justify: r.justify,
         hyphenate: r.hyphenate,
         publisher_styles: r.publisher_styles,
-        ruby: r.ruby,
+        ruby: r.annotations,
         paragraph_spacing: r.paragraph_spacing,
         paragraph_indent: indent_em(r.paragraph_indent),
         embolden: r.font_weight.min(ink_store::settings::WEIGHT_MAX),

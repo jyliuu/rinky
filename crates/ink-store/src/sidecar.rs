@@ -274,9 +274,10 @@ pub struct BookSettings {
     /// Use the book's own CSS ("publisher styles").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publisher_styles: Option<bool>,
-    /// Show ruby annotations (the book's `<ruby>` readings and a plugin's annotations).
+    /// Show annotations (the book's `<ruby>` readings and plugins' annotations, above or
+    /// below the text).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
-    pub ruby: Option<bool>,
+    pub annotations: Option<bool>,
     /// Use the book's embedded fonts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedded_fonts: Option<bool>,
@@ -680,7 +681,7 @@ mod tests {
             hyphenation: Some(true),
             language: Some("en".into()),
             publisher_styles: Some(true),
-            ruby: Some(false),
+            annotations: Some(false),
             embedded_fonts: Some(true),
             rotation: Some(1),
             night_mode: Some(true),
@@ -1016,22 +1017,22 @@ mod tests {
         assert_eq!((st.settings.columns, st.settings.rtl, st.settings.spreads, st.settings.crop_auto, st.settings.font_px), (None, None, None, None, Some(30.0)));
     }
 
-    /// A book's own "show ruby" choice survives a save; unset is not written, and a
+    /// A book's own "show annotations" choice survives a save; unset is not written, and a
     /// value of another type reads as unset.
     #[test]
-    fn ruby_choice_round_trip() {
+    fn annotations_choice_round_trip() {
         let dir = TempDir::new("sidecar-ruby");
         let book = dir.path().join("poems.epub");
         let mut s = BookState::default();
-        s.settings.ruby = Some(false);
+        s.settings.annotations = Some(false);
         s.save(&book).unwrap();
-        assert_eq!(BookState::load(&book).unwrap().settings.ruby, Some(false));
-        assert!(std::fs::read_to_string(sidecar_path(&book)).unwrap().contains(r#""ruby": false"#));
+        assert_eq!(BookState::load(&book).unwrap().settings.annotations, Some(false));
+        assert!(std::fs::read_to_string(sidecar_path(&book)).unwrap().contains(r#""annotations": false"#));
         BookState::default().save(&book).unwrap();
-        assert!(!std::fs::read_to_string(sidecar_path(&book)).unwrap().contains("ruby"));
-        std::fs::write(sidecar_path(&book), r#"{"version":2,"settings":{"ruby":"off","font_px":30}}"#).unwrap();
+        assert!(!std::fs::read_to_string(sidecar_path(&book)).unwrap().contains("annotations"));
+        std::fs::write(sidecar_path(&book), r#"{"version":2,"settings":{"annotations":"off","font_px":30}}"#).unwrap();
         let st = BookState::load(&book).unwrap().settings;
-        assert_eq!((st.ruby, st.font_px), (None, Some(30.0)));
+        assert_eq!((st.annotations, st.font_px), (None, Some(30.0)));
     }
 
     #[test]

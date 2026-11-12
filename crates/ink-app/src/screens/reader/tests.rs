@@ -2416,7 +2416,7 @@ impl ink_plugin::Plugin for AnnotatingPlugin {
 }
 
 /// The plugin's annotator is in the layout of a book opened with it; a version bump
-/// lays the book out again after a plugin action; "Show ruby annotations" off for this
+/// lays the book out again after a plugin action; "Annotations" off for this
 /// book (Aa) or as the default takes it out of the layout.
 #[test]
 fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
@@ -2439,14 +2439,14 @@ fn plugin_annotator_follows_its_version_and_the_ruby_setting() {
     assert_ne!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key);
     // Off for this book: neither ruby nor the annotator.
     h.with_cx(|r, cx| {
-        r.aa_action("aa-ruby:off", cx).unwrap();
+        r.aa_action("aa-annotations:off", cx).unwrap();
         r.relayout(cx, RefreshClass::Gc16).unwrap();
     });
     let l = h.reader.doc.as_deref().unwrap().layout().clone();
     assert!(!l.ruby && l.annotators.is_empty());
-    assert_eq!(h.reader.book_settings.ruby, Some(false));
+    assert_eq!(h.reader.book_settings.annotations, Some(false));
     // Off as the default: a book without its own choice opens without them.
-    h.settings.reader.ruby = false;
+    h.settings.reader.annotations = false;
     h.reader = ReaderScreen::new(h.reader.path.clone());
     h.reader.book_settings = BookSettings::default();
     let _ = std::fs::remove_file(ink_store::sidecar::sidecar_path(&h.reader.path));

@@ -181,18 +181,18 @@ Tap **Aa** in the menu, or swipe up from the bottom edge, to open *Reading setti
   Hyphenate, Book's styles (off ignores the book's own styling) and Weight (Normal,
   Darker, Darkest; thicker strokes, the same line breaks).
 - **Layout:** line spacing, side, top and bottom margins, space between paragraphs,
-  first-line indent and Ruby annotations.
+  first-line indent and Annotations.
 - **Page:** page turn wave, status bars, how often the page flashes to clear ghosting,
   and night mode.
 - **View** (PDF and comics only, in place of Text and Layout): fit, columns,
   contrast, two pages side by side, crop margins and right to left. See *PDF and
   comics* below.
 
-**Ruby annotations** shows or hides readings drawn in small type above the text: the
-ones a book marks up as ruby (furigana in Japanese books, for example) and the ones a
-plugin adds. Turned off, the book shows its base text only, the way it looks without
-ruby. A reading never becomes part of the text: search, selection and highlights see
-only the text it is drawn over.
+**Annotations** shows or hides the small texts drawn above or below the text: the
+ones a book marks up as ruby (furigana in Japanese books, readings in Chinese
+textbooks, for example) and the ones plugins add. Turned off, the book shows its text
+only, the way it looks without them. An annotation never becomes part of the text:
+search, selection, highlights and look-ups see only the text it is drawn over.
 
 Text and Layout changes apply to the open book only. **Use for all books** makes them
 the default for every book, which you can also set under *Settings > Default layout*.
