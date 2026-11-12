@@ -382,3 +382,77 @@ fn giant_paragraphs_keep_annotations_whole() {
     assert!(!text.is_empty());
     assert!(ruby.len() > 10 && ruby.iter().all(|r| r.text == "B"));
 }
+
+/// Gives every CJK ideograph the same short annotation (or, `idle`, wants nothing).
+struct EveryIdeograph {
+    idle: bool,
+}
+
+impl TextAnnotator for EveryIdeograph {
+    fn id(&self) -> &str {
+        "every-ideograph"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, p: &str) -> bool {
+        !self.idle && p.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+    }
+    fn annotate(&self, p: &str, _lang: Option<&str>) -> Vec<Annotation> {
+        p.char_indices().filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c)).map(|(i, c)| Annotation::new(i..i + c.len_utf8(), "abc")).collect()
+    }
+}
+
+/// Run with `cargo test --release -p ink-html --test ruby -- --ignored --nocapture measure`.
+#[test]
+#[ignore = "measurement: prints the pagination time of a big CJK book without an annotator, with one that wants nothing and with one that annotates every ideograph"]
+fn measure_annotator_cost_on_a_big_cjk_book() {
+    // 40 chapters of 60 paragraphs of 150 ideographs and punctuation: about 1 MB of text
+    // (characters drawn from the Thousand Character Classic, in a fixed pseudo-random
+    // order).
+    let pool: Vec<char> = "天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳云腾致雨露结为霜金生丽水玉出昆冈剑号巨阙珠称夜光果珍李柰菜重芥姜海咸河淡鳞潜羽翔".chars().collect();
+    let mut seed = 12345u32;
+    let mut next = || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        (seed >> 16) as usize
+    };
+    let chapters: Vec<String> = (0..40)
+        .map(|_| {
+            let mut body = String::new();
+            for _ in 0..60 {
+                body.push_str("<p>");
+                for k in 1..=150 {
+                    body.push(pool[next() % pool.len()]);
+                    if k % 12 == 0 {
+                        body.push('，');
+                    }
+                }
+                body.push_str("。</p>\n");
+            }
+            body
+        })
+        .collect();
+    let refs: Vec<&str> = chapters.iter().map(String::as_str).collect();
+    let bytes: usize = chapters.iter().map(String::len).sum();
+    println!("book: {} chapters, {} KB of XHTML body", chapters.len(), bytes / 1024);
+    let variants: [(&str, Option<Arc<dyn TextAnnotator>>); 3] = [
+        ("no annotator", None),
+        ("annotator that wants nothing", Some(Arc::new(EveryIdeograph { idle: true }))),
+        ("every ideograph annotated", Some(Arc::new(EveryIdeograph { idle: false }))),
+    ];
+    for (name, a) in variants {
+        let mut times = Vec::new();
+        let mut pages = 0;
+        for _ in 0..5 {
+            let mut s = LayoutSettings::for_screen(1272, 1696);
+            s.annotator = a.clone().map(AnnotatorHandle::new);
+            let t = std::time::Instant::now();
+            let mut d = doc_with(&refs, "", &s);
+            assert!(d.wait_paginated(std::time::Duration::from_secs(600)));
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+            pages = d.page_count().pages;
+        }
+        times.sort_by(f64::total_cmp);
+        println!("{name}: {pages} pages, open + full pagination median {:.0} ms (min {:.0}, max {:.0}, n=5)", times[2], times[0], times[4]);
+    }
+}
