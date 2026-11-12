@@ -161,20 +161,28 @@ fn a_wide_ruby_reaches_over_plain_neighbours_without_moving_them() {
 }
 
 #[test]
-fn neighbouring_wide_rubies_keep_a_gap_and_move_apart_only_by_the_shortfall() {
+fn neighbouring_wide_rubies_are_condensed_then_keep_a_gap() {
     let d = doc("<p>x<ruby>a<rt>wide reading</rt>b<rt>wide reading</rt>c<rt>c</rt></ruby>xxxxxxxx</p>", "p { text-indent: 0 }");
     let (text, ruby) = page_runs(&d);
-    let (r0, r1, r2) = (&ruby[0], &ruby[1], &ruby[2]);
-    let gap = r0.px * 0.25;
-    let between = r1.x - (r0.x + r0.width);
-    assert!((between - gap).abs() < 0.5, "exactly the gap between two wide readings: {between} vs {gap}");
-    assert!(r2.x - (r1.x + r1.width) >= gap - 0.5, "the narrow reading after them keeps the gap too");
-    // Only the shortfall goes between the two bases; the leading x is not moved.
-    let (a, b) = (run(&text, "a"), run(&text, "b"));
-    let shortfall = (r0.width + r1.width) / 2.0 + gap - (a.width + b.width) / 2.0;
-    assert!((b.x - (a.x + a.width) - shortfall).abs() < 0.5, "{} vs {shortfall}", b.x - (a.x + a.width));
+    let normal = run(&text, "a").px / 2.0;
+    for r in &ruby {
+        assert!(r.px >= normal * 0.7 - 0.01 && r.px < normal, "condensed, not below 70 %: {} of {normal}", r.px);
+        assert_eq!(r.px, ruby[0].px, "one size for the paragraph");
+    }
+    let gap = ruby[0].px * 0.25;
+    for w in ruby.windows(2) {
+        assert!(w[1].x - (w[0].x + w[0].width) >= gap - 0.5, "{:?} and {:?} too close", w[0].text, w[1].text);
+    }
+    // A ruby text sits within a quarter of its base's width of the base's centre.
+    for (r, b) in ruby.iter().zip(["a", "b", "c"]) {
+        let b = run(&text, b);
+        assert!((mid(r) - mid(b)).abs() <= b.width * 0.25 + 0.5, "{:?} off its base", r.text);
+    }
+    // The bases of the run keep one pitch.
+    let (a, b, c) = (run(&text, "a"), run(&text, "b"), run(&text, "c"));
+    assert!(((b.x - (a.x + a.width)) - (c.x - (b.x + b.width))).abs() < 0.5, "one pitch: {} vs {}", b.x - (a.x + a.width), c.x - (b.x + b.width));
     // The leading x stays at the line start unless the first reading would reach past it.
-    assert!((text[0].x - 50.0).abs() < 0.5 || (r0.x - 50.0).abs() < 0.5, "x at {}, reading at {}", text[0].x, r0.x);
+    assert!((text[0].x - 50.0).abs() < 0.5 || (ruby[0].x - 50.0).abs() < 0.5, "x at {}, reading at {}", text[0].x, ruby[0].x);
 }
 
 #[test]
@@ -233,7 +241,7 @@ fn cjk_doc(body: &str, s: &LayoutSettings) -> HtmlDocument {
 }
 
 #[test]
-fn per_character_readings_of_mixed_width_overhang_and_keep_their_gaps() {
+fn per_character_readings_of_mixed_width_keep_one_pitch() {
     // One syllable per character, as Latin-letter readings of Chinese have: the
     // lengths of the readings of the first two lines of the fixture's first poem.
     let text = "床前明月光疑是地上霜";
@@ -246,6 +254,14 @@ fn per_character_readings_of_mixed_width_overhang_and_keep_their_gaps() {
     let plain = cjk_doc(&body, &s);
     let (bases, ruby) = page_runs(&d);
     let (pbases, _) = page_runs(&plain);
+    // The pitch: from one character's left edge to the next one's (32 px plain).
+    let gaps: Vec<f32> = bases.windows(2).map(|w| w[1].x - w[0].x).collect();
+    let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
+    let sd = (gaps.iter().map(|g| (g - mean) * (g - mean)).sum::<f32>() / gaps.len() as f32).sqrt();
+    let (lo, hi) = gaps.iter().fold((f32::MAX, f32::MIN), |(a, b), &g| (a.min(g), b.max(g)));
+    let right = |r: &[TextRun]| r.iter().map(|t| t.x + t.width).fold(f32::MIN, f32::max);
+    let left = |r: &[TextRun]| r.iter().map(|t| t.x).fold(f32::MAX, f32::min);
+    println!("character pitch: min {lo:.1} max {hi:.1} mean {mean:.1} sd {sd:.1} px; reading size {} px", ruby[0].px);
     assert_eq!(ruby.len(), 10);
     assert!(bases.iter().all(|b| b.line_top == bases[0].line_top), "one line");
     let gap = ruby[0].px * 0.25;
@@ -253,23 +269,12 @@ fn per_character_readings_of_mixed_width_overhang_and_keep_their_gaps() {
         assert!(w[1].x - (w[0].x + w[0].width) >= gap - 0.5, "{:?} and {:?} too close", w[0].text, w[1].text);
     }
     assert!(ruby[0].x >= s.margin_left - 0.5, "inside the line");
-    // The extra width of the line, against the rule before overhang (every base as
-    // wide as its reading plus the gap).
-    let right = |r: &[TextRun]| r.iter().map(|t| t.x + t.width).fold(f32::MIN, f32::max);
-    let left = |r: &[TextRun]| r.iter().map(|t| t.x).fold(f32::MAX, f32::min);
-    let base_w = (right(&pbases) - left(&pbases)) / text.chars().count() as f32;
-    let now = right(&bases) - left(&bases) - (right(&pbases) - left(&pbases)) + (bases[0].x - pbases[0].x);
-    let before: f32 = ruby.iter().map(|r| (r.width + gap - base_w).max(0.0)).sum();
-    println!("extra width of the line: {now:.1} px with overhang, {before:.1} px when every base widened (base {base_w:.1} px)");
-    assert!(now < before - 20.0, "{now} vs {before}");
-    // Two characters move apart only where their readings would come closer than the
-    // gap; elsewhere the readings reach over each other's slack.
-    for (w, r) in bases.windows(2).zip(ruby.windows(2)) {
-        let moved = w[1].x - (w[0].x + w[0].width);
-        let fits = (r[0].width + r[1].width) / 2.0 + gap <= base_w + 0.01;
-        assert!(!fits || moved.abs() < 0.5, "{:?} and {:?} moved apart by {moved} px though their readings fit", w[0].text, w[1].text);
-        assert!(fits || moved <= (r[0].width + r[1].width) / 2.0 + gap - base_w + 0.5, "more than the shortfall");
-    }
+    // One pitch for the whole run, readings condensed to no less than 70 %.
+    assert!(sd < 0.5, "uneven pitch: sd {sd}");
+    assert!(ruby.iter().all(|r| r.px >= 16.0 * 0.7 - 0.01 && r.px == ruby[0].px));
+    let plain_w = right(&pbases) - left(&pbases);
+    let now = right(&bases) - left(&bases) - plain_w;
+    println!("extra width of the line: {now:.1} px over {plain_w:.1} px of plain text");
 }
 
 /// Annotates every occurrence of a word with a text; `version` and `text` can change.

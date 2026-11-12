@@ -9,10 +9,12 @@
 //!   justification, sub/superscript, inline images.
 //! - Ruby: the text of `<rt>` drawn centred above its base at a reduced size (the `rt`
 //!   font size, 50 % by default), and the annotations of the settings' annotator laid
-//!   out the same way ([`Ruby`]). A base is never broken across lines; a ruby wider than
-//!   its base reaches over the text beside it (overhang), and its base moves right only
-//!   where the ruby would come too close to the ruby text before it or reach past the
-//!   line's edge. A paragraph with ruby gets the same extra space above every line. Ruby text is drawn only: it has no DOM position, so
+//!   out the same way ([`Ruby`]). A base is never broken across lines. A ruby wider than
+//!   its base reaches over the text beside it (overhang, a little off centre when that
+//!   keeps the bases' pitch); readings that still do not fit are condensed, one size
+//!   for the paragraph down to 70 %; only then do bases move apart, by one pitch for a
+//!   run of annotated characters ([`place_ruby`]). A paragraph with ruby gets the same
+//!   extra space above every line. Ruby text is drawn only: it has no DOM position, so
 //!   selection, search and page text never see it.
 //! - Output: [`ChapterLayout`] with slices (the units the paginator places), draw items
 //!   (text, images) per slice and border rectangles in flow coordinates.
@@ -233,13 +235,98 @@ struct Ruby {
     /// Width of the base text and of the ruby text (measured by [`Flow::lay_lines`]).
     base_w: f32,
     ruby_w: f32,
-    /// Space added before the base so its ruby text, centred over it, keeps
-    /// [`RUBY_GAP`] from the ruby text before it (set by [`Flow::lay_lines`]).
+    /// Space added before the base so its ruby text keeps [`RUBY_GAP`] from the ruby
+    /// text before it, and the offset of the ruby text from the centre of its base (set
+    /// by [`place_ruby`]).
     pad: f32,
+    shift: f32,
 }
 
 /// Least space between two ruby texts side by side, in em of the ruby text.
 const RUBY_GAP: f32 = 0.25;
+/// Smallest size ruby text is condensed to (share of its normal size) so it fits over
+/// its bases without moving them apart.
+const RUBY_MIN_SCALE: f32 = 0.7;
+
+/// How far a ruby text may sit off the centre of its base (share of the base width) so
+/// that its neighbours keep their pitch.
+const RUBY_SHIFT: f32 = 0.25;
+
+/// Places the ruby texts of a paragraph over their bases at `scale` of their size:
+/// sets [`Ruby::pad`] (space before the base) and [`Ruby::shift`] (offset of the ruby
+/// text from the centre of its base). Returns the space added in all.
+///
+/// Overhang: a ruby text may reach over the text beside it, as long as it keeps
+/// [`RUBY_GAP`] from the ruby text before it. A run of bases with nothing between them
+/// (one reading per character) keeps one pitch: every base of the run but the first gets
+/// the same pad, the smallest that lets each ruby text sit within [`RUBY_SHIFT`] of its
+/// base's centre without coming too close to the one before (a ruby text sits centred
+/// unless the one before pushes it right). The first base of a run moves only if the
+/// ruby text before the run reaches too far. `before[i]` is the raw width of the text
+/// between ruby `i - 1` and ruby `i`, and whether a forced line break lies in it (the
+/// readings start afresh there). The edges of the lines the text is broken into are the
+/// boxes' lead and trail.
+fn place_ruby(ruby: &mut [Ruby], before: &[(f32, bool)], scale: f32) -> f32 {
+    let n = ruby.len();
+    let (mut x, mut reach, mut total) = (0.0f32, f32::NEG_INFINITY, 0.0f32);
+    let mut i = 0;
+    while i < n {
+        if before[i].1 {
+            reach = f32::NEG_INFINITY;
+        }
+        x += before[i].0;
+        let mut j = i + 1;
+        while j < n && before[j].0 == 0.0 && !before[j].1 {
+            j += 1;
+        }
+        let run = &mut ruby[i..j];
+        // Places the run with pad `u` before every base but the first; Some(reach after
+        // it) when every ruby text fits, the shifts written into the run.
+        let try_place = |run: &mut [Ruby], pad0: f32, u: f32| -> Option<f32> {
+            let (mut left, mut reach) = (x + pad0, reach);
+            for (k, r) in run.iter_mut().enumerate() {
+                if k > 0 {
+                    left += u;
+                }
+                let rw = r.ruby_w * scale;
+                let centred = left + (r.base_w - rw) / 2.0;
+                let at = reach.max(centred);
+                if at > centred + RUBY_SHIFT * r.base_w + 0.01 {
+                    return None;
+                }
+                r.shift = at - centred;
+                reach = at + rw + RUBY_GAP * r.px * scale;
+                left += r.base_w;
+            }
+            Some(reach)
+        };
+        let first = &run[0];
+        let pad0 = (reach - (x + (first.base_w - first.ruby_w * scale) / 2.0 + RUBY_SHIFT * first.base_w)).max(0.0);
+        let mut u = 0.0;
+        if run.len() > 1 && try_place(run, pad0, 0.0).is_none() {
+            let mut hi = run.iter().map(|r| r.ruby_w * scale + RUBY_GAP * r.px * scale).fold(0.0, f32::max);
+            let mut lo = 0.0;
+            for _ in 0..14 {
+                let mid = (lo + hi) / 2.0;
+                if try_place(run, pad0, mid).is_some() {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            u = hi;
+        }
+        reach = try_place(run, pad0, u).unwrap_or(f32::NEG_INFINITY);
+        for (k, r) in run.iter_mut().enumerate() {
+            r.pad = if k == 0 { pad0 } else { u };
+        }
+        let added = pad0 + u * (run.len() - 1) as f32;
+        total += added;
+        x += added + run.iter().map(|r| r.base_w).sum::<f32>();
+        i = j;
+    }
+    total
+}
 
 /// Annotation text size as a share of the base text's size.
 const ANNOTATION_SCALE: f32 = 0.5;
@@ -1286,7 +1373,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                             continue;
                         }
                         let face = self.face(st);
-                        out.ruby.push(Ruby { start: bs, end: be, text, face, px: st.font_size, gray: st.color, base_w: 0.0, ruby_w: 0.0, pad: 0.0 });
+                        out.ruby.push(Ruby { start: bs, end: be, text, face, px: st.font_size, gray: st.color, base_w: 0.0, ruby_w: 0.0, pad: 0.0, shift: 0.0 });
                     }
                     "rb" => {
                         if let Some(b) = base(out, anon) {
@@ -1359,7 +1446,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 if let SegKind::Text { face, px } = seg.kind {
                     let (st, en, ref t) = keep[k];
                     let gray = self.st(seg.style).color;
-                    out.push(Ruby { start: st, end: en, text: t.clone(), face, px: px * ANNOTATION_SCALE, gray, base_w: 0.0, ruby_w: 0.0, pad: 0.0 });
+                    out.push(Ruby { start: st, end: en, text: t.clone(), face, px: px * ANNOTATION_SCALE, gray, base_w: 0.0, ruby_w: 0.0, pad: 0.0, shift: 0.0 });
                 }
                 k += 1;
             }
@@ -1543,25 +1630,39 @@ impl<'a, 'e> Flow<'a, 'e> {
                 r.base_w = self.width(&para, r.start, r.end);
                 r.ruby_w = self.env.fonts.width(r.face, r.px, &r.text);
             }
-            // Overhang: a ruby text centred over its base may reach over the text beside
-            // it, as long as it keeps RUBY_GAP from the ruby text before it; only what
-            // the neighbours cannot take becomes space before the base. Left to right:
-            // `x` is where the text has got to (pads included), `reach` the right edge
-            // of the last ruby text plus the gap. A forced line break starts afresh;
-            // the edges of the lines the text is broken into are the boxes' lead and
-            // trail below.
-            let (mut x, mut at, mut reach) = (0.0f32, 0usize, f32::NEG_INFINITY);
-            for r in &mut ruby {
-                if text[at..r.start].contains('\n') {
-                    reach = f32::NEG_INFINITY;
-                }
-                x += self.width(&para, at, r.start);
-                r.pad = (reach - (x + (r.base_w - r.ruby_w) / 2.0)).max(0.0);
-                x += r.pad;
-                reach = x + (r.base_w + r.ruby_w) / 2.0 + RUBY_GAP * r.px;
-                x += r.base_w;
+            // The text before each base since the last one (raw widths), and whether a
+            // forced line break lies in it.
+            let mut before = Vec::with_capacity(ruby.len());
+            let mut at = 0usize;
+            for r in &ruby {
+                before.push((self.width(&para, at, r.start), text[at..r.start].contains('\n')));
                 at = r.end;
             }
+            // When the readings do not fit over their bases (overhang below), they are
+            // condensed first: one smaller size for every ruby text of the paragraph (a
+            // uniform look), as large as lets them fit, at least RUBY_MIN_SCALE of the
+            // normal size. Only what is still missing then moves bases apart.
+            if place_ruby(&mut ruby, &before, 1.0) > 0.01 {
+                let scale = if place_ruby(&mut ruby, &before, RUBY_MIN_SCALE) > 0.01 {
+                    RUBY_MIN_SCALE
+                } else {
+                    let (mut lo, mut hi) = (RUBY_MIN_SCALE, 1.0f32);
+                    for _ in 0..8 {
+                        let mid = (lo + hi) / 2.0;
+                        if place_ruby(&mut ruby, &before, mid) > 0.01 {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                    lo
+                };
+                for r in &mut ruby {
+                    r.px *= scale;
+                    r.ruby_w = self.env.fonts.width(r.face, r.px, &r.text);
+                }
+            }
+            place_ruby(&mut ruby, &before, 1.0);
             para.ruby = ruby;
         }
         // Break opportunities.
@@ -1626,7 +1727,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             for b in &mut boxes {
                 let first = para.ruby.partition_point(|r| r.start < b.start);
                 for i in first..para.ruby.len() {
-                    let (rs, re, pad, bw, rw) = { let r = &para.ruby[i]; (r.start, r.end, r.pad, r.base_w, r.ruby_w) };
+                    let (rs, re, pad, bw, rw) = { let r = &para.ruby[i]; (r.start, r.end, r.pad + r.shift, r.base_w, r.ruby_w) };
                     if rs >= b.end {
                         break;
                     }
@@ -2059,7 +2160,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 }
             }
         }
-        // Ruby text centred over its base, its bottom on the top of the base's
+        // Ruby text over its base (centred unless shifted by place_ruby), its bottom on the top of the base's
         // glyphs. Drawn only: no DOM node, so selection and page text skip it.
         for (i, left) in ruby_cells {
             let r = &p.ruby[i];
@@ -2067,7 +2168,7 @@ impl<'a, 'e> Flow<'a, 'e> {
             let (bface, bpx) = self.seg_face(seg);
             let (a, _) = self.env.fonts.vmetrics(bface, bpx);
             let (_, rd) = self.env.fonts.vmetrics(r.face, r.px);
-            let x = left + (r.base_w - r.ruby_w) / 2.0;
+            let x = left + (r.base_w - r.ruby_w) / 2.0 + r.shift;
             self.out.items.push(Draw::Text(TextRun {
                 x,
                 baseline: baseline - seg.shift - a + rd,
