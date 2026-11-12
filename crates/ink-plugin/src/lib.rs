@@ -171,8 +171,9 @@ pub trait Plugin {
     }
     /// A [`TextAnnotator`] whose annotations the reader draws above the text of
     /// reflowable books, like ruby, or `None` (the default). Asked when a book opens;
-    /// the reader keeps the `Arc` and reads [`TextAnnotator::version`] again whenever it
-    /// rebuilds its layout settings (after a plugin action or a settings page closes), so
+    /// the reader keeps the `Arc` and reads [`TextAnnotator::version`] again before
+    /// every frame (after any plugin callback: actions, dialog and card answers, ticks,
+    /// network results) and whenever it rebuilds its layout settings, so
     /// a plugin changes the annotations by bumping the version, not by returning a
     /// different annotator. Rust plugins only: the annotator runs on the pagination
     /// thread for every paragraph of the book, where a Lua call would be too slow.

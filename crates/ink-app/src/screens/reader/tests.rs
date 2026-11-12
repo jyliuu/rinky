@@ -2447,3 +2447,46 @@ fn annotator_version_set_in_on_book_open_is_used_from_the_first_page() {
     assert_eq!(opens.get(), 1, "the first paint does not send it again");
     assert_eq!(version(&h), Some(7));
 }
+
+/// A plugin that changes its annotations when a dialog or card is answered.
+struct AnswerAnnotator(ink_plugin::PluginManifest, std::sync::Arc<RomeoAnnotator>);
+
+impl ink_plugin::Plugin for AnswerAnnotator {
+    fn manifest(&self) -> &ink_plugin::PluginManifest {
+        &self.0
+    }
+    fn on_load(&mut self, _reg: &mut ink_plugin::Registrar) -> ink_plugin::Result<()> {
+        Ok(())
+    }
+    fn on_ui_result(&mut self, _cx: &mut ink_plugin::HostCtx, _id: u32, result: &str) -> ink_plugin::Result<()> {
+        if result == "more" {
+            self.1 .0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+    fn text_annotator(&self) -> Option<std::sync::Arc<dyn ink_doc::TextAnnotator>> {
+        Some(self.1.clone())
+    }
+}
+
+/// A version bump inside `on_ui_result` (a card or dialog answer, a settings menu)
+/// lays the book out again by the next frame; an answer that changes nothing does not.
+#[test]
+fn annotator_version_bumped_in_a_ui_answer_repaginates() {
+    let mut h = Harness::new("annotator-answer", "juliet.epub");
+    let a = std::sync::Arc::new(RomeoAnnotator(std::sync::atomic::AtomicU64::new(1)));
+    h.plugins = PluginHost::new(vec![Box::new(AnswerAnnotator(ink_plugin::PluginManifest::new("romeo", "1", &[]), a))]);
+    let p = providers();
+    h.reader = ReaderScreen::new(h.reader.path.clone());
+    h.reader.on_enter(&mut cx!(h, p)).unwrap();
+    h.paint();
+    let version = |h: &Harness| h.reader.doc.as_deref().unwrap().layout().annotator.as_ref().map(|x| x.version());
+    let key = h.reader.doc.as_deref().unwrap().layout().cache_key();
+    h.with_cx(|r, cx| cx.plugins.answer("romeo", 1, "ok", r.document()));
+    h.paint();
+    assert_eq!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key, "nothing changed");
+    h.with_cx(|r, cx| cx.plugins.answer("romeo", 1, "more", r.document()));
+    h.paint();
+    assert_eq!(version(&h), Some(2), "laid out again with the new version");
+    assert_ne!(h.reader.doc.as_deref().unwrap().layout().cache_key(), key);
+}

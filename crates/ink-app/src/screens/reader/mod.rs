@@ -1886,11 +1886,21 @@ impl ReaderScreen {
         Ok(())
     }
 
-    /// After a plugin action: the plugin may have changed its annotations.
+    /// True when the annotator's version is not the one the book is laid out with (a
+    /// plugin changed its annotations). One version read: cheap enough for every frame.
+    fn annotator_moved(&self) -> bool {
+        let (Some(a), Some(doc)) = (self.annotator.as_ref(), self.doc.as_deref()) else { return false };
+        doc.layout().annotator.as_ref().is_some_and(|h| h.version() != a.version())
+    }
+
+    /// After plugin code ran (an action, a dialog or card answer, a tick, a network
+    /// result, a selection action): lays the book out again when the plugin changed its
+    /// annotations.
     fn relayout_after_plugin(&mut self, cx: &mut AppCtx) {
-        if self.annotator.is_some() {
+        if self.annotator_moved() {
+            log::info!("reader: the annotator's version changed; laying the book out again");
             if let Err(e) = self.relayout(cx, RefreshClass::Gc16) {
-                log::warn!("reader: layout after a plugin action: {e:#}");
+                log::warn!("reader: layout after a plugin call: {e:#}");
             }
         }
     }
@@ -2474,6 +2484,10 @@ impl AppScreen for ReaderScreen {
     }
 
     fn paint(&mut self, cx: &mut AppCtx) -> anyhow::Result<Vec<Damage>> {
+        // The app loop ran the plugins' ticks, network results and event handlers (dialog
+        // and menu answers) before this frame, and the reader its own plugin calls (card
+        // answers, actions): one of them may have changed the annotations.
+        self.relayout_after_plugin(cx);
         // The plugin overlay is drawn over this by the app loop (hooks::app_paint).
         self.paint_screen(cx)
     }

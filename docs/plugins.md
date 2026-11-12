@@ -443,10 +443,11 @@ fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator
   of the book, so it is `Send + Sync`, must not block, and `wants` should be a cheap
   test that lets most paragraphs through untouched.
 - **Changing the output:** the output must be a function of (paragraph, language,
-  version). To change it (a new mode, another word list), bump `version()`: the reader
-  reads it whenever it rebuilds its layout (after a plugin action, when a settings page
-  closes, when a book opens), and a new version paginates the book again, like a font
-  size change. Returning a different annotator later has no effect until the book is
+  version). To change it (a new mode, another word list), bump `version()` from any
+  callback (`on_action`, `on_ui_result` for a dialog, card or settings menu answer,
+  `on_tick`, `on_http`, `on_book_open`): the reader reads it before every frame and
+  whenever it rebuilds its layout, and a new version paginates the book again, like a
+  font size change. Returning a different annotator later has no effect until the book is
   opened again.
 - **Failures:** a panic in `wants` or `annotate` is caught; the engine logs it once and
   lays the rest of the book out without annotations.
