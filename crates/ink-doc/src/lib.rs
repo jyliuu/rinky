@@ -418,6 +418,13 @@ pub trait Document {
         false
     }
 
+    /// True while the page drawn last lacks annotations that are being computed (see
+    /// [`annotate`]): draw it again when this turns false. The reader asks while it
+    /// shows such a page. Default: never.
+    fn annotations_pending(&self) -> bool {
+        false
+    }
+
     /// Position of the first character on `page`.
     fn position_of_page(&self, page: usize) -> Result<Position>;
 
