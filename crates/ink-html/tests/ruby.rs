@@ -277,6 +277,43 @@ fn per_character_readings_of_mixed_width_keep_one_pitch() {
     println!("extra width of the line: {now:.1} px over {plain_w:.1} px of plain text");
 }
 
+/// Readings given by position: `texts[k]` for the k-th ideograph ("" none).
+struct ByPosition(Vec<&'static str>);
+
+impl TextAnnotator for ByPosition {
+    fn id(&self) -> &str {
+        "by-position"
+    }
+    fn version(&self) -> u64 {
+        1
+    }
+    fn wants(&self, p: &str) -> bool {
+        p.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+    }
+    fn annotate(&self, p: &str, _: Option<&str>) -> Vec<Annotation> {
+        p.char_indices()
+            .filter(|&(_, c)| ('\u{4e00}'..='\u{9fff}').contains(&c))
+            .enumerate()
+            .filter_map(|(k, (i, c))| self.0.get(k).filter(|t| !t.is_empty()).map(|t| Annotation::new(i..i + c.len_utf8(), *t)))
+            .collect()
+    }
+}
+
+fn cjk_annotated(body: &str, texts: Vec<&'static str>) -> HtmlDocument {
+    let mut s = settings();
+    s.annotator = Some(AnnotatorHandle::new(Arc::new(ByPosition(texts))));
+    cjk_doc(body, &s)
+}
+
+#[test]
+fn every_paragraph_the_annotator_wants_gets_the_ruby_room() {
+    // The annotator reads both paragraphs but has a reading for the first one only.
+    let d = cjk_annotated("<p>床前</p><p>明月</p><p>abc</p>", vec!["a"]);
+    let h = line_heights(&d);
+    assert!((h[0] - h[1]).abs() < 0.01, "the same line pitch without a reading: {h:?}");
+    assert!(h[2] < h[1] - 1.0, "a paragraph it does not want keeps its spacing: {h:?}");
+}
+
 /// Annotates every occurrence of a word with a text; `version` and `text` can change.
 struct Words {
     word: &'static str,

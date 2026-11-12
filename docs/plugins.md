@@ -437,6 +437,12 @@ fn text_annotator(&self) -> Option<Arc<dyn TextAnnotator>> { Some(self.annotator
   out of bounds, inside a character, overlapping an earlier annotation of the list or a
   `<ruby>` base of the book (the book's ruby wins), and annotations with no text. It
   never breaks a line inside an annotated range.
+- **Line rhythm:** every paragraph for which `wants` returns true gets the room of an
+  annotation above all its lines, even when `annotate` then returns nothing for it, so
+  a page of text the annotator reads keeps one line pitch whether or not a paragraph
+  has annotations. `wants` is therefore also the switch for that room: return false for
+  paragraphs the annotator never annotates (another script, say). Book `<ruby>` keeps
+  its own rule: only paragraphs with ruby get the room.
 - **Drawing only:** annotations are not document text. Positions, selection, search,
   highlights and the text plugins read stay as without them.
 - **Threads and cost:** the pagination threads call the annotator for every paragraph

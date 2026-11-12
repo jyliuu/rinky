@@ -1396,16 +1396,24 @@ impl<'a, 'e> Flow<'a, 'e> {
     /// sources `src` of its chars), as ruby. Ranges that are empty, out of the text,
     /// inside a char, overlapping an earlier annotation or a ruby of the book (`book`,
     /// sorted) are dropped. A panic in the annotator turns it off for the rest of the
-    /// book (logged once).
-    fn annotations(&mut self, owner: NodeId, text: &str, src: &SrcRuns, segs: &[Seg], book: &[Ruby]) -> Vec<Ruby> {
+    /// book (logged once). Also returns whether the annotator wanted the paragraph.
+    fn annotations(&mut self, owner: NodeId, text: &str, src: &SrcRuns, segs: &[Seg], book: &[Ruby]) -> (Vec<Ruby>, bool) {
         let s = &self.p.settings;
-        let Some(handle) = s.annotator.as_ref().filter(|_| s.ruby) else { return Vec::new() };
+        let Some(handle) = s.annotator.as_ref().filter(|_| s.ruby) else { return (Vec::new(), false) };
         if self.p.annotator_state.failed() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         let a = handle.annotator();
         let lang = self.lang_of(owner);
-        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| if a.wants(text) { a.annotate(text, lang.as_deref()) } else { Vec::new() }));
+        let mut wanted = false;
+        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wanted = a.wants(text);
+            if wanted {
+                a.annotate(text, lang.as_deref())
+            } else {
+                Vec::new()
+            }
+        }));
         let list = match called {
             Ok(list) => list,
             Err(e) => {
@@ -1413,11 +1421,11 @@ impl<'a, 'e> Flow<'a, 'e> {
                     let what = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
                     log::error!("ink-html: annotator {} panicked ({what}); the rest of the book is laid out without annotations", handle.key());
                 }
-                return Vec::new();
+                return (Vec::new(), false);
             }
         };
         if list.is_empty() {
-            return Vec::new();
+            return (Vec::new(), wanted);
         }
         // Taken ranges by start (the book's ruby, then each accepted annotation).
         let mut taken: std::collections::BTreeMap<usize, usize> = book.iter().map(|r| (r.start, r.end)).collect();
@@ -1454,7 +1462,7 @@ impl<'a, 'e> Flow<'a, 'e> {
                 break;
             }
         }
-        out
+        (out, wanted)
     }
 
     /// Baseline shift of an inline element relative to its parent.
@@ -1558,8 +1566,10 @@ impl<'a, 'e> Flow<'a, 'e> {
         // The text may have lost trailing spaces and breaks since the book's ruby was
         // collected.
         ruby.retain(|r| r.end <= text.len());
+        let mut reserve = false;
         if self.p.settings.annotator.is_some() {
-            let more = self.annotations(owner, &text, &src, &segs, &ruby);
+            let (more, wanted) = self.annotations(owner, &text, &src, &segs, &ruby);
+            reserve = wanted;
             if !more.is_empty() {
                 ruby.extend(more);
                 ruby.sort_by_key(|r| r.start);
@@ -1568,6 +1578,15 @@ impl<'a, 'e> Flow<'a, 'e> {
         self.ruby_h = 0.0;
         for r in &ruby {
             let (a, d) = self.env.fonts.vmetrics(r.face, r.px);
+            self.ruby_h = self.ruby_h.max(a - d);
+        }
+        if reserve {
+            // The annotator wanted this paragraph: its lines get the room of an
+            // annotation even when it had none to give, so every paragraph it reads has
+            // the same line pitch.
+            let ost = self.st(owner);
+            let face = self.face(ost);
+            let (a, d) = self.env.fonts.vmetrics(face, ost.font_size * ANNOTATION_SCALE);
             self.ruby_h = self.ruby_h.max(a - d);
         }
         let para_first_slice = self.out.slices.len();
