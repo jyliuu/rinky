@@ -679,7 +679,7 @@ pub struct Tool {
     pub label: String,
     /// Icon (`None`: the highlighter mark drawn by the card).
     pub icon: Option<Icon>,
-    /// Reported on a tap (`sel-more` opens the "More" page inside the card).
+    /// Reported on a tap (`sel-more`: the reader opens the "More" page, [`show_more`]).
     pub action: String,
 }
 
@@ -747,21 +747,21 @@ pub struct SelectionCard {
 }
 
 impl SelectionCard {
-    /// Card height for a quote of `quote_chars` characters and `rest` tools on the "More"
-    /// page when the main row is `tools` (the quote gets one to three lines, estimated
-    /// from its length: building needs no fonts).
-    pub fn height(tools: &[Tool], quote_chars: usize, rest: usize, w: u32) -> u32 {
+    /// Card height for a quote of `quote_chars` characters (the quote gets one to three
+    /// lines, estimated from its length: building needs no fonts) over the main row, or,
+    /// with `more`, for the "More" page listing `rest` tools. Each page gets its own
+    /// height: a main row sized for the "More" page left a band of empty card between
+    /// the quote and the buttons.
+    pub fn height(quote_chars: usize, rest: usize, w: u32, more: bool) -> u32 {
+        if more {
+            let rows = rest.div_ceil(2).clamp(1, MORE_ROWS) as u32;
+            return 2 * PAD as u32 + PILL_H + rows * (PILL_H + GAP) + SHADOW;
+        }
         let per_line = (w.saturating_sub(2 * PAD as u32 + 40) / 18).max(10) as usize;
         // No quote (a lookup card shows the text): the tool row alone.
         let lines = if quote_chars == 0 { 0 } else { quote_chars.div_ceil(per_line).clamp(1, 3) as u32 };
         let gap = if lines == 0 { 0 } else { GAP };
-        let base = 2 * PAD as u32 + lines * QUOTE_LH + gap + TOOL_H + SHADOW;
-        if !tools.iter().any(|t| t.action == "sel-more") {
-            return base;
-        }
-        let rows = rest.div_ceil(2).min(MORE_ROWS) as u32;
-        let more = 2 * PAD as u32 + PILL_H + rows * (PILL_H + GAP) + SHADOW;
-        base.max(more)
+        2 * PAD as u32 + lines * QUOTE_LH + gap + TOOL_H + SHADOW
     }
 
     /// The card without its shadow.
@@ -892,8 +892,8 @@ impl Widget for SelectionCard {
         if self.more {
             let (back, pills, next) = self.more_rects(b);
             if back.contains(*pos) {
-                self.more = false;
-                self.first = 0;
+                // The reader puts the card back at the main row's height.
+                return EventResult::Action("sel-less".into());
             } else if let Some(t) = pills.iter().find(|(_, r)| r.contains(*pos)).and_then(|(i, _)| self.rest.get(*i)) {
                 return EventResult::Action(t.action.clone());
             } else if next.is_some_and(|r| r.contains(*pos)) {
@@ -903,11 +903,6 @@ impl Widget for SelectionCard {
             return EventResult::Handled;
         }
         match tool_rects(b, self.tools.len()).iter().zip(&self.tools).find(|(r, _)| r.contains(*pos)) {
-            Some((_, t)) if t.action == "sel-more" => {
-                self.more = true;
-                self.first = 0;
-                EventResult::Handled
-            }
             Some((_, t)) => EventResult::Action(t.action.clone()),
             None => EventResult::Handled,
         }
@@ -919,15 +914,30 @@ impl Widget for SelectionCard {
 /// More, Close) over a page scrim (`sel-cancel` on a tap on the page). `plugins`: labels
 /// of all plugin selection actions (`plugin-sel:I`); `insightful`: the index of
 /// Insightful's among them (its button takes the third place); tools that do not fit the
-/// row are listed after "More". `above`: the card stays above this y (the top of the
-/// dictionary card added next to it).
+/// row are listed after "More". `avoid`: a lookup card shown next to it, which the card
+/// keeps clear of ([`card_frame`]); `with_quote` false: the tool row only.
 pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, highlighted: bool, size: Size, avoid: Option<Rect>, with_quote: bool) -> Overlay {
     let mut o = Overlay::over_page(OverlayKind::Selection, size, "sel-cancel");
-    let anchor = bounds(&sel.rects).unwrap_or_default();
     let w = size.w.saturating_sub(48).min(CARD_W);
     let (tools, rest) = layout_tools(plugins, insightful, highlighted, w);
     let quote = if with_quote { quote(sel, 300) } else { String::new() };
-    let h = SelectionCard::height(&tools, if quote.is_empty() { 0 } else { quote.chars().count() + 2 }, rest.len(), w);
+    let card = SelectionCard { quote, tools, rest, more: false, first: 0 };
+    let frame = card_frame(sel, &card, size, avoid);
+    for (r, t) in tool_rects(frame, card.tools.len()).into_iter().zip(&card.tools) {
+        o.buttons.push((t.action.clone(), r));
+    }
+    o.ids.insert("card", o.tree.add(None, Box::new(card), frame));
+    o
+}
+
+/// Where `card` goes on a `size` screen: next to the selection, below it when there is
+/// room, else above; beside the card `avoid` when given (in the room below a card at
+/// the top of the screen, else above it); clear of the screen edges.
+fn card_frame(sel: &Selection, card: &SelectionCard, size: Size, avoid: Option<Rect>) -> Rect {
+    let anchor = bounds(&sel.rects).unwrap_or_default();
+    let w = size.w.saturating_sub(48).min(CARD_W);
+    let n = card.quote.chars().count();
+    let h = SelectionCard::height(if n == 0 { 0 } else { n + 2 }, card.rest.len(), w, card.more);
     let mut frame = match avoid {
         // A card at the top of the screen: the selection card goes in the room below it.
         Some(a) if a.y < size.h as i32 - a.bottom() => {
@@ -950,12 +960,33 @@ pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, hig
     };
     // Keep a margin to the screen edges.
     frame.x = frame.x.clamp(24.min(size.w.saturating_sub(w) as i32 / 2), (size.w.saturating_sub(w + 24) as i32).max(0));
-    for (r, t) in tool_rects(frame, tools.len()).into_iter().zip(&tools) {
-        o.buttons.push((t.action.clone(), r));
+    frame
+}
+
+/// Turns the selection card of `o` to its "More" page (`more`) or back to the main row:
+/// the card is taken out and put back at the height of that page, placed again next to
+/// `sel` (and clear of `avoid`). Returns the old card's rectangle, for the caller to put
+/// the page back there (the tree does not fill it), or `None` when there is no card or
+/// it already shows that page.
+pub fn show_more(o: &mut Overlay, sel: &Selection, size: Size, avoid: Option<Rect>, more: bool) -> Option<Rect> {
+    let id = *o.ids.get("card")?;
+    let card = o.tree.get_mut::<SelectionCard>(id)?;
+    if card.more == more {
+        return None;
     }
-    let card = SelectionCard { quote, tools, rest, more: false, first: 0 };
+    let card = SelectionCard { quote: std::mem::take(&mut card.quote), tools: std::mem::take(&mut card.tools), rest: std::mem::take(&mut card.rest), more, first: 0 };
+    let old = o.tree.remove(id)?;
+    o.tree.take_exposed();
+    let frame = card_frame(sel, &card, size, avoid);
+    let tools: Vec<String> = card.tools.iter().map(|t| t.action.clone()).collect();
+    o.buttons.retain(|(a, _)| !tools.contains(a));
+    if !more {
+        for (r, t) in tool_rects(frame, card.tools.len()).into_iter().zip(&card.tools) {
+            o.buttons.push((t.action.clone(), r));
+        }
+    }
     o.ids.insert("card", o.tree.add(None, Box::new(card), frame));
-    o
+    Some(old)
 }
 
 /// The note editor for a selection on a `size` screen: an app bar ("Add note", Save,
@@ -1500,10 +1531,19 @@ pub(super) mod tests {
         let acts: Vec<String> = o.buttons.iter().map(|(a, _)| a.clone()).collect();
         assert_eq!(acts, ["sel-highlight", "sel-note", "plugin-sel:0", "plugin-sel:1", "sel-more", "sel-cancel"]);
         let more = o.button_rect("sel-more").unwrap();
-        assert_eq!(tap(&mut o, more), None);
+        // The main row is as tall as a one-line quote over the buttons: no empty band.
+        let main = o.tree.bounds(o.ids["card"]).unwrap();
+        assert_eq!(main.h, 2 * PAD as u32 + QUOTE_LH + GAP + TOOL_H + SHADOW);
+        assert_eq!(more.bottom(), SelectionCard::body(main).bottom() - PAD);
+        // More: the reader turns the card to its taller "More" page.
+        assert_eq!(tap(&mut o, more).as_deref(), Some("sel-more"));
+        let s = sel("Romeo");
+        assert_eq!(show_more(&mut o, &s, size, None, true), Some(main));
+        assert_eq!(show_more(&mut o, &s, size, None, true), None);
+        assert!(o.button_rect("sel-more").is_none() && o.button_rect("sel-cancel").is_none());
         let id = o.ids["card"];
         let b = o.tree.bounds(id).unwrap();
-        assert!(b.bottom() <= size.h as i32);
+        assert!(b.h > main.h && b.bottom() <= size.h as i32 && b.y == main.y, "{b:?} {main:?}");
         let mut seen = Vec::new();
         for _ in 0..4 {
             let card = o.tree.get_mut::<SelectionCard>(id).unwrap();
@@ -1523,10 +1563,14 @@ pub(super) mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen, (0..7).collect::<Vec<_>>());
-        // Back returns to the row.
+        // Back returns to the row, at its own height and place.
         let back = o.tree.get_mut::<SelectionCard>(id).unwrap().more_rects(b).0;
-        tap(&mut o, back);
+        assert_eq!(tap(&mut o, back).as_deref(), Some("sel-less"));
+        assert_eq!(show_more(&mut o, &s, size, None, false), Some(b));
+        let id = o.ids["card"];
         assert!(!o.tree.get_mut::<SelectionCard>(id).unwrap().more);
+        assert_eq!(o.tree.bounds(id), Some(main));
+        assert_eq!(o.button_rect("sel-more"), Some(more));
         // Landscape and a narrow screen keep at least four tools of 96 px.
         for size in [Size::new(1696, 1272), Size::new(600, 800)] {
             let o = popup(&sel("x"), &plugins, None, false, size, None, true);
