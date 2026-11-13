@@ -6,6 +6,7 @@
 //! description = "Counts words on the page"
 //! permissions = ["document", "ui", "storage", "network"]
 //! entry = "main.lua"              # Lua plugins only (default main.lua)
+//! native = "libwordcount.so"      # native plugins: the library in the plugin folder
 //! time_limit_ms = 1000            # Lua: limit per call (default 1000, page turns 500)
 //! memory_mb = 32                  # Lua: heap limit of the plugin's Lua state (default 32)
 //! hosts = ["api.example.com"]     # network: allowed hosts (empty = any host)
@@ -68,6 +69,10 @@ pub struct PluginManifest {
     /// Lua entry file (default `main.lua`); unused for Rust plugins.
     #[serde(default)]
     pub entry: Option<String>,
+    /// Native plugins: the shared library in the plugin folder (`libfoo.so`; on the
+    /// macOS simulator `libfoo.dylib`). A manifest with it is not a Lua plugin.
+    #[serde(default)]
+    pub native: Option<String>,
     /// Lua time limit per call in milliseconds (default [`DEFAULT_TIME_LIMIT_MS`], at most
     /// [`MAX_TIME_LIMIT_MS`]); `on_page_change` gets at most [`PAGE_TURN_LIMIT_MS`] unless
     /// this is set.
@@ -91,6 +96,7 @@ impl PluginManifest {
             description: String::new(),
             permissions: permissions.to_vec(),
             entry: None,
+            native: None,
             time_limit_ms: None,
             memory_mb: None,
             hosts: Vec::new(),
@@ -106,6 +112,14 @@ impl PluginManifest {
         if let Some(entry) = &m.entry {
             if !valid_file_name(entry) || !entry.ends_with(".lua") {
                 return Err(PluginError::Manifest(format!("bad entry {entry:?} (a .lua file in the plugin folder)")));
+            }
+        }
+        if let Some(lib) = &m.native {
+            if !valid_file_name(lib) || !(lib.ends_with(".so") || lib.ends_with(".dylib")) {
+                return Err(PluginError::Manifest(format!("bad native {lib:?} (a .so file in the plugin folder)")));
+            }
+            if m.entry.is_some() {
+                return Err(PluginError::Manifest("a plugin has either entry (Lua) or native, not both".into()));
             }
         }
         Ok(m)
@@ -195,6 +209,12 @@ mod tests {
         assert!(PluginManifest::parse("name = \"x\"\nversion = \"1\"\nentry = \"../evil.lua\"").is_err());
         assert!(PluginManifest::parse("name = \"x\"\nversion = \"1\"\nentry = \"init.txt\"").is_err());
         assert_eq!(PluginManifest::parse("name = \"x\"\nversion = \"1\"\nentry = \"init.lua\"").unwrap().entry_file(), "init.lua");
+        let native = PluginManifest::parse("name = \"x\"\nversion = \"1\"\nnative = \"libx.so\"").unwrap();
+        assert_eq!(native.native.as_deref(), Some("libx.so"));
+        for bad in ["../libx.so", "libx.txt", "x/libx.so"] {
+            assert!(PluginManifest::parse(&format!("name = \"x\"\nversion = \"1\"\nnative = {bad:?}")).is_err(), "{bad}");
+        }
+        assert!(PluginManifest::parse("name = \"x\"\nversion = \"1\"\nnative = \"libx.so\"\nentry = \"a.lua\"").is_err());
     }
 
     #[test]

@@ -1,0 +1,18 @@
+[package]
+name = "sample-native"
+description = "Sample native plugin: a shared library loaded from the plugins folder (word count of the page)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+path = "lib.rs"
+# cdylib: the plugin library rinky loads. rlib: lets tests depend on the crate, which
+# makes cargo build the library next to them.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ink-plugin-native.workspace = true

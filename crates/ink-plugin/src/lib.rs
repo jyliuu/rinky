@@ -11,6 +11,8 @@
 //! - [`manifest`]: `plugin.toml`, [`Permission`]s and limits.
 //! - [`lua`]: the sandboxed Lua 5.4 host; [`lua::LuaPlugin`] implements [`Plugin`], so Lua
 //!   plugins go through the same manager, registry and host services as Rust plugins.
+//! - [`native`]: plugins as shared libraries; [`native::NativePlugin`] implements
+//!   [`Plugin`] over the C ABI of `ink-plugin-abi`.
 //! - [`markdown`]: the Markdown subset of the text viewer.
 //! - [`PluginManager`]: holds plugins, calls them, and keeps one failing plugin from
 //!   taking the reader down (errors are collected; a plugin is disabled after
@@ -27,6 +29,7 @@ pub mod kit;
 pub mod lua;
 pub mod manifest;
 pub mod markdown;
+pub mod native;
 pub mod net;
 pub mod registry;
 pub mod testing;
@@ -66,6 +69,10 @@ pub enum PluginError {
     /// The plugin reported a failure.
     #[error("{0}")]
     Failed(String),
+    /// A native plugin panicked (caught inside the plugin). The manager turns the
+    /// plugin off at once.
+    #[error("crashed: {0}")]
+    Crashed(String),
 }
 
 /// Result alias for this crate.
@@ -76,7 +83,7 @@ pub trait Plugin {
     /// Name, version, permissions.
     fn manifest(&self) -> &PluginManifest;
 
-    /// `rust` or `lua` (for plugin lists and logs).
+    /// `rust`, `lua` or `native` (for plugin lists and logs).
     fn kind(&self) -> &'static str {
         "rust"
     }
@@ -204,6 +211,12 @@ pub trait Plugin {
     fn word_bounds(&self, _text: &str, _at: usize, _lang: Option<&str>) -> Option<std::ops::Range<usize>> {
         None
     }
+    /// `Some(what)` once the plugin crashed outside a hook call, where no error can be
+    /// returned (a native plugin's annotator panicking on the pagination thread, say).
+    /// [`PluginManager::disable_crashed`] then turns it off. Default: never.
+    fn crashed(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The selection action id of a dictionary lookup ([`Plugin::claims_lookup`]).
@@ -248,7 +261,7 @@ impl Lifecycle {
 pub struct PluginInfo {
     /// Manifest.
     pub manifest: PluginManifest,
-    /// `rust` or `lua`.
+    /// `rust`, `lua` or `native`.
     pub kind: &'static str,
     /// False after a failed `on_load`, too many errors or [`PluginManager::disable`].
     pub enabled: bool,
@@ -382,6 +395,16 @@ impl PluginManager {
         }
     }
 
+    /// Turns off every enabled plugin that reports a crash outside its hook calls
+    /// ([`Plugin::crashed`]); returns their names. The host calls it after plugin calls.
+    pub fn disable_crashed(&mut self) -> Vec<String> {
+        let crashed: Vec<(String, String)> = self.slots.iter().filter(|s| s.enabled).filter_map(|s| Some((s.manifest.name.clone(), s.plugin.crashed()?))).collect();
+        for (name, what) in &crashed {
+            self.disable(name, &format!("it crashed ({what})"));
+        }
+        crashed.into_iter().map(|(n, _)| n).collect()
+    }
+
     /// Records the outcome of a call of plugin `i`; disables it when needed.
     fn record(&mut self, i: usize, what: &str, r: &Result<()>, page_turn: bool) {
         let Err(e) = r else { return };
@@ -389,7 +412,9 @@ impl PluginManager {
         slot.errors += 1;
         let (name, n) = (slot.manifest.name.clone(), slot.errors);
         self.errors.push((name.clone(), format!("{what}: {e}")));
-        if page_turn && matches!(e, PluginError::Limit(_)) {
+        if matches!(e, PluginError::Crashed(_)) {
+            self.disable(&name, "it crashed");
+        } else if page_turn && matches!(e, PluginError::Limit(_)) {
             self.disable(&name, "too slow on a page turn");
         } else if n >= self.max_errors {
             self.disable(&name, &format!("{n} errors"));

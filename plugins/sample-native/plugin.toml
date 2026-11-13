@@ -1,0 +1,7 @@
+# Copy this folder's plugin.toml and the built library (libsample_native.so) into
+# <RINKY_HOME>/plugins/sample-native/ to try the plugin.
+name = "sample-native"
+version = "0.1.0"
+description = "Counts the words on the page (sample native plugin)"
+permissions = ["document", "ui", "storage"]
+native = "libsample_native.so"

@@ -1404,12 +1404,14 @@ pub fn plugin_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Loads every Lua plugin under `root`: `(plugins, errors)` where an error is
+/// Loads every Lua plugin under `root` (folders without `native` in `plugin.toml`):
+/// `(plugins, errors)` where an error is
 /// `(folder name, message)` for a plugin that could not be built.
 pub fn load_dir(root: &Path) -> (Vec<LuaPlugin>, Vec<(String, String)>) {
     let mut plugins = Vec::new();
     let mut errors = Vec::new();
-    for dir in plugin_dirs(root) {
+    // Native plugin folders are loaded by crate::native::load_dir.
+    for dir in plugin_dirs(root).into_iter().filter(|d| !crate::native::is_native_dir(d)) {
         let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if !valid_name(&folder) {
             errors.push((folder.clone(), format!("folder name {folder:?} is not a valid plugin name (a-z, 0-9, _ and -)")));

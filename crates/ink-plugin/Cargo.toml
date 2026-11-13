@@ -22,3 +22,11 @@ serde_json.workspace = true
 toml.workspace = true
 mlua.workspace = true
 pulldown-cmark.workspace = true
+ink-plugin-abi.workspace = true
+libloading.workspace = true
+
+[dev-dependencies]
+# Native plugin libraries the tests load (cargo builds their cdylib next to the tests).
+sample-native = { path = "../../plugins/sample-native" }
+native-faulty = { path = "../../plugins/native-faulty" }
+libloading.workspace = true

@@ -801,9 +801,13 @@ dependencies = [
  "ink-device",
  "ink-doc",
  "ink-net",
+ "ink-plugin-abi",
+ "libloading",
  "log",
  "mlua",
+ "native-faulty",
  "pulldown-cmark",
+ "sample-native",
  "serde",
  "serde_json",
  "thiserror",
@@ -1174,6 +1178,13 @@ name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
+name = "native-faulty"
+version = "0.8.0"
+dependencies = [
+ "ink-plugin-native",
+]
 
 [[package]]
 name = "new_debug_unreachable"
@@ -1651,6 +1662,13 @@ version = "0.8.0"
 dependencies = [
  "ink-doc",
  "ink-plugin",
+]
+
+[[package]]
+name = "sample-native"
+version = "0.8.0"
+dependencies = [
+ "ink-plugin-native",
 ]
 
 [[package]]
