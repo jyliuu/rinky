@@ -6,7 +6,8 @@ human version. The code layout is in `docs/ARCHITECTURE.md`, the test suites in
 `docs/TESTING.md`, the plugin API in `docs/plugins.md`.
 
 rinky is an e-book reader for jailbroken Kindles (and Kobos), written in Rust. One
-static ARMv7 musl binary (`rinky`, crate `ink-app`) replaces the Kindle framework
+ARMv7 musl binary (`rinky`, crate `ink-app`; dynamically linked, with musl's loader
+shipped in `lib/` so it can load native plugin libraries) replaces the Kindle framework
 while it runs. On a Mac or Linux host the same binary runs as a simulator (`rinky
 sim`), and most tests run headless on the host.
 
@@ -23,9 +24,12 @@ crates/ink-mupdf     PDF/CBZ/XPS through MuPDF (C, built with zig by build.rs)
 crates/ink-store     sidecars, library index, settings.toml, statistics DB
 crates/ink-dict      StarDict reader
 crates/ink-net       HTTP client (ureq + rustls), SSE, test server
-crates/ink-plugin    Plugin trait, registries, host services, Lua 5.4 host
+crates/ink-plugin    Plugin trait, registries, host services, Lua 5.4 host, native plugin loader
+crates/ink-plugin-abi     C ABI between rinky and native plugin libraries
+crates/ink-plugin-native  safe API and export_plugin! for native plugin authors
 crates/ink-app       the `rinky` binary: event loop, screens, plugin host, CLI, update
-plugins/<name>       first-party plugins, one crate each (sample-lua holds the Lua sample)
+plugins/<name>       first-party plugins, one crate each (sample-lua holds the Lua sample,
+                     sample-native a native plugin library, native-faulty a test fixture)
 packaging/           KUAL extension, install/uninstall scripts
 scripts/             build, package, deploy, emulator, e2e, golden and perf scripts
 tests/golden/        page goldens   tests/e2e/ emulator scenarios   tests/sim/ sim scripts

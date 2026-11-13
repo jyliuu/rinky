@@ -1,6 +1,7 @@
 # rinky architecture
 
-rinky is one static ARMv7 binary that replaces the stock reading software on Kindles
+rinky is one ARMv7 musl binary (dynamically linked, with musl's loader shipped next to
+it) that replaces the stock reading software on Kindles
 and Kobos while it runs. This page is a map: which crate and module holds each part,
 how a page turn travels through them, and the device behaviour you need to know before
 changing the launcher, sleep or the screen code. Each crate's `lib.rs` documents its
@@ -12,7 +13,8 @@ The main choices behind the layout:
   HTML and TXT, so positions match KOReader's crengine xpointers. PDF, CBZ and XPS go
   through MuPDF over C FFI.
 - **One plugin API.** First-party plugins are Rust crates compiled in; user plugins are
-  Lua 5.4 scripts on the device. Both implement the same `Plugin` trait.
+  Lua 5.4 scripts or native shared libraries on the device. All implement the same
+  `Plugin` trait.
 - **The app owns the device.** On start the launcher stops the stock UI (the Kindle
   framework or Kobo's Nickel). rinky then handles sleep, light, Wi-Fi, USB and the
   screensaver itself, and the stock UI comes back on exit or crash.
@@ -48,6 +50,8 @@ The main choices behind the layout:
 | StarDict dictionaries | ink-dict | `stardict.rs`, `library.rs`, `markdown.rs` |
 | HTTP(S), SSE, downloads, OPDS, KOSync | ink-net | `http.rs`, `sse.rs`, `download.rs`, `opds.rs`, `kosync.rs` |
 | Plugin trait, registry, host services, Lua host | ink-plugin | `lib.rs`, `registry.rs`, `host.rs`, `lua/` |
+| Native plugin libraries: loader, host table | ink-plugin | `native.rs` |
+| Native plugin C ABI / authoring crate | ink-plugin-abi, ink-plugin-native | `lib.rs` |
 | Event loop and screen stack | ink-app | `app.rs`, `router.rs` |
 | Screens: reader, library, settings, statistics, widget gallery | ink-app | `screens/<name>/` |
 | What the panel shows (to avoid flashes) | ink-app | `shown.rs` |
@@ -63,7 +67,9 @@ First-party plugins in `plugins/`: `kosync` (progress sync), `opds` (catalogs),
 `calibre` (wireless connection), `dictionary` (look up, with ink-dict), `stats` (crate
 `ink-stats`: reading statistics and the vocabulary table), `insightful` (AI chat about
 the book), `wikipedia`, `usbnet` (USB Ethernet gadget), `ssh` (bundled dropbear), and
-`sample-lua`, a crate that embeds and tests the sample Lua plugin.
+`sample-lua`, a crate that embeds and tests the sample Lua plugin, `sample-native`, a
+sample native plugin library, and `native-faulty`, a test fixture that panics or
+crashes on request (never packaged).
 
 ### Dependencies between crates
 
@@ -79,8 +85,11 @@ ink-mupdf    <- ink-device, ink-doc
 ink-dict     <- ink-html            (its HTML parser and CSS cascade, for definitions)
 ink-store    <- ink-platform
 ink-net                            (no ink dependencies)
-ink-plugin   <- ink-device, ink-doc, ink-net
+ink-plugin-abi                     (no dependencies: the C tables both sides build)
+ink-plugin-native <- ink-plugin-abi (what native plugin libraries build against)
+ink-plugin   <- ink-device, ink-doc, ink-net, ink-plugin-abi
 plugins/*    <- ink-plugin, plus ink-net, ink-store, ink-doc, ink-dict, ink-stats as needed
+                (native plugins: ink-plugin-native only)
 ink-app      <- everything
 ```
 
@@ -241,7 +250,9 @@ after 3 minutes (`RINKY_COVER_UNUSED_S`). `RINKY_COVER=0` ignores the cover.
 `scripts/rinky.sh` is the launcher, started from KUAL. It detaches (`setsid`), starts
 `rinky-watchdog.sh`, stops the framework (`stop lab126_gui`, ignoring SIGTERM
 meanwhile as KOReader does), waits until `KPPMainApp` and `pillowd` are gone, and runs
-`rinky run`. On every exit path it restarts appmgrd and runs `start lab126_gui`.
+`rinky run` through musl's loader (`lib/ld-musl-armhf.so.1`, copied beside the binary
+in `/tmp/rinky/bin`; see "Build and toolchain"). On every exit path it restarts
+appmgrd and runs `start lab126_gui`.
 
 The watchdog polls once a second. If the launcher disappears it stops rinky and starts
 the framework; if rinky disappears and the launcher does not finish within 15 s, it
@@ -253,8 +264,28 @@ by `scripts/deploy.sh`) and the in-app update (`update::request_restart`) write
 and starts the installed binary again without bringing the framework back. A launcher
 announces that it can do this with `/tmp/rinky/restart-capable`.
 
+A crash inside a native plugin restarts rinky the same way. Every call into a plugin
+library runs in `ink_device::trace::crash_scope` with the plugin's name (a
+thread-local, so annotators on the pagination thread are covered); the fatal-signal
+handler (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT) writes that name to
+`/tmp/rinky/plugin-crashed` with `open`/`write`/`close` and lets the signal end the
+process. The launcher sees the file and runs rinky again without the framework (at
+most twice in 60 s, then the normal exit path; not at all when the marker's second
+line is `exiting`, written once rinky was asked to exit); at start-up rinky turns
+that plugin off in `plugins/disabled.txt`, removes the file and shows a toast (the
+file stays when `disabled.txt` cannot be written; the plugin is off either way). Host
+services reached from a plugin call clear the scope (`no_crash_scope`), so a crash in
+rinky's own code is not blamed on the plugin. The first start of a new binary after
+an in-app update from a release without native plugins runs it under the old
+launcher, which starts it directly: its interpreter, the installed
+`lib/ld-musl-armhf.so.1`, is then mapped from the userstore for that session. The reading
+position survives up to the last save: the reader writes it to the sidecar once a
+page has rested 2 s (at most 10 s after the first unsaved turn), so a crash loses at
+most the last few seconds of page turns. The restart reopens what the launcher was
+started with (a book, or the library).
+
 Runtime files are in `/tmp/rinky` (`lock/`, `launcher.pid`, `rinky.pid`, `done`,
-`heartbeat`, `restore`, `quieted`, `restart-capable`). Logs are
+`heartbeat`, `restore`, `quieted`, `restart-capable`, `plugin-crashed`). Logs are
 `/mnt/us/rinky/rinky.log` and `watchdog.log`.
 
 The PW12 on 5.19.5, for scale: two ARMv7 cores, 980 MB RAM (about 618 MB available
@@ -322,7 +353,7 @@ draws a screensaver and tries to suspend, the next one wakes. Scenario:
 
 ### Kindle system services
 
-rinky's static musl binary cannot load the glibc `liblipc`, so `ink_device::lipc` runs
+rinky's musl binary cannot load the glibc `liblipc`, so `ink_device::lipc` runs
 `lipc-get-prop`, `lipc-set-prop` and `lipc-wait-event` as child processes, each with a
 timeout. On Linux every child gets `PR_SET_PDEATHSIG(SIGKILL)` and dies with the thread
 that spawned it, so start watchers from long-lived threads.
@@ -344,8 +375,9 @@ and the lipc services among them keep answering. The properties rinky uses:
 
 The same binary runs on Kobos; `ink_platform::Platform::detect` chooses Kobo when
 `/mnt/onboard/.kobo` exists (`RINKY_PLATFORM` overrides). `packaging/kobo/rinky.sh`,
-started from NickelMenu, copies itself and the binary to tmpfs, stops Nickel and its
-helpers, runs rinky, and on every exit path restores the framebuffer and starts Nickel
+started from NickelMenu, copies itself, the binary and the musl loader to tmpfs, stops
+Nickel and its helpers, runs rinky through the loader (again after an update or a
+native plugin crash, as on the Kindle), and on every exit path restores the framebuffer and starts Nickel
 again, as KOReader's `koreader.sh` does.
 
 There is no lipc on a Kobo. `ereader/kobo/` drives the frontlight and warmth through
@@ -369,13 +401,27 @@ with one line in `crates/ink-app/src/plugins.rs`. Lua plugins are folders with
 `plugin.toml` and `main.lua` in the install folder's `plugins/`, loaded by
 `ink_plugin::lua::LuaHost` through the same registry and host services.
 
+Native plugins are an addition: the compiled-in plugins load first, then Lua, then
+native ones (a name already taken is refused). Native plugins are shared libraries in
+the same folders (`plugin.toml` with
+`native = "libname.so"`), built against `ink-plugin-native`. `ink_plugin::native`
+opens them with `dlopen` at start-up, never unloads them, and wraps each in
+`NativePlugin`, which implements `Plugin` by calling the library's C table. Nothing of
+Rust crosses the boundary (each library has its own copy of the standard library):
+`ink-plugin-abi` defines `#[repr(C)]` tables, UTF-8 strings as pointer and length,
+JSON for structured values, and an `ABI_VERSION` that must match exactly. Panics are
+caught inside the library, by the functions `export_plugin!` generates, and turn the
+plugin off (`PluginError::Crashed`); a panic that unwound into rinky would abort it.
+Calls cost a function-pointer call (about 12 ns in the emulator).
+
 A Rust plugin can also offer a `TextAnnotator` (`Plugin::text_annotator`): the reader
 asks the plugin host for them when a book opens (every enabled plugin that offers
 one, in plugin order) and passes them to the engine in `LayoutSettings::annotators`.
 
 Plugins never block the reader: UI requests are queued and answered in `on_ui_result`,
 network requests run in worker threads and report through `on_http`. A plugin that
-fails five times, or runs out of time during a page turn, is disabled. Permissions in
+fails five times, runs out of time during a page turn, or panics (native plugins), is
+disabled. Permissions in
 the manifest (`document`, `ui`, `storage`, `network`) gate the host services.
 
 The app loop does the plugin calls for every screen (event routing, overlay painting,
@@ -412,9 +458,17 @@ exact version and `default-features = false` where the defaults pull in much, an
   compatible with it.
 - Device build: `cargo zigbuild --release --target armv7-unknown-linux-musleabihf`.
   zig is the C compiler and linker, so the C code (MuPDF, ring, vendored Lua, bundled
-  SQLite) cross-compiles without a GNU toolchain. The result is one static hard-float
-  musl binary for every supported device, built for the Cortex-A9 with NEON, the
-  oldest CPU among them (`.cargo/config.toml` explains why not newer).
+  SQLite) cross-compiles without a GNU toolchain. The result is one hard-float musl
+  binary for every supported device, built for the Cortex-A9 with NEON, the oldest CPU
+  among them (`.cargo/config.toml` explains why not newer).
+- The binary is dynamically linked against musl (`-crt-static` off, plus `-dynamic`
+  for zig), so it can `dlopen` native plugins. The devices have only glibc: the
+  packages ship musl's loader as `lib/ld-musl-armhf.so.1`, taken by
+  `scripts/fetch-musl-loader.sh` from Alpine's pinned and checksummed armv7 musl
+  package, and the launchers start rinky through it. The link sets a placeholder
+  interpreter path valid on a Kindle; `scripts/package.sh` writes each platform's
+  install path with `scripts/set-interp.py`, so the installed binary also runs
+  directly. Started through the loader, the process names itself `rinky` (`prctl`).
 - ink-mupdf's `build.rs` builds MuPDF 1.27.2 from the pinned, checksummed tarball with
   `zig cc` for the device and the system compiler for the host. It needs `zig`,
   `curl` (first build only), `shasum`, a `tar` that reads lzip, and `make`.

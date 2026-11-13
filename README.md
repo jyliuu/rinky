@@ -41,8 +41,8 @@
 </table>
 
 rinky takes over the e-reader's screen while it runs and hands it back to the Kindle or
-Kobo software when you exit. It is a single static binary that draws directly to the
-e-ink display and reads the touchscreen from the kernel.
+Kobo software when you exit. It is a single binary (with its own C library) that draws
+directly to the e-ink display and reads the touchscreen from the kernel.
 
 ## Features
 
@@ -108,7 +108,8 @@ cargo install cargo-zigbuild
 scripts/package.sh          # → out/package/rinky-<version>-{kindlehf.tar.gz,kindle.zip,kobo.tar.gz,kobo.zip}
 ```
 
-Each package holds the same static ARMv7 binary, plus the launcher and menu entry for
+Each package holds the same ARMv7 binary and musl's loader (`lib/ld-musl-armhf.so.1`,
+which `scripts/fetch-musl-loader.sh` fetches), plus the launcher and menu entry for
 its e-reader. The Kindle package also has the watchdog and the SSH server, which
 `scripts/build-dropbear.sh` builds on the first run (it needs curl, patch and make).
 Try the reader on your computer without an e-reader:

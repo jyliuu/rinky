@@ -327,8 +327,11 @@ scrolling list:
 ## 6. Built-in plugins
 
 Each plugin can be switched off under *Settings > Plugins*. Plugins you write yourself
-in Lua go in `/mnt/us/rinky/plugins/<name>/`; [the plugin guide](plugins.md) explains
-how to write one.
+in Lua, or as compiled native plugins, go in `/mnt/us/rinky/plugins/<name>/`;
+[the plugin guide](plugins.md) explains how to write one. If a native plugin crashes
+rinky, rinky starts again by itself with that plugin switched off and tells you which
+one it was; switch it on again under *Settings > Plugins* once you have a fixed
+version.
 
 ### Dictionary
 

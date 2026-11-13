@@ -13,8 +13,10 @@ ran in the eink-emulator's Tolino Shine 5 instance, which is Kobo Clara BW hardw
 
 ## How the port is shaped
 
-- **One binary.** The Kindle build (static ARMv7 musl, hard float, Cortex-A9 with
-  NEON) runs unchanged on Kobo firmware. It needs no libc from the device, and every
+- **One binary.** The Kindle build (ARMv7 musl, hard float, Cortex-A9 with NEON,
+  dynamically linked against the musl loader the package ships in `lib/`) runs
+  unchanged on Kobo firmware; only the loader path written into it differs. It needs
+  no libc from the device, and every
   Kobo since the Glo HD (2015) has a Cortex-A7, A9 or A53 CPU with NEON.
   `ink_platform::Platform::detect` tells a Kobo from a Kindle at start.
 - **A separate package.** Kobo apps live in `/mnt/onboard/.adds/rinky/`, start from
