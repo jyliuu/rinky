@@ -39,6 +39,9 @@ All notable changes to rinky are listed here. The format is based on
   above or below it shows only its buttons, without repeating the quote.
 
 ### Fixed
+- Selecting a passage takes the punctuation at its ends with it: the full stop,
+  comma or closing quote after the last word and an opening quote or bracket before
+  the first. A single word pressed for a look-up is still taken without them.
 - Space characters that the book's font has no glyph for are taken from a fallback
   font like any other character, instead of showing as boxes.
 - Chinese, Japanese and Korean text in menus, cards, messages and title bars shows
