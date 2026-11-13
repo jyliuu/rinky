@@ -503,6 +503,23 @@ impl WidgetTree {
         self.node_mut(id)?.widget.as_mut().as_any_mut().downcast_mut::<T>()
     }
 
+    /// Takes the rectangles uncovered by [`WidgetTree::remove`] since the last paint, for
+    /// a caller that puts back what was under them itself (a reader restores its page
+    /// there); [`WidgetTree::paint`] would fill them with the background. Widgets over
+    /// them are still painted again.
+    pub fn take_exposed(&mut self) -> Vec<Rect> {
+        let exposed = std::mem::take(&mut self.exposed);
+        for (r, class) in &exposed {
+            for n in self.nodes.iter_mut().flatten() {
+                if !n.bounds.intersect(r).is_empty() {
+                    n.mark(*class);
+                    n.full = true;
+                }
+            }
+        }
+        exposed.into_iter().map(|(r, _)| r).collect()
+    }
+
     /// Paints dirty widgets (parents before children, layers in order) and returns the
     /// merged damage ([`crate::refresh::merge`]: overlapping rectangles only). The app
     /// should coalesce a whole frame with [`crate::refresh::coalesce`].
@@ -971,6 +988,24 @@ mod tests {
         assert!(t.get_mut::<Button>(label).is_none());
         assert_eq!(t.remove(label), Some(Rect::new(0, 0, 400, 100)));
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn exposed_rects_taken_by_the_caller_are_not_filled() {
+        let theme = Theme::day();
+        let mut fonts = Fonts::load();
+        let mut canvas = Canvas::new(400, 300);
+        let mut t = WidgetTree::new();
+        let r = Rect::new(150, 120, 100, 60);
+        let b = t.add(None, Box::new(Button::new("OK", "ok")), r);
+        t.paint(&mut cx(&mut canvas, &mut fonts, &theme));
+        t.remove(b);
+        // The caller puts back what was under the button (here: black).
+        assert_eq!(t.take_exposed(), vec![r]);
+        canvas.fill_rect(r.x, r.y, r.w as i32, r.h as i32, 0);
+        assert!(t.paint(&mut cx(&mut canvas, &mut fonts, &theme)).is_empty());
+        assert!(canvas.pixels[(r.y as usize + 10) * 400 + r.x as usize + 10] == 0);
+        assert!(t.take_exposed().is_empty());
     }
 
     #[test]

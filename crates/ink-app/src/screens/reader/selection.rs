@@ -82,6 +82,25 @@ fn word_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '\'' | '\u{2019}' | '-' | '\u{2010}' | '\u{2011}')
 }
 
+/// Punctuation that closes what comes before it and is selected with the last word of a
+/// passage: stops, commas, closing quotes and brackets (also full-width ones).
+fn closing_punct(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ',' | ';' | ':' | '!' | '?' | '\u{2026}' | '\'' | '"' | '\u{2019}' | '\u{201d}' | ')' | ']' | '}' | '\u{bb}' | '\u{203a}'
+            | '\u{3002}' | '\u{ff0c}' | '\u{3001}' | '\u{ff1b}' | '\u{ff1a}' | '\u{ff01}' | '\u{ff1f}' | '\u{300d}' | '\u{300f}' | '\u{ff09}' | '\u{3011}' | '\u{300b}'
+    )
+}
+
+/// Punctuation that opens what comes after it and is selected with the first word of a
+/// passage: opening quotes and brackets, Spanish inverted marks.
+fn opening_punct(c: char) -> bool {
+    matches!(
+        c,
+        '\'' | '"' | '\u{2018}' | '\u{201c}' | '(' | '[' | '{' | '\u{ab}' | '\u{2039}' | '\u{bf}' | '\u{a1}' | '\u{300c}' | '\u{300e}' | '\u{ff08}' | '\u{3010}' | '\u{300a}'
+    )
+}
+
 /// The one character of a probe's text (`None` for none or several, e.g. a trimmed space).
 fn single(text: &str) -> Option<char> {
     let mut it = text.chars();
@@ -104,19 +123,39 @@ fn hyphen(text: &str) -> bool {
 /// The word characters next to `from` on its line, nearest first: to the right
 /// (`forward`) or the left, up to a non-word character, a gap or the line's end.
 fn scan_line(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect, forward: bool) -> Vec<(char, Rect)> {
+    let mut out = scan_chars(probe, from, forward, word_char, 64);
+    // Trim apostrophes and hyphens at the far end.
+    while out.last().is_some_and(|(c, _)| !c.is_alphanumeric()) {
+        out.pop();
+    }
+    out
+}
+
+/// The rectangle of the farthest of the punctuation marks right after `last` (closing
+/// marks: "word." or "word?\u{201d}") or right before `first` (opening marks), with no
+/// gap between; `None` when there is none.
+fn punct_beyond(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect, forward: bool) -> Option<Rect> {
+    let keep = if forward { closing_punct } else { opening_punct };
+    scan_chars(probe, from, forward, keep, 4).last().map(|(_, r)| *r)
+}
+
+/// The characters next to `from` on its line that `keep` accepts, nearest first (at
+/// most `max`): to the right (`forward`) or the left, up to another character, a gap or
+/// the line's end.
+fn scan_chars(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect, forward: bool, keep: fn(char) -> bool, max: usize) -> Vec<(char, Rect)> {
     let y = from.y + from.h as i32 / 2;
     let mut out: Vec<(char, Rect)> = Vec::new();
     let mut cur = from;
     // `r` is the character right after (before) `cur` on the line, with no gap between.
     let adjacent = |r: Rect, cur: Rect| r.y == from.y && if forward { r.right() > cur.right() && r.x <= cur.right() + 2 } else { r.x < cur.x && r.right() >= cur.x - 2 };
-    while out.len() < 64 {
+    while out.len() < max {
         let mut x = if forward { cur.right() } else { cur.x - 1 };
         let mut next = None;
         while if forward { x <= cur.right() + SCAN_PX } else { x >= (cur.x - SCAN_PX).max(0) } {
             match probe(Point::new(x, y)) {
                 Some((_, r)) if r == cur => x += if forward { SCAN_STEP } else { -SCAN_STEP },
                 Some((t, r)) if adjacent(r, cur) => {
-                    next = single(&t).filter(|c| word_char(*c)).map(|c| (c, r));
+                    next = single(&t).filter(|c| keep(*c)).map(|c| (c, r));
                     break;
                 }
                 _ => break,
@@ -125,10 +164,6 @@ fn scan_line(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect,
         let Some((c, r)) = next else { break };
         out.push((c, r));
         cur = r;
-    }
-    // Trim apostrophes and hyphens at the far end.
-    while out.last().is_some_and(|(c, _)| !c.is_alphanumeric()) {
-        out.pop();
     }
     out
 }
@@ -271,6 +306,12 @@ pub struct Word {
     pub first: Point,
     /// A point on its last character.
     pub last: Point,
+    /// A point on the opening punctuation right before the word ("\u{201c}" or "("),
+    /// else on its first character: where a passage that starts at this word starts.
+    pub lead: Point,
+    /// A point on the closing punctuation right after the word ("." or ",\u{201d}"),
+    /// else on its last character: where a passage that ends at this word ends.
+    pub tail: Point,
     /// Its ends came from a [`Splitter`] (a plugin's word boundaries), not from the
     /// spaces and punctuation around it.
     pub split: bool,
@@ -309,11 +350,19 @@ pub fn word_hit_split(doc: &mut dyn ink_doc::Document, page: usize, pos: Point, 
     };
     let (a, b, split) = span?;
     // x + 1: the left part of a character maps to it under both point rules.
-    let first = Point::new(a.x + 1, a.y + a.h as i32 / 2);
-    let last = Point::new(b.x + 1, b.y + b.h as i32 / 2);
+    let at = |r: Rect| Point::new(r.x + 1, r.y + r.h as i32 / 2);
+    let (first, last) = (at(a), at(b));
+    let (lead, tail) = {
+        let mut probe = |p: Point| {
+            probes += 1;
+            let s = doc.select(page, p, p).ok()??;
+            Some((s.text, *s.rects.first()?))
+        };
+        (punct_beyond(&mut probe, a, false).map_or(first, at), punct_beyond(&mut probe, b, true).map_or(last, at))
+    };
     let sel = doc.select(page, first, last).ok()??;
     log::debug!("reader: word {:?} at {},{} in {} probes, {} ms", sel.text, pos.x, pos.y, probes + 1, t0.elapsed().as_millis());
-    Some(Word { sel, first, last, split })
+    Some(Word { sel, first, last, lead, tail, split })
 }
 
 /// The whole word under `pos` on `page` (see [`word_hit`]).
@@ -365,29 +414,48 @@ pub struct Span {
 /// part comes from `Document::select`; the pieces are joined with a line break, and the
 /// document's selection is set to the whole (`Document::set_selection`), which plugins
 /// read. `None` when no page has text in the range.
+///
+/// A passage of more than one word takes the punctuation around its ends with it (an
+/// opening quote before its first word, the full stop or closing quote after its last:
+/// [`Word::lead`], [`Word::tail`]); one word alone stays without it (a look-up), and
+/// so does a run of words that a plugin split on one page, which is looked up whole.
 pub fn span_select(doc: &mut dyn ink_doc::Document, size: Size, anchor_page: usize, anchor: &Word, page: usize, end: &SpanEnd) -> Option<Span> {
     let (s, e) = (page_start(), page_end(size));
+    if page == anchor_page && anchor.split {
+        if let SpanEnd::Word(w) = end {
+            if w.split {
+                let (from, to) = if w.before(anchor) { (w.first, anchor.last) } else { (anchor.first, w.last) };
+                return span_select_parts(doc, page, vec![(page, from, to)]);
+            }
+        }
+    }
     let (end_first, end_last) = match end {
-        SpanEnd::Word(w) => (w.first, w.last),
+        SpanEnd::Word(w) => (w.lead, w.tail),
         SpanEnd::PageStart => (s, s),
         SpanEnd::PageEnd => (e, e),
     };
     let segs: Vec<(usize, Point, Point)> = if page == anchor_page {
         let (from, to) = match end {
-            SpanEnd::Word(w) if w.before(anchor) => (w.first, anchor.last),
-            SpanEnd::Word(w) => (anchor.first, w.last),
-            SpanEnd::PageStart => (s, anchor.last),
-            SpanEnd::PageEnd => (anchor.first, e),
+            SpanEnd::Word(w) if w.first == anchor.first => (anchor.first, anchor.last),
+            SpanEnd::Word(w) if w.before(anchor) => (w.lead, anchor.tail),
+            SpanEnd::Word(w) => (anchor.lead, w.tail),
+            SpanEnd::PageStart => (s, anchor.tail),
+            SpanEnd::PageEnd => (anchor.lead, e),
         };
         vec![(page, from, to)]
     } else {
         // (page, point) of the earlier and the later end.
-        let ((p0, from), (p1, to)) = if page > anchor_page { ((anchor_page, anchor.first), (page, end_last)) } else { ((page, end_first), (anchor_page, anchor.last)) };
+        let ((p0, from), (p1, to)) = if page > anchor_page { ((anchor_page, anchor.lead), (page, end_last)) } else { ((page, end_first), (anchor_page, anchor.tail)) };
         let mut v = vec![(p0, from, e)];
         v.extend((p0 + 1..p1).map(|p| (p, s, e)));
         v.push((p1, s, to));
         v
     };
+    span_select_parts(doc, page, segs)
+}
+
+/// [`span_select`] of the pieces `segs` (page, from, to), with `page` the page shown.
+fn span_select_parts(doc: &mut dyn ink_doc::Document, page: usize, segs: Vec<(usize, Point, Point)>) -> Option<Span> {
     let parts: Vec<Selection> = segs.into_iter().filter_map(|(p, from, to)| doc.select(p, from, to).ok().flatten()).collect();
     let (first, last) = (parts.first()?, parts.last()?);
     let text = parts.iter().map(|p| p.text.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n");
@@ -611,7 +679,7 @@ pub struct Tool {
     pub label: String,
     /// Icon (`None`: the highlighter mark drawn by the card).
     pub icon: Option<Icon>,
-    /// Reported on a tap (`sel-more` opens the "More" page inside the card).
+    /// Reported on a tap (`sel-more`: the reader opens the "More" page, [`show_more`]).
     pub action: String,
 }
 
@@ -679,21 +747,21 @@ pub struct SelectionCard {
 }
 
 impl SelectionCard {
-    /// Card height for a quote of `quote_chars` characters and `rest` tools on the "More"
-    /// page when the main row is `tools` (the quote gets one to three lines, estimated
-    /// from its length: building needs no fonts).
-    pub fn height(tools: &[Tool], quote_chars: usize, rest: usize, w: u32) -> u32 {
+    /// Card height for a quote of `quote_chars` characters (the quote gets one to three
+    /// lines, estimated from its length: building needs no fonts) over the main row, or,
+    /// with `more`, for the "More" page listing `rest` tools. Each page gets its own
+    /// height: a main row sized for the "More" page left a band of empty card between
+    /// the quote and the buttons.
+    pub fn height(quote_chars: usize, rest: usize, w: u32, more: bool) -> u32 {
+        if more {
+            let rows = rest.div_ceil(2).clamp(1, MORE_ROWS) as u32;
+            return 2 * PAD as u32 + PILL_H + rows * (PILL_H + GAP) + SHADOW;
+        }
         let per_line = (w.saturating_sub(2 * PAD as u32 + 40) / 18).max(10) as usize;
         // No quote (a lookup card shows the text): the tool row alone.
         let lines = if quote_chars == 0 { 0 } else { quote_chars.div_ceil(per_line).clamp(1, 3) as u32 };
         let gap = if lines == 0 { 0 } else { GAP };
-        let base = 2 * PAD as u32 + lines * QUOTE_LH + gap + TOOL_H + SHADOW;
-        if !tools.iter().any(|t| t.action == "sel-more") {
-            return base;
-        }
-        let rows = rest.div_ceil(2).min(MORE_ROWS) as u32;
-        let more = 2 * PAD as u32 + PILL_H + rows * (PILL_H + GAP) + SHADOW;
-        base.max(more)
+        2 * PAD as u32 + lines * QUOTE_LH + gap + TOOL_H + SHADOW
     }
 
     /// The card without its shadow.
@@ -824,8 +892,8 @@ impl Widget for SelectionCard {
         if self.more {
             let (back, pills, next) = self.more_rects(b);
             if back.contains(*pos) {
-                self.more = false;
-                self.first = 0;
+                // The reader puts the card back at the main row's height.
+                return EventResult::Action("sel-less".into());
             } else if let Some(t) = pills.iter().find(|(_, r)| r.contains(*pos)).and_then(|(i, _)| self.rest.get(*i)) {
                 return EventResult::Action(t.action.clone());
             } else if next.is_some_and(|r| r.contains(*pos)) {
@@ -835,11 +903,6 @@ impl Widget for SelectionCard {
             return EventResult::Handled;
         }
         match tool_rects(b, self.tools.len()).iter().zip(&self.tools).find(|(r, _)| r.contains(*pos)) {
-            Some((_, t)) if t.action == "sel-more" => {
-                self.more = true;
-                self.first = 0;
-                EventResult::Handled
-            }
             Some((_, t)) => EventResult::Action(t.action.clone()),
             None => EventResult::Handled,
         }
@@ -851,15 +914,30 @@ impl Widget for SelectionCard {
 /// More, Close) over a page scrim (`sel-cancel` on a tap on the page). `plugins`: labels
 /// of all plugin selection actions (`plugin-sel:I`); `insightful`: the index of
 /// Insightful's among them (its button takes the third place); tools that do not fit the
-/// row are listed after "More". `above`: the card stays above this y (the top of the
-/// dictionary card added next to it).
+/// row are listed after "More". `avoid`: a lookup card shown next to it, which the card
+/// keeps clear of ([`card_frame`]); `with_quote` false: the tool row only.
 pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, highlighted: bool, size: Size, avoid: Option<Rect>, with_quote: bool) -> Overlay {
     let mut o = Overlay::over_page(OverlayKind::Selection, size, "sel-cancel");
-    let anchor = bounds(&sel.rects).unwrap_or_default();
     let w = size.w.saturating_sub(48).min(CARD_W);
     let (tools, rest) = layout_tools(plugins, insightful, highlighted, w);
     let quote = if with_quote { quote(sel, 300) } else { String::new() };
-    let h = SelectionCard::height(&tools, if quote.is_empty() { 0 } else { quote.chars().count() + 2 }, rest.len(), w);
+    let card = SelectionCard { quote, tools, rest, more: false, first: 0 };
+    let frame = card_frame(sel, &card, size, avoid);
+    for (r, t) in tool_rects(frame, card.tools.len()).into_iter().zip(&card.tools) {
+        o.buttons.push((t.action.clone(), r));
+    }
+    o.ids.insert("card", o.tree.add(None, Box::new(card), frame));
+    o
+}
+
+/// Where `card` goes on a `size` screen: next to the selection, below it when there is
+/// room, else above; beside the card `avoid` when given (in the room below a card at
+/// the top of the screen, else above it); clear of the screen edges.
+fn card_frame(sel: &Selection, card: &SelectionCard, size: Size, avoid: Option<Rect>) -> Rect {
+    let anchor = bounds(&sel.rects).unwrap_or_default();
+    let w = size.w.saturating_sub(48).min(CARD_W);
+    let n = card.quote.chars().count();
+    let h = SelectionCard::height(if n == 0 { 0 } else { n + 2 }, card.rest.len(), w, card.more);
     let mut frame = match avoid {
         // A card at the top of the screen: the selection card goes in the room below it.
         Some(a) if a.y < size.h as i32 - a.bottom() => {
@@ -882,12 +960,33 @@ pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, hig
     };
     // Keep a margin to the screen edges.
     frame.x = frame.x.clamp(24.min(size.w.saturating_sub(w) as i32 / 2), (size.w.saturating_sub(w + 24) as i32).max(0));
-    for (r, t) in tool_rects(frame, tools.len()).into_iter().zip(&tools) {
-        o.buttons.push((t.action.clone(), r));
+    frame
+}
+
+/// Turns the selection card of `o` to its "More" page (`more`) or back to the main row:
+/// the card is taken out and put back at the height of that page, placed again next to
+/// `sel` (and clear of `avoid`). Returns the old card's rectangle, for the caller to put
+/// the page back there (the tree does not fill it), or `None` when there is no card or
+/// it already shows that page.
+pub fn show_more(o: &mut Overlay, sel: &Selection, size: Size, avoid: Option<Rect>, more: bool) -> Option<Rect> {
+    let id = *o.ids.get("card")?;
+    let card = o.tree.get_mut::<SelectionCard>(id)?;
+    if card.more == more {
+        return None;
     }
-    let card = SelectionCard { quote, tools, rest, more: false, first: 0 };
+    let card = SelectionCard { quote: std::mem::take(&mut card.quote), tools: std::mem::take(&mut card.tools), rest: std::mem::take(&mut card.rest), more, first: 0 };
+    let old = o.tree.remove(id)?;
+    o.tree.take_exposed();
+    let frame = card_frame(sel, &card, size, avoid);
+    let tools: Vec<String> = card.tools.iter().map(|t| t.action.clone()).collect();
+    o.buttons.retain(|(a, _)| !tools.contains(a));
+    if !more {
+        for (r, t) in tool_rects(frame, card.tools.len()).into_iter().zip(&card.tools) {
+            o.buttons.push((t.action.clone(), r));
+        }
+    }
     o.ids.insert("card", o.tree.add(None, Box::new(card), frame));
-    o
+    Some(old)
 }
 
 /// The note editor for a selection on a `size` screen: an app bar ("Add note", Save,
@@ -1324,6 +1423,40 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_passage_takes_the_punctuation_around_its_ends_and_one_word_does_not() {
+        let mut doc = PagedDoc::new(vec![vec!["He said, \u{201c}Go now.\u{201d} Then", "(she left)."]]);
+        // One word alone: no punctuation (what a look-up gets).
+        let now = word_on(&mut doc, 0, 0, 13);
+        assert_eq!(now.sel.text, "now");
+        let one = span_select(&mut doc, SIZE, 0, &now, 0, &SpanEnd::Word(now.clone())).unwrap();
+        assert_eq!(one.sel.text, "now");
+        // "Go" to "now": the opening quote and the full stop with its closing quote.
+        let go = word_on(&mut doc, 0, 0, 10);
+        assert_eq!(go.sel.text, "Go");
+        let s = span_select(&mut doc, SIZE, 0, &go, 0, &SpanEnd::Word(now.clone())).unwrap();
+        assert_eq!(s.sel.text, "\u{201c}Go now.\u{201d}");
+        assert_eq!(s.sel.rects, vec![Rect::new(100 + 20 * 9, 100, 20 * 9, 50)]);
+        // Dragged backwards, the same passage.
+        let s = span_select(&mut doc, SIZE, 0, &now, 0, &SpanEnd::Word(go.clone())).unwrap();
+        assert_eq!(s.sel.text, "\u{201c}Go now.\u{201d}");
+        // A comma closes "said"; a space before the next word stops the scan.
+        let he = word_on(&mut doc, 0, 0, 0);
+        let said = word_on(&mut doc, 0, 0, 4);
+        assert_eq!(span_select(&mut doc, SIZE, 0, &he, 0, &SpanEnd::Word(said)).unwrap().sel.text, "He said,");
+        // Over a line break: the bracket before "she", ")." after "left".
+        let then = word_on(&mut doc, 0, 0, 20);
+        let left = word_on(&mut doc, 0, 1, 6);
+        assert_eq!(span_select(&mut doc, SIZE, 0, &then, 0, &SpanEnd::Word(left)).unwrap().sel.text, "Then\n(she left).");
+        let she = word_on(&mut doc, 0, 1, 2);
+        assert_eq!(span_select(&mut doc, SIZE, 0, &she, 0, &SpanEnd::Word(then)).unwrap().sel.text, "Then\n(she");
+        // Words a plugin split are looked up as a run: no punctuation at either end.
+        let split = |w: Word| Word { split: true, ..w };
+        let (go, now) = (split(go), split(now));
+        assert_eq!(span_select(&mut doc, SIZE, 0, &go, 0, &SpanEnd::Word(now.clone())).unwrap().sel.text, "Go now");
+        assert_eq!(span_select(&mut doc, SIZE, 0, &now, 0, &SpanEnd::Word(go)).unwrap().sel.text, "Go now");
+    }
+
+    #[test]
     fn a_selection_continues_on_the_previous_page() {
         let mut doc = three_pages();
         // "scene" on page 1, dragged back to page 0, where it starts at the last word.
@@ -1333,18 +1466,19 @@ pub(super) mod tests {
         let SpanEnd::Word(w) = &last else { panic!("{last:?}") };
         assert_eq!(w.sel.text, "In");
         let s = span_select(&mut doc, SIZE, 1, &anchor, 0, &last).unwrap();
-        assert_eq!(s.sel.text, "In\nfair Verona, where we\nlay our scene");
+        // The comma after "scene" ends the passage with it.
+        assert_eq!(s.sel.text, "In\nfair Verona, where we\nlay our scene,");
         let end = word_on(&mut doc, 0, 1, 10);
         let s = span_select(&mut doc, SIZE, 1, &anchor, 0, &SpanEnd::Word(end)).unwrap();
-        assert_eq!(s.sel.text, "dignity, In\nfair Verona, where we\nlay our scene");
+        assert_eq!(s.sel.text, "dignity, In\nfair Verona, where we\nlay our scene,");
         assert_eq!(s.sel.start.to_string(), "flow:0.1.9");
-        assert_eq!(s.sel.end.to_string(), "flow:1.1.13");
+        assert_eq!(s.sel.end.to_string(), "flow:1.1.14");
         assert_eq!((s.sel.page, s.pages[0].0, s.pages[1].0), (0, 0, 1));
         // Back on the anchor's page: a one-page selection again; the page edges as ends.
         let s = span_select(&mut doc, SIZE, 1, &anchor, 1, &SpanEnd::PageEnd).unwrap();
         assert_eq!((s.sel.text.as_str(), s.pages.len()), ("scene, From", 1));
         let s = span_select(&mut doc, SIZE, 1, &anchor, 1, &SpanEnd::PageStart).unwrap();
-        assert_eq!(s.sel.text, "fair Verona, where we\nlay our scene");
+        assert_eq!(s.sel.text, "fair Verona, where we\nlay our scene,");
     }
 
     #[test]
@@ -1397,10 +1531,19 @@ pub(super) mod tests {
         let acts: Vec<String> = o.buttons.iter().map(|(a, _)| a.clone()).collect();
         assert_eq!(acts, ["sel-highlight", "sel-note", "plugin-sel:0", "plugin-sel:1", "sel-more", "sel-cancel"]);
         let more = o.button_rect("sel-more").unwrap();
-        assert_eq!(tap(&mut o, more), None);
+        // The main row is as tall as a one-line quote over the buttons: no empty band.
+        let main = o.tree.bounds(o.ids["card"]).unwrap();
+        assert_eq!(main.h, 2 * PAD as u32 + QUOTE_LH + GAP + TOOL_H + SHADOW);
+        assert_eq!(more.bottom(), SelectionCard::body(main).bottom() - PAD);
+        // More: the reader turns the card to its taller "More" page.
+        assert_eq!(tap(&mut o, more).as_deref(), Some("sel-more"));
+        let s = sel("Romeo");
+        assert_eq!(show_more(&mut o, &s, size, None, true), Some(main));
+        assert_eq!(show_more(&mut o, &s, size, None, true), None);
+        assert!(o.button_rect("sel-more").is_none() && o.button_rect("sel-cancel").is_none());
         let id = o.ids["card"];
         let b = o.tree.bounds(id).unwrap();
-        assert!(b.bottom() <= size.h as i32);
+        assert!(b.h > main.h && b.bottom() <= size.h as i32 && b.y == main.y, "{b:?} {main:?}");
         let mut seen = Vec::new();
         for _ in 0..4 {
             let card = o.tree.get_mut::<SelectionCard>(id).unwrap();
@@ -1420,10 +1563,14 @@ pub(super) mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen, (0..7).collect::<Vec<_>>());
-        // Back returns to the row.
+        // Back returns to the row, at its own height and place.
         let back = o.tree.get_mut::<SelectionCard>(id).unwrap().more_rects(b).0;
-        tap(&mut o, back);
+        assert_eq!(tap(&mut o, back).as_deref(), Some("sel-less"));
+        assert_eq!(show_more(&mut o, &s, size, None, false), Some(b));
+        let id = o.ids["card"];
         assert!(!o.tree.get_mut::<SelectionCard>(id).unwrap().more);
+        assert_eq!(o.tree.bounds(id), Some(main));
+        assert_eq!(o.button_rect("sel-more"), Some(more));
         // Landscape and a narrow screen keep at least four tools of 96 px.
         for size in [Size::new(1696, 1272), Size::new(600, 800)] {
             let o = popup(&sel("x"), &plugins, None, false, size, None, true);

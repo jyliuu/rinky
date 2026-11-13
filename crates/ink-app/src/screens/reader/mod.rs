@@ -1751,11 +1751,6 @@ impl ReaderScreen {
         }
     }
 
-    /// The selection overlay for `sel`: the page scrim, the selection card and, with
-    /// `card` (`(plugin, request id, card)`), the plugin's card as a sibling of the
-    /// selection card (the card at the bottom, the selection card kept above it; without a
-    /// card, above `keep_above` when given: where a closed card was, so the selection
-    /// card does not move). Sets [`ReaderScreen::dict_card`].
     /// Where a lookup card goes: `r` as the card framed itself (at the bottom), moved to
     /// the top of the screen when the selection shown is in the lower half, so the card
     /// never covers it.
@@ -1766,19 +1761,15 @@ impl ReaderScreen {
         }
     }
 
-    /// `keep_clear`: the rectangle of a lookup card that just closed: the selection card
-    /// stays as it was beside it, buttons only.
+    /// The selection overlay for `sel`: the page scrim, the selection card and, with
+    /// `card` (`(plugin, request id, card)`), the plugin's card as a sibling of the
+    /// selection card, placed by [`ReaderScreen::place_card`], with the selection card
+    /// beside it. `keep_clear`: the rectangle of a lookup card that just closed: the
+    /// selection card stays as it was beside it, buttons only. Sets
+    /// [`ReaderScreen::dict_card`].
     fn selection_overlay(&mut self, sel: &Selection, card: Option<(String, u32, crate::plugin_host::CardDialog)>, keep_clear: Option<Rect>, cx: &mut AppCtx) -> Overlay {
         let size = cx.screen.size();
-        // In a half-page view the card sits by the selection where it is shown.
-        let shown;
-        let sel = match self.bridge {
-            Some(b) => {
-                shown = Selection { rects: b.to_screen(&self.sel_pages), ..sel.clone() };
-                &shown
-            }
-            None => sel,
-        };
+        let sel = &self.shown_selection(sel);
         let (extra, insightful) = selection_entries(cx);
         let card = card.map(|(plugin, id, mut c)| {
             c.prefix = PCARD.into();
@@ -1798,6 +1789,28 @@ impl ReaderScreen {
             self.dict_card = Some((plugin, id));
         }
         o
+    }
+
+    /// `sel` where it is shown: in a half-page view the card sits by the selection there.
+    fn shown_selection(&self, sel: &Selection) -> Selection {
+        match self.bridge {
+            Some(b) => Selection { rects: b.to_screen(&self.sel_pages), ..sel.clone() },
+            None => sel.clone(),
+        }
+    }
+
+    /// "More" on the selection card (`more`) or Back on its "More" page: the card takes
+    /// that page's height, next to the selection and above a plugin card in the overlay;
+    /// the page comes back where the old card was.
+    fn selection_more(&mut self, more: bool, cx: &mut AppCtx) {
+        let Some(sel) = self.sel.as_ref().map(|s| self.shown_selection(s)) else { return };
+        let Some(o) = self.overlay.as_mut() else { return };
+        let avoid = o.ids.get("dict").and_then(|w| o.tree.bounds(*w));
+        if let Some(old) = selection::show_more(o, &sel, cx.screen.size(), avoid, more) {
+            log::info!("reader: selection card {} (was {old:?})", if more { "More page" } else { "main row" });
+            self.reveal.push(old);
+            self.reveal_selection_under(Some(old));
+        }
     }
 
     /// A button or swipe of the plugin card in the selection overlay (`pcard:<result>`):
@@ -2137,6 +2150,7 @@ impl ReaderScreen {
                 self.relayout_after_plugin(cx);
             }
             "sel-cancel" => self.close_overlay(),
+            "sel-more" | "sel-less" => self.selection_more(a == "sel-more", cx),
             "sel-highlight" => {
                 self.add_highlight(None);
                 self.close_overlay();
