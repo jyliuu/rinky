@@ -17,6 +17,9 @@
 #      (`rinky-ctl.sh restart` writes $RUN/restart and sends SIGTERM to rinky: the
 #      launcher then copies the installed binary again and runs it again, without
 #      starting the framework in between; if that fails it takes the exit path below;)
+#      (a crash inside a native plugin leaves $RUN/plugin-crashed: the launcher runs
+#      rinky again, which turns that plugin off, without starting the framework; at
+#      most twice within 60 s, then it takes the exit path below;)
 #   5. on every exit path (normal exit, error, crash, signal, watchdog kill):
 #      undo the settings rinky journaled ($RUN/restore: volumd disableMounting,
 #      powerd flIntensity, the framebuffer night flag, ...), start the jobs in
@@ -527,6 +530,40 @@ restart_prepare() {
     return 0
 }
 
+# crash_restart: called when rinky ended and $RUN/plugin-crashed exists (a fatal signal
+# inside a native plugin). Returns 0 when rinky may run again at once, with the
+# framework still stopped: the next rinky turns that plugin off. At most
+# CRASH_RESTARTS (2) such restarts within 60 s, and none when the crash came while
+# rinky was exiting (the marker's second line is `exiting`: the user asked to leave);
+# then the marker stays (the next start still turns the plugin off) and the launcher
+# takes the exit path.
+CRASH_RESTARTS=${RINKY_CRASH_RESTARTS:-2}
+CRASH_TIMES=
+crash_restart() {
+    if grep -qx exiting "$RUN/plugin-crashed" 2>/dev/null; then
+        log "crash restart: the plugin crashed while rinky was exiting; not running it again"
+        return 1
+    fi
+    now=$(now_ms)
+    recent=
+    for c in $CRASH_TIMES; do
+        [ $((now - c)) -lt 60000 ] && recent="$recent $c"
+    done
+    set -- $recent
+    if [ $# -ge "$CRASH_RESTARTS" ]; then
+        log "crash restart: already $# in the last 60 s; ending"
+        return 1
+    fi
+    CRASH_TIMES="$recent $now"
+    log "crash restart: native plugin '$(head -n 1 "$RUN/plugin-crashed" 2>/dev/null)' crashed rinky; running it again without that plugin ($(($# + 1)) of $CRASH_RESTARTS within 60 s)"
+    rm -f "$RUN/rinky.pid" "$RUN/heartbeat" "$RUN/exit-reason" "$RUN/watchdog-kill"
+    t=$(now_ms)
+    replay_journal
+    phase "restore settings (crash restart)" "$t"
+    splash "Starting rinky..."
+    return 0
+}
+
 while :; do
     t=$(now_ms)
     ld=$(loader_for "$BIN")
@@ -561,6 +598,9 @@ while :; do
         fi
         rm -f "$RUN/restart"
         log "restart failed; ending (the framework starts again)"
+    fi
+    if [ -f "$RUN/plugin-crashed" ] && crash_restart; then
+        continue
     fi
     exit "$STATUS"
 done

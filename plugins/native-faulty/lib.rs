@@ -7,6 +7,8 @@
 //! - `on_action("ui")` uses host services; `claims_lookup` and the annotator panic for
 //!   the text `boom`.
 //! - The annotator returns one good and two bad ranges for every paragraph.
+//! - `on_book_open` segfaults when its data folder holds a file `crash-on-open` (the
+//!   emulator scenario `tests/e2e/plugin-native-crash.sh`).
 
 use ink_plugin_native::{export_plugin, json, Annotation, AnnotationPosition, Host, HttpEvent, Plugin, Registrar, Result, TextAnnotator};
 use std::sync::Arc;
@@ -51,6 +53,15 @@ impl Plugin for Faulty {
         reg.selection_action("lookup", "Look up")?;
         reg.control_tile("t", "Tile", "")?;
         reg.status_widget("w", "left", "ready")?;
+        Ok(())
+    }
+
+    fn on_book_open(&mut self, host: &mut Host) -> Result<()> {
+        if host.data_dir().is_ok_and(|d| d.join("crash-on-open").exists()) {
+            host.log("crash-on-open: segfault now");
+            // SAFETY: none; the point is the crash.
+            unsafe { std::ptr::write_volatile(std::ptr::null_mut::<u32>(), 1) };
+        }
         Ok(())
     }
 

@@ -34,6 +34,14 @@
 #   13 framework does not stop within the deadline: no rinky, framework back
 #   14 random kill -9 points (launcher or rinky, 0-4 s after launch), repeated:
 #      the framework always comes back and no rinky is left
+#   16 a native plugin crashes rinky once ($RUN/plugin-crashed, status 139): the
+#      launcher runs it again without starting the framework; normal exit afterwards
+#   16b it crashes every time: two restarts, then the normal exit path; the marker
+#      stays for the next start
+#   16c it crashes while exiting (marker line `exiting`): no restart, the exit path
+#   17 with lib/ld-musl-armhf.so.1 installed (a fake loader that records and execs):
+#      rinky, its splash and device restore run through the copy in $RUN/bin, which
+#      is removed on exit
 #
 #   scripts/e2e/launcher-race-test.sh [OUTDIR] [RANDOM_ROUNDS]   exit status = failures
 set -uo pipefail
@@ -90,6 +98,20 @@ echo \$\$ >"$SB/live/\$\$"
 echo "\$(date +%s) rinky \$\$ start \$*" >>"$SB/ink.log"
 trap 'echo "\$(date +%s) rinky \$\$ TERM" >>"$SB/ink.log"; rm -f "$SB/live/\$\$"; exit 143' TERM
 [ "\${INK_MODE:-}" = fail ] && { echo "rinky: cannot open book" >&2; rm -f "$SB/live/\$\$"; exit 3; }
+# INK_CRASHES=N: the first N starts crash "inside a native plugin": the marker the
+# fatal-signal handler writes, then status 139. A real rinky takes the marker at start.
+if [ -n "\${INK_CRASHES:-}" ]; then
+  n=\$(cat "$SB/state/crashes" 2>/dev/null || echo 0)
+  rm -f "\$RINKY_RUN/plugin-crashed"
+  if [ "\$n" -lt "\$INK_CRASHES" ]; then
+    echo \$((n + 1)) >"$SB/state/crashes"
+    echo faulty >"\$RINKY_RUN/plugin-crashed"
+    [ -n "\${INK_CRASH_EXITING:-}" ] && echo exiting >>"\$RINKY_RUN/plugin-crashed"
+    echo "\$(date +%s) rinky \$\$ crash" >>"$SB/ink.log"
+    rm -f "$SB/live/\$\$"
+    exit 139
+  fi
+fi
 while [ ! -f "$SB/quit" ]; do sleep 0.2; done
 echo "\$(date +%s) rinky \$\$ quit" >>"$SB/ink.log"
 rm -f "$SB/live/\$\$"
@@ -275,6 +297,56 @@ for how in exit kill; do
     || bad "15 ($how) during=[$during] after=[$after] btmanagerd=$(cat "$SB/state/btmanagerd")"
   finish
 done
+
+# 16. a native plugin crashes rinky once: run again, framework stays stopped
+ink_starts() { grep -c " start " "$SB/ink.log" 2>/dev/null || echo 0; }
+two_starts_running() { [ "$(ink_starts)" -ge 2 ] && running1; }
+setup 16; INK_CRASHES=1 launch
+if waitfor 25 two_starts_running && [ "$(fw)" = stop/waiting ] && [ "$(starts)" = 0 ] \
+  && grep -q "crash restart: native plugin 'faulty' crashed rinky" "$SB/app/rinky.log" && [ ! -e "$SB/run/plugin-crashed" ]; then
+  touch "$SB/quit"; waitfor 20 fw_up; quiet
+  [ "$(starts)" = 1 ] && [ "$(inks)" = 0 ] && ok "16 a plugin crash: rinky ran again without the framework; normal exit starts it once" \
+    || bad "16 after the exit: starts=$(starts) inks=$(inks)"
+else
+  bad "16 starts of rinky=$(ink_starts) inks=$(inks) fw=$(fw) framework starts=$(starts) $(tail -2 "$SB/app/rinky.log")"
+fi
+finish
+
+# 16b. it crashes every time: two restarts within 60 s, then the exit path
+setup 16b; INK_CRASHES=9 launch
+waitfor 30 in_calls " start lab126_gui"; waitfor 20 fw_up; quiet
+[ "$(ink_starts)" = 3 ] && [ "$(starts)" = 1 ] && [ "$(inks)" = 0 ] && [ -e "$SB/run/plugin-crashed" ] \
+  && grep -q "already 2 in the last 60 s; ending" "$SB/app/rinky.log" \
+  && ok "16b repeated plugin crashes: 2 restarts, then the framework once; the marker stays" \
+  || bad "16b starts of rinky=$(ink_starts) framework starts=$(starts) inks=$(inks) marker=$([ -e "$SB/run/plugin-crashed" ] && echo yes || echo no)"
+finish
+
+# 16c. a crash while rinky was exiting (the user asked to leave): no restart
+setup 16c; INK_CRASHES=1 INK_CRASH_EXITING=1 launch
+waitfor 30 in_calls " start lab126_gui"; waitfor 20 fw_up; quiet
+[ "$(ink_starts)" = 1 ] && [ "$(starts)" = 1 ] && [ -e "$SB/run/plugin-crashed" ] \
+  && grep -q "crashed while rinky was exiting; not running it again" "$SB/app/rinky.log" \
+  && ok "16c a plugin crash during the exit: no restart, the framework once, the marker stays" \
+  || bad "16c starts of rinky=$(ink_starts) framework starts=$(starts)"
+finish
+
+# 17. the bundled musl loader: everything runs through the copy in $RUN/bin
+setup 17
+mkdir -p "$SB/app/lib"
+printf '#!/bin/bash\necho "$(date +%%s) ldso $0 $*" >>"%s/ld.log"\nexec "$@"\n' "$SB" >"$SB/app/lib/ld-musl-armhf.so.1"
+chmod +x "$SB/app/lib/ld-musl-armhf.so.1"
+launch; waitfor 15 running1
+during=$([ -x "$SB/run/bin/ld-musl-armhf.so.1" ] && echo copied || echo missing)
+touch "$SB/quit"; waitfor 20 fw_up; quiet
+ld="$SB/run/bin/ld-musl-armhf.so.1"
+if [ "$during" = copied ] && grep -q "ldso $ld $SB/run/bin/rinky run book.epub" "$SB/ld.log" \
+  && grep -q "ldso $ld $SB/run/bin/rinky splash" "$SB/ld.log" && grep -q "ldso $ld $SB/run/bin/rinky device restore" "$SB/ld.log" \
+  && [ ! -e "$ld" ] && [ ! -e "$SB/run/bin/rinky" ] && [ "$(starts)" = 1 ]; then
+  ok "17 rinky, splash and device restore run through the loader copied to \$RUN/bin; both copies removed on exit"
+else
+  bad "17 loader during the run: $during; left: $(ls "$SB/run/bin" 2>/dev/null | tr '\n' ' '); ld.log: $(cut -d' ' -f3- "$SB/ld.log" 2>/dev/null | tr '\n' ';')"
+fi
+finish
 
 # 14. random kill -9 points
 left=0

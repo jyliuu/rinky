@@ -9,7 +9,9 @@
 #   3. run rinky, through the musl loader the package ships (lib/ld-musl-armhf.so.1,
 #      copied to $RUN/bin too): rinky is a dynamically linked musl program and the Kobo
 #      has only glibc; when it exits after writing $RUN/restart (an in-app update does),
-#      the launcher runs the installed binary again without starting Nickel;
+#      the launcher runs the installed binary again without starting Nickel; when a
+#      native plugin crashed it ($RUN/plugin-crashed), it runs it again too (the new
+#      rinky turns that plugin off), at most twice within 60 s;
 #   4. on every exit path: put back what rinky journaled (framebuffer bit depth and
 #      rotation), turn Wi-Fi off, and start Nickel again (reboot if Nickel was not
 #      running before, or KFMon asked for that).
@@ -126,6 +128,31 @@ case "$1" in
     --library | "") set -- library ;;
     *) set -- run "$@" ;;
 esac
+# crash_restart: true when rinky may run again after a crash inside a native plugin
+# ($RUN/plugin-crashed): at most CRASH_RESTARTS (2) times within 60 s, and not when
+# it crashed while rinky was exiting (second line `exiting`). Otherwise the marker
+# stays, so the next start still turns the plugin off.
+CRASH_RESTARTS=${RINKY_CRASH_RESTARTS:-2}
+CRASH_TIMES=
+crash_restart() {
+    if grep -qx exiting "$RUN/plugin-crashed" 2>/dev/null; then
+        log "crash restart: the plugin crashed while rinky was exiting; not running it again"
+        return 1
+    fi
+    now=$(date +%s)
+    recent=
+    for c in $CRASH_TIMES; do
+        [ $((now - c)) -lt 60 ] && recent="$recent $c"
+    done
+    set -- $recent
+    if [ $# -ge "$CRASH_RESTARTS" ]; then
+        log "crash restart: already $# in the last 60 s; ending"
+        return 1
+    fi
+    CRASH_TIMES="$recent $now"
+    log "crash restart: native plugin '$(head -n 1 "$RUN/plugin-crashed" 2>/dev/null)' crashed rinky; running it again without that plugin"
+    return 0
+}
 while :; do
     log "run: ${LDSO:+$LDSO }$BIN $*"
     # Exported, not a prefix: a prefix assignment on a shell function is not
@@ -140,6 +167,7 @@ while :; do
         copy_binary
         continue
     fi
+    [ -e "$RUN/plugin-crashed" ] && crash_restart && continue
     break
 done
 
