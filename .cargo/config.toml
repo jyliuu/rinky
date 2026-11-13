@@ -20,5 +20,18 @@ incompatible-rust-versions = "fallback"
 # NEON (the default armv7 target has NEON off). `cortex-a53` (used until 0.4.3) let
 # LLVM emit ARMv8 AArch32 instructions: "Illegal instruction" on the i.MX emulators
 # (2026-11-05). RUSTFLAGS in the environment replaces this.
+#
+# Dynamically linked against musl (not static): a static binary cannot dlopen, and native
+# plugins are shared libraries. `-crt-static` alone is not enough: zig links musl
+# statically unless the link also gets `-dynamic`. The interpreter is a placeholder as
+# long as the longest install path that already works on a Kindle (extra slashes are
+# ignored); scripts/package.sh writes each platform's path (scripts/set-interp.py). The
+# Kindle and Kobo system libraries are glibc: the package ships musl's loader as
+# lib/ld-musl-armhf.so.1 (scripts/fetch-musl-loader.sh) and the launchers start rinky
+# through it. Keep scripts/package.sh's copy of these flags in step.
 [target.armv7-unknown-linux-musleabihf]
-rustflags = ["-C", "target-cpu=cortex-a9", "-C", "target-feature=+neon"]
+rustflags = [
+    "-C", "target-cpu=cortex-a9", "-C", "target-feature=+neon",
+    "-C", "target-feature=-crt-static", "-C", "link-arg=-dynamic",
+    "-C", "link-arg=-Wl,--dynamic-linker=/mnt/us/rinky/lib////////////ld-musl-armhf.so.1",
+]
