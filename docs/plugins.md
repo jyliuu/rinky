@@ -146,6 +146,24 @@ the book's language; default true), Lua plugins always claim. A provider for one
 language placed before the general dictionary therefore takes only its language, and
 the dictionary still gets every other word. With one provider nothing changes.
 
+**Word boundaries.** The reader finds the word under a long press from spaces and
+punctuation. For text written without spaces between words, a Rust plugin can say where
+its words end: `Plugin::word_bounds(text, at, lang)` gets a run of word characters on
+one line (continued over a line break when the run reaches the line's end or start)
+and the index of the pressed character (character indices, not bytes) and
+returns the word around it as a range, or `None` (the default) to leave it to the
+reader. The first enabled plugin that answers wins. A long press then selects that
+word, a drag extends the selection by such words, and when both ends of the selection
+are such words the lift looks the selection up whole, like one word. Lua plugins
+cannot answer (the reader asks on every press and drag step).
+
+**Card columns.** In the card body convention (a `_subtitle_` first line or a `— footer`
+last line), a body line with tabs is one row of columns: `term\treading\tmeaning`. The
+columns of all such rows line up, the middle ones are drawn in muted italics, and the
+last one is cut to the card's width. The reader puts a lookup card at the top of the
+screen when the selection is in the lower half, so the card never covers it, and the
+selection card shows only its buttons while a lookup card is open.
+
 Status-widget text changes with `ink.ui.status(id, text)` (Rust:
 `cx.ui()?.status(id, text)`); an empty text hides it.
 
