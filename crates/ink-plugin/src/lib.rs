@@ -191,6 +191,19 @@ pub trait Plugin {
     fn claims_lookup(&self, _text: &str, _lang: Option<&str>) -> bool {
         true
     }
+    /// The word around character `at` of `text`, as a range of **character** (not byte)
+    /// indices that contains `at`, or `None` to leave it to the reader (the default).
+    /// `text` is a run of word characters on one line with no space in it, as the
+    /// reader's long press finds it; `lang` is the book's language, if known. For text
+    /// written without spaces between words, a plugin that knows where its words end
+    /// returns them here: a long press then selects that word, a drag extends the
+    /// selection by such words, and a selection whose both ends came from here is looked
+    /// up whole, like one word ([`Plugin::claims_lookup`]). The first enabled plugin, in
+    /// plugin order, that returns a range wins. Rust plugins only (called for every
+    /// press and drag step).
+    fn word_bounds(&self, _text: &str, _at: usize, _lang: Option<&str>) -> Option<std::ops::Range<usize>> {
+        None
+    }
 }
 
 /// The selection action id of a dictionary lookup ([`Plugin::claims_lookup`]).
@@ -453,6 +466,17 @@ impl PluginManager {
             }
         }
         None
+    }
+
+    /// The word around character `at` of `text` from the first enabled plugin that
+    /// knows it ([`Plugin::word_bounds`]); a range that is empty, past the text or not
+    /// around `at` is ignored.
+    pub fn word_bounds(&self, text: &str, at: usize, lang: Option<&str>) -> Option<std::ops::Range<usize>> {
+        let n = text.chars().count();
+        self.slots.iter().filter(|s| s.enabled).find_map(|slot| {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.plugin.word_bounds(text, at, lang))).ok()??;
+            (r.start <= at && at < r.end && r.end <= n).then_some(r)
+        })
     }
 
     /// Routes a triggered registry entry to its plugin.

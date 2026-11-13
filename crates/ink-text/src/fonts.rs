@@ -691,10 +691,11 @@ impl Fonts {
     }
 
     /// The face that shows `c` in `style`: the main face when it has the glyph, else the
-    /// first fallback that has it, else the main face (which draws `.notdef`).
+    /// first fallback that has it, else the main face (which draws `.notdef`). Spaces
+    /// follow the same rule; only controls stay in the main face.
     pub fn face_for(&mut self, style: Style, c: char) -> FaceId {
         let (main, _) = Self::main_face(style);
-        if self.faces[main as usize].has_char(c) || c.is_whitespace() || c.is_control() {
+        if self.faces[main as usize].has_char(c) || c.is_control() {
             return main;
         }
         if let Some(found) = self.fallback_for.get(&c) {
@@ -767,8 +768,15 @@ impl Fonts {
         let mut items: Vec<(usize, usize, FaceId)> = Vec::new();
         for (i, g) in text.grapheme_indices(true) {
             let c = g.chars().next().unwrap_or(' ');
-            let face = if c.is_whitespace() || c.is_control() {
+            let face = if c.is_control() {
                 items.last().map(|l| l.2).unwrap_or_else(|| Self::main_face(style).0)
+            } else if c.is_whitespace() {
+                // A space stays in the current run when that face has it (runs do not
+                // split at every word), else it goes to the face that has it.
+                match items.last() {
+                    Some(l) if self.faces[l.2 as usize].has_char(c) => l.2,
+                    _ => self.face_for(style, c),
+                }
             } else {
                 self.face_for_cluster(style, g)
             };
@@ -1145,6 +1153,22 @@ mod tests {
         // A cluster the main face covers stays there (one char, or base plus a mark).
         assert_eq!(f.face_for_cluster(Style::Regular, "o"), 0);
         assert_eq!(f.face_for_cluster(Style::Regular, "o\u{35e}"), 3);
+    }
+
+    #[test]
+    fn space_comes_from_a_face_that_has_it() {
+        let mut f = Fonts::load();
+        f.add_fallback_file(&test_font()).unwrap();
+        assert_eq!(f.face_for(Style::Regular, '\u{3000}'), 3, "the main face has no U+3000");
+        assert_eq!(f.face_for(Style::Regular, ' '), 0);
+        // Between fallback glyphs, after Latin text, and at the start of the text.
+        for text in ["★\u{3000}→", "1\u{3000}★", "\u{3000}Ink"] {
+            let run = f.shape(Style::Regular, 40.0, text);
+            let sp = run.glyphs.iter().find(|g| text[g.cluster..].starts_with('\u{3000}')).expect("a glyph for U+3000");
+            assert_eq!(sp.face, 3, "{text:?}");
+            assert_ne!(sp.id, 0, "{text:?}: .notdef");
+            assert!((sp.advance - 40.0).abs() < 0.01, "{text:?}: advance {}", sp.advance);
+        }
     }
 
     #[test]

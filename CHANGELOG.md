@@ -25,11 +25,28 @@ All notable changes to rinky are listed here. The format is based on
 - A long press can look a word up with a plugin made for the book's language while
   the dictionary still takes every other word: the first plugin that takes the word
   gets it.
+- Plugins can tell the reader where words end in text written without spaces: a long
+  press then selects one word instead of everything up to the next punctuation mark,
+  a drag grows the selection a whole word at a time (also a word that a line break
+  splits, which is selected on both lines), and a selection of such words is looked up
+  at once, like a single word.
+- Lookup cards from plugins can show rows of aligned columns (for example a word, its
+  reading and its meaning).
+
+### Changed
+- A lookup card opens at the top of the screen when the selected text is in the lower
+  half, so it no longer covers the selection, and while it is open the selection card
+  above or below it shows only its buttons, without repeating the quote.
 
 ### Fixed
 - The card that opens on selected text no longer has a wide empty band between the
   quoted text and its buttons: it is as tall as what it shows, and grows only when
   More opens the list of other actions.
+- Selecting a passage takes the punctuation at its ends with it: the full stop,
+  comma or closing quote after the last word and an opening quote or bracket before
+  the first. A single word pressed for a look-up is still taken without them.
+- Space characters that the book's font has no glyph for are taken from a fallback
+  font like any other character, instead of showing as boxes.
 - Chinese, Japanese and Korean text in menus, cards, messages and title bars shows
   in the Kindle's own sans fonts instead of as empty boxes.
 
