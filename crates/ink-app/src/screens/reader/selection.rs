@@ -133,6 +133,41 @@ fn scan_line(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, from: Rect,
     out
 }
 
+/// Most characters taken from a neighbouring line to complete a word at a line break.
+const CROSS_LINE: usize = 8;
+
+/// The first line below `end`'s (the nearest one) as a probe sees it: its point at the
+/// left edge, stepping down half a character height at a time past annotations between
+/// the lines.
+fn line_below(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, end: Rect, x: i32) -> Option<(String, Rect)> {
+    let h = (end.h as i32).max(2);
+    (1..=6).find_map(|k| probe(Point::new(x, end.bottom() + k * h / 2)).filter(|(_, r)| r.y > end.y))
+}
+
+/// The run of word characters that starts the line after `end`'s (at most
+/// [`CROSS_LINE`]), in reading order; empty when that line starts with something else.
+fn next_line_run(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, end: Rect) -> Vec<(char, Rect)> {
+    let Some((t, r)) = line_below(probe, end, 0) else { return Vec::new() };
+    let Some(c) = single(&t).filter(|c| c.is_alphanumeric()) else { return Vec::new() };
+    let mut v = vec![(c, r)];
+    v.extend(scan_line(probe, r, true));
+    v.truncate(CROSS_LINE);
+    v
+}
+
+/// The run of word characters that ends the line before `start`'s (at most
+/// [`CROSS_LINE`]), in reading order; empty when that line ends with something else.
+fn prev_line_run(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, start: Rect) -> Vec<(char, Rect)> {
+    let h = (start.h as i32).max(2);
+    let Some((t, r)) = (1..=6).find_map(|k| probe(Point::new(LINE_END_X, start.y - k * h / 2)).filter(|(_, r)| r.bottom() <= start.y)) else { return Vec::new() };
+    let Some(c) = single(&t).filter(|c| c.is_alphanumeric()) else { return Vec::new() };
+    let mut v = scan_line(probe, r, false);
+    v.truncate(CROSS_LINE - 1);
+    v.reverse();
+    v.push((c, r));
+    v
+}
+
 /// The hyphen that ends `last`'s line right after it, if any: a hyphen of the book
 /// ("well-" | "known") or the one the layout added ("in-" | "finities"), which a
 /// document's selection leaves out of the text (so the probe returns no text).
@@ -157,18 +192,55 @@ fn hyphen_after(probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, last: Re
 /// A word hyphenated at the end of a line goes on at the start of the next: pressed on
 /// either part, the word is both (its first and last character are then on two lines).
 pub fn word_span(start: Point, probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>) -> Option<(Rect, Rect)> {
+    word_span_split(start, probe, None).map(|(a, b, _)| (a, b))
+}
+
+/// Finds the word around character `at` of `run` (a run of word characters on one line,
+/// no space in it): a range of character indices around `at`, or `None` when it does
+/// not know (see [`ink_plugin::Plugin::word_bounds`]).
+pub type Splitter<'a> = &'a dyn Fn(&str, usize) -> Option<std::ops::Range<usize>>;
+
+/// [`word_span`], and when `split` is given, the run of word characters found on the
+/// line is passed to it with the pressed character's index: a range it returns is the
+/// word (the third value is then true), else the whole run is (as [`word_span`]).
+pub fn word_span_split(start: Point, probe: &mut dyn FnMut(Point) -> Option<(String, Rect)>, split: Option<Splitter>) -> Option<(Rect, Rect, bool)> {
     let mut r0 = None;
     for dx in [0, -10, 10, -20, 20, -30, 30] {
         if let Some((t, r)) = probe(Point::new(start.x + dx, start.y)) {
-            if single(&t).is_some_and(char::is_alphanumeric) {
-                r0 = Some(r);
+            if let Some(c) = single(&t).filter(|c| c.is_alphanumeric()) {
+                r0 = Some((c, r));
                 break;
             }
         }
     }
-    let r0 = r0?;
-    let mut first = scan_line(probe, r0, false).last().map_or(r0, |(_, r)| *r);
-    let mut last = scan_line(probe, r0, true).last().map_or(r0, |(_, r)| *r);
+    let (c0, r0) = r0?;
+    let left = scan_line(probe, r0, false);
+    let right = scan_line(probe, r0, true);
+    if let Some(split) = split {
+        let mut run: Vec<(char, Rect)> = left.iter().rev().copied().chain(std::iter::once((c0, r0))).chain(right.iter().copied()).collect();
+        let mut at = left.len();
+        // Text without spaces breaks between any two characters, also inside a word:
+        // a run that ends its line goes on with the next line's first run, and one that
+        // starts its line with the previous line's last run, so the splitter sees the
+        // whole word.
+        if let Some(&(_, end)) = run.last() {
+            if probe(Point::new(LINE_END_X, end.y + end.h as i32 / 2)).is_some_and(|(_, r)| r == end) {
+                run.extend(next_line_run(probe, end));
+            }
+        }
+        let start = run[0].1;
+        if probe(Point::new(0, start.y + start.h as i32 / 2)).is_some_and(|(_, r)| r == start) {
+            let before = prev_line_run(probe, start);
+            at += before.len();
+            run.splice(0..0, before);
+        }
+        let text: String = run.iter().map(|(c, _)| *c).collect();
+        if let Some(w) = split(&text, at).filter(|w| w.start <= at && at < w.end && w.end <= run.len()) {
+            return Some((run[w.start].1, run[w.end - 1].1, true));
+        }
+    }
+    let mut first = left.last().map_or(r0, |(_, r)| *r);
+    let mut last = right.last().map_or(r0, |(_, r)| *r);
     let h = r0.h as i32;
     // The word ends its line with a hyphen: it goes on at the next line's start.
     if hyphen_after(probe, last).is_some() {
@@ -187,7 +259,7 @@ pub fn word_span(start: Point, probe: &mut dyn FnMut(Point) -> Option<(String, R
             }
         }
     }
-    Some((first, last))
+    Some((first, last, false))
 }
 
 /// A word found by [`word_hit`].
@@ -199,6 +271,9 @@ pub struct Word {
     pub first: Point,
     /// A point on its last character.
     pub last: Point,
+    /// Its ends came from a [`Splitter`] (a plugin's word boundaries), not from the
+    /// spaces and punctuation around it.
+    pub split: bool,
 }
 
 impl Word {
@@ -217,6 +292,11 @@ impl Word {
 /// The whole word under `pos` on `page` ([`word_span`] with `Document::select` probes),
 /// selected in the document. `None` when there is no word near `pos`.
 pub fn word_hit(doc: &mut dyn ink_doc::Document, page: usize, pos: Point) -> Option<Word> {
+    word_hit_split(doc, page, pos, None)
+}
+
+/// [`word_hit`] with the word boundaries of `split` ([`word_span_split`]).
+pub fn word_hit_split(doc: &mut dyn ink_doc::Document, page: usize, pos: Point, split: Option<Splitter>) -> Option<Word> {
     let t0 = std::time::Instant::now();
     let mut probes = 0u32;
     let span = {
@@ -225,15 +305,15 @@ pub fn word_hit(doc: &mut dyn ink_doc::Document, page: usize, pos: Point) -> Opt
             let s = doc.select(page, p, p).ok()??;
             Some((s.text, *s.rects.first()?))
         };
-        word_span(pos, &mut probe)
+        word_span_split(pos, &mut probe, split)
     };
-    let (a, b) = span?;
+    let (a, b, split) = span?;
     // x + 1: the left part of a character maps to it under both point rules.
     let first = Point::new(a.x + 1, a.y + a.h as i32 / 2);
     let last = Point::new(b.x + 1, b.y + b.h as i32 / 2);
     let sel = doc.select(page, first, last).ok()??;
     log::debug!("reader: word {:?} at {},{} in {} probes, {} ms", sel.text, pos.x, pos.y, probes + 1, t0.elapsed().as_millis());
-    Some(Word { sel, first, last })
+    Some(Word { sel, first, last, split })
 }
 
 /// The whole word under `pos` on `page` (see [`word_hit`]).
@@ -604,8 +684,10 @@ impl SelectionCard {
     /// from its length: building needs no fonts).
     pub fn height(tools: &[Tool], quote_chars: usize, rest: usize, w: u32) -> u32 {
         let per_line = (w.saturating_sub(2 * PAD as u32 + 40) / 18).max(10) as usize;
-        let lines = quote_chars.div_ceil(per_line).clamp(1, 3) as u32;
-        let base = 2 * PAD as u32 + lines * QUOTE_LH + GAP + TOOL_H + SHADOW;
+        // No quote (a lookup card shows the text): the tool row alone.
+        let lines = if quote_chars == 0 { 0 } else { quote_chars.div_ceil(per_line).clamp(1, 3) as u32 };
+        let gap = if lines == 0 { 0 } else { GAP };
+        let base = 2 * PAD as u32 + lines * QUOTE_LH + gap + TOOL_H + SHADOW;
         if !tools.iter().any(|t| t.action == "sel-more") {
             return base;
         }
@@ -700,6 +782,12 @@ impl Widget for SelectionCard {
         }
         // The quote: a black bar on the left, italic text, at most the lines that fit.
         let rects = tool_rects(b, self.tools.len());
+        if self.quote.is_empty() {
+            for (r, tool) in rects.iter().zip(&self.tools) {
+                SelectionCard::paint_tool(cx, *r, tool);
+            }
+            return;
+        }
         let top = body.y + PAD;
         let bottom = rects.first().map_or(body.bottom(), |r| r.y) - GAP as i32;
         let px = QUOTE_LH as f32 / 1.3;
@@ -765,19 +853,33 @@ impl Widget for SelectionCard {
 /// Insightful's among them (its button takes the third place); tools that do not fit the
 /// row are listed after "More". `above`: the card stays above this y (the top of the
 /// dictionary card added next to it).
-pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, highlighted: bool, size: Size, above: Option<i32>) -> Overlay {
+pub fn popup(sel: &Selection, plugins: &[String], insightful: Option<usize>, highlighted: bool, size: Size, avoid: Option<Rect>, with_quote: bool) -> Overlay {
     let mut o = Overlay::over_page(OverlayKind::Selection, size, "sel-cancel");
     let anchor = bounds(&sel.rects).unwrap_or_default();
     let w = size.w.saturating_sub(48).min(CARD_W);
     let (tools, rest) = layout_tools(plugins, insightful, highlighted, w);
-    let quote = quote(sel, 300);
-    let h = SelectionCard::height(&tools, quote.chars().count() + 2, rest.len(), w);
-    let room = Size::new(size.w, above.map_or(size.h, |y| (y - GAP as i32).clamp(0, size.h as i32) as u32));
-    let mut frame = Popup::frame(anchor, Size::new(w, h), room);
-    if let Some(y) = above {
-        // Below the word there was no room above the card's top: keep clear of it.
-        frame.y = frame.y.min(y - GAP as i32 - h as i32).max(0);
-    }
+    let quote = if with_quote { quote(sel, 300) } else { String::new() };
+    let h = SelectionCard::height(&tools, if quote.is_empty() { 0 } else { quote.chars().count() + 2 }, rest.len(), w);
+    let mut frame = match avoid {
+        // A card at the top of the screen: the selection card goes in the room below it.
+        Some(a) if a.y < size.h as i32 - a.bottom() => {
+            let off = (a.bottom() + GAP as i32).clamp(0, size.h as i32);
+            let room = Size::new(size.w, size.h - off as u32);
+            let mut f = Popup::frame(Rect::new(anchor.x, anchor.y - off, anchor.w, anchor.h), Size::new(w, h), room);
+            f.y = (f.y + off).max(off);
+            f
+        }
+        // A card at the bottom: the room above it.
+        Some(a) => {
+            let y = a.y;
+            let room = Size::new(size.w, (y - GAP as i32).clamp(0, size.h as i32) as u32);
+            let mut f = Popup::frame(anchor, Size::new(w, h), room);
+            // Below the word there was no room above the card's top: keep clear of it.
+            f.y = f.y.min(y - GAP as i32 - h as i32).max(0);
+            f
+        }
+        None => Popup::frame(anchor, Size::new(w, h), size),
+    };
     // Keep a margin to the screen edges.
     frame.x = frame.x.clamp(24.min(size.w.saturating_sub(w) as i32 / 2), (size.w.saturating_sub(w + 24) as i32).max(0));
     for (r, t) in tool_rects(frame, tools.len()).into_iter().zip(&tools) {
@@ -853,6 +955,50 @@ pub(super) mod tests {
         let (a, b) = word_span(Point::new(100 + at * 20 + dx, 320), &mut probe).unwrap();
         let chars: Vec<char> = text.chars().collect();
         chars[((a.x - 100) / 20) as usize..=((b.x - 100) / 20) as usize].iter().collect()
+    }
+
+    /// A splitter's word around the pressed character replaces the run; one that does
+    /// not answer, or answers a range not around it, leaves the run whole.
+    #[test]
+    fn a_splitter_picks_the_word_inside_a_run() {
+        let t = "He said: abcdefg, end.";
+        let pairs = |run: &str, at: usize| (run.len() > 4).then(|| at / 2 * 2..(at / 2 * 2 + 2).min(run.chars().count()));
+        let bad = |_: &str, at: usize| Some(at + 1..at + 2);
+        let pick = |at: i32, split: Option<Splitter>| {
+            let mut probe = line_probe(t, true);
+            let (a, b, s) = word_span_split(Point::new(100 + at * 20 + 5, 320), &mut probe, split).unwrap();
+            let chars: Vec<char> = t.chars().collect();
+            (chars[((a.x - 100) / 20) as usize..=((b.x - 100) / 20) as usize].iter().collect::<String>(), s)
+        };
+        // "abcdefg" is characters 9..16.
+        assert_eq!(pick(9, Some(&pairs)), ("ab".to_string(), true));
+        assert_eq!(pick(12, Some(&pairs)), ("cd".to_string(), true));
+        assert_eq!(pick(15, Some(&pairs)), ("g".to_string(), true));
+        assert_eq!(pick(19, Some(&pairs)), ("end".to_string(), false), "a short run: no answer");
+        assert_eq!(pick(12, Some(&bad)), ("abcdefg".to_string(), false), "a range not around the press");
+        assert_eq!(pick(12, None), ("abcdefg".to_string(), false));
+    }
+
+    /// A splitter sees a run that a line break cuts as one run: a word broken at the
+    /// line end is selected on both lines, pressed on either part.
+    #[test]
+    fn a_splitter_word_goes_on_over_a_line_break() {
+        // Words of three letters from the run's start: "abc|def|gh" over "He said abcd" | "efgh end.".
+        let threes = |run: &str, at: usize| Some(at / 3 * 3..(at / 3 * 3 + 3).min(run.chars().count()));
+        let lines: &'static [&'static str] = &["He said abcd", "efgh end."];
+        let pick = |l: i32, at: i32| {
+            let mut probe = lines_probe(lines);
+            let (a, b, s) = word_span_split(Point::new(100 + at * 20 + 5, 300 + l * 50 + 20), &mut probe, Some(&threes)).unwrap();
+            assert!(s);
+            (((a.y - 300) / 50, (a.x - 100) / 20), ((b.y - 300) / 50, (b.x - 100) / 20))
+        };
+        // "def": d ends line 0 (character 11), "ef" start line 1.
+        assert_eq!(pick(0, 11), ((0, 11), (1, 1)));
+        assert_eq!(pick(1, 0), ((0, 11), (1, 1)));
+        assert_eq!(pick(1, 1), ((0, 11), (1, 1)));
+        // Words inside one line stay there.
+        assert_eq!(pick(0, 8), ((0, 8), (0, 10)), "abc");
+        assert_eq!(pick(1, 3), ((1, 2), (1, 3)), "gh");
     }
 
     #[test]
@@ -1238,7 +1384,7 @@ pub(super) mod tests {
     fn card_row_fits_and_more_lists_every_plugin() {
         let size = Size::new(1272, 1696);
         // One plugin: Highlight, Note, the plugin, Search, Close (no More, no Copy).
-        let mut o = popup(&sel("Romeo"), &["Look up".into()], None, false, size, None);
+        let mut o = popup(&sel("Romeo"), &["Look up".into()], None, false, size, None, true);
         let acts: Vec<&str> = o.buttons.iter().map(|(a, _)| a.as_str()).collect();
         assert_eq!(acts, ["sel-highlight", "sel-note", "plugin-sel:0", "sel-search", "sel-cancel"]);
         for (a, r) in o.buttons.clone() {
@@ -1247,7 +1393,7 @@ pub(super) mod tests {
         }
         // Eight plugins: two inline, More opens a page with the other six and Search (paged).
         let plugins: Vec<String> = (0..8).map(|i| format!("Action {i}")).collect();
-        let mut o = popup(&sel("Romeo"), &plugins, None, false, size, None);
+        let mut o = popup(&sel("Romeo"), &plugins, None, false, size, None, true);
         let acts: Vec<String> = o.buttons.iter().map(|(a, _)| a.clone()).collect();
         assert_eq!(acts, ["sel-highlight", "sel-note", "plugin-sel:0", "plugin-sel:1", "sel-more", "sel-cancel"]);
         let more = o.button_rect("sel-more").unwrap();
@@ -1280,7 +1426,7 @@ pub(super) mod tests {
         assert!(!o.tree.get_mut::<SelectionCard>(id).unwrap().more);
         // Landscape and a narrow screen keep at least four tools of 96 px.
         for size in [Size::new(1696, 1272), Size::new(600, 800)] {
-            let o = popup(&sel("x"), &plugins, None, false, size, None);
+            let o = popup(&sel("x"), &plugins, None, false, size, None, true);
             assert!(o.buttons.iter().all(|(_, r)| r.w >= 96 && r.right() <= size.w as i32), "{size:?} {:?}", o.buttons);
         }
     }
@@ -1289,7 +1435,7 @@ pub(super) mod tests {
     fn insightful_takes_the_third_place_and_there_is_no_copy() {
         let size = Size::new(1272, 1696);
         let plugins: Vec<String> = vec!["Look up".into(), "Insightful".into()];
-        let mut o = popup(&sel("Romeo"), &plugins, Some(1), false, size, None);
+        let mut o = popup(&sel("Romeo"), &plugins, Some(1), false, size, None, true);
         let acts: Vec<&str> = o.buttons.iter().map(|(a, _)| a.as_str()).collect();
         // Insightful's own plugin button is not listed twice.
         assert_eq!(acts, ["sel-highlight", "sel-note", "plugin-sel:1", "plugin-sel:0", "sel-search", "sel-cancel"]);
@@ -1305,7 +1451,7 @@ pub(super) mod tests {
         for y in [400, 1200] {
             let mut s = sel("Romeo");
             s.rects = vec![Rect::new(100, y, 400, 50)];
-            let o = popup(&s, &plugins, Some(1), false, size, Some(900));
+            let o = popup(&s, &plugins, Some(1), false, size, Some(Rect::new(0, 900, size.w, size.h - 900)), true);
             let b = o.tree.bounds(o.ids["card"]).unwrap();
             assert!(b.bottom() <= 900 && b.y >= 0, "word at {y}: {b:?}");
         }

@@ -1637,6 +1637,27 @@ mod lookup_stub {
         }
     }
 
+    /// Word boundaries every two letters (`ab|cd|e`), as a plugin for text written
+    /// without spaces gives them.
+    pub struct Pairs(pub PluginManifest);
+
+    impl Plugin for Pairs {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        fn word_bounds(&self, text: &str, at: usize, _lang: Option<&str>) -> Option<std::ops::Range<usize>> {
+            let start = at / 2 * 2;
+            Some(start..(start + 2).min(text.chars().count()))
+        }
+    }
+
+    /// [`new`] with [`Pairs`] first.
+    pub fn with_pairs() -> (Vec<Box<dyn Plugin>>, Log) {
+        let (mut plugins, log) = new();
+        plugins.insert(0, Box::new(Pairs(PluginManifest::new("pairs", "1", &[]))));
+        (plugins, log)
+    }
+
     /// [`new`] with a [`Picky`] provider for `lang` before the dictionary.
     pub fn with_picky(lang: &'static str) -> (Vec<Box<dyn Plugin>>, Log) {
         let (mut plugins, log) = new();
@@ -1707,6 +1728,81 @@ fn long_press_lookup_goes_to_the_first_provider_that_claims_it() {
         h.frame(100, p.x, p.y, TouchPhase::Up);
         let word = h.reader.sel.as_ref().map(|s| s.text.clone()).unwrap_or_default();
         assert_eq!(log.lock().unwrap().as_slice(), [format!("{want}{word}")], "provider for {lang}");
+    }
+}
+
+/// A plugin's word boundaries: a long press selects its word (two letters here), a drag
+/// extends by its words, and the lift looks the selection up whole like one word. A
+/// drag without them is not looked up.
+#[test]
+fn plugin_word_bounds_select_and_drag_by_its_words_and_look_the_run_up() {
+    for (pairs, tag) in [(true, "pairs"), (false, "plain")] {
+        let mut h = Harness::new(&format!("word-bounds-{tag}"), "juliet.epub");
+        let (plugins, log) = if pairs { lookup_stub::with_pairs() } else { lookup_stub::new() };
+        h.plugins = PluginHost::new(plugins);
+        h.reader.go_to_page(30);
+        h.paint();
+        let p = h.text_point();
+        h.frame(400, p.x, p.y, TouchPhase::Down);
+        h.tick(700);
+        let one = h.reader.sel.as_ref().unwrap().text.clone();
+        if pairs {
+            assert!((1..=2).contains(&one.chars().count()), "{one:?}");
+            assert!(h.reader.sel_word.as_ref().unwrap().split);
+        }
+        h.frame(100, p.x + 300, p.y, TouchPhase::Move);
+        let sel = h.reader.sel.clone().unwrap().text;
+        assert!(sel.len() > one.len(), "{one:?} -> {sel:?}");
+        h.frame(100, p.x + 300, p.y, TouchPhase::Up);
+        assert_eq!(h.kind(), Some(overlay::OverlayKind::Selection));
+        let looked_up: Vec<String> = log.lock().unwrap().iter().filter(|l| l.starts_with("action:lookup:")).cloned().collect();
+        if pairs {
+            assert_eq!(looked_up, [format!("action:lookup:{sel}")], "the run of split words is looked up");
+            let o = h.reader.overlay().unwrap();
+            assert!(o.ids.contains_key("dict"), "its card is in the selection overlay");
+        } else {
+            assert!(looked_up.is_empty(), "an extended selection is not looked up: {looked_up:?}");
+        }
+    }
+}
+
+/// A word in the lower half of the page: the lookup card opens at the top and the
+/// selection card (buttons only, no quote) below it by the word, so neither covers the
+/// selection; a word in the upper half keeps the card at the bottom.
+#[test]
+fn lookup_card_goes_to_the_half_without_the_selection() {
+    for (low, tag) in [(true, "low"), (false, "high")] {
+        let mut h = Harness::new(&format!("lookup-place-{tag}"), "juliet.epub");
+        let (plugins, _log) = lookup_stub::new();
+        h.plugins = PluginHost::new(plugins);
+        h.reader.go_to_page(30);
+        h.paint();
+        let p = h.text_point();
+        let p = if low {
+            let page = h.reader.page();
+            let doc = h.reader.doc.as_deref_mut().unwrap();
+            let q = (1100..1500).step_by(10).rev().map(|y| Point::new(p.x, y)).find(|q| doc.select(page, *q, *q).ok().flatten().is_some_and(|s| s.text.chars().any(char::is_alphabetic) && s.rects.iter().any(|r| r.contains(*q))));
+            doc.clear_selection();
+            q.expect("text low on the page")
+        } else {
+            p
+        };
+        h.frame(400, p.x, p.y, TouchPhase::Down);
+        h.tick(700);
+        h.frame(100, p.x, p.y, TouchPhase::Up);
+        let word = selection::bounds(&h.reader.sel.as_ref().unwrap().rects).unwrap();
+        let o = h.reader.overlay().unwrap();
+        let card = o.tree.bounds(o.ids["card"]).unwrap();
+        let dict = o.tree.bounds(o.ids["dict"]).unwrap();
+        assert!(dict.intersect(&word).is_empty() && card.intersect(&word).is_empty(), "word {word:?} card {card:?} dict {dict:?}");
+        if low {
+            assert!(dict.bottom() < word.y && dict.y < 100, "card at the top: {dict:?}");
+            assert!(card.y > dict.bottom(), "selection card below the lookup card: {card:?}");
+        } else {
+            assert!(dict.y > word.bottom(), "card below the word: {dict:?}");
+        }
+        assert!(card.h < 300, "buttons only: {card:?}");
+        h.shot(&format!("01-{tag}"));
     }
 }
 
@@ -2589,6 +2685,10 @@ fn a_page_drawn_before_its_annotations_are_ready_is_drawn_again_once() {
     let p = providers();
     h.reader = ReaderScreen::new(h.reader.path.clone());
     h.reader.on_enter(&mut cx!(h, p)).unwrap();
+    h.paint();
+    // The page count settles first: on a slow machine it would otherwise complete
+    // between the last two paints below and redraw the footer.
+    assert!(h.reader.doc.as_deref_mut().unwrap().wait_paginated(std::time::Duration::from_secs(20)), "paginated");
     h.paint();
     // A page with Romeo in it, not drawn yet.
     let page = {

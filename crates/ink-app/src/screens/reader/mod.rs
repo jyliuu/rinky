@@ -607,6 +607,10 @@ pub struct ReaderScreen {
     sel: Option<Selection>,
     /// The word the selection started on.
     sel_word: Option<selection::Word>,
+    /// The selection's moving end is a word from a plugin's word boundaries
+    /// ([`selection::Word::split`]); with `sel_word` split too, the lift looks the
+    /// selection up like one word.
+    sel_end_split: bool,
     /// Bounds of the word the selection was last extended to, and the finger point of
     /// that extension (moves inside it, or within a few pixels, are skipped).
     sel_end: Option<(Rect, Point)>,
@@ -755,6 +759,7 @@ impl ReaderScreen {
             selecting: None,
             sel: None,
             sel_word: None,
+            sel_end_split: false,
             sel_end: None,
             sel_anchor_page: 0,
             sel_pages: Vec::new(),
@@ -1354,7 +1359,10 @@ impl ReaderScreen {
                 let Some(doc) = self.doc.as_deref_mut() else { return false };
                 // A hold away from any text (blank space, margins) is not a selection.
                 let t0 = Instant::now();
-                match selection::word_hit(doc, page, t.pos) {
+                let lang = doc.metadata().language.clone();
+                let plugins = &*cx.plugins;
+                let split = |run: &str, at: usize| plugins.word_bounds(run, at, lang.as_deref());
+                match selection::word_hit_split(doc, page, t.pos, Some(&split)) {
                     Some(w) if w.sel.rects.iter().any(|r| near(r, t.pos, 30)) => {
                         log::info!(
                             "reader: long press at {},{} selects {:?} on page {} ({} ms)",
@@ -1371,6 +1379,7 @@ impl ReaderScreen {
                         self.leave_edge();
                         self.sel_text_box = None;
                         self.sel = Some(w.sel.clone());
+                        self.sel_end_split = w.split;
                         self.sel_word = Some(w);
                         self.sel_dirty = true;
                         true
@@ -1411,7 +1420,10 @@ impl ReaderScreen {
                     Some(b) => b.to_page(p),
                     None => (page, p),
                 };
-                let Some(end) = selection::word_hit(doc, page, q) else {
+                let lang = doc.metadata().language.clone();
+                let plugins = &*cx.plugins;
+                let split = |run: &str, at: usize| plugins.word_bounds(run, at, lang.as_deref());
+                let Some(end) = selection::word_hit_split(doc, page, q, Some(&split)) else {
                     // Between words or lines: keep the selection as it is.
                     return true;
                 };
@@ -1433,17 +1445,20 @@ impl ReaderScreen {
                 self.sel_settle = selection::bounds(&self.sel_screen_rects());
                 let Some(doc) = self.doc.as_deref_mut() else { return true };
                 let one_word = self.sel_pages.len() <= 1 && self.sel_word.as_ref().is_some_and(|w| w.sel.rects == sel.rects);
+                // Both ends are words a plugin split: the selection is a run of its
+                // words and is looked up whole, like one word.
+                let split_words = self.sel_pages.len() <= 1 && self.sel_end_split && self.sel_word.as_ref().is_some_and(|w| w.split);
                 let pages = match (self.sel_pages.first(), self.sel_pages.last()) {
                     (Some(a), Some(b)) if a.0 != b.0 => format!("pages {}-{}", a.0 + 1, b.0 + 1),
                     _ => format!("page {}", sel.page + 1),
                 };
-                log::info!("reader selection {pages}: {:?} ({})", note_excerpt(&sel.text, 60), if one_word { "one word" } else { "extended" });
+                log::info!("reader selection {pages}: {:?} ({})", note_excerpt(&sel.text, 60), if one_word { "one word" } else if split_words { "split words" } else { "extended" });
                 cx.plugins.selection(doc, &sel);
                 // One word with long_press = dictionary: the lookup runs at once and its
                 // card becomes a sibling of the selection card in one overlay (a tap on
                 // the page closes both).
                 let mut card = None;
-                if one_word && cx.settings.gestures.action("long_press") == "dictionary" {
+                if (one_word || split_words) && cx.settings.gestures.action("long_press") == "dictionary" {
                     // The first lookup provider (in plugin order) that claims the word.
                     let lang = doc.metadata().language.clone();
                     match cx.plugins.lookup_provider(&sel.text, lang.as_deref()).map(|p| (p, ink_plugin::LOOKUP_ACTION.to_string())) {
@@ -1491,6 +1506,7 @@ impl ReaderScreen {
     /// document's selection, which plugins read).
     /// `page`: the page `end` is on (the page shown, or in a bridge either of its pages).
     fn extend_selection(&mut self, end: &selection::SpanEnd, size: Size, page: usize) {
+        self.sel_end_split = matches!(end, selection::SpanEnd::Word(w) if w.split);
         let (Some(doc), Some(word)) = (self.doc.as_deref_mut(), self.sel_word.as_ref()) else { return };
         let Some(span) = selection::span_select(doc, size, self.sel_anchor_page, word, page, end) else { return };
         if self.sel.as_ref().is_none_or(|s| s.page != span.sel.page || s.rects != span.sel.rects || s.text != span.sel.text) {
@@ -1740,7 +1756,19 @@ impl ReaderScreen {
     /// selection card (the card at the bottom, the selection card kept above it; without a
     /// card, above `keep_above` when given: where a closed card was, so the selection
     /// card does not move). Sets [`ReaderScreen::dict_card`].
-    fn selection_overlay(&mut self, sel: &Selection, card: Option<(String, u32, crate::plugin_host::CardDialog)>, keep_above: Option<i32>, cx: &mut AppCtx) -> Overlay {
+    /// Where a lookup card goes: `r` as the card framed itself (at the bottom), moved to
+    /// the top of the screen when the selection shown is in the lower half, so the card
+    /// never covers it.
+    fn place_card(&self, r: Rect, size: Size) -> Rect {
+        match selection::bounds(&self.sel_screen_rects()) {
+            Some(b) if b.y + b.h as i32 / 2 > size.h as i32 / 2 => Rect::new(r.x, ink_ui::theme::space(1), r.w, r.h),
+            _ => r,
+        }
+    }
+
+    /// `keep_clear`: the rectangle of a lookup card that just closed: the selection card
+    /// stays as it was beside it, buttons only.
+    fn selection_overlay(&mut self, sel: &Selection, card: Option<(String, u32, crate::plugin_host::CardDialog)>, keep_clear: Option<Rect>, cx: &mut AppCtx) -> Overlay {
         let size = cx.screen.size();
         // In a half-page view the card sits by the selection where it is shown.
         let shown;
@@ -1755,9 +1783,13 @@ impl ReaderScreen {
         let card = card.map(|(plugin, id, mut c)| {
             c.prefix = PCARD.into();
             let r = c.frame(&mut PaintCx::new(cx.canvas, cx.fonts, cx.theme), size);
+            let r = self.place_card(r, size);
             (plugin, id, c, r)
         });
-        let mut o = selection::popup(sel, &extra, insightful, self.sel_highlight, size, card.as_ref().map(|(.., r)| r.y).or(keep_above));
+        // With a lookup card the selection card is its tool row only (the card shows the
+        // text), and stays so when the card closes (it does not move or grow).
+        let with_quote = card.is_none() && keep_clear.is_none();
+        let mut o = selection::popup(sel, &extra, insightful, self.sel_highlight, size, card.as_ref().map(|(.., r)| *r).or(keep_clear), with_quote);
         self.dict_card = None;
         if let Some((plugin, id, c, r)) = card {
             log::info!("reader: {plugin} card {id} {:?} at {r:?}, sibling of the selection card (pages {:?})", c.title, c.pages);
@@ -1788,6 +1820,7 @@ impl ReaderScreen {
             let size = cx.screen.size();
             c.prefix = PCARD.into();
             let r = c.frame(&mut PaintCx::new(cx.canvas, cx.fonts, cx.theme), size);
+            let r = self.place_card(r, size);
             let Some(o) = self.overlay.as_mut() else { return };
             let wid = o.ids.get("dict").copied();
             let old = wid.and_then(|w| o.tree.bounds(w));
@@ -1813,7 +1846,7 @@ impl ReaderScreen {
         self.dict_card = None;
         let old = self.overlay.as_ref().and_then(|o| o.ids.get("dict").and_then(|w| o.tree.bounds(*w)));
         self.reveal_selection_under(old);
-        let o = self.selection_overlay(&sel, None, old.map(|r| r.y), cx);
+        let o = self.selection_overlay(&sel, None, old, cx);
         self.open_overlay(o, cx);
     }
 

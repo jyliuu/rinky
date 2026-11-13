@@ -619,6 +619,12 @@ impl PluginHost {
         self.manager.lookup_provider(text, lang)
     }
 
+    /// The word around character `at` of `text` from a plugin (see
+    /// [`ink_plugin::Plugin::word_bounds`]).
+    pub fn word_bounds(&self, text: &str, at: usize, lang: Option<&str>) -> Option<std::ops::Range<usize>> {
+        self.manager.word_bounds(text, at, lang)
+    }
+
     // -- Registries ------------------------------------------------------------------------
 
     /// Reader menu entries, sorted by order.
