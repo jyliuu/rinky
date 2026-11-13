@@ -2686,6 +2686,10 @@ fn a_page_drawn_before_its_annotations_are_ready_is_drawn_again_once() {
     h.reader = ReaderScreen::new(h.reader.path.clone());
     h.reader.on_enter(&mut cx!(h, p)).unwrap();
     h.paint();
+    // The page count settles first: on a slow machine it would otherwise complete
+    // between the last two paints below and redraw the footer.
+    assert!(h.reader.doc.as_deref_mut().unwrap().wait_paginated(std::time::Duration::from_secs(20)), "paginated");
+    h.paint();
     // A page with Romeo in it, not drawn yet.
     let page = {
         let d = h.reader.doc.as_deref_mut().unwrap();
