@@ -811,6 +811,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ink-plugin-abi"
+version = "0.8.0"
+
+[[package]]
+name = "ink-plugin-native"
+version = "0.8.0"
+dependencies = [
+ "ink-plugin-abi",
+ "serde_json",
+]
+
+[[package]]
 name = "ink-stats"
 version = "0.8.0"
 dependencies = [

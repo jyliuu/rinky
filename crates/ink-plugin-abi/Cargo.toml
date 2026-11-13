@@ -1,0 +1,15 @@
+[package]
+name = "ink-plugin-abi"
+description = "C ABI between rinky and native plugin libraries: #[repr(C)] tables, strings and status codes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+# No dependencies: plugin libraries and rinky both build this crate, and nothing in it
+# may depend on which copy of the standard library is on each side.
+[dependencies]

@@ -32,6 +32,8 @@ ink-mupdf = { path = "crates/ink-mupdf" }
 ink-store = { path = "crates/ink-store" }
 ink-net = { path = "crates/ink-net" }
 ink-plugin = { path = "crates/ink-plugin" }
+ink-plugin-abi = { path = "crates/ink-plugin-abi" }
+ink-plugin-native = { path = "crates/ink-plugin-native" }
 ink-stats = { path = "plugins/stats" }
 kosync = { path = "plugins/kosync" }
 opds = { path = "plugins/opds" }
@@ -47,6 +49,8 @@ log = "0.4.34"
 env_logger = { version = "0.11.11", default-features = false }
 crossbeam-channel = "0.5.17"
 libc = "0.2.191"
+# Native plugins: dlopen of plugin libraries (ink-plugin).
+libloading = "0.8.9"
 
 # Data formats.
 serde = { version = "1.0.229", features = ["derive"] }
