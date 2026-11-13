@@ -27,6 +27,8 @@ All notable changes to rinky are listed here. The format is based on
   gets it.
 
 ### Fixed
+- Space characters that the book's font has no glyph for are taken from a fallback
+  font like any other character, instead of showing as boxes.
 - Chinese, Japanese and Korean text in menus, cards, messages and title bars shows
   in the Kindle's own sans fonts instead of as empty boxes.
 

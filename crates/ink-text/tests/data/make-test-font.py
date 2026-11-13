@@ -98,13 +98,14 @@ def kern_table():
 
 
 def main(out, kern=False):
-    names = [".notdef", "space"] + [n for _, n in CHARS]
+    # uni3000 (a space Noto Serif lacks; blank, 1 em) goes last so the other glyph ids stay.
+    names = [".notdef", "space"] + [n for _, n in CHARS] + ["uni3000"]
     fb = FontBuilder(UPEM, isTTF=True)
     fb.setupGlyphOrder(names)
-    cmap = {0x20: "space"}
+    cmap = {0x20: "space", 0x3000: "uni3000"}
     cmap.update({cp: n for cp, n in CHARS})
     fb.setupCharacterMap(cmap)
-    glyphs = {".notdef": notdef(), "space": TTGlyphPen(None).glyph()}
+    glyphs = {".notdef": notdef(), "space": TTGlyphPen(None).glyph(), "uni3000": TTGlyphPen(None).glyph()}
     for i, (_, n) in enumerate(CHARS):
         glyphs[n] = glyph(i)
     fb.setupGlyf(glyphs)

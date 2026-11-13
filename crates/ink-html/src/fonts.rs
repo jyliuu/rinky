@@ -557,9 +557,9 @@ impl FontBook {
     }
 
     /// True when `c` is drawn with a fallback face: the family's face has no glyph for
-    /// it and a fallback face has one.
+    /// it and a fallback face has one (spaces included).
     fn uses_fallback(&mut self, k: FaceKey, c: char) -> bool {
-        if c.is_ascii() || c.is_whitespace() || c.is_control() || self.fallback_dirs.is_empty() {
+        if c.is_ascii() || c.is_control() || self.fallback_dirs.is_empty() {
             return false;
         }
         let (f, s) = self.fonts_style(k);
@@ -839,6 +839,27 @@ mod tests {
         let mut fb = FontSources { fallback_dirs: vec!["/nonexistent".into()], ..Default::default() }.build();
         fb.width(r, 40.0, "Romeo");
         assert!(fb.fallback.is_none());
+    }
+
+    #[test]
+    fn space_without_a_glyph_in_the_family_comes_from_a_fallback() {
+        // Noto Serif has no glyph for the space U+3000; the test fallback face has one
+        // (blank, 1 em). It must be drawn from there, not as a .notdef box.
+        let crate_dir = std::env::var_os("INK_MANIFEST_DIR").map(PathBuf::from).unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into());
+        let dir = crate_dir.join("../ink-text/tests/data");
+        let r = FaceKey { family: 0, bold: false, italic: false };
+        let mut fb = FontSources { fallback_dirs: vec![dir], ..Default::default() }.build();
+        assert!(!fb.has_glyph(r, '\u{3000}'));
+        assert!((fb.advance(r, 40.0, '\u{3000}') - 40.0).abs() < 0.01);
+        let one = fb.width(r, 40.0, "1");
+        for (text, want) in [("★\u{3000}→", 120.0), ("1\u{3000}★", one + 80.0), ("\u{3000}", 40.0)] {
+            let w = fb.width(r, 40.0, text);
+            assert!((w - want).abs() < 0.5, "{text:?}: width {w}, want {want}");
+        }
+        let mut c = Canvas::new(200, 80);
+        let end = fb.draw(&mut c, r, 40.0, 10.0, 60.0, "\u{3000}\u{3000}");
+        assert!((end - 90.0).abs() < 0.5, "pen {end}");
+        assert!(c.pixels.iter().all(|p| *p > 200), "space drawn as a .notdef box");
     }
 
     #[test]
