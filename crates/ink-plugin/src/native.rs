@@ -942,10 +942,30 @@ pub fn is_native_dir(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("plugin.toml")).ok().and_then(|t| PluginManifest::parse(&t).ok()).is_some_and(|m| m.native.is_some())
 }
 
+/// A native plugin that is listed but whose library is not opened (the user turned it
+/// off, or it crashed rinky): loading a library runs its code, so a library that
+/// crashes while loading must not be opened again.
+pub struct NotOpened(PluginManifest);
+
+impl Plugin for NotOpened {
+    fn manifest(&self) -> &PluginManifest {
+        &self.0
+    }
+
+    fn kind(&self) -> &'static str {
+        "native"
+    }
+}
+
+/// What [`load_dir`] found: the plugins and `(folder name, error)` for those it could
+/// not load.
+pub type Loaded = (Vec<Box<dyn Plugin>>, Vec<(String, String)>);
+
 /// Loads every native plugin under `root` (folders whose `plugin.toml` has `native`):
-/// `(plugins, errors)` where an error is `(folder name, message)`.
-pub fn load_dir(root: &Path) -> (Vec<NativePlugin>, Vec<(String, String)>) {
-    let mut plugins = Vec::new();
+/// `(plugins, errors)` where an error is `(folder name, message)`. A plugin for which
+/// `skip(name)` is true is returned as [`NotOpened`] without opening its library.
+pub fn load_dir(root: &Path, skip: impl Fn(&str) -> bool) -> Loaded {
+    let mut plugins: Vec<Box<dyn Plugin>> = Vec::new();
     let mut errors = Vec::new();
     for dir in crate::lua::plugin_dirs(root).into_iter().filter(|d| is_native_dir(d)) {
         let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -953,11 +973,18 @@ pub fn load_dir(root: &Path) -> (Vec<NativePlugin>, Vec<(String, String)>) {
             errors.push((folder.clone(), format!("folder name {folder:?} is not a valid plugin name (a-z, 0-9, _ and -)")));
             continue;
         }
+        if skip(&folder) {
+            match std::fs::read_to_string(dir.join("plugin.toml")).map_err(|e| PluginError::Manifest(e.to_string())).and_then(|t| PluginManifest::parse(&t)) {
+                Ok(m) if m.name == folder => plugins.push(Box::new(NotOpened(m))),
+                Ok(m) => errors.push((folder.clone(), format!("plugin name {:?} differs from its folder name {folder:?}", m.name))),
+                Err(e) => errors.push((folder, e.to_string())),
+            }
+            continue;
+        }
         match NativePlugin::load(&dir) {
-            Ok(p) => plugins.push(p),
+            Ok(p) => plugins.push(Box::new(p)),
             Err(e) => errors.push((folder, e.to_string())),
         }
     }
     (plugins, errors)
 }
-

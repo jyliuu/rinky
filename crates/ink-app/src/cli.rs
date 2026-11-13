@@ -325,6 +325,31 @@ fn evdump(deadline: std::time::Instant) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Names the process `rinky` (`/proc/PID/comm`). Started through the bundled loader
+/// (`lib/ld-musl-armhf.so.1 rinky ...`, as the launchers do), the kernel names it after
+/// the loader, and `pidof rinky` would not find it.
+fn name_process() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_NAME with a NUL-terminated string; only this thread's name changes,
+    // before any other thread exists.
+    unsafe {
+        libc::prctl(libc::PR_SET_NAME, c"rinky".as_ptr() as libc::c_ulong, 0, 0, 0);
+    }
+}
+
+/// This program's path. Started through the bundled loader, `current_exe` is the
+/// loader (`lib/ld-musl-armhf.so.1`); the program is then the first argument the loader
+/// was given, which musl's loader passes on as `argv[0]`.
+pub fn program_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let via_loader = exe.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("ld-musl"));
+    if !via_loader {
+        return Some(exe);
+    }
+    let arg0 = PathBuf::from(std::env::args_os().next()?);
+    std::fs::canonicalize(&arg0).ok().or(Some(arg0))
+}
+
 /// Entry point; returns the process exit status.
 ///
 /// The app commands (`run`, `library`, `sim`, `demo`) get the panic hook, the
@@ -332,6 +357,7 @@ fn evdump(deadline: std::time::Instant) -> anyhow::Result<()> {
 /// `exit: reason=... status=...` log line ([`crate::logging::log_exit`]).
 pub fn main(args: Vec<String>) -> i32 {
     ink_device::trace::init();
+    name_process();
     let cmd = args.get(1).map(String::as_str);
     let app = matches!(cmd, Some("run" | "library" | "sim" | "demo"));
     if app {
@@ -344,6 +370,11 @@ pub fn main(args: Vec<String>) -> i32 {
         crate::logging::set_home(&home_dir());
         crate::logging::install_panic_hook();
         ink_device::trace::install_fatal_handlers();
+        // A crash inside a native plugin leaves its name here; the next start turns it
+        // off (plugin_host::take_crash_marker) and the launcher starts rinky again.
+        if let Some(run) = std::env::var_os("RINKY_RUN") {
+            ink_device::trace::set_crash_file(&std::path::Path::new(&run).join(crate::plugin_host::CRASH_MARKER));
+        }
         ink_device::trace::spawn_exit_signal_thread(crate::logging::on_exit_signal);
         #[cfg(target_os = "linux")]
         if matches!(cmd, Some("run" | "library")) {
@@ -557,7 +588,7 @@ fn run(args: &[String]) -> anyhow::Result<i32> {
                 }
             }
             if opts.book.is_none() {
-                opts.book = std::env::current_exe().ok().and_then(|e| crate::selftest::default_book(&e));
+                opts.book = program_path().and_then(|e| crate::selftest::default_book(&e));
             }
             Ok(crate::selftest::run(&opts) as i32)
         }

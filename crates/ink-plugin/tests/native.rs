@@ -5,7 +5,7 @@ use ink_plugin::host::{HostCtx, MemoryStorage, PluginStorage, UiQueue, UiRequest
 use ink_plugin::manifest::Permission;
 use ink_plugin::native::{self, NativePlugin};
 use ink_plugin::testing::{FakeBook, TempDir};
-use ink_plugin::{Plugin, PluginError, PluginManager};
+use ink_plugin::{PluginError, PluginManager};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -28,10 +28,10 @@ fn install(root: &Path, crate_name: &str, name: &str, perms: &str) -> PathBuf {
 }
 
 fn load(root: &Path) -> PluginManager {
-    let (plugins, errors) = native::load_dir(root);
+    let (plugins, errors) = native::load_dir(root, |_| false);
     assert!(errors.is_empty(), "{errors:?}");
     let mut mgr = PluginManager::new();
-    mgr.load(plugins.into_iter().map(|p| Box::new(p) as Box<dyn Plugin>).collect());
+    mgr.load(plugins);
     mgr
 }
 
@@ -164,7 +164,7 @@ fn broken_native_plugins_are_reported_not_loaded() {
     std::fs::write(lua.join("plugin.toml"), "name = \"hello\"\nversion = \"1\"\n").unwrap();
     std::fs::write(lua.join("main.lua"), "return {}").unwrap();
 
-    let (plugins, mut errors) = native::load_dir(&root);
+    let (plugins, mut errors) = native::load_dir(&root, |_| false);
     assert!(plugins.is_empty());
     errors.sort();
     let names: Vec<_> = errors.iter().map(|(n, _)| n.as_str()).collect();
@@ -173,6 +173,11 @@ fn broken_native_plugins_are_reported_not_loaded() {
     let (lua_plugins, lua_errors) = ink_plugin::lua::load_dir(&root);
     assert_eq!((lua_plugins.len(), lua_errors.len()), (1, 0), "{lua_errors:?}");
     assert!(NativePlugin::load(&lua).is_err());
+    // A plugin that is turned off is listed without opening its library (the junk one
+    // would fail to open).
+    let (plugins, errors) = native::load_dir(&root, |n| n == "junk");
+    assert_eq!(plugins.iter().map(|p| (p.manifest().name.as_str(), p.kind())).collect::<Vec<_>>(), [("junk", "native")]);
+    assert_eq!(errors.len(), 2);
 }
 
 // ---------------------------------------------------------------------------------------
