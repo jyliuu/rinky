@@ -7,6 +7,9 @@
 //! - last line starting with `— ` (em dash, space): footer (source dictionary);
 //! - body lines are paragraphs; a paragraph starting with a number (`1. `) wraps with a
 //!   hanging indent under its text, one wrapped in `_…_` is drawn in italics (examples);
+//! - a paragraph with tabs is one row of columns (`term\treading\tmeaning`): the
+//!   columns of all such rows line up, the middle ones are muted italics, the last one
+//!   is cut to the card's width (no wrapping);
 //! - a button with the action `close` becomes the close button in the corner when there
 //!   are other buttons;
 //! - a footer starting with `N/M · ` (`— 2/3 · Dictionary`) marks page N of M: a swipe
@@ -47,6 +50,8 @@ struct Line {
     indent: i32,
     text: String,
     italic: bool,
+    /// The columns of a row with tabs (`text` is then empty).
+    cols: Vec<String>,
 }
 
 /// A card dialog (see the module docs).
@@ -71,6 +76,8 @@ pub struct CardDialog {
     pub prefix: String,
     /// Wrapped body lines (set by [`CardDialog::frame`]).
     lines: Vec<Line>,
+    /// Left edge of each column of the rows with tabs, from the body's left edge.
+    col_x: Vec<i32>,
     /// The card changed since its last paint (new card, new page); a tap on its empty
     /// parts reports no damage.
     changed: bool,
@@ -116,6 +123,7 @@ impl CardDialog {
             pages,
             prefix: String::new(),
             lines: Vec::new(),
+            col_x: Vec::new(),
             changed: true,
         })
     }
@@ -157,7 +165,22 @@ impl CardDialog {
         let (px, regular) = (cx.theme.body.px, cx.theme.body.style);
         let max = (w as i32 - 2 * PAD) as f32;
         let mut lines: Vec<Line> = Vec::new();
-        for para in self.body.split('\n').map(str::trim).filter(|p| !p.is_empty()) {
+        let mut widths: Vec<f32> = Vec::new();
+        // Trim spaces only: a trailing tab is an empty last column.
+        for para in self.body.split('\n').map(|p| p.trim_matches(|c: char| c != '\t' && c.is_whitespace())).filter(|p| !p.trim().is_empty()) {
+            if para.contains('\t') {
+                let cols: Vec<String> = para.split('\t').map(|c| c.trim().to_string()).collect();
+                for (i, c) in cols.iter().enumerate().take(cols.len() - 1) {
+                    let (style, cpx) = Self::col_font(i, regular, px);
+                    let w = cx.text_width(style, cpx, c);
+                    if widths.len() <= i {
+                        widths.push(0.0);
+                    }
+                    widths[i] = widths[i].max(w);
+                }
+                lines.push(Line { marker: String::new(), indent: 0, text: String::new(), italic: false, cols });
+                continue;
+            }
             let (para, italic) = match para.strip_prefix('_').and_then(|p| p.strip_suffix('_')) {
                 Some(p) if !p.is_empty() => (p, true),
                 _ => (para, false),
@@ -171,19 +194,40 @@ impl CardDialog {
             };
             let indent = if marker.is_empty() { 0 } else { cx.text_width(regular, px, "00. ").ceil() as i32 };
             for (i, l) in ink_ui::dialog::wrap_lines(cx, text, px, style, max - indent as f32).into_iter().enumerate() {
-                lines.push(Line { marker: if i == 0 { marker.clone() } else { String::new() }, indent, text: l, italic });
+                lines.push(Line { marker: if i == 0 { marker.clone() } else { String::new() }, indent, text: l, italic, cols: Vec::new() });
             }
         }
         if lines.len() > MAX_LINES {
             lines.truncate(MAX_LINES);
             let last = &mut lines[MAX_LINES - 1];
-            last.text = format!("{}…", last.text.trim_end_matches(['…', ' ']));
+            if last.cols.is_empty() {
+                last.text = format!("{}…", last.text.trim_end_matches(['…', ' ']));
+            }
+        }
+        // Each column starts after the widest cell before it (a column takes at most a
+        // third of the width, so the last one keeps room).
+        let gap = space(3) as f32;
+        let mut x = 0.0;
+        self.col_x = vec![0];
+        for w in widths {
+            x += w.min(max / 3.0) + gap;
+            self.col_x.push(x.ceil() as i32);
         }
         self.lines = lines;
         self.changed = true;
         let h = self.height().min(screen.h);
         let y = (screen.h - h) as i32 - space(1);
         Rect::new(space(4), y.max(0), w, h)
+    }
+
+    /// Style and size of column `i` of a row with tabs: the first in the body style, the
+    /// later ones (readings, meanings) in italics where they are not the last.
+    fn col_font(i: usize, regular: ink_text::Style, px: f32) -> (ink_text::Style, f32) {
+        if i == 0 {
+            (regular, px)
+        } else {
+            (ink_text::Style::Italic, px)
+        }
     }
 
     fn close_rect(b: Rect) -> Rect {
@@ -228,6 +272,18 @@ impl Widget for CardDialog {
         }
         y += space(2);
         for line in &self.lines {
+            if !line.cols.is_empty() {
+                let n = line.cols.len();
+                for (i, c) in line.cols.iter().enumerate() {
+                    let cx0 = x + self.col_x.get(i).copied().unwrap_or(0);
+                    let room = (b.right() - PAD - cx0).max(1);
+                    let (style, value) = if i + 1 == n { (t.body.style, t.fg) } else { (Self::col_font(i, t.body.style, t.body.px).0, if i == 0 { t.fg } else { t.muted }) };
+                    let c = cx.ellipsize(c, t.body.px, style, room as f32);
+                    cx.text_left(Rect::new(cx0, y, room as u32, LINE_H as u32), &c, t.body.px, style, value);
+                }
+                y += LINE_H;
+                continue;
+            }
             if !line.marker.is_empty() {
                 cx.text_left(Rect::new(x, y, line.indent.max(1) as u32, LINE_H as u32), &line.marker, t.body.px, ink_text::Style::Bold, t.fg);
             }
@@ -335,6 +391,30 @@ mod unit {
     /// The Wikipedia plugin's cards (summary, paged, missing) are cards of this host:
     /// subtitle from the description, footer, close in the corner, pages from `N/M ·`,
     /// and the body fits the card (at most 8 wrapped lines, ellipsis when cut).
+    /// Body lines with tabs are rows of columns that line up across rows; other lines
+    /// still wrap as paragraphs.
+    #[test]
+    fn rows_with_tabs_are_aligned_columns() {
+        use ink_device::Canvas;
+        use ink_text::Fonts;
+        use ink_ui::Theme;
+        let body = "_three terms_\nab\tone\tfirst meaning\nabcdef\ttwo\tsecond\nx\tthree-long\t\nA plain paragraph.\n— Source";
+        let mut c = CardDialog::parse("ab abcdef x", body, &[("Close".into(), "close".into())]).unwrap();
+        let (theme, mut canvas, mut fonts) = (Theme::day(), Canvas::new(1264, 1680), Fonts::load());
+        let mut cx = PaintCx::new(&mut canvas, &mut fonts, &theme);
+        let r = c.frame(&mut cx, Size { w: 1264, h: 1680 });
+        let rows: Vec<&Vec<String>> = c.lines.iter().filter(|l| !l.cols.is_empty()).map(|l| &l.cols).collect();
+        assert_eq!(rows, [&vec!["ab".to_string(), "one".into(), "first meaning".into()], &vec!["abcdef".to_string(), "two".into(), "second".into()], &vec!["x".to_string(), "three-long".into(), String::new()]]);
+        assert_eq!(c.lines.last().map(|l| l.text.as_str()), Some("A plain paragraph."));
+        // Each column starts past the widest cell before it.
+        let px = theme.body.px;
+        let w0 = cx.text_width(theme.body.style, px, "abcdef");
+        let w1 = cx.text_width(ink_text::Style::Italic, px, "three-long");
+        assert_eq!(c.col_x.len(), 3);
+        assert!(c.col_x[1] as f32 >= w0 && c.col_x[2] as f32 >= c.col_x[1] as f32 + w1, "{:?}", c.col_x);
+        c.paint(&mut cx, r);
+    }
+
     #[test]
     fn wikipedia_cards_parse_and_fit() {
         use ink_text::Fonts;
