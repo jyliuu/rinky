@@ -10,10 +10,14 @@
 //!   (the UTC offset is read once).
 //! - [`free_space`] (statvfs) and [`meminfo`] (`/proc/meminfo`) for the startup report.
 //! - [`install_fatal_handlers`] writes a one-line note to stderr (the log file in the app)
-//!   on SIGSEGV, SIGBUS, SIGILL and SIGFPE using only `write(2)`; [`block_exit_signals`]
+//!   on SIGSEGV, SIGBUS, SIGILL, SIGFPE and SIGABRT using only `write(2)`; [`block_exit_signals`]
 //!   and [`spawn_exit_signal_thread`] turn SIGTERM, SIGINT and SIGHUP into a normal
 //!   callback on a thread of their own (sigwait), so the logger can write the reason and
 //!   flush before the process exits.
+//! - [`crash_scope`] names the native plugin whose code runs on this thread; a fatal
+//!   signal meanwhile (also SIGABRT) writes that name to the file set with
+//!   [`set_crash_file`] (`$RINKY_RUN/plugin-crashed`), so the next start turns the
+//!   plugin off.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -214,15 +218,110 @@ pub fn redirect_stderr(_fd: i32) -> bool {
 
 /// Signals that end the process with a note in the log ([`install_fatal_handlers`]).
 #[cfg(unix)]
-const FATAL: [(libc::c_int, &str); 4] = [
+const FATAL: [(libc::c_int, &str); 5] = [
     (libc::SIGSEGV, "SIGSEGV (invalid memory access)"),
     (libc::SIGBUS, "SIGBUS (bus error)"),
     (libc::SIGILL, "SIGILL (illegal instruction)"),
     (libc::SIGFPE, "SIGFPE (arithmetic fault)"),
+    (libc::SIGABRT, "SIGABRT (abort)"),
 ];
 
 #[cfg(unix)]
-static mut PREVIOUS: [std::mem::MaybeUninit<libc::sigaction>; 4] = [const { std::mem::MaybeUninit::uninit() }; 4];
+static mut PREVIOUS: [std::mem::MaybeUninit<libc::sigaction>; 5] = [const { std::mem::MaybeUninit::uninit() }; 5];
+
+std::thread_local! {
+    /// The native plugin whose code this thread runs now: a `&'static str` as pointer and
+    /// length ((null, 0): none). Set and read without allocation, so the fatal-signal
+    /// handler can read it (a `const` thread-local has no lazy initialisation).
+    static CRASH_SCOPE: std::cell::Cell<(*const u8, usize)> = const { std::cell::Cell::new((std::ptr::null(), 0)) };
+}
+
+/// The path of the crash marker as a NUL-terminated string ([`set_crash_file`]); the
+/// handler only reads it.
+static CRASH_FILE: OnceLock<std::ffi::CString> = OnceLock::new();
+
+/// Sets the file a fatal signal inside a [`crash_scope`] writes the plugin name to
+/// (prepared once at start-up: the signal handler cannot allocate). The first call wins.
+pub fn set_crash_file(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+            let _ = CRASH_FILE.set(c);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// While the returned guard lives, a fatal signal on this thread is blamed on `name`
+/// (see [`set_crash_file`]). Two memory writes; guards nest.
+pub fn crash_scope(name: &'static str) -> CrashScope {
+    let prev = CRASH_SCOPE.with(|c| c.replace((name.as_ptr(), name.len())));
+    CrashScope { prev }
+}
+
+/// While the returned guard lives, a fatal signal on this thread is blamed on nobody:
+/// rinky's own code that a plugin call reaches (the host services) puts this around
+/// itself, so a crash in rinky does not turn the plugin off.
+pub fn no_crash_scope() -> CrashScope {
+    let prev = CRASH_SCOPE.with(|c| c.replace((std::ptr::null(), 0)));
+    CrashScope { prev }
+}
+
+/// Set once rinky is on its way out ([`set_exiting`], [`request_stop`]).
+static EXITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// rinky is exiting (the user asked for it, or an exit signal came): a crash marker
+/// written from now on gets a second line `exiting`, and the launcher does not start
+/// rinky again for it (the next start still turns the plugin off).
+pub fn set_exiting() {
+    EXITING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The name a fatal signal on this thread would be blamed on now ([`crash_scope`]).
+pub fn crash_scope_name() -> Option<&'static str> {
+    let (p, n) = CRASH_SCOPE.with(|c| c.get());
+    // SAFETY: only `&'static str`s are stored (crash_scope).
+    (!p.is_null()).then(|| unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, n)) })
+}
+
+/// Guard of [`crash_scope`]: puts the previous scope back.
+pub struct CrashScope {
+    prev: (*const u8, usize),
+}
+
+impl Drop for CrashScope {
+    fn drop(&mut self) {
+        let prev = self.prev;
+        CRASH_SCOPE.with(|c| c.set(prev));
+    }
+}
+
+/// Async-signal-safe: when this thread is inside a [`crash_scope`] and a crash file is
+/// set, writes the plugin name and a newline to it (open/write/close only).
+#[cfg(unix)]
+fn write_crash_marker() {
+    let Some(file) = CRASH_FILE.get() else { return };
+    let Ok((p, n)) = CRASH_SCOPE.try_with(|c| c.get()) else { return };
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: open/write/close with a NUL-terminated path and the 'static name; all
+    // async-signal-safe.
+    unsafe {
+        let fd = libc::open(file.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC, 0o644);
+        if fd >= 0 {
+            libc::write(fd, p.cast(), n);
+            libc::write(fd, b"\n".as_ptr().cast(), 1);
+            if EXITING.load(std::sync::atomic::Ordering::SeqCst) {
+                libc::write(fd, b"exiting\n".as_ptr().cast(), 8);
+            }
+            libc::close(fd);
+        }
+    }
+    raw_write(&[b"[ERROR rinky] the crash happened inside native plugin ", unsafe { std::slice::from_raw_parts(p, n) }, b"\n"]);
+}
 #[cfg(unix)]
 static PREVIOUS_SET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -263,6 +362,7 @@ extern "C" fn fatal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *
     let mut b = [0u8; 20];
     let ms = fmt_u64(ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000, &mut b);
     raw_write(&[b"[ERROR rinky] fatal signal: ", name.as_bytes(), b" at monotonic ", ms, b" ms; exit: reason=signal\n"]);
+    write_crash_marker();
     // Put the previous handler back (std's stack-overflow handler, or the default) and
     // run it: the faulting instruction runs again and reaches it.
     if let (Some(i), true) = (idx, PREVIOUS_SET.load(std::sync::atomic::Ordering::Acquire)) {
@@ -272,6 +372,12 @@ extern "C" fn fatal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *
             let prev = (*std::ptr::addr_of!(PREVIOUS))[i].assume_init_ref();
             libc::sigaction(sig, prev, std::ptr::null_mut());
             let h = prev.sa_sigaction;
+            if sig == libc::SIGABRT && h == libc::SIG_DFL {
+                // A SIGABRT sent from outside (kill, raise) is not raised again by
+                // abort(): raise it here; it is delivered, with the default action,
+                // when this handler returns.
+                libc::raise(sig);
+            }
             if h != libc::SIG_DFL && h != libc::SIG_IGN {
                 if prev.sa_flags & libc::SA_SIGINFO != 0 {
                     let f: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) = std::mem::transmute(h);
@@ -288,7 +394,7 @@ extern "C" fn fatal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *
     }
 }
 
-/// Installs the SIGSEGV/SIGBUS/SIGILL/SIGFPE note writer (once). The note goes to fd 2;
+/// Installs the SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT note writer (once). The note goes to fd 2;
 /// the app points fd 2 at its log file. Log lines still in the logger's buffer (at most
 /// about one second) are lost on such a crash.
 #[cfg(unix)]
@@ -398,6 +504,7 @@ static STOP_LISTENER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// so it is also safe inside a signal handler.
 pub fn request_stop(sig: i32) {
     use std::sync::atomic::Ordering;
+    EXITING.store(true, Ordering::SeqCst);
     STOP_SIGNAL.store(sig.max(1), Ordering::SeqCst);
     #[cfg(unix)]
     {
@@ -471,6 +578,25 @@ pub fn stop_wake_fd() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crash_scopes_nest_and_host_code_clears_them() {
+        assert_eq!(crash_scope_name(), None);
+        {
+            let _plugin = crash_scope("one");
+            assert_eq!(crash_scope_name(), Some("one"));
+            {
+                let _host = no_crash_scope();
+                assert_eq!(crash_scope_name(), None, "rinky's own code inside a plugin call");
+                let _inner = crash_scope("two");
+                assert_eq!(crash_scope_name(), Some("two"));
+            }
+            assert_eq!(crash_scope_name(), Some("one"));
+            // Per thread: another thread is in no scope.
+            assert_eq!(std::thread::spawn(crash_scope_name).join().unwrap(), None);
+        }
+        assert_eq!(crash_scope_name(), None);
+    }
 
     #[test]
     fn meminfo_clock_and_sizes() {
