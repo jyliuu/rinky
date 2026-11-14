@@ -6,8 +6,10 @@
 #   scripts/release.sh tag --ref origin/main --push     (see .claude/skills/release)
 #
 # Release assets: rinky-V-kindlehf.tar.gz and rinky-V-kobo.tar.gz (SSH install and the in-app
-# update), rinky-V-kindle.zip and rinky-V-kobo.zip (USB install) and SHA256SUMS (all four;
-# the in-app update checks it).
+# update), rinky-V-kindle.zip and rinky-V-kobo.zip (USB install), rinky-V-kindlehf.kpkg and
+# rinky-V-kpm-repo.json (KPM) and SHA256SUMS (the tarballs and zips; the in-app update checks
+# it). The kpm-repo job also publishes manifest.v2.json to the gh-pages branch, which gives
+# `kpm add-repo` an address that never carries a version.
 name: Package
 
 on:
@@ -84,6 +86,8 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.kpkg
+            dist/*-kpm-repo.json
             dist/SHA256SUMS
           if-no-files-found: error
 
@@ -106,8 +110,92 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.kpkg
+            dist/*-kpm-repo.json
             dist/SHA256SUMS
           # The changelog section; GitHub's generated PR list is added after it.
           body_path: ${{ runner.temp }}/notes.md
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  # A stable address for `kpm add-repo`: the manifest is rewritten on every release and
+  # pushed to the gh-pages branch, so the URL never carries a version. Only the manifest
+  # lives there (a few KB); the .kpkg stays with the release assets. Enable Pages once
+  # (Settings > Pages > Deploy from a branch > gh-pages) and the address becomes
+  # https://<owner>.github.io/<repo>/manifest.v2.json.
+  kpm-repo:
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rinky-kindle-${{ github.sha }}
+          path: dist
+
+      - name: Build the KPM repository manifest
+        run: |
+          python3 - dist "${{ github.repository }}" "${{ github.ref_name }}" <<'PY'
+          import json, os, re, sys
+
+          dist, repo, tag = sys.argv[1], sys.argv[2], sys.argv[3]
+          version = tag[1:] if tag.startswith("v") else tag
+          nums = [int(part) for part in re.findall(r"\d+", version)][:3]
+          nums += [0] * (3 - len(nums))
+          package = f"rinky-{version}-kindlehf.kpkg"
+          if not os.path.exists(os.path.join(dist, package)):
+              sys.exit(f"error: {package} was not built")
+          manifest = {
+              "manifest_version": 2,
+              "id": "rinky",
+              "name": "rinky",
+              "description": "An e-book reader for Kindle and Kobo, written in Rust.",
+              "packages": {
+                  "rinky": {
+                      "name": "rinky",
+                      "author": "jyliuu",
+                      "description": "An e-book reader for Kindle and Kobo, written in Rust. "
+                      "EPUB, MOBI, AZW3, FB2, TXT, HTML, PDF and CBZ.",
+                      "artifacts": [
+                          {
+                              "url": f"https://github.com/{repo}/releases/download/{tag}/{package}",
+                              "version": nums,
+                              "dependencies": [],
+                              "supported_platforms": ["kindlehf"],
+                          }
+                      ],
+                  }
+              },
+          }
+          with open(os.path.join(dist, "manifest.v2.json"), "w") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PY
+
+      - name: Publish it to the gh-pages branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          work=$(mktemp -d)
+          cd "$work"
+          git init -q
+          git remote add origin "$remote"
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch -q --depth 1 origin gh-pages
+            git checkout -q -B gh-pages FETCH_HEAD
+          else
+            git checkout -q --orphan gh-pages
+          fi
+          cp "$GITHUB_WORKSPACE/dist/manifest.v2.json" .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "manifest unchanged"
+            exit 0
+          fi
+          git commit -q -m "KPM repository: rinky ${GITHUB_REF_NAME}"
+          git push -q origin gh-pages

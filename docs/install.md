@@ -55,7 +55,8 @@ SSH and for the in-app update.
 ### Get the Kindle ready
 
 rinky only runs on a **jailbroken** Kindle, started from **KUAL** (the Kindle Unified
-Application Launcher).
+Application Launcher) or, on devices where KUAL is unavailable, from **KPM** (the Kindle
+Package Manager).
 
 1. **Find the firmware version** under *Settings > Device Options > Device Info* (on
    older firmware: *Menu > Settings > Menu > Device Info*), for example *5.18.1*.
@@ -67,7 +68,8 @@ Application Launcher).
 3. **Install KUAL** (and MRPI, which installs it) from the same site, in the build it
    gives for your firmware. Firmware 5.16.3 and newer needs the *hard-float* KUAL; the
    Paperwhite 3, Voyage and Oasis 1 stay on older firmware and use the older KUAL.
-   rinky is the same package for both.
+   rinky is the same package for both. A device whose jailbreak provides KPM instead of
+   KUAL skips this step and uses [Install with KPM](#install-with-kpm-no-kual).
 
 ### Install over USB
 
@@ -79,6 +81,41 @@ Application Launcher).
 4. Open the Kindle's `extensions` folder (KUAL made it) and copy `extensions/rinky`
    from the zip into it.
 5. Eject the Kindle.
+
+### Install with KPM (no KUAL)
+
+Some jailbreaks ship [KPM](https://kindlemodding.org/) instead of KUAL, and current
+devices — the Scribe, for one — have no working KUAL booklet at all. KPM installs
+packages without it, so every release also carries a KPM package:
+
+```
+rinky-<version>-kindlehf.kpkg
+```
+
+It holds the same `rinky/` and `extensions/` folders as the USB zip, plus the manifest
+and the three hooks KPM calls. Add the repository, then install:
+
+```sh
+kpm add-repo https://jyliuu.github.io/rinky/manifest.v2.json
+kpm install rinky
+```
+
+That address never changes: every release rewrites `manifest.v2.json` on the `gh-pages`
+branch, and the manifest points at the `.kpkg` of the newest release, so the same two
+commands install and update rinky. (The repository owner has to enable Pages once —
+*Settings > Pages > Deploy from a branch > `gh-pages`* — for the address to answer.)
+
+Two alternatives, for a repository that does not publish the manifest:
+
+- `rinky-<version>-kpm-repo.json`, next to the `.kpkg` in the release, is the same
+  manifest with a relative artifact URL. Upload both to a directory of your own (or use
+  the release URL) and pass that path instead.
+- With the `.kpkg` already on the Kindle and no repository at all, the SSH install below
+  works unchanged — the package has the same layout.
+
+`kpm install rinky` runs the same installer as the other packages, so the library entry
+`documents/rinky.sh` is created too: start rinky from there, or with `kpm launch rinky`.
+`kpm uninstall rinky` removes rinky and keeps your settings, notes and positions.
 
 ### Install over SSH
 
