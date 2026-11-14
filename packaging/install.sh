@@ -168,6 +168,11 @@ EOF
         [ "$NEW_EXTROOT" = 1 ] && rmdir "$EXTROOT" 2>/dev/null
     fi
     [ "$LOCKED" = 1 ] && rm -rf "$LOCK"
+    # A first install that failed: the folders it made inside $DEST (bin/, fonts/, lib/
+    # come before the binary), deepest first, each only when empty.
+    if [ "$DONE" != 1 ] && [ "$NEW_DEST" = 1 ] && [ "$LOCKED" = 1 ]; then
+        find "$DEST" -depth -mindepth 1 -type d 2>/dev/null | while IFS= read -r d; do rmdir "$d" 2>/dev/null; done
+    fi
     # Empty only when no other run holds a lock in it.
     [ "$DONE" != 1 ] && [ "$NEW_DEST" = 1 ] && rmdir "$DEST" 2>/dev/null
     return 0
