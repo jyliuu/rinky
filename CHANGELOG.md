@@ -4,6 +4,12 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- *Update rinky* in the KUAL menu no longer fails with "Update failed; see update.log"
+  (the updater crashed with a bus error while the new version was installed).
+
 ## [0.8.0] - 2026-11-13
 
 ### Added
@@ -405,6 +411,7 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
+[Unreleased]: https://github.com/jyliuu/rinky/compare/v0.8.0...HEAD
 [0.8.0]: https://github.com/jyliuu/rinky/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jyliuu/rinky/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/jyliuu/rinky/compare/v0.6.0...v0.6.1

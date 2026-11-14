@@ -69,8 +69,33 @@ case "$cmd" in
     update)
         need_install
         msg "Checking for an rinky update..." 2
-        out=$("$DEST/rinky" update install 2>&1)
+        # Run the updater from a copy on tmpfs. install.sh renames the new binary over
+        # $DEST/rinky; on the Kindle's userstore (a FUSE file system) a process running
+        # from the replaced file loses the pages it has not read yet and dies with
+        # SIGBUS ("Bus error"; the in-app Update page runs from the launcher's copy in
+        # /tmp/rinky/bin and is not affected). The musl loader, when the install has
+        # one, is copied too. A copy that fails (full tmpfs) runs from $DEST as before.
+        upd=${TMPDIR:-/tmp}/rinky-update.$$
+        bin=$DEST/rinky
+        ld=
+        if mkdir -p "$upd" 2>/dev/null && cp "$DEST/rinky" "$upd/rinky" 2>/dev/null && chmod 755 "$upd/rinky"; then
+            bin=$upd/rinky
+            if [ -f "$DEST/lib/ld-musl-armhf.so.1" ]; then
+                if cp "$DEST/lib/ld-musl-armhf.so.1" "$upd/ld-musl-armhf.so.1" 2>/dev/null && chmod 755 "$upd/ld-musl-armhf.so.1"; then
+                    ld=$upd/ld-musl-armhf.so.1
+                else
+                    bin=$DEST/rinky
+                fi
+            fi
+        fi
+        [ "$bin" = "$DEST/rinky" ] && echo "[kual $(date '+%H:%M:%S')] update: cannot copy the binary to $upd; running it from $DEST" >>"$LOG" 2>/dev/null
+        if [ -n "$ld" ]; then
+            out=$("$ld" "$bin" update install 2>&1)
+        else
+            out=$("$bin" update install 2>&1)
+        fi
         status=$?
+        rm -rf "$upd"
         echo "$out" >>"$UPDATE_LOG"
         last=$(echo "$out" | tail -n 1)
         case "$last" in
