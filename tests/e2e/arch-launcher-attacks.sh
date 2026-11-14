@@ -3,7 +3,8 @@
 # Attacks on the framework-stop launcher and watchdog on the guest (busybox sh, real
 # upstart):
 #   A. second launcher 1 s after the first (first still waiting for the framework to
-#      stop): refused, one rinky; exit restores a clean Home;
+#      stop): refused, one rinky; an exit (SIGTERM, as Exit to Kindle) restores a
+#      clean Home;
 #   B. two launchers started at the same instant: at most one rinky may run (the
 #      lock window is shown deterministically by scripts/e2e/launcher-race-test.sh 3b);
 #      a clean Home afterwards;
@@ -17,14 +18,13 @@ set -o pipefail
 RANDOM=${ATTACK_SEED:-$$}
 inks() { guest 'pidof rinky | wc -w' 2>/dev/null | tr -d ' '; }
 watchers() { guest 'ps -eo pid,args | grep "lipc-wait-event -m com.lab126.powerd" | grep -v grep | wc -l' 2>/dev/null | tr -d ' '; }
-# Every exit tap uses another x: a new rinky process decodes a touch at exactly the
-# point of the previous touch as (0,0), because the kernel drops ABS values that did not
-# change and the decoder starts without the current values.
-exits=0
+# exit_reader: ends every running rinky with SIGTERM, as Exit to Kindle does
+# (rinky-ctl.sh stop), so each launcher takes its normal exit path. There is no exit
+# corner any more (the scenario used to tap one), and in round B two rinkys may run,
+# which rinky-ctl.sh (one rinky.pid) would not both stop.
 exit_reader() {
-  exits=$((exits + 1))
-  tap $((1150 + 20 * exits)) 60
-  wait_until 30 "rinky exited" reader_gone || fail "rinky did not exit after the exit tap ($(inks) left)"
+  guest 'for p in $(pidof rinky); do kill -TERM $p; done' || fail "SIGTERM to rinky"
+  wait_until 30 "rinky exited" reader_gone || fail "rinky did not exit after SIGTERM ($(inks) left)"
 }
 after_round() {   # LABEL: clean Home, nothing left behind
   wait_clean_home 300 "$1-home"
@@ -63,7 +63,7 @@ log "B: $n rinky process(es) after two simultaneous launches"
 not_home B-reader
 exit_reader
 if [ "$n" != 1 ]; then
-  # Both rinkys exit on the same tap; let both launchers finish before failing.
+  # Both rinkys got SIGTERM; let both launchers finish before failing.
   wait_clean_home 300 B-home
   fail "B: $n rinkys ran after two simultaneous launches (lock race; B-lock-lines.txt)"
 fi
@@ -85,7 +85,7 @@ for r in 1 2; do
     guest "kill -9 $p" && log "C$r: killed $who $p"
     echo "kill -9 $who $p after ${d}s" >"$OUT/C$r-kill.txt"
   else
-    # Nothing to kill yet: the run continues; end it with the exit tap.
+    # Nothing to kill yet: the run continues; end it normally.
     log "C$r: no $who process yet after ${d}s; normal exit instead"
     echo "no $who process after ${d}s; normal exit" >"$OUT/C$r-kill.txt"
     wait_until 90 "rinky running" reader_running || fail "C$r: rinky did not take over"

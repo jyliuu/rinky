@@ -7,6 +7,8 @@ All notable changes to rinky are listed here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- A first install that failed (for example with no space left) no longer leaves empty
+  folders behind.
 - *Update rinky* in the KUAL menu no longer fails with "Update failed; see update.log"
   (the updater crashed with a bus error while the new version was installed).
 
