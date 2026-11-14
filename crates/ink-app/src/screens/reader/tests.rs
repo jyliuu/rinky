@@ -1559,14 +1559,23 @@ mod lookup_stub {
     pub type Log = Arc<Mutex<Vec<String>>>;
 
     /// A dictionary stand-in: the selection action `lookup` shows a paged card (two
-    /// dictionaries) for the selected text; `next`/`prev` send the other page.
-    pub struct Dict(pub PluginManifest, pub Log, pub usize, pub String);
+    /// dictionaries) for the selected text; `next`/`prev` send the other page. Every card
+    /// is request 1, or with `.4 = Some(n)` a new request n, n + 1, ... (as a native
+    /// plugin's dialogs are).
+    pub struct Dict(pub PluginManifest, pub Log, pub usize, pub String, pub Option<u32>);
 
     impl Dict {
-        fn card(&self, cx: &mut HostCtx) -> ink_plugin::Result<()> {
+        fn card(&mut self, cx: &mut HostCtx) -> ink_plugin::Result<()> {
             let name = ["Alpha", "Beta"][self.2];
             let body = format!("_noun_\n{} in {name}\n— {}/2 · {name}", self.3, self.2 + 1);
-            cx.ui()?.dialog(1, &self.3, &body, &[("Close", "close"), ("Add", "add"), ("Full view", "full")]);
+            let id = match self.4.as_mut() {
+                Some(n) => {
+                    *n += 1;
+                    *n - 1
+                }
+                None => 1,
+            };
+            cx.ui()?.dialog(id, &self.3, &body, &[("Close", "close"), ("Add", "add"), ("Full view", "full")]);
             Ok(())
         }
     }
@@ -1666,8 +1675,13 @@ mod lookup_stub {
     }
 
     pub fn new() -> (Vec<Box<dyn Plugin>>, Log) {
+        with_ids(None)
+    }
+
+    /// [`new`] with the dictionary's card requests numbered from `first` (`None`: all 1).
+    pub fn with_ids(first: Option<u32>) -> (Vec<Box<dyn Plugin>>, Log) {
         let log = Log::default();
-        let dict = Dict(PluginManifest::new("dictionary", "1", &[Permission::Document, Permission::Ui]), log.clone(), 0, String::new());
+        let dict = Dict(PluginManifest::new("dictionary", "1", &[Permission::Document, Permission::Ui]), log.clone(), 0, String::new(), first);
         let ins = Insightful(PluginManifest::new(insightful::plugin::NAME, "1", &[Permission::Document, Permission::Ui]), log.clone());
         (vec![Box::new(dict), Box::new(ins)], log)
     }
@@ -1677,8 +1691,12 @@ impl Harness {
     /// Long-presses a word on page 30 with the lookup stubs loaded: returns the log, the
     /// word, the selection card's and the dictionary card's rectangles.
     fn long_press_lookup(test: &str) -> (Harness, lookup_stub::Log, String, Rect, Rect) {
+        Self::long_press_lookup_with(test, lookup_stub::new())
+    }
+
+    /// [`Harness::long_press_lookup`] with these plugins.
+    fn long_press_lookup_with(test: &str, (plugins, log): (Vec<Box<dyn ink_plugin::Plugin>>, lookup_stub::Log)) -> (Harness, lookup_stub::Log, String, Rect, Rect) {
         let mut h = Harness::new(test, "juliet.epub");
-        let (plugins, log) = lookup_stub::new();
         h.plugins = PluginHost::new(plugins);
         h.reader.go_to_page(30);
         h.paint();
@@ -1848,6 +1866,25 @@ fn long_press_lookup_cards_are_siblings_swipes_switch_and_one_tap_closes_both() 
     assert_eq!(log[1..], ["answer:1:next", "answer:1:prev", "answer:1:"].map(String::from), "{log:?}");
     assert!(h.plugins.manager.errors.is_empty(), "{:?}", h.plugins.manager.errors);
     h.shot("03-closed");
+}
+
+/// A plugin whose every card is a new request (a native plugin's dialogs get a new id
+/// each): a swipe still replaces the card in place in one partial update, and the next
+/// answers go to the newest request.
+#[test]
+fn a_paged_card_sent_as_a_new_request_is_replaced_in_place() {
+    let (mut h, log, _word, _card, dict) = Harness::long_press_lookup_with("lookup-ids", lookup_stub::with_ids(Some(7)));
+    assert_eq!(h.dict_footer().as_deref(), Some("1/2 · Alpha"));
+    let n = h.probe.updates().len();
+    h.swipe(Point::new(dict.x + 900, dict.y + 250), -500);
+    let ups: Vec<_> = h.probe.updates()[n..].iter().map(|u| (u.rect, u.class)).collect();
+    assert_eq!(h.dict_footer().as_deref(), Some("2/2 · Beta"));
+    assert_eq!(ups, vec![(dict, RefreshClass::Gl16)], "one partial update of the card");
+    h.swipe(Point::new(dict.x + 300, dict.y + 250), 500);
+    assert_eq!(h.dict_footer().as_deref(), Some("1/2 · Alpha"));
+    let log = log.lock().unwrap().clone();
+    assert_eq!(log[1..], ["answer:7:next", "answer:8:prev"].map(String::from), "each answer to the card shown: {log:?}");
+    assert!(h.plugins.manager.errors.is_empty(), "{:?}", h.plugins.manager.errors);
 }
 
 /// Taps inside either card work as before: a card button answers the plugin and closes

@@ -1837,16 +1837,20 @@ impl ReaderScreen {
             let Some(o) = self.overlay.as_mut() else { return };
             let wid = o.ids.get("dict").copied();
             let old = wid.and_then(|w| o.tree.bounds(w));
-            if let (Some(w), true, true) = (wid, old == Some(r), rid == id) {
-                log::info!("reader: {plugin} card {result}: {:?} page {:?} in place", c.title, c.pages);
+            // The same rectangle: the new card replaces the old one in place, also when it
+            // came as a new request (a native plugin's dialogs each get a new id); its
+            // answers then go to that request.
+            if let (Some(w), true) = (wid, old == Some(r)) {
+                log::info!("reader: {plugin} card {result}: {:?} page {:?} in place (request {rid})", c.title, c.pages);
                 o.buttons.retain(|(a, _)| !a.starts_with(PCARD));
                 o.buttons.extend(c.action_rects(r));
                 if let Some(slot) = o.tree.get_mut::<crate::plugin_host::CardDialog>(w) {
                     *slot = c;
                 }
                 o.tree.mark_dirty(w, RefreshClass::Gl16);
+                self.dict_card = Some((plugin, rid));
             } else {
-                // Another size or request: the overlay is built again with the new card.
+                // Another size: the overlay is built again with the new card.
                 log::info!("reader: {plugin} card {result}: new card at {r:?} (was {old:?}), overlay rebuilt");
                 self.reveal_selection_under(old);
                 let o = self.selection_overlay(&sel, Some((plugin, rid, c)), None, cx);

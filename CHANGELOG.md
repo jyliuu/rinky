@@ -10,6 +10,8 @@ All notable changes to rinky are listed here. The format is based on
 - A native plugin that offers dictionary look-ups for some texts gets the long press on
   those texts before the built-in Dictionary; the Dictionary still looks up everything
   else.
+- Paging a native plugin's look-up card with a swipe redraws only the card, as for
+  built-in plugins, instead of the whole selection overlay.
 
 ## [0.9.0] - 2026-11-14
 
