@@ -110,7 +110,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "calibre"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-plugin",
  "libc",
@@ -232,7 +232,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "dictionary"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-dict",
  "ink-doc",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "ink-app"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "calibre",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "ink-device"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-platform",
  "libc",
@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "ink-dict"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "flate2",
  "ink-html",
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "ink-doc"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-device",
  "serde",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "ink-formats"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "ink-html"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "ink-mupdf"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "cc",
  "ink-device",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "ink-net"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "log",
  "md-5",
@@ -794,11 +794,11 @@ dependencies = [
 
 [[package]]
 name = "ink-platform"
-version = "0.9.0"
+version = "0.9.1"
 
 [[package]]
 name = "ink-plugin"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-device",
  "ink-doc",
@@ -818,11 +818,11 @@ dependencies = [
 
 [[package]]
 name = "ink-plugin-abi"
-version = "0.9.0"
+version = "0.9.1"
 
 [[package]]
 name = "ink-plugin-native"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-plugin-abi",
  "serde_json",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "ink-stats"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-device",
  "ink-doc",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "ink-store"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-platform",
  "libc",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "ink-text"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "fontdue",
  "hyphenation",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "ink-ui"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-device",
  "ink-text",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "insightful"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-device",
  "ink-doc",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "kosync"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-doc",
  "ink-formats",
@@ -1183,7 +1183,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "native-faulty"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-plugin-native",
 ]
@@ -1235,7 +1235,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opds"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-net",
  "ink-plugin",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "sample-lua-plugin"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-doc",
  "ink-plugin",
@@ -1668,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "sample-native"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-plugin-native",
 ]
@@ -1807,7 +1807,7 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
 name = "ssh"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-plugin",
  "libc",
@@ -2004,7 +2004,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "translate"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-doc",
  "ink-net",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "usbnet"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-plugin",
  "log",
@@ -2352,7 +2352,7 @@ dependencies = [
 
 [[package]]
 name = "wikipedia"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ink-doc",
  "ink-net",

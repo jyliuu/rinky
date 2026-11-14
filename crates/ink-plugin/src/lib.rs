@@ -192,7 +192,8 @@ pub trait Plugin {
     /// Whether this plugin takes the dictionary lookup of `text` (`lang`: the book's
     /// language, if known). Every plugin that registers the selection action
     /// [`LOOKUP_ACTION`] is a lookup provider; the reader's long press gives the lookup to
-    /// the first provider, in plugin order, that claims it. The default claims every
+    /// the first provider that claims it: native plugins first, then the others, each in
+    /// plugin order. The default claims every
     /// lookup, so a plugin for one language returns false for the others and the general
     /// dictionary after it gets them. Lua plugins always claim (the default).
     fn claims_lookup(&self, _text: &str, _lang: Option<&str>) -> bool {
@@ -473,24 +474,31 @@ impl PluginManager {
             .collect()
     }
 
-    /// The plugin that takes the dictionary lookup of `text`: the first enabled plugin,
-    /// in registration (plugin) order, that registered the selection action
-    /// [`LOOKUP_ACTION`] and claims it ([`Plugin::claims_lookup`]). A plugin that panics
-    /// when asked does not claim.
+    /// The plugin that takes the dictionary lookup of `text`: the first enabled plugin
+    /// that registered the selection action [`LOOKUP_ACTION`] and claims it
+    /// ([`Plugin::claims_lookup`]). Native plugins are asked before the others, each
+    /// group in registration (plugin) order: they load after the compiled-in plugins, and
+    /// a native provider for some texts gets them while the built-in dictionary, which
+    /// claims every lookup, takes the rest. Lua plugins always claim, so they keep their
+    /// place. A plugin that panics when asked does not claim.
     pub fn lookup_provider(&self, text: &str, lang: Option<&str>) -> Option<String> {
         let mut seen: Vec<&str> = Vec::new();
+        let mut providers = Vec::new();
         for a in self.registry.selection_actions.iter().filter(|a| a.id == LOOKUP_ACTION) {
             if seen.contains(&a.plugin.as_str()) {
                 continue;
             }
             seen.push(&a.plugin);
-            let Some(slot) = self.enabled(&a.plugin) else { continue };
-            let claims = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.plugin.claims_lookup(text, lang))).unwrap_or(false);
-            if claims {
-                return Some(a.plugin.clone());
+            if let Some(slot) = self.enabled(&a.plugin) {
+                providers.push(slot);
             }
         }
-        None
+        // Stable: the order inside each group stays.
+        providers.sort_by_key(|slot| slot.plugin.kind() != "native");
+        providers.into_iter().find_map(|slot| {
+            let claims = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.plugin.claims_lookup(text, lang))).unwrap_or(false);
+            claims.then(|| slot.manifest.name.clone())
+        })
     }
 
     /// The word around character `at` of `text` from the first enabled plugin that
@@ -721,6 +729,38 @@ mod tests {
         assert_eq!(mgr.lookup_provider("Wort", Some("de")).as_deref(), Some("german"));
         assert_eq!(mgr.lookup_provider("word", Some("en")).as_deref(), Some("dictionary"));
         assert_eq!(mgr.lookup_provider("word", None).as_deref(), Some("dictionary"), "a panicking provider does not claim");
+        mgr.disable("german", "test");
+        assert_eq!(mgr.lookup_provider("Wort", Some("de")).as_deref(), Some("dictionary"));
+    }
+
+    /// A lookup provider loaded from the plugins folder, of kind `.1`.
+    struct Installed(Lookup, &'static str);
+
+    impl Plugin for Installed {
+        fn manifest(&self) -> &PluginManifest {
+            self.0.manifest()
+        }
+        fn kind(&self) -> &'static str {
+            self.1
+        }
+        fn on_load(&mut self, reg: &mut Registrar) -> Result<()> {
+            self.0.on_load(reg)
+        }
+        fn claims_lookup(&self, text: &str, lang: Option<&str>) -> bool {
+            self.0.claims_lookup(text, lang)
+        }
+    }
+
+    #[test]
+    fn native_lookup_providers_are_asked_before_compiled_in_ones() {
+        // Compiled-in plugins load first; the installed one comes after the dictionary.
+        let mut mgr = PluginManager::new();
+        mgr.load(vec![lookup("dictionary", None, false)]);
+        // A Lua plugin claims every lookup, so it keeps its place after the dictionary.
+        mgr.load(vec![Box::new(Installed(Lookup(PluginManifest::new("script", "1", &[]), None, false), "lua"))]);
+        mgr.load(vec![Box::new(Installed(Lookup(PluginManifest::new("german", "1", &[]), Some("de"), false), "native"))]);
+        assert_eq!(mgr.lookup_provider("Wort", Some("de")).as_deref(), Some("german"));
+        assert_eq!(mgr.lookup_provider("word", Some("en")).as_deref(), Some("dictionary"), "what it does not claim goes to the dictionary, not to the Lua plugin");
         mgr.disable("german", "test");
         assert_eq!(mgr.lookup_provider("Wort", Some("de")).as_deref(), Some("dictionary"));
     }

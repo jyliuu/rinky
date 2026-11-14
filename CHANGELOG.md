@@ -4,6 +4,15 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-11-14
+
+### Fixed
+- A native plugin that offers dictionary look-ups for some texts gets the long press on
+  those texts before the built-in Dictionary; the Dictionary still looks up everything
+  else.
+- Paging a native plugin's look-up card with a swipe redraws only the card, as for
+  built-in plugins, instead of the whole selection overlay.
+
 ## [0.9.0] - 2026-11-14
 
 ### Added
@@ -432,7 +441,8 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
-[Unreleased]: https://github.com/jyliuu/rinky/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/jyliuu/rinky/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/jyliuu/rinky/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/jyliuu/rinky/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jyliuu/rinky/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jyliuu/rinky/compare/v0.6.1...v0.7.0

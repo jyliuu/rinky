@@ -144,11 +144,13 @@ gesture, never raw touches, so they have no hold timer of their own.
 
 **Dictionary lookup.** A selection action with the id `lookup`
 (`ink_plugin::LOOKUP_ACTION`) makes the plugin a lookup provider. A long press (with the
-gesture set to the dictionary) gives the selected word to the first provider, in plugin
-order, that claims it: Rust plugins answer `Plugin::claims_lookup(text, lang)` (`lang`:
-the book's language; default true), Lua plugins always claim. A provider for one
-language placed before the general dictionary therefore takes only its language, and
-the dictionary still gets every other word. With one provider nothing changes.
+gesture set to the dictionary) gives the selected word to the first provider that
+claims it: Rust and native plugins answer `Plugin::claims_lookup(text, lang)` (`lang`:
+the book's language; default true), Lua plugins always claim. Native plugins are asked
+before the others (they load after the compiled-in ones), each group in plugin order.
+A provider for one language placed before the general dictionary, or installed as a
+native plugin, therefore takes only its language, and the dictionary still gets every
+other word. With one provider nothing changes.
 
 **Word boundaries.** The reader finds the word under a long press from spaces and
 punctuation. For text written without spaces between words, a Rust plugin can say where
