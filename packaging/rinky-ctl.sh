@@ -47,7 +47,7 @@ framework_running() { status lab126_gui 2>/dev/null | grep -q "start/"; }
 # pgrep is not part of every Kindle busybox; ps is.
 # shellcheck disable=SC2009
 watchdog_pids() {
-    ps -eo pid,args 2>/dev/null | grep "[i]nkreader-watchdog.sh" | while read -r pid _; do echo "$pid"; done
+    ps -eo pid,args 2>/dev/null | grep "[r]inky-watchdog.sh" | while read -r pid _; do echo "$pid"; done
 }
 
 # An install copied over USB never ran install.sh, which lists the book .sdr folders
