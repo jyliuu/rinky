@@ -11,10 +11,7 @@ use std::process::Command;
 
 /// The library of workspace crate `crate_name` built for this test run.
 fn library(crate_name: &str) -> PathBuf {
-    let deps = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
-    let lib = deps.join(format!("{}{}{}", std::env::consts::DLL_PREFIX, crate_name.replace('-', "_"), std::env::consts::DLL_SUFFIX));
-    assert!(lib.is_file(), "{} is missing (built by cargo as a dev-dependency)", lib.display());
-    lib
+    ink_plugin::testing::built_library(crate_name)
 }
 
 /// Installs the library of `crate_name` as plugin `name` in `root` with `perms`.

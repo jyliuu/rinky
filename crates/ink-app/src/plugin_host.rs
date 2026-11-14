@@ -4238,7 +4238,7 @@ mod tests {
         let stem = format!("lib{}", krate.replace('-', "_"));
         std::fs::write(d.join("plugin.toml"), format!("name = \"{name}\"\nversion = \"1\"\npermissions = [{perms}]\nnative = \"{stem}.so\"\n")).unwrap();
         let file = format!("{stem}{}", std::env::consts::DLL_SUFFIX);
-        let built = std::env::current_exe().unwrap().parent().unwrap().join(&file);
+        let built = ink_plugin::testing::built_library(krate);
         std::fs::copy(&built, d.join(&file)).unwrap_or_else(|e| panic!("{}: {e}", built.display()));
     }
 
