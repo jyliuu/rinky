@@ -28,6 +28,8 @@ All notable changes to rinky are listed here. The format is based on
   folders behind.
 - *Update rinky* in the KUAL menu no longer fails with "Update failed; see update.log"
   (the updater crashed with a bus error while the new version was installed).
+- *Exit to Kindle* and uninstalling stop rinky's watchdog helper again when it has not
+  ended by itself.
 
 ## [0.8.0] - 2026-11-13
 
