@@ -6,6 +6,23 @@ All notable changes to rinky are listed here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Native plugins: a plugin can now be a compiled shared library dropped into
+  `plugins/<name>/` next to its `plugin.toml`, loaded when rinky starts, with no new
+  rinky build. It can do everything a built-in plugin can, at the same speed, and is
+  written in Rust against the new `ink-plugin-native` crate (`docs/plugins.md`,
+  "Native plugins"; `plugins/sample-native` is an example). Plugin ABI version 1.
+- When a native plugin crashes rinky, rinky starts again by itself, without going
+  back to the Kindle or Kobo software, with that plugin turned off; a message says
+  which plugin it was. A plugin that panics is turned off at once and rinky carries
+  on.
+
+### Changed
+- rinky is now a dynamically linked program and brings its own C library and loader
+  (`lib/ld-musl-armhf.so.1`, musl's MIT license in `LICENSE-musl`); the launchers
+  start it through that loader. The package is about 0.5 MB larger. Nothing changes
+  for you: the in-app update installs the new folder with the new version.
+
 ### Fixed
 - A first install that failed (for example with no space left) no longer leaves empty
   folders behind.

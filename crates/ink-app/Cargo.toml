@@ -54,3 +54,9 @@ libc.workspace = true
 # The host simulator window exists only off the Kindle.
 [target.'cfg(not(target_arch = "arm"))'.dependencies]
 ink-device = { workspace = true, features = ["sim"] }
+
+[dev-dependencies]
+# Native plugin libraries the plugin host tests load (cargo builds their cdylib next to
+# the tests).
+sample-native = { path = "../../plugins/sample-native" }
+native-faulty = { path = "../../plugins/native-faulty" }

@@ -20,8 +20,9 @@
 #   scripts/emu-slot.sh push NAME SRC... DEST  copy host files into a guest directory
 #   scripts/emu-slot.sh pull NAME SRC DEST     copy one guest file to the host
 #   scripts/emu-slot.sh deploy NAME [--no-build]
-#                                              zigbuild + copy binary, launcher, watchdog, testdata
-#                                              to /mnt/us/rinky (--no-build: copy only)
+#                                              zigbuild + copy binary, musl loader (lib/),
+#                                              launcher, watchdog, testdata to /mnt/us/rinky
+#                                              (--no-build: copy only)
 #   scripts/emu-slot.sh shot NAME FILE.png     QMP screendump
 #   scripts/emu-slot.sh tap NAME X Y [HOLD_S]  touch at panel pixels (0..1271 x 0..1695)
 #   scripts/emu-slot.sh swipe NAME X1 Y1 X2 Y2 [STEPS]
@@ -519,12 +520,15 @@ cmd_deploy() {
     (cd "$ROOT" && CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)} cargo zigbuild --release \
         --target armv7-unknown-linux-musleabihf -p ink-app)
   fi
-  guest "$name" "mkdir -p $DEST"
+  # The musl loader the dynamically linked binary runs with (lib/ in the install).
+  loader=$(cd "$ROOT" && scripts/fetch-musl-loader.sh) || die "cannot fetch the musl loader"
+  guest "$name" "mkdir -p $DEST/lib"
+  cmd_push "$name" "$loader" "$DEST/lib/"
   cmd_push "$name" "$bin" "$ROOT/scripts/rinky.sh" "$ROOT/scripts/rinky-watchdog.sh" "$ROOT/packaging/rinky-ctl.sh" \
     "$ROOT"/testdata/*.epub "$DEST/"
   # EMU_DEPLOY_BIN may have another file name (a copy of the ARM build): the guest wants "rinky".
   [ "$(basename "$bin")" = rinky ] || guest "$name" "mv -f $DEST/$(basename "$bin") $DEST/rinky"
-  guest "$name" "chmod +x $DEST/rinky $DEST/rinky.sh $DEST/rinky-watchdog.sh $DEST/rinky-ctl.sh; ls -la $DEST"
+  guest "$name" "chmod +x $DEST/rinky $DEST/lib/ld-musl-armhf.so.1 $DEST/rinky.sh $DEST/rinky-watchdog.sh $DEST/rinky-ctl.sh; ls -la $DEST"
 }
 
 cmd_shot() {
@@ -578,7 +582,7 @@ cmd_wifi() {
   guest "$name" 'ifconfig wlan0 | grep "inet addr"; lipc-get-prop com.lab126.wifid cmState'
 }
 
-usage() { sed -n '2,57p' "$0"; exit 2; }
+usage() { sed -n '2,58p' "$0"; exit 2; }
 
 cmd=${1:-}
 shift || true

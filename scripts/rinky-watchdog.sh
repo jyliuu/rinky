@@ -23,6 +23,10 @@ HANG_S=${RINKY_HANG_S:-60}
 cd /
 
 if [ -x "$RUN/bin/rinky" ]; then BIN=$RUN/bin/rinky; else BIN=$DIR/rinky; fi
+# The musl loader that runs it (rinky.sh copies it beside the binary in $RUN/bin).
+LDSO=$(dirname "$BIN")/ld-musl-armhf.so.1
+[ -f "$LDSO" ] || LDSO=$DIR/lib/ld-musl-armhf.so.1
+[ -f "$LDSO" ] || LDSO=
 
 # The log is fd 3, opened once (see rinky.sh): a plain `>>` redirection to the log
 # makes busybox sh skip the whole command when the log cannot be opened, and that
@@ -73,7 +77,7 @@ replay_journal() {
     J=$RUN/restore
     [ -f "$J" ] || return 0
     log "restoring settings: $(tr '\n' ';' <"$J")"
-    if ! RINKY_RUN=$RUN "$BIN" device restore >&3 2>&3; then
+    if ! RINKY_RUN=$RUN $LDSO "$BIN" device restore >&3 2>&3; then
         log "rinky device restore failed; replaying lipc lines in the shell"
         while read -r kind jt pub prop val; do
             [ "$kind" = lipc ] && lipc-set-prop "-$jt" "$pub" "$prop" "$val" >&3 2>&3

@@ -6,8 +6,8 @@
 #
 #   --allow-dirty   package a tree with uncommitted changes (VERSION then says dirty=yes);
 #                   without it the script refuses, so a release always matches a commit
-#   --no-build      use the ARM binaries already in the target directory (rinky and
-#                   target/dropbear/dropbearmulti)
+#   --no-build      use the ARM binaries already in the target directory (rinky,
+#                   target/dropbear/dropbearmulti and target/musl/ld-musl-armhf.so.1)
 #   --version V     version written into the package (default: [workspace.package]
 #                   version in Cargo.toml). For test releases of the in-app update only.
 #   --out DIR       output directory (default out/package)
@@ -27,12 +27,17 @@
 #
 # Kindle package layout (mirrors /mnt/us on the Kindle):
 #   rinky/              -> /mnt/us/rinky
-#     rinky             static ARMv7 musl binary
+#     rinky             ARMv7 musl binary, dynamically linked (native plugins are shared
+#                       libraries); its interpreter is set to lib/ld-musl-armhf.so.1 below
+#     lib/ld-musl-armhf.so.1   musl's C library and dynamic loader (the Kindle has only
+#                       glibc); the launchers run rinky through it. Fetched by
+#                       scripts/fetch-musl-loader.sh; LICENSE-musl
 #     rinky.sh, rinky-watchdog.sh   framework-stop launcher and watchdog
 #     rinky-ctl.sh      start / stop (Exit to Kindle) / status
 #     install.sh, uninstall.sh
 #     VERSION, FILES (every file of the package), SHA256SUMS (of every other file)
-#     README.txt, install.md, user-guide.md, LICENSE, LICENSE-Noto, LICENSE-dropbear
+#     README.txt, install.md, user-guide.md, LICENSE, LICENSE-Noto, LICENSE-dropbear,
+#     LICENSE-musl
 #     bin/dropbearmulti     static ARMv7 musl dropbear (SSH server, dropbearkey, scp) for
 #                           the ssh plugin; built by scripts/build-dropbear.sh
 #     bin/scp               wrapper running dropbearmulti scp (dropbear's session PATH
@@ -44,12 +49,14 @@
 #
 # Kobo package layout:
 #   rinky/              -> /mnt/onboard/.adds/rinky: the same files without the Kindle
-#                          launcher scripts and dropbear; rinky.sh is the Kobo launcher
+#                          launcher scripts and dropbear; rinky.sh is the Kobo launcher;
+#                          the binary's interpreter is the Kobo path of lib/
 #   nm/rinky            -> /mnt/onboard/.adds/nm/rinky (NickelMenu entry)
 #
 # Build: cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p ink-app
 # (CARGO_BUILD_JOBS defaults to all cores; CARGO_TARGET_DIR is honoured), then
-# scripts/build-dropbear.sh (skipped when target/dropbear/dropbearmulti is up to date).
+# scripts/build-dropbear.sh (skipped when target/dropbear/dropbearmulti is up to date) and
+# scripts/fetch-musl-loader.sh (target/musl/ld-musl-armhf.so.1, pinned and checked).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -100,17 +107,53 @@ PROFILE=${PROFILE:-release}
 case "$PROFILE" in ''|*[!A-Za-z0-9_-]*) die "bad profile '$PROFILE'" ;; esac
 BIN=$TARGET_DIR/$TARGET/$PROFILE/rinky
 DROPBEAR=$TARGET_DIR/dropbear/dropbearmulti
+LOADER=$TARGET_DIR/musl/ld-musl-armhf.so.1
+# Interpreter paths written into each package's binary (scripts/set-interp.py).
+KINDLE_INTERP=/mnt/us/rinky/lib/ld-musl-armhf.so.1
+KOBO_INTERP=/mnt/onboard/.adds/rinky/lib/ld-musl-armhf.so.1
 if [ "$BUILD" = 1 ]; then
   log "building $TARGET, profile $PROFILE (cargo zigbuild, CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)})"
   # The binary keeps source paths for panic messages. Remap the home folder and this
   # checkout so a package carries no user name or folder of the build machine. These
-  # flags replace .cargo/config.toml's rustflags, so its CPU flags are repeated here.
+  # flags replace .cargo/config.toml's rustflags, so its CPU and linking flags are
+  # repeated here.
   sep=$(printf '\037')
-  CARGO_ENCODED_RUSTFLAGS="-Ctarget-cpu=cortex-a9${sep}-Ctarget-feature=+neon${sep}--remap-path-prefix=$HOME=~${sep}--remap-path-prefix=$ROOT=rinky" \
+  flags="-Ctarget-cpu=cortex-a9${sep}-Ctarget-feature=+neon${sep}-Ctarget-feature=-crt-static${sep}-Clink-arg=-dynamic"
+  flags="$flags${sep}-Clink-arg=-Wl,--dynamic-linker=/mnt/us/rinky/lib////////////ld-musl-armhf.so.1"
+  CARGO_ENCODED_RUSTFLAGS="$flags${sep}--remap-path-prefix=$HOME=~${sep}--remap-path-prefix=$ROOT=rinky" \
     CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)} cargo zigbuild --profile "$PROFILE" --target "$TARGET" -p ink-app >&2
   scripts/build-dropbear.sh >&2
+  scripts/fetch-musl-loader.sh >/dev/null
 fi
-for b in "$BIN" "$DROPBEAR"; do
+[ -f "$LOADER" ] || die "$LOADER is missing (scripts/fetch-musl-loader.sh, or drop --no-build)"
+case "$(file -b "$LOADER")" in
+  *ELF\ 32-bit*shared\ object*ARM*) ;;
+  *) die "$LOADER is not a 32-bit ARM shared object" ;;
+esac
+# rinky: dynamically linked, needing only musl's libc (the loader we ship).
+[ -f "$BIN" ] || die "$BIN is missing (build first or drop --no-build)"
+info=$(file -b "$BIN")
+case "$info" in
+  *ELF\ 32-bit*ARM*dynamically\ linked*ld-musl-armhf.so.1*) ;;
+  *) die "$BIN is not a dynamically linked musl binary (rebuild without --no-build): $info" ;;
+esac
+needed=$(LC_ALL=C python3 -I - "$BIN" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+phoff, = struct.unpack_from("<I", d, 28); phentsize, phnum = struct.unpack_from("<HH", d, 42)
+segs = [struct.unpack_from("<IIIII", d, phoff + i * phentsize) for i in range(phnum)]
+def off(vaddr):
+    for t, o, v, _, fs in segs:
+        if t == 1 and v <= vaddr < v + fs:
+            return vaddr - v + o
+dyn = next(s for s in segs if s[0] == 2)
+ents = [struct.unpack_from("<iI", d, dyn[1] + 8 * i) for i in range(dyn[4] // 8)]
+strtab = off(next(v for t, v in ents if t == 5))
+print(" ".join(d[strtab + v:d.index(b"\0", strtab + v)].decode() for t, v in ents if t == 1))
+PY
+)
+[ "$needed" = "libc.so" ] || die "$BIN needs libraries other than musl's libc.so: $needed"
+for b in "$DROPBEAR"; do
   [ -f "$b" ] || die "$b is missing (build first or drop --no-build)"
   info=$(file -b "$b")
   case "$info" in
@@ -123,13 +166,14 @@ for b in "$BIN" "$DROPBEAR"; do
   esac
 done
 # No build-machine paths in the package (see the remap above).
-for b in "$BIN" "$DROPBEAR"; do
+for b in "$BIN" "$DROPBEAR" "$LOADER"; do
   if LC_ALL=C grep -a -q -F "$HOME/" "$b" || LC_ALL=C grep -a -q -F "$ROOT/" "$b"; then
     die "$b contains paths of this machine ($HOME); rebuild without --no-build"
   fi
 done
 
-# Stage, seal and archive one package per platform. Both carry the same binary.
+# Stage, seal and archive one package per platform. Both carry the same binary, but for
+# the path of the loader written into it.
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/rinky-package.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$OUT"
@@ -142,6 +186,9 @@ common() {
   local p=$1/rinky
   mkdir -p "$p/fonts"
   install -m 755 "$BIN" "$p/rinky"
+  mkdir -p "$p/lib"
+  install -m 755 "$LOADER" "$p/lib/ld-musl-armhf.so.1"
+  install -m 644 packaging/musl/COPYRIGHT "$p/LICENSE-musl"
   install -m 755 packaging/install.sh "$p/install.sh"
   install -m 644 packaging/README.txt "$p/README.txt"
   install -m 644 docs/user-guide.md "$p/user-guide.md"
@@ -190,6 +237,7 @@ zipdir() {
 # Kindle: rinky/ -> /mnt/us/rinky, extensions/rinky/ (the KUAL menu) -> /mnt/us/extensions.
 K=$STAGE/kindle
 common "$K"
+python3 -I scripts/set-interp.py "$K/rinky/rinky" "$KINDLE_INTERP"
 install -m 755 scripts/rinky.sh "$K/rinky/rinky.sh"
 install -m 755 scripts/rinky-watchdog.sh "$K/rinky/rinky-watchdog.sh"
 install -m 755 packaging/rinky-ctl.sh "$K/rinky/rinky-ctl.sh"
@@ -212,6 +260,7 @@ zipdir "$K" "$OUT/rinky-$VERSION-kindle.zip"
 # zip is laid out as the Kobo drive: .adds/rinky and .adds/nm/rinky.
 B=$STAGE/kobo
 common "$B"
+python3 -I scripts/set-interp.py "$B/rinky/rinky" "$KOBO_INTERP"
 install -m 755 packaging/kobo/rinky.sh "$B/rinky/rinky.sh"
 mkdir -p "$B/nm" "$STAGE/kobo-drive/.adds"
 install -m 644 packaging/kobo/nm-rinky "$B/nm/rinky"

@@ -1,8 +1,9 @@
 //! Glue between the app and `ink-plugin`.
 //!
-//! [`PluginHost`] owns the [`PluginManager`] with the compiled-in Rust plugins and the
-//! Lua plugins found in `<RINKY_HOME>/plugins/<name>/` (`plugin.toml` + `main.lua`),
-//! and gives them:
+//! [`PluginHost`] owns the [`PluginManager`] with the compiled-in Rust plugins, the
+//! Lua plugins found in `<RINKY_HOME>/plugins/<name>/` (`plugin.toml` + `main.lua`)
+//! and the native plugins there (`plugin.toml` with `native = "libname.so"`), and
+//! gives them:
 //! - storage on disk ([`DiskStorage`]): settings in `plugins/<name>/settings.json` over
 //!   defaults from `[plugins.<name>]` in `settings.toml`, per-book data in the book's
 //!   sidecar (`BookState::plugins[<name>]`), files in `plugins/<name>/data/`;
@@ -358,20 +359,44 @@ impl PluginHost {
     /// under `paths`, setting defaults from `settings.plugins`. A Lua plugin that fails
     /// to load (bad manifest, syntax error, name taken) is skipped and reported; the
     /// others still load.
+    ///
+    /// Native plugins come last. One that crashed rinky last time (its name in
+    /// `$RINKY_RUN/plugin-crashed`, see [`take_crash_marker`]) is turned off first and
+    /// reported; turned-off native plugins are listed without opening their library.
     pub fn load(compiled: Vec<Box<dyn Plugin>>, settings: &Settings, paths: &Paths) -> Self {
+        let run = std::env::var_os("RINKY_RUN").map(PathBuf::from);
+        Self::load_with_run(compiled, settings, paths, run.as_deref())
+    }
+
+    /// [`PluginHost::load`] with the runtime folder of the crash marker given.
+    pub fn load_with_run(compiled: Vec<Box<dyn Plugin>>, settings: &Settings, paths: &Paths, run: Option<&Path>) -> Self {
+        let crashed = run.and_then(|r| take_crash_marker(r, paths));
         let mut plugins = compiled;
         let dir = paths.plugins();
         let (lua_plugins, lua_errors) = lua::load_dir(&dir);
-        log::info!("plugins: {} compiled-in, {} Lua plugin(s) in {}", plugins.len(), lua_plugins.len(), dir.display());
+        let mut off = user_disabled(paths);
+        // Off even when disabled.txt could not be written: its library is not opened.
+        off.extend(crashed.clone());
+        let (native_plugins, native_errors) = ink_plugin::native::load_dir(&dir, |n| off.contains(n));
+        log::info!(
+            "plugins: {} compiled-in, {} Lua and {} native plugin(s) in {}",
+            plugins.len(),
+            lua_plugins.len(),
+            native_plugins.len(),
+            dir.display()
+        );
         plugins.extend(lua_plugins.into_iter().map(|p| Box::new(p) as Box<dyn Plugin>));
+        plugins.extend(native_plugins);
         let mut defaults = match serde_json::to_value(&settings.plugins) {
             Ok(Value::Object(m)) => m,
             _ => Map::new(),
         };
         library_dir_default(&mut defaults, settings);
-        let off = user_disabled(paths);
         let mut host = Self::build(plugins, Some(paths.clone()), defaults, off);
-        for (name, err) in lua_errors {
+        if let Some(name) = crashed {
+            host.manager.record_error(&name, CRASHED_NOTE);
+        }
+        for (name, err) in lua_errors.into_iter().chain(native_errors) {
             host.manager.record_error(&name, &format!("not loaded: {err}"));
         }
         host.ui.keyboard_layouts = crate::screens::settings::keyboard_layouts::layouts(settings);
@@ -463,6 +488,8 @@ impl PluginHost {
     /// notifications to the list, the rest to the presenter) and turns new plugin
     /// errors into toasts and notifications.
     fn after_calls(&mut self) {
+        // A native plugin that panicked outside a hook (an annotator, a lookup claim).
+        self.manager.disable_crashed();
         for (plugin, req) in std::mem::take(&mut self.out) {
             let what = describe_request(&req);
             match req {
@@ -591,6 +618,8 @@ impl PluginHost {
         }
         let restarting = restart_pending();
         log::info!("plugins: exit{}", if restarting { " (restart: the framework stays stopped)" } else { "" });
+        // A plugin crash from here on must not bring rinky back (the launcher reads it).
+        ink_device::trace::set_exiting();
         self.broadcast(None, Lifecycle::Exit(restarting));
     }
 
@@ -911,6 +940,38 @@ fn hook_log_level(page_turn: bool, ms: f64) -> log::Level {
 /// per line (`#` comments). Read by [`PluginHost::load`] at start.
 pub const DISABLED_FILE: &str = "disabled.txt";
 
+/// The crash marker in the runtime folder: the name of the native plugin a fatal signal
+/// hit, written by the signal handler (`ink_device::trace::set_crash_file`).
+pub const CRASH_MARKER: &str = "plugin-crashed";
+
+/// What the plugin list and the toast say about a plugin that crashed rinky.
+pub const CRASHED_NOTE: &str = "crashed rinky; turned off";
+
+/// Reads `run/plugin-crashed`. A valid plugin name in it is turned off for good
+/// ([`set_user_enabled`]) and returned; the file is removed once that is stored, so a
+/// userstore that cannot be written keeps the marker and the next start turns the
+/// plugin off again. The caller treats the name as turned off either way.
+pub fn take_crash_marker(run: &Path, paths: &Paths) -> Option<String> {
+    let file = run.join(CRASH_MARKER);
+    let text = std::fs::read_to_string(&file).ok()?;
+    let name = text.lines().next().unwrap_or("").trim().to_string();
+    if !ink_plugin::manifest::valid_name(&name) {
+        log::warn!("plugins: {} names no plugin: {text:?}", file.display());
+        let _ = std::fs::remove_file(&file);
+        return None;
+    }
+    log::error!("plugins: {name} crashed rinky last time; turning it off");
+    match set_user_enabled(paths, &name, false) {
+        Ok(()) => {
+            if let Err(e) = std::fs::remove_file(&file) {
+                log::warn!("plugins: cannot remove {}: {e}", file.display());
+            }
+        }
+        Err(e) => log::warn!("plugins: cannot turn {name} off for good ({e:#}); it stays off while {} exists", file.display()),
+    }
+    Some(name)
+}
+
 /// Plugins the user turned off.
 pub fn user_disabled(paths: &Paths) -> BTreeSet<String> {
     match std::fs::read_to_string(paths.plugins().join(DISABLED_FILE)) {
@@ -969,8 +1030,8 @@ pub fn plugin_list(host: &PluginHost) -> Vec<String> {
         .collect()
 }
 
-/// `rinky plugins [list | enable NAME | disable NAME]`: lists the compiled-in and
-/// Lua plugins (from `<RINKY_HOME>/plugins`) with state, errors and registrations,
+/// `rinky plugins [list | enable NAME | disable NAME]`: lists the compiled-in, Lua
+/// and native plugins (from `<RINKY_HOME>/plugins`) with state, errors and registrations,
 /// or turns one on/off for the next start. Exit status 1 for an unknown plugin.
 pub fn cli(args: &[String], compiled: Vec<Box<dyn Plugin>>, settings: &Settings, paths: &Paths) -> anyhow::Result<i32> {
     let host = PluginHost::load(compiled, settings, paths);
@@ -4167,6 +4228,95 @@ mod tests {
         for f in ["plugin.toml", "main.lua"] {
             std::fs::copy(repo(&format!("plugins/sample-lua/{f}")), d.join(f)).unwrap();
         }
+    }
+
+    /// Copies the cdylib of workspace crate `krate` (built as a dev-dependency) into
+    /// `plugins/<name>/` with a plugin.toml naming it.
+    fn native_plugin(plugins: &Path, krate: &str, name: &str, perms: &str) {
+        let d = plugins.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        let stem = format!("lib{}", krate.replace('-', "_"));
+        std::fs::write(d.join("plugin.toml"), format!("name = \"{name}\"\nversion = \"1\"\npermissions = [{perms}]\nnative = \"{stem}.so\"\n")).unwrap();
+        let file = format!("{stem}{}", std::env::consts::DLL_SUFFIX);
+        let built = ink_plugin::testing::built_library(krate);
+        std::fs::copy(&built, d.join(&file)).unwrap_or_else(|e| panic!("{}: {e}", built.display()));
+    }
+
+    /// The sample native plugin from a plugin folder on disk, on Juliet: its menu item
+    /// opens a card with the page's word count. A native plugin that crashed rinky last
+    /// time (its name in the crash marker) is turned off for good, listed without
+    /// opening its library, and reported once.
+    #[test]
+    fn native_plugins_from_disk_and_the_crash_marker() {
+        let root = tmp("native");
+        let paths = Paths { root: root.clone() };
+        native_plugin(&paths.plugins(), "sample-native", "sample-native", "\"document\", \"ui\", \"storage\"");
+        native_plugin(&paths.plugins(), "native-faulty", "native-faulty", "\"ui\"");
+        lua_plugin(&paths.plugins(), "hello", "", "return {}");
+        let run = root.join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join(CRASH_MARKER), "native-faulty\n").unwrap();
+
+        let mut host = PluginHost::load_with_run(Vec::new(), &Settings::default(), &paths, Some(&run));
+        assert!(!run.join(CRASH_MARKER).exists(), "the marker is taken");
+        assert_eq!(host.manager.list(), vec![("hello".to_string(), true), ("native-faulty".to_string(), false), ("sample-native".to_string(), true)]);
+        assert!(user_disabled(&paths).contains("native-faulty"), "turned off for the next starts too");
+        assert_eq!(host.manager.errors, vec![("native-faulty".to_string(), CRASHED_NOTE.to_string())]);
+        assert!(host.notifications().iter().any(|n| n.text == format!("Plugin native-faulty: {CRASHED_NOTE}")), "{:?}", host.notifications());
+        assert!(host.plugins().iter().any(|i| i.manifest.name == "sample-native" && i.kind == "native"));
+
+        let (book, mut doc) = juliet(&root);
+        host.book_open(doc.as_mut(), &book);
+        doc.set_current_page(5);
+        host.page_change(doc.as_mut(), 5);
+        assert!(host.trigger("sample-native", "count", Some(doc.as_mut())));
+        let card = host.ui.pending.iter().find_map(|(p, r)| match r {
+            UiRequest::TextViewer { markdown, .. } if p == "sample-native" => Some(markdown.clone()),
+            _ => None,
+        });
+        let words: usize = card.as_deref().and_then(|m| m.strip_prefix("**")?.split("**").next()?.parse().ok()).unwrap_or(0);
+        assert!(words > 50, "{card:?}");
+
+        // Without a marker nothing changes; turned on again, the plugin loads.
+        set_user_enabled(&paths, "native-faulty", true).unwrap();
+        let host = PluginHost::load_with_run(Vec::new(), &Settings::default(), &paths, Some(&run));
+        assert!(host.manager.is_enabled("native-faulty"));
+        assert!(host.manager.errors.is_empty(), "{:?}", host.manager.errors);
+        drop(host);
+
+        // disabled.txt cannot be written (here: a folder of that name): the crashed
+        // plugin is still not opened, and the marker stays for the next start.
+        std::fs::remove_file(paths.plugins().join(DISABLED_FILE)).ok();
+        std::fs::create_dir_all(paths.plugins().join(DISABLED_FILE)).unwrap();
+        std::fs::write(run.join(CRASH_MARKER), "native-faulty\n").unwrap();
+        for _ in 0..2 {
+            let host = PluginHost::load_with_run(Vec::new(), &Settings::default(), &paths, Some(&run));
+            assert!(!host.manager.is_enabled("native-faulty"));
+            assert!(run.join(CRASH_MARKER).exists());
+        }
+    }
+
+    /// Native plugins come in addition to the compiled-in ones, never instead of them:
+    /// every compiled-in plugin still loads, the native one after them, and each kind
+    /// gets its own calls.
+    #[test]
+    fn compiled_in_and_native_plugins_load_side_by_side() {
+        let root = tmp("native-both");
+        let paths = Paths { root: root.clone() };
+        native_plugin(&paths.plugins(), "sample-native", "sample-native", "\"document\", \"ui\", \"storage\"");
+        let compiled: Vec<String> = crate::plugins::compiled_in().iter().map(|p| p.manifest().name.clone()).collect();
+        let host = PluginHost::load_with_run(crate::plugins::compiled_in(), &Settings::default(), &paths, None);
+        assert!(host.manager.errors.is_empty(), "{:?}", host.manager.errors);
+        let info = host.plugins();
+        let kinds: Vec<(&str, &str)> = info.iter().map(|i| (i.manifest.name.as_str(), i.kind)).collect();
+        assert_eq!(kinds.len(), compiled.len() + 1, "{kinds:?}");
+        for (i, name) in compiled.iter().enumerate() {
+            assert_eq!(kinds[i], (name.as_str(), "rust"), "compiled-in plugins first, in their order");
+        }
+        assert_eq!(kinds.last(), Some(&("sample-native", "native")));
+        assert!(info.iter().all(|i| i.enabled));
+        assert!(host.menu_items().iter().any(|m| m.plugin == "sample-native"), "the native plugin registered its menu item");
+        assert!(host.menu_items().iter().any(|m| m.plugin != "sample-native"), "and the compiled-in ones theirs");
     }
 
     /// The sample plugin and two broken ones from a plugin folder on disk, on Juliet,

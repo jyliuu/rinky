@@ -1,22 +1,25 @@
 # Plugins
 
 rinky has one plugin API. First-party plugins are Rust crates compiled into the
-binary; user plugins are Lua 5.4 scripts in a folder on the e-reader. Both implement the same
-`ink_plugin::Plugin` trait (a Lua plugin is a `ink_plugin::lua::LuaPlugin`), go through the
-same `PluginManager`, registry and host services, and get the same permissions checks.
+binary; user plugins are Lua 5.4 scripts or native shared libraries in a folder on the
+e-reader. All implement the same `ink_plugin::Plugin` trait (a Lua plugin is a
+`ink_plugin::lua::LuaPlugin`, a library a `ink_plugin::native::NativePlugin`), go through
+the same `PluginManager`, registry and host services, and get the same permissions checks.
 
 | Part | Where |
 | --- | --- |
 | API: trait, registry, host services, manifest, Lua host, Markdown parser, network worker | `crates/ink-plugin` |
 | App side: loading, storage on disk, network, UI presenter (ink-ui widgets) | `crates/ink-app/src/plugin_host.rs` |
 | Sample Lua plugin (word count and reading timer) | `plugins/sample-lua/plugin.toml`, `main.lua` |
-| Lua plugins on the device | `/mnt/us/rinky/plugins/<name>/` (Kobo: `/mnt/onboard/.adds/rinky/plugins/<name>/`) |
+| Lua and native plugins on the device | `/mnt/us/rinky/plugins/<name>/` (Kobo: `/mnt/onboard/.adds/rinky/plugins/<name>/`) |
+| Native plugins: C ABI, authoring crate, loader | `crates/ink-plugin-abi`, `crates/ink-plugin-native`, `crates/ink-plugin/src/native.rs` |
+| Sample native plugin (word count card) | `plugins/sample-native` |
 | Compiled-in Rust plugins | `plugins/<name>/` crates, one line each in `crates/ink-app/src/plugins.rs` (kosync, opds, calibre, dictionary, stats, insightful, wikipedia, translate, usbnet, ssh) |
 
 Contents: [Lua quick start](#lua-quick-start) - [plugin.toml](#plugintoml) -
 [Hooks](#hooks) - [Registries](#registries) - [The `ink` table](#the-ink-table) -
 [Storage](#storage) - [Network](#network) - [Limits, sandbox, errors](#limits-sandbox-and-errors) -
-[Rust plugins](#rust-plugins) - [For screen authors](#for-screen-authors) - [Testing](#testing)
+[Rust plugins](#rust-plugins) - [Native plugins](#native-plugins) - [For screen authors](#for-screen-authors) - [Testing](#testing)
 
 ## Lua quick start
 
@@ -74,6 +77,7 @@ files) to `/mnt/us/rinky/plugins/sample-lua/`.
 | `description` | `""` | one line for the plugin list |
 | `permissions` | `[]` | any of `document`, `ui`, `storage`, `network` |
 | `entry` | `main.lua` | Lua file in the folder |
+| `native` | none | native plugins: the library in the folder (`libname.so`); see [Native plugins](#native-plugins) |
 | `time_limit_ms` | 1000 (500 for `on_page_change`) | time per call, at most 10000 |
 | `memory_mb` | 32 | Lua heap limit, at most 128 |
 | `hosts` | `[]` (any) | hosts for `network`; `example.com` also allows its subdomains |
@@ -542,6 +546,134 @@ A network plugin with a selection action. Worth reading for these patterns:
   and no network. The card text is checked against `CardDialog::parse` in
   `crates/ink-app/src/plugin_card.rs`.
 
+## Native plugins
+
+A native plugin is a shared library that rinky loads from the plugins folder at
+start-up, with no rebuild of rinky. It has what a compiled-in Rust plugin has (text
+annotators, word bounds, lookup claims, tile states run as plain function calls) and
+installs like a Lua plugin. Calls into it cost about as much as calls into a
+compiled-in plugin: a function-pointer call (about 12 ns in the Kindle emulator) plus
+copying the strings that cross. It is machine code in rinky's process: the permissions
+in `plugin.toml` limit what the host API gives it, not what the code could do, so
+install only plugins you trust.
+
+Native plugins come in addition to the other two kinds, not instead of them. rinky
+loads the compiled-in plugins first (the list in `crates/ink-app/src/plugins.rs`), then
+the Lua plugins of the plugins folder, then its native plugins; all of them are
+enabled, ordered and called the same way. A Lua or native plugin with the name of one
+already loaded is skipped with an error, so a compiled-in plugin cannot be replaced
+from the plugins folder. Which kind to write: compiled in (`ink_plugin::Plugin`) for a
+plugin that ships with every rinky and may use rinky's crates directly; native
+(`ink-plugin-native`) for one installed separately, updated on its own schedule or not
+public, with the same speed; Lua for a small script that needs no build.
+
+```text
+/mnt/us/rinky/plugins/wordcount/
+  plugin.toml          name = "wordcount", native = "libwordcount.so", permissions, ...
+  libwordcount.so
+```
+
+### Writing one
+
+Make a `cdylib` crate that depends on `ink-plugin-native` (and on nothing of rinky
+itself), implement its `Plugin` trait for a type with a `Default` value, and export it:
+
+```rust
+use ink_plugin_native::{export_plugin, Host, Plugin, Registrar, Result};
+
+#[derive(Default)]
+struct WordCount;
+
+impl Plugin for WordCount {
+    const NAME: &'static str = "wordcount"; // must equal name in plugin.toml
+
+    fn on_load(&mut self, reg: &mut Registrar) -> Result<()> {
+        reg.menu_item("count", "Word count", 50)
+    }
+
+    fn on_action(&mut self, host: &mut Host, _id: &str) -> Result<()> {
+        let words = host.page_text(None)?.split_whitespace().count();
+        host.view("Word count", &format!("**{words}** words")).map(|_| ())
+    }
+}
+
+export_plugin!(WordCount);
+```
+
+`plugins/sample-native` is a complete example (with a tile and a stored setting).
+Build for the e-readers with
+`cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p <crate>` (the
+workspace's `.cargo/config.toml` has the flags; outside the workspace, copy its
+`[target.armv7-unknown-linux-musleabihf]` rustflags: a `cdylib` needs `-crt-static`
+off). Copy `lib<crate>.so` and `plugin.toml` into `plugins/<name>/`. On the macOS
+simulator the same `plugin.toml` loads `lib<crate>.dylib` from the folder.
+
+The trait mirrors `ink_plugin::Plugin` (all hooks, `tick_interval`, `tile_state`,
+`claims_lookup`, `word_bounds`, `text_annotator`) with these differences:
+
+- Hooks get a `Host` instead of a `HostCtx`; `on_load` gets a `Registrar` whose
+  methods return `Result` (registration happens only there, as for Lua).
+- `Host` mirrors the `ink` table of Lua plugins: `toast`, `notify`, `status_text`,
+  `tile_state`, `dialog`, `menu`, `menu_label`, `view` / `update_view` (cards),
+  `input`, `go_to`, `rescan_library`, `setting` / `set_setting`, `book_value` /
+  `set_book_value`, `data_dir`, `doc(method, args)` with `page_text`, `selection` and
+  `current_position` as shortcuts, `http_request` / `http_cancel`, `log`. Values are
+  `serde_json::Value`s. Pages are 0-based (Lua: 1-based). Permissions are checked as
+  for Lua: a call without its permission returns an `Error` with `is_permission()`.
+- Answers arrive in `on_ui_result(id, result)` and `on_http(id, event)`, by the id the
+  call returned; there are no callbacks.
+- `doc` methods: `metadata`, `book_id`, `toc`, `search` (`{"query", "limit"}`),
+  `read_around` (`{"position", "chars"}`), `links` (`{"position"}`),
+  `current_position`, `selection`, `page`, `page_count`, `page_text` (`{"page"}`).
+- The annotator (`ink_plugin_native::TextAnnotator`) must be `Send + Sync`: it runs on
+  the pagination thread. `text_annotator` is asked whenever a book opens, so it may
+  offer one for some books or settings only.
+
+### Errors and crashes
+
+- An `Err` from a hook is a plugin error as for any plugin: logged, shown as a toast,
+  and five of them turn the plugin off.
+- A panic is caught inside the library by the functions `export_plugin!` generates and
+  turns the plugin off at once: in a hook, and also in `tile_state`, `claims_lookup`,
+  `word_bounds` and the annotator (which then return nothing until the plugin is off). It must not reach rinky: each library has its own copy
+  of the Rust standard library, so to rinky a panic from a library is a foreign
+  exception, which aborts the process even inside `catch_unwind`
+  (`crates/ink-plugin/tests/native.rs` shows it). Do not export functions of your own
+  that unwind.
+- A crash that is not a panic (a segfault in `unsafe` code or a C library, an abort)
+  ends rinky. The fatal-signal handler names the plugin in `/tmp/rinky/plugin-crashed`,
+  the launcher starts rinky again without bringing back the Kindle UI (at most twice in
+  a minute; not when the crash came while rinky was exiting), and that start turns the
+  plugin off in `plugins/disabled.txt` and says so. Turn it on again in Settings >
+  Plugins. A crash in rinky's own code that a plugin call reaches (a document query on
+  a broken book) is not blamed on the plugin.
+- What the crash handler cannot see: a crash on a thread the plugin started itself (it
+  ends rinky, but no plugin is named and none is turned off), and a hook that never
+  returns (there is no time limit for native code; the watchdog ends a hung rinky
+  after a minute, again without naming the plugin). Keep long work off the UI thread
+  and catch panics in your own threads.
+- A library is never unloaded (musl's `dlclose` does nothing). Replacing it needs a
+  restart of rinky.
+- A library that cannot be opened, lacks `rinky_plugin_v1`, calls itself by another
+  name than its `plugin.toml`, or was built for another ABI version is not loaded; the
+  error is shown like a broken Lua plugin's.
+
+### The ABI and its version
+
+Nothing of Rust crosses between rinky and a library. `ink-plugin-abi` holds the
+`#[repr(C)]` tables: `PluginV1` (the plugin's hooks, its opaque state, `free_str`,
+`drop`), `HostApiV1` (the host services), `AnnotatorV1`. Strings are UTF-8 as pointer
+and length, borrowed for the call; a string handed over for keeping is freed by the
+side that allocated it, with that side's `free_str`. Structured values are JSON. The
+entry function is `rinky_plugin_v1(host: *const HostApiV1) -> *mut PluginV1`.
+
+`ink_plugin_abi::ABI_VERSION` changes with any change to any table: a field added,
+removed, reordered or retyped. rinky refuses a library of another version, and a
+library refuses a rinky of another version, so a plugin is rebuilt against the
+`ink-plugin-native` of the rinky release it runs on whenever the version changes. The
+changelog says when it does. Additions to the safe `ink-plugin-native` API that do not
+touch the tables need no new version.
+
 ## For screen authors
 
 The hook API is `cx.plugins` (the `PluginHost`) and `crate::plugin_host::hooks`
@@ -658,7 +790,14 @@ when repeated.
 - `rinky plugins` (with `RINKY_HOME`) lists what the app would load.
 - Emulator: `tests/e2e/plugin-*.sh` (run with `scripts/e2e/run.sh NAME OUTDIR 'plugin-*'`)
   install the sample plugin and two broken plugins, run the reader and check
-  `rinky.log`, the sidecar and the plugin's data files.
+  `rinky.log`, the sidecar and the plugin's data files. `plugin-native-crash.sh` needs
+  the native libraries built for ARM first (see its header) and checks a native
+  plugin's crash, the restart without the Kindle UI and the plugin turned off.
+- Native plugins: `crates/ink-plugin/tests/native.rs` loads `plugins/sample-native`
+  and the fixture `plugins/native-faulty` as built libraries (cargo builds their
+  `cdylib` as dev-dependencies) and checks host services, permissions, a panic, and a
+  segfault and an abort in a child process; `cargo test -p ink-app plugin_host::tests::native`
+  loads them from a plugin folder on disk with the crash marker.
 
 ## Settings menus
 

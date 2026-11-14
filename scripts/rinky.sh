@@ -11,10 +11,15 @@
 #      metrics, log uploaders, audio, Bluetooth; listed in $RUN/quieted) and kill what
 #      a stopped job left running (its shell died, its daemon did not: fastmetrics,
 #      wifilocker; a stuck orphaned fastmetrics made powerd take 32 s per event);
-#   4. run rinky;
+#   4. run rinky, through the musl loader the package ships (lib/ld-musl-armhf.so.1,
+#      copied next to the binary in $RUN/bin): rinky is a dynamically linked musl
+#      program and the Kindle has only glibc;
 #      (`rinky-ctl.sh restart` writes $RUN/restart and sends SIGTERM to rinky: the
 #      launcher then copies the installed binary again and runs it again, without
 #      starting the framework in between; if that fails it takes the exit path below;)
+#      (a crash inside a native plugin leaves $RUN/plugin-crashed: the launcher runs
+#      rinky again, which turns that plugin off, without starting the framework; at
+#      most twice within 60 s, then it takes the exit path below;)
 #   5. on every exit path (normal exit, error, crash, signal, watchdog kill):
 #      undo the settings rinky journaled ($RUN/restore: volumd disableMounting,
 #      powerd flIntensity, the framebuffer night flag, ...), start the jobs in
@@ -90,6 +95,21 @@ rotate_log() {
 
 log() { echo "[launcher $(date '+%H:%M:%S')] $*" >&3; }
 
+# copy_pair TAG: the installed loader and binary to $RUN/bin (loader first, so a
+# binary there always has its loader beside it).
+copy_pair() {
+    copy_loader "$1" && cp "$DIR/rinky" "$RUN/bin/.rinky$1" 2>/dev/null &&
+        chmod 755 "$RUN/bin/.rinky$1" && mv -f "$RUN/bin/.rinky$1" "$RUN/bin/rinky"
+}
+
+# copy_loader TAG: copies the installed musl loader to $RUN/bin (cp to a name with TAG,
+# then mv). No loader installed: nothing to copy, and the binary runs directly.
+copy_loader() {
+    [ -f "$DIR/lib/ld-musl-armhf.so.1" ] || { rm -f "$RUN/bin/ld-musl-armhf.so.1"; return 0; }
+    cp "$DIR/lib/ld-musl-armhf.so.1" "$RUN/bin/.ld$1" 2>/dev/null &&
+        chmod 755 "$RUN/bin/.ld$1" && mv -f "$RUN/bin/.ld$1" "$RUN/bin/ld-musl-armhf.so.1"
+}
+
 # now_ms: milliseconds since boot (/proc/uptime has 1/100 s); 0 without /proc.
 now_ms() {
     read -r up _ </proc/uptime 2>/dev/null || { echo 0; return; }
@@ -100,11 +120,28 @@ now_ms() {
 # phase NAME START_MS: logs how long NAME took.
 phase() { log "phase $1: $(($(now_ms) - $2)) ms"; }
 
+# loader_for BINARY: the musl loader that runs BINARY (beside it in $RUN/bin, in lib/
+# next to it in $DIR); nothing when there is none (an install without lib/).
+loader_for() {
+    for f in "$(dirname "$1")/ld-musl-armhf.so.1" "$(dirname "$1")/lib/ld-musl-armhf.so.1"; do
+        [ -f "$f" ] && { echo "$f"; return 0; }
+    done
+}
+
+# run_bin BINARY ARGS...: BINARY through its loader (or directly without one), with
+# RINKY_RUN set.
+run_bin() {
+    rb=$1
+    shift
+    rl=$(loader_for "$rb")
+    if [ -n "$rl" ]; then RINKY_RUN=$RUN "$rl" "$rb" "$@"; else RINKY_RUN=$RUN "$rb" "$@"; fi
+}
+
 # splash TEXT...: a white screen with one centred line per TEXT. rinky draws it
 # itself; FBInk (KMC or libkh) is the fallback.
 splash() {
     sb=${BIN:-$DIR/rinky}
-    if [ -x "$sb" ] && "$sb" splash "$@" >&3 2>&3; then return 0; fi
+    if [ -x "$sb" ] && run_bin "$sb" splash "$@" >&3 2>&3; then return 0; fi
     for f in /var/local/kmc/bin/fbink /mnt/us/libkh/bin/fbink; do
         if [ -x "$f" ]; then
             "$f" -q -c -m -M "$*" >&3 2>&3 && return 0
@@ -123,18 +160,18 @@ if [ -z "$RINKY_DETACHED" ]; then
     tc=$(now_ms)
     # Run from a tmpfs copy. cp + mv: a running copy keeps its (unlinked) file. The
     # temporary names carry this shell's pid: launchers started together each rename
-    # their own copy (a shared name made the second mv fail, "No such file").
+    # their own copy (a shared name made the second mv fail, "No such file"). The
+    # loader goes first: a binary in $RUN/bin always has its loader beside it.
     SELF=$DIR/rinky.sh
     t=.new.$$
     if mkdir -p "$RUN/bin" 2>/dev/null &&
-        cp "$DIR/rinky" "$RUN/bin/.rinky$t" 2>/dev/null &&
-        chmod 755 "$RUN/bin/.rinky$t" && mv -f "$RUN/bin/.rinky$t" "$RUN/bin/rinky" &&
+        copy_pair "$t" &&
         cp "$DIR/rinky.sh" "$RUN/bin/.rinky.sh$t" && mv -f "$RUN/bin/.rinky.sh$t" "$RUN/bin/rinky.sh" &&
         cp "$DIR/rinky-watchdog.sh" "$RUN/bin/.rinky-watchdog.sh$t" &&
         mv -f "$RUN/bin/.rinky-watchdog.sh$t" "$RUN/bin/rinky-watchdog.sh"; then
         SELF=$RUN/bin/rinky.sh
     else
-        rm -f "$RUN/bin/.rinky$t" "$RUN/bin/.rinky.sh$t" "$RUN/bin/.rinky-watchdog.sh$t"
+        rm -f "$RUN/bin/.rinky$t" "$RUN/bin/.rinky.sh$t" "$RUN/bin/.rinky-watchdog.sh$t" "$RUN/bin/.ld$t"
         log "cannot copy to $RUN/bin; running from $DIR"
         # /var (and /tmp) is a 64 MB tmpfs on the Kindle; a full one is the usual cause.
         log "free space: $(df -k "$RUN" /var /tmp 2>&1 | tr '\n' ';')"
@@ -318,7 +355,7 @@ replay_journal() {
     J=$RUN/restore
     if [ -f "$J" ]; then
         log "restoring settings: $(tr '\n' ';' <"$J")"
-        if ! RINKY_RUN=$RUN "$BIN" device restore >&3 2>&3; then
+        if ! run_bin "$BIN" device restore >&3 2>&3; then
             log "rinky device restore failed; replaying lipc lines in the shell"
             while read -r kind jt pub prop val; do
                 [ "$kind" = lipc ] && lipc-set-prop "-$jt" "$pub" "$prop" "$val" >&3 2>&3
@@ -327,7 +364,7 @@ replay_journal() {
         rm -f "$J"
     else
         # No journal: still put the framebuffer flags back (night flag, fast mode).
-        RINKY_RUN=$RUN "$BIN" device restore >&3 2>&3 || true
+        run_bin "$BIN" device restore >&3 2>&3 || true
     fi
 }
 
@@ -407,7 +444,7 @@ cleanup() {
     # Free the tmpfs copy of the binary: about 20 MB of the 64 MB RAM-backed /var that
     # the framework (and anything else in /tmp) needs once rinky is gone. The next
     # launcher copies it again; one that copied it just before this rm runs from $DIR.
-    [ "$BIN" = "$RUN/bin/rinky" ] && rm -f "$RUN/bin/rinky"
+    [ "$BIN" = "$RUN/bin/rinky" ] && rm -f "$RUN/bin/rinky" "$RUN/bin/ld-musl-armhf.so.1"
     # Only our own lock (a lock taken over by a newer launcher stays).
     [ "$(cat "$RUN/lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$RUN/lock"
     log "exit: reason=${REASON:-launcher stopped before rinky ran} status=${STATUS:-?} total $(($(now_ms) - T0)) ms"
@@ -474,16 +511,14 @@ restart_prepare() {
         # Oasis, rinky about 24 MB) only after removing it (rinky has exited); else run
         # the installed binary from $DIR, as the first start does when it cannot copy.
         rt=.new.$$
-        if cp "$DIR/rinky" "$RUN/bin/.rinky$rt" 2>/dev/null &&
-            chmod 755 "$RUN/bin/.rinky$rt" && mv -f "$RUN/bin/.rinky$rt" "$RUN/bin/rinky"; then
+        if copy_pair "$rt"; then
             :
         else
-            rm -f "$RUN/bin/.rinky$rt" "$RUN/bin/rinky"
-            if cp "$DIR/rinky" "$RUN/bin/.rinky$rt" 2>/dev/null &&
-                chmod 755 "$RUN/bin/.rinky$rt" && mv -f "$RUN/bin/.rinky$rt" "$RUN/bin/rinky"; then
+            rm -f "$RUN/bin/.rinky$rt" "$RUN/bin/.ld$rt" "$RUN/bin/rinky" "$RUN/bin/ld-musl-armhf.so.1"
+            if copy_pair "$rt"; then
                 log "restart: copied the new binary to $RUN/bin after removing the old one"
             else
-                rm -f "$RUN/bin/.rinky$rt"
+                rm -f "$RUN/bin/.rinky$rt" "$RUN/bin/.ld$rt" "$RUN/bin/rinky" "$RUN/bin/ld-musl-armhf.so.1"
                 BIN=$DIR/rinky
                 log "restart: cannot copy the new binary to $RUN/bin; running it from $DIR"
             fi
@@ -495,9 +530,48 @@ restart_prepare() {
     return 0
 }
 
+# crash_restart: called when rinky ended and $RUN/plugin-crashed exists (a fatal signal
+# inside a native plugin). Returns 0 when rinky may run again at once, with the
+# framework still stopped: the next rinky turns that plugin off. At most
+# CRASH_RESTARTS (2) such restarts within 60 s, and none when the crash came while
+# rinky was exiting (the marker's second line is `exiting`: the user asked to leave);
+# then the marker stays (the next start still turns the plugin off) and the launcher
+# takes the exit path.
+CRASH_RESTARTS=${RINKY_CRASH_RESTARTS:-2}
+CRASH_TIMES=
+crash_restart() {
+    if grep -qx exiting "$RUN/plugin-crashed" 2>/dev/null; then
+        log "crash restart: the plugin crashed while rinky was exiting; not running it again"
+        return 1
+    fi
+    now=$(now_ms)
+    recent=
+    for c in $CRASH_TIMES; do
+        [ $((now - c)) -lt 60000 ] && recent="$recent $c"
+    done
+    set -- $recent
+    if [ $# -ge "$CRASH_RESTARTS" ]; then
+        log "crash restart: already $# in the last 60 s; ending"
+        return 1
+    fi
+    CRASH_TIMES="$recent $now"
+    log "crash restart: native plugin '$(head -n 1 "$RUN/plugin-crashed" 2>/dev/null)' crashed rinky; running it again without that plugin ($(($# + 1)) of $CRASH_RESTARTS within 60 s)"
+    rm -f "$RUN/rinky.pid" "$RUN/heartbeat" "$RUN/exit-reason" "$RUN/watchdog-kill"
+    t=$(now_ms)
+    replay_journal
+    phase "restore settings (crash restart)" "$t"
+    splash "Starting rinky..."
+    return 0
+}
+
 while :; do
     t=$(now_ms)
-    RINKY_LOG_FILE=$LOGFILE RINKY_RUN=$RUN "$BIN" "$@" >&3 2>&3 3>&- &
+    ld=$(loader_for "$BIN")
+    if [ -n "$ld" ]; then
+        RINKY_LOG_FILE=$LOGFILE RINKY_RUN=$RUN "$ld" "$BIN" "$@" >&3 2>&3 3>&- &
+    else
+        RINKY_LOG_FILE=$LOGFILE RINKY_RUN=$RUN "$BIN" "$@" >&3 2>&3 3>&- &
+    fi
     INK=$!
     echo "$INK" >"$RUN/rinky.pid"
     log "rinky pid $INK"
@@ -524,6 +598,9 @@ while :; do
         fi
         rm -f "$RUN/restart"
         log "restart failed; ending (the framework starts again)"
+    fi
+    if [ -f "$RUN/plugin-crashed" ] && crash_restart; then
+        continue
     fi
     exit "$STATUS"
 done

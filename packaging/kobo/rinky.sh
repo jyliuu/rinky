@@ -6,8 +6,12 @@
 #      exit, or an update, cannot hit a running file);
 #   2. take Nickel's environment (PLATFORM, PRODUCT, WIFI_MODULE, INTERFACE, ...),
 #      turn Bluetooth off, stop Nickel and its helpers;
-#   3. run rinky; when it exits after writing $RUN/restart (an in-app update does),
-#      the launcher runs the installed binary again without starting Nickel;
+#   3. run rinky, through the musl loader the package ships (lib/ld-musl-armhf.so.1,
+#      copied to $RUN/bin too): rinky is a dynamically linked musl program and the Kobo
+#      has only glibc; when it exits after writing $RUN/restart (an in-app update does),
+#      the launcher runs the installed binary again without starting Nickel; when a
+#      native plugin crashed it ($RUN/plugin-crashed), it runs it again too (the new
+#      rinky turns that plugin off), at most twice within 60 s;
 #   4. on every exit path: put back what rinky journaled (framebuffer bit depth and
 #      rotation), turn Wi-Fi off, and start Nickel again (reboot if Nickel was not
 #      running before, or KFMon asked for that).
@@ -49,12 +53,28 @@ fi
 export RINKY_RUN="$RUN" RINKY_HOME="$DIR" RINKY_PLATFORM=kobo
 log "start: $*"
 
+# copy_binary: the binary and its loader to $RUN/bin; LDSO is the loader that runs
+# BIN (empty for an install without lib/: the binary then runs directly).
 copy_binary() {
-    rm -f "$RUN/bin/rinky"
-    cp -f "$DIR/rinky" "$RUN/bin/rinky" && chmod 755 "$RUN/bin/rinky" && BIN=$RUN/bin/rinky && return 0
+    rm -f "$RUN/bin/rinky" "$RUN/bin/ld-musl-armhf.so.1"
+    LDSO=
+    if [ -f "$DIR/lib/ld-musl-armhf.so.1" ]; then
+        cp -f "$DIR/lib/ld-musl-armhf.so.1" "$RUN/bin/ld-musl-armhf.so.1" && chmod 755 "$RUN/bin/ld-musl-armhf.so.1" &&
+            LDSO=$RUN/bin/ld-musl-armhf.so.1
+    fi
+    if [ -n "$LDSO" ] || [ ! -f "$DIR/lib/ld-musl-armhf.so.1" ]; then
+        cp -f "$DIR/rinky" "$RUN/bin/rinky" && chmod 755 "$RUN/bin/rinky" && BIN=$RUN/bin/rinky && return 0
+    fi
     # A full tmpfs: run from the userstore instead (USB storage must then wait).
     log "cannot copy the binary to $RUN/bin; running it from $DIR"
+    rm -f "$RUN/bin/rinky" "$RUN/bin/ld-musl-armhf.so.1"
     BIN=$DIR/rinky
+    LDSO=
+    [ -f "$DIR/lib/ld-musl-armhf.so.1" ] && LDSO=$DIR/lib/ld-musl-armhf.so.1
+}
+# run_bin ARGS...: the binary through its loader.
+run_bin() {
+    if [ -n "$LDSO" ]; then "$LDSO" "$BIN" "$@"; else "$BIN" "$@"; fi
 }
 copy_binary
 
@@ -108,21 +128,54 @@ case "$1" in
     --library | "") set -- library ;;
     *) set -- run "$@" ;;
 esac
+# crash_restart: true when rinky may run again after a crash inside a native plugin
+# ($RUN/plugin-crashed): at most CRASH_RESTARTS (2) times within 60 s, and not when
+# it crashed while rinky was exiting (second line `exiting`). Otherwise the marker
+# stays, so the next start still turns the plugin off.
+CRASH_RESTARTS=${RINKY_CRASH_RESTARTS:-2}
+CRASH_TIMES=
+crash_restart() {
+    if grep -qx exiting "$RUN/plugin-crashed" 2>/dev/null; then
+        log "crash restart: the plugin crashed while rinky was exiting; not running it again"
+        return 1
+    fi
+    now=$(date +%s)
+    recent=
+    for c in $CRASH_TIMES; do
+        [ $((now - c)) -lt 60 ] && recent="$recent $c"
+    done
+    set -- $recent
+    if [ $# -ge "$CRASH_RESTARTS" ]; then
+        log "crash restart: already $# in the last 60 s; ending"
+        return 1
+    fi
+    CRASH_TIMES="$recent $now"
+    log "crash restart: native plugin '$(head -n 1 "$RUN/plugin-crashed" 2>/dev/null)' crashed rinky; running it again without that plugin"
+    return 0
+}
 while :; do
-    log "run: $BIN $*"
-    RINKY_LOG_FILE=$LOG "$BIN" "$@" >>"$LOG" 2>&1
+    log "run: ${LDSO:+$LDSO }$BIN $*"
+    # Exported, not a prefix: a prefix assignment on a shell function is not
+    # reliably passed on to the commands it runs.
+    export RINKY_LOG_FILE="$LOG"
+    run_bin "$@" >>"$LOG" 2>&1
     status=$?
     log "rinky exited with status $status"
-    [ -e "$RUN/restart" ] || break
-    rm -f "$RUN/restart"
-    log "restart requested"
-    copy_binary
+    if [ -e "$RUN/restart" ]; then
+        rm -f "$RUN/restart"
+        log "restart requested"
+        copy_binary
+        continue
+    fi
+    [ -e "$RUN/plugin-crashed" ] && crash_restart && continue
+    break
 done
 
 # 4. Put things back and start Nickel.
-"$BIN" device restore >>"$LOG" 2>&1
-"$BIN" device wifi enable 0 >>"$LOG" 2>&1
-rm -f "$RUN/restart-capable" "$RUN/launcher.pid" "$RUN/bin/rinky" "$RUN/nickel.env"
+unset RINKY_LOG_FILE
+run_bin device restore >>"$LOG" 2>&1
+run_bin device wifi enable 0 >>"$LOG" 2>&1
+rm -f "$RUN/restart-capable" "$RUN/launcher.pid" "$RUN/bin/rinky" "$RUN/bin/ld-musl-armhf.so.1" "$RUN/nickel.env"
 sync
 
 if [ "$FROM_KFMON" = true ] && ! grep -qs "reboot_on_exit=false" /mnt/onboard/.adds/kfmon/config/rinky.ini; then

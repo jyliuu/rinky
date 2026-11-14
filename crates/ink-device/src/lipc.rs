@@ -1,7 +1,7 @@
 //! `lipc` access through child processes.
 //!
-//! The Kindle's `liblipc` is a glibc shared library that a static musl binary cannot
-//! load, so this runs the stock tools instead:
+//! The Kindle's `liblipc` is a glibc shared library that rinky, a musl program,
+//! cannot load, so this runs the stock tools instead:
 //!
 //! ```text
 //! lipc-get-prop  [-i|-s] PUBLISHER PROPERTY          -> value on stdout

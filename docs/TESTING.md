@@ -289,8 +289,8 @@ Pick a pattern for the area you changed:
 | Reader and library | `arch-reader-gestures`, `reader-menu-smoke`, `library-smoke`, `wave-b-merge-smoke`, `b-verify-*`, `settings-smoke`, `stats-record` |
 | Device (sleep, night, rotation, USB, Wi-Fi) | `device-selftest`, `device-sleep`, `device-reader-sleep`, `device-night`, `device-rotate`, `device-usb`, `device-wifi`, `device-verify1-*` |
 | Engines and test binaries on ARM | `html-*`, `formats-*`, `mupdf-*`, `ui-*`, `store-*` |
-| Packaging and update | `packaging-*` |
-| Plugins and network | `dict-smoke`, `plugin-*`, `net-selftest`, `c-sync-kosync` (mock servers on the host); `plugin-tls` fetches from the internet |
+| Packaging and update | `packaging-*` (`packaging-update-running` updates a running install from an older release, `PKG`, to this tree's package, `PKG_NEW`; see its header) |
+| Plugins and network | `dict-smoke`, `plugin-*`, `net-selftest`, `c-sync-kosync` (mock servers on the host); `plugin-tls` fetches from the internet; `plugin-native-crash` needs `cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p native-faulty -p sample-native` first (else it is skipped) |
 
 Host-only scripts in `scripts/e2e/` need no emulator: `launcher-race-test.sh`
 (launcher and watchdog against a stub upstart), `attack-inputs.sh` (malformed books

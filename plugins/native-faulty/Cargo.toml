@@ -1,0 +1,16 @@
+[package]
+name = "native-faulty"
+description = "Test fixture: a native plugin that panics, aborts or segfaults on request (never packaged)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+path = "lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ink-plugin-native.workspace = true

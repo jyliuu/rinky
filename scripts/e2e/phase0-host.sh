@@ -120,7 +120,7 @@ unit_tests_per_crate() {
 
 file_type() {
   local b=target/armv7-unknown-linux-musleabihf/release/rinky
-  ls -la "$b" && file "$b" | tee /dev/stderr | grep -q "ELF 32-bit LSB.*ARM.*statically linked"
+  ls -la "$b" && file "$b" | tee /dev/stderr | grep -q "ELF 32-bit LSB.*ARM.*dynamically linked.*ld-musl-armhf.so.1"
 }
 
 # One pixel of the first page golden flipped in a copy: the golden test must fail.
