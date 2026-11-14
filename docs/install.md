@@ -93,25 +93,29 @@ rinky-<version>-kindlehf.kpkg
 ```
 
 It holds the same `rinky/` and `extensions/` folders as the USB zip, plus the manifest
-and the three hooks KPM calls. Add a repository, then install:
+and the three hooks KPM calls. Add the repository, then install:
 
 ```sh
-kpm add-repo <manifest URL>
-kpm update
+kpm add-repo https://jyliuu.github.io/rinky/manifest.v2.json
 kpm install rinky
 ```
 
-Each release also carries `rinky-<version>-kpm-repo.json`, a one-package repository
-manifest whose artifact URL is relative, so it resolves to the `.kpkg` uploaded next to
-it. Upload both and use the manifest's release URL as `<manifest URL>`; for a stable
-address host them on GitHub Pages and update the URL and version per release.
+That address never changes: every release rewrites `manifest.v2.json` on the `gh-pages`
+branch, and the manifest points at the `.kpkg` of the newest release, so the same two
+commands install and update rinky. (The repository owner has to enable Pages once —
+*Settings > Pages > Deploy from a branch > `gh-pages`* — for the address to answer.)
+
+Two alternatives, for a repository that does not publish the manifest:
+
+- `rinky-<version>-kpm-repo.json`, next to the `.kpkg` in the release, is the same
+  manifest with a relative artifact URL. Upload both to a directory of your own (or use
+  the release URL) and pass that path instead.
+- With the `.kpkg` already on the Kindle and no repository at all, the SSH install below
+  works unchanged — the package has the same layout.
 
 `kpm install rinky` runs the same installer as the other packages, so the library entry
 `documents/rinky.sh` is created too: start rinky from there, or with `kpm launch rinky`.
 `kpm uninstall rinky` removes rinky and keeps your settings, notes and positions.
-
-With the `.kpkg` already on the Kindle and no repository, the SSH install below works
-unchanged — the package has the same layout.
 
 ### Install over SSH
 
