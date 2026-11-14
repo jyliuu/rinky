@@ -10,6 +10,7 @@ layout). Owner: the `packaging` agent.
 | `uninstall.sh` | `/mnt/us/rinky/uninstall.sh` | stops rinky, removes everything it added (`--keep-data`: program only) |
 | `rinky-ctl.sh` | `/mnt/us/rinky/rinky-ctl.sh` | `start`, `stop` (Exit to Kindle), `status` |
 | `kual/rinky/` | `/mnt/us/extensions/rinky/` | KUAL menu: start, exit to Kindle, update, uninstall |
+| `kpm/` | root of the `.kpkg` | KPM manifest and hooks (`install.sh`, `launch.sh`, `uninstall.sh`), plus `repo.json`, the repository manifest `scripts/package.sh` fills in for a release |
 | `README.txt` | `/mnt/us/rinky/README.txt` | short install/uninstall text for users |
 | `test/host-install-test.sh` | - | install/uninstall cycle on the host under a fake `/mnt/us` |
 | `test/mock-release-server.py` | - | GitHub-release-shaped server for the in-app update tests (`--slow` for overlapping updates) |

@@ -18,6 +18,9 @@
 #   rinky-V-kindlehf.tar.gz          the install package (SSH install, in-app update)
 #   rinky-V-kindlehf.tar.gz.sha256   its SHA-256 (sha256sum format)
 #   rinky-V-kindle.zip               the same files as a zip, for copying over USB
+#   rinky-V-kindlehf.kpkg (.sha256)  the same Kindle files as a KPM package, for
+#                                    `kpm install` on a Kindle that has KPM instead of
+#                                    KUAL (no KUAL needed; see docs/install.md)
 #   rinky-V-kobo.tar.gz (.sha256)    the Kobo package (same binary; Kobo launcher,
 #                                    NickelMenu entry nm/rinky)
 #   rinky-V-kobo.zip                 the Kobo files laid out as the drive (.adds/rinky,
@@ -255,6 +258,69 @@ PKG=$OUT/rinky-$VERSION-kindlehf.tar.gz
 archive "$K" "$PKG" rinky extensions
 zipdir "$K" "$OUT/rinky-$VERSION-kindle.zip"
 
+# KPM: the same Kindle tree, plus KPM's manifest and its three hooks, as a .kpkg (a
+# tar.gz KPM unpacks and runs). KPM installs a package by running install.sh in the
+# unpacked tree, keeps the tree for launch.sh and calls uninstall.sh to remove it; the
+# library entry is still created by rinky/install.sh itself, so KPM is only a
+# distribution channel here, not a second launcher. KPM has no dependency on KUAL, which
+# is why devices that use KPM alone (the Scribe, for one) can install this.
+M=$STAGE/kpm
+mkdir -p "$M"
+cp -R "$K/rinky" "$K/extensions" "$M/"
+install -m 755 packaging/kpm/install.sh "$M/install.sh"
+install -m 755 packaging/kpm/launch.sh "$M/launch.sh"
+install -m 755 packaging/kpm/uninstall.sh "$M/uninstall.sh"
+install -m 644 packaging/kpm/manifest.json "$M/manifest.json"
+# KPM wants the version as a [major, minor, patch] array, so it is filled in here from
+# the same VERSION the rest of the package uses.
+python3 -I - "$M/manifest.json" "$VERSION" <<'PY'
+import json, re, sys
+
+path, version = sys.argv[1], sys.argv[2]
+nums = [int(part) for part in re.findall(r"\d+", version)][:3]
+nums += [0] * (3 - len(nums))
+with open(path) as f:
+    manifest = json.load(f)
+manifest["version"] = nums
+with open(path, "w") as f:
+    json.dump(manifest, f, indent=2)
+    f.write("\n")
+PY
+KP=$OUT/rinky-$VERSION-kindlehf.kpkg
+rm -f "$KP" "$KP.sha256"
+if tar --version 2>/dev/null | grep -q bsdtar; then
+  (cd "$M" && COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
+      --no-xattrs --no-mac-metadata -czf "$KP" .)
+else
+  (cd "$M" && tar --format=ustar --owner=0 --group=0 --numeric-owner -czf "$KP" .)
+fi
+if tar -tzf "$KP" | grep -q '\(^\|/\)\._'; then die "$(basename "$KP") contains AppleDouble ._ files"; fi
+for f in manifest.json install.sh launch.sh uninstall.sh rinky/rinky rinky/FILES; do
+  tar -tzf "$KP" | grep -qx "\./$f" || die "$(basename "$KP") is missing $f"
+done
+(cd "$OUT" && sha256 "$(basename "$KP")" >"$(basename "$KP").sha256")
+
+# A ready-made KPM repository manifest pointing at the .kpkg next to it. Upload both as
+# release assets and `kpm add-repo <manifest URL>` installs rinky; KPM resolves the
+# relative URL against the manifest's own URL, which is exactly how a release asset is
+# served. A stable repo URL (GitHub Pages) needs only the artifact and version lines
+# updated per release.
+REPO=$OUT/rinky-$VERSION-kpm-repo.json
+sed -e "s/rinky-VERSION-kindlehf.kpkg/$(basename "$KP")/" packaging/kpm/repo.json >"$REPO"
+python3 -I - "$REPO" "$VERSION" <<'PY'
+import json, re, sys
+
+path, version = sys.argv[1], sys.argv[2]
+nums = [int(part) for part in re.findall(r"\d+", version)][:3]
+nums += [0] * (3 - len(nums))
+with open(path) as f:
+    repo = json.load(f)
+repo["packages"]["rinky"]["artifacts"][0]["version"] = nums
+with open(path, "w") as f:
+    json.dump(repo, f, indent=2)
+    f.write("\n")
+PY
+
 # Kobo: rinky/ -> /mnt/onboard/.adds/rinky, nm/rinky (the NickelMenu entry) ->
 # /mnt/onboard/.adds/nm/rinky; install.sh tells the packages apart by nm/rinky. The
 # zip is laid out as the Kobo drive: .adds/rinky and .adds/nm/rinky.
@@ -270,8 +336,10 @@ archive "$B" "$KPKG" rinky nm
 cp -R "$B/rinky" "$B/nm" "$STAGE/kobo-drive/.adds/"
 zipdir "$STAGE/kobo-drive" "$OUT/rinky-$VERSION-kobo.zip"
 
-(cd "$OUT" && cat "$(basename "$PKG").sha256" "$(basename "$KPKG").sha256" >SHA256SUMS &&
+(cd "$OUT" && cat "$(basename "$PKG").sha256" "$(basename "$KP").sha256" "$(basename "$KPKG").sha256" >SHA256SUMS &&
   sha256 "rinky-$VERSION-kindle.zip" "rinky-$VERSION-kobo.zip" >>SHA256SUMS)
 for d in "$K" "$B"; do log "$(basename "$d"): $(wc -l <"$d/rinky/FILES" | tr -d ' ') files"; done
+log "KPM: $(basename "$KP") ($(wc -c <"$KP" | tr -d ' ') bytes)"
 echo "$PKG"
+echo "$KP"
 echo "$KPKG"
