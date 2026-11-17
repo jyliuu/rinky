@@ -62,7 +62,7 @@ pub use gesture::{Corner, Direction, DoubleTapMode, Gesture, GestureRecognizer, 
 pub use icon::{Icon, IconView};
 pub use input::TextInput;
 pub use keyboard::{ClosingTap, KeyAction, Keyboard, KeyboardLayout};
-pub use list::{paint_cover, Card, CardKind, Cover, List, ListItem, ScrollView};
+pub use list::{paint_cover, Card, CardKind, Cover, Fold, List, ListItem, ScrollView};
 pub use refresh::{Damage, RefreshScheduler};
 pub use scrollbar::ScrollBar;
 pub use theme::{TextRole, Theme};
