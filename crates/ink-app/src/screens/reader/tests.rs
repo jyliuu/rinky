@@ -361,9 +361,10 @@ fn goto_contents_marks_the_current_chapter_and_jumps() {
     let o = h.reader.overlay.as_mut().unwrap();
     let b = o.tree.bounds(id).unwrap();
     let l = o.tree.get_mut::<ink_ui::List>(id).unwrap();
-    assert_eq!(l.selected, Some(cur));
+    let sel = l.selected.expect("the current chapter is shown");
+    assert_eq!(l.items[sel].action, format!("toc:{cur}"));
     // Tap the first row shown on the list's page.
-    let first = l.page * l.per_page(b);
+    let first: usize = l.items[l.first(b)].action.strip_prefix("toc:").unwrap().parse().unwrap();
     let target = doc.page_of(&toc[first].position).unwrap();
     h.tap_at(300, b.y + goto::ROW_H as i32 / 2);
     assert_eq!(h.reader.actions().last().unwrap(), &format!("toc:{first}"));
@@ -379,6 +380,50 @@ fn goto_contents_marks_the_current_chapter_and_jumps() {
     let pages = h.reader.doc.as_deref().unwrap().page_count().pages;
     assert!(h.reader.actions().last().unwrap().starts_with("pct:"), "{:?}", h.reader.actions());
     assert!((h.reader.page() as i64 - (pages / 2) as i64).abs() <= 3, "page {} of {pages}", h.reader.page());
+}
+
+#[test]
+fn goto_contents_folds_by_chevron_and_one_level_at_a_time() {
+    let mut h = Harness::new("goto-fold", "juliet.epub");
+    h.reader.go_to_page(100);
+    h.paint();
+    h.tap_at(636, 848);
+    h.tap_button("goto");
+    let rows = |h: &mut Harness| {
+        let o = h.reader.overlay.as_mut().unwrap();
+        let id = o.ids["list"];
+        let b = o.tree.bounds(id).unwrap();
+        let l = o.tree.get_mut::<ink_ui::List>(id).unwrap();
+        let items: Vec<(String, u8, Option<bool>)> = l.items.iter().map(|i| (i.action.clone(), i.level, i.fold.as_ref().map(|f| f.open))).collect();
+        (items, l.page, l.clone(), b)
+    };
+    let (start, _, _, _) = rows(&mut h);
+    let open_parents = start.iter().filter(|r| r.2 == Some(true)).count();
+    assert!(open_parents >= 1, "the current act is open: {start:?}");
+    // Collapse: back to the top level only, nothing left to collapse.
+    h.tap_button("toc-collapse");
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Goto));
+    h.shot("01-collapsed");
+    let (top, _, _, _) = rows(&mut h);
+    assert!(top.iter().all(|r| r.1 == 0 && r.2 != Some(true)), "{top:?}");
+    assert!(top.len() < start.len());
+    // Expand once: every act shows its scenes.
+    h.tap_button("toc-expand");
+    h.shot("02-expanded");
+    let (all, _, _, _) = rows(&mut h);
+    assert!(all.iter().any(|r| r.1 == 1) && all.iter().all(|r| r.2 != Some(false)), "{all:?}");
+    // The chevron of the first open entry on the page folds that entry alone.
+    let (_, _, l, b) = rows(&mut h);
+    let i = (0..l.items.len()).find(|&i| l.fold_rect(b, i).is_some() && l.items[i].fold.as_ref().unwrap().open).expect("an open entry on the page");
+    let fr = l.fold_rect(b, i).unwrap();
+    let action = l.items[i].fold.as_ref().unwrap().action.clone();
+    h.tap_at(fr.x + fr.w as i32 / 2, fr.y + fr.h as i32 / 2);
+    assert_eq!(h.reader.actions().last(), Some(&action));
+    assert_eq!(h.kind(), Some(overlay::OverlayKind::Goto), "folding does not jump");
+    h.shot("03-one-folded");
+    let (after, _, _, _) = rows(&mut h);
+    assert!(after.len() < all.len());
+    assert_eq!(after.iter().filter(|r| r.2 == Some(false)).count(), 1, "{after:?}");
 }
 
 #[test]
