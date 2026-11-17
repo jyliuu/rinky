@@ -518,6 +518,11 @@ impl super::ReaderScreen {
                 let o = self.goto_overlay(tab, size);
                 self.open_overlay(o, cx);
             }
+            _ if a.starts_with("fold:") || a == "toc-collapse" || a == "toc-expand" => {
+                if let Some(o) = self.fold_action(a, size) {
+                    self.open_overlay(o, cx);
+                }
+            }
             "export" => {
                 let text = self.export_highlights(cx.paths, cx.settings.export_format());
                 crate::export::toast(cx.plugins, text);
@@ -797,7 +802,7 @@ mod wired {
     }
 
     #[test]
-    fn goto_tabs_with_progress_and_highlights() {
+    fn goto_tabs_with_contents_and_highlights() {
         let mut h = Harness::new("wired-goto", "juliet.epub");
         // A saved highlight on page 31.
         let start = h.reader.doc.as_deref().unwrap().position_of_page(30).unwrap();
@@ -822,10 +827,12 @@ mod wired {
             let o = h.reader.overlay.as_mut().unwrap();
             let id = o.ids["list"];
             let l = o.tree.get_mut::<ink_ui::List>(id).unwrap();
-            assert_eq!(l.items[0].progress, Some(1.0), "{:?}", l.items[0]);
+            assert!(l.items.iter().all(|i| i.progress.is_none()), "no progress bars");
+            // Folded to the acts, with the current act open down to the current scene.
+            assert!(l.items.iter().any(|i| i.fold.as_ref().is_some_and(|f| !f.open)), "{:?}", l.items);
             let cur = l.selected.unwrap();
-            let p = l.items[cur].progress.unwrap();
-            assert!(p > 0.0 && p <= 1.0, "{p}");
+            assert_eq!(l.items[cur].checked, Some(true));
+            assert!(l.items[cur].level > 0, "{:?}", l.items[cur]);
         }
         act(&mut h, "gtab:2");
         h.shot("07c-goto-highlights");

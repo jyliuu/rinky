@@ -148,7 +148,11 @@ can have a leading icon or a book cover (`ListItem::cover`, 2:3, picture scaled 
 black frame, or a light placeholder with the title), title, muted italic subtitle,
 right-aligned detail, check mark, and `ListItem::progress` (a thin bar with the
 percentage along the bottom third). Dividers are 3 px `light`. Pressed row: inverted,
-DU, only that row refreshed. Page footer with arrows and "n / m".
+DU, only that row refreshed. Page footer with arrows and "n / m", or with
+`List::with_scroll_bar` a `ScrollBar` in a right column instead (the last screen ends
+on the last row). A tree row has `ListItem::level` (56 px indent per level) and a
+`Fold` chevron in a 96 px slot (right when closed, down when open) that reports its own
+action.
 
 ### Scroll bar: `ScrollBar`
 
@@ -221,11 +225,11 @@ drawn by hand for one setting:
 
 ### Icons: `Icon`, `IconView`
 
-45 vector icons on a 24-unit grid with 2-unit round-ended strokes, drawn at any size
+49 vector icons on a 24-unit grid with 2-unit round-ended strokes, drawn at any size
 (`Icon::draw`, `PaintCx::icon`): navigation (Back, Forward, Up, Down, Close, Menu, More),
 reading (Book, Library, Toc, Bookmark, Font, Search, Chat), views (Grid, ListView, Sort,
-Filter, Folder), status (Light, Night, Wifi, Battery, Clock, Sync, Download, Chart),
-editing and keyboard keys. Draw icons at 44-56 px in bars and rows, about half the
+Filter, Folder, UnfoldMore, UnfoldLess), status (Light, Night, Wifi, Battery, Clock,
+Sync, Download, Chart), editing and keyboard keys. Draw icons at 44-56 px in bars and rows, about half the
 button side in icon buttons. `Icon::ALL` lists them for the gallery.
 
 ## E-ink rules

@@ -119,6 +119,10 @@ icons! {
     Terminal,
     /// Large four-pointed sparkle with two small ones (AI).
     Sparkle,
+    /// A line with chevrons pointing away from it (expand a tree one level).
+    UnfoldMore,
+    /// A line with chevrons pointing at it (collapse a tree one level).
+    UnfoldLess,
 }
 
 impl Icon {
@@ -166,6 +170,16 @@ impl Icon {
             Icon::Forward => poly(&mut path, &[(9.0, 5.0), (16.0, 12.0), (9.0, 19.0)]),
             Icon::Up => poly(&mut path, &[(5.0, 15.0), (12.0, 8.0), (19.0, 15.0)]),
             Icon::Down => poly(&mut path, &[(5.0, 9.0), (12.0, 16.0), (19.0, 9.0)]),
+            Icon::UnfoldMore => {
+                poly(&mut path, &[(4.0, 12.0), (20.0, 12.0)]);
+                poly(&mut path, &[(7.5, 7.5), (12.0, 3.0), (16.5, 7.5)]);
+                poly(&mut path, &[(7.5, 16.5), (12.0, 21.0), (16.5, 16.5)]);
+            }
+            Icon::UnfoldLess => {
+                poly(&mut path, &[(4.0, 12.0), (20.0, 12.0)]);
+                poly(&mut path, &[(7.5, 3.0), (12.0, 7.5), (16.5, 3.0)]);
+                poly(&mut path, &[(7.5, 21.0), (12.0, 16.5), (16.5, 21.0)]);
+            }
             Icon::Close => {
                 poly(&mut path, &[(6.0, 6.0), (18.0, 18.0)]);
                 poly(&mut path, &[(18.0, 6.0), (6.0, 18.0)]);

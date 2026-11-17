@@ -4,6 +4,17 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- The table of contents is a tree you can fold: an arrow beside a part or act shows or
+  hides its chapters, and the collapse and expand buttons at the top fold everything
+  one level in or out. It opens folded to the top level with the current chapter's
+  parts open, and the per-chapter progress bars are gone.
+- The *Go to* page's lists (contents, bookmarks, highlights) have a scroll bar instead
+  of page numbers and arrows: swipe to move a screenful, or tap or drag the bar to
+  jump.
+
 ## [0.9.1] - 2026-11-14
 
 ### Fixed

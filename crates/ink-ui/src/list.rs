@@ -2,7 +2,11 @@
 //!
 //! - [`List`]: rows of [`ListItem`]s (title, subtitle, detail, leading icon or book
 //!   cover, reading progress, check mark) with a page footer. Tapping a row reports the
-//!   item's action.
+//!   item's action. Rows can be indented by level and carry a [`Fold`] chevron (a tree:
+//!   tapping the chevron reports the fold's action instead). [`List::with_scroll_bar`]
+//!   swaps the page footer for a [`ScrollBar`] at the right: a swipe still moves a
+//!   screenful, a tap or a drag on the bar jumps there (the drag moves only the bar,
+//!   DU; the lift shows the rows).
 //! - [`Card`]: a rounded panel (outlined or filled) with an optional cover, title,
 //!   subtitle, body and progress; tappable. Other widgets can be its children.
 //! - [`Cover`] and [`paint_cover`]: a book cover thumbnail, or a placeholder with the
@@ -14,6 +18,7 @@
 use crate::draw::{fill_round_rect, stroke_round_rect, Path};
 use crate::gesture::{Direction, Gesture, TouchKind};
 use crate::icon::Icon;
+use crate::scrollbar::ScrollBar;
 use crate::theme::space;
 use crate::widget::{follow_press, look_damage, press_class, press_or_tap, take_gestures, EventResult, PaintCx, Widget};
 use crate::UiEvent;
@@ -39,12 +44,32 @@ pub struct ListItem {
     pub cover: Option<Cover>,
     /// Reading progress (0..=1): a thin bar with the percentage under the subtitle.
     pub progress: Option<f32>,
+    /// Nesting level: the row's content is indented [`INDENT`] per level (at most 4).
+    pub level: u8,
+    /// Fold chevron left of the title (a tree row with children).
+    pub fold: Option<Fold>,
 }
+
+/// The chevron of a tree row with children: pointing down when open, right when closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fold {
+    /// The children are shown.
+    pub open: bool,
+    /// Action reported on a tap on the chevron.
+    pub action: String,
+}
+
+/// Indent per nesting level of a [`ListItem`].
+pub const INDENT: i32 = 56;
+/// Width of the fold chevron's slot (a touch target), kept on every row of a list with
+/// any [`Fold`] so the titles of one level line up.
+pub const FOLD_W: u32 = 96;
+const _: () = assert!(FOLD_W >= 96, "the fold chevron is a touch target");
 
 impl ListItem {
     /// A row with a title.
     pub fn new(title: impl Into<String>, action: impl Into<String>) -> Self {
-        ListItem { title: title.into(), subtitle: None, detail: None, icon: None, action: action.into(), checked: None, cover: None, progress: None }
+        ListItem { title: title.into(), subtitle: None, detail: None, icon: None, action: action.into(), checked: None, cover: None, progress: None, level: 0, fold: None }
     }
 
     setters! {
@@ -60,6 +85,14 @@ impl ListItem {
         cover(c: Cover) => cover = Some(c);
         /// With reading progress (0..=1).
         progress(p: f32) => progress = Some(p);
+        /// At nesting level `l`.
+        level(l: u8) => level = l;
+    }
+
+    /// With a fold chevron (`open`) reporting `action`.
+    pub fn fold(mut self, open: bool, action: impl Into<String>) -> Self {
+        self.fold = Some(Fold { open, action: action.into() });
+        self
     }
 }
 
@@ -270,20 +303,58 @@ pub struct List {
     pub page: usize,
     /// Highlighted row (the last tapped).
     pub selected: Option<usize>,
+    /// A scroll bar at the right instead of the page footer.
+    pub scroll_bar: bool,
     pressed: Option<usize>,
     changed: Vec<usize>,
     page_changed: bool,
+    /// A finger on the scroll bar: the page under it (shown on the bar only).
+    bar_drag: Option<usize>,
+    /// The drag preview changed: repaint the bar only.
+    bar_changed: bool,
 }
 
 impl List {
     /// A list with touch-sized rows.
     pub fn new(items: Vec<ListItem>, row_h: u32) -> Self {
-        List { items, row_h, page: 0, selected: None, pressed: None, changed: Vec::new(), page_changed: false }
+        List { items, row_h, page: 0, selected: None, scroll_bar: false, pressed: None, changed: Vec::new(), page_changed: false, bar_drag: None, bar_changed: false }
+    }
+
+    /// With a scroll bar instead of the page footer.
+    pub fn with_scroll_bar(mut self) -> Self {
+        self.scroll_bar = true;
+        self
     }
 
     /// Rows per page in `b`.
     pub fn per_page(&self, b: Rect) -> usize {
-        (b.h.saturating_sub(FOOTER_H) / self.row_h.max(1)).max(1) as usize
+        let h = if self.scroll_bar { b.h } else { b.h.saturating_sub(FOOTER_H) };
+        (h / self.row_h.max(1)).max(1) as usize
+    }
+
+    /// Index of the first row shown on `page`. With a scroll bar the last screen ends
+    /// on the last row (it may repeat rows of the screen before) instead of half empty.
+    fn first_of(&self, b: Rect, page: usize) -> usize {
+        let per = self.per_page(b);
+        let first = page.min(self.pages(b) - 1) * per;
+        if self.scroll_bar {
+            first.min(self.items.len().saturating_sub(per))
+        } else {
+            first
+        }
+    }
+
+    /// Index of the first row shown in `b`.
+    pub fn first(&self, b: Rect) -> usize {
+        self.first_of(b, self.page)
+    }
+
+    /// The scroll bar of the screen shown (or previewed by a drag), when there is one and
+    /// not everything fits.
+    fn bar(&self, b: Rect) -> Option<ScrollBar> {
+        let (total, per) = (self.items.len(), self.per_page(b));
+        let bar = ScrollBar::new(total, self.first_of(b, self.bar_drag.unwrap_or(self.page)), per.min(total));
+        (self.scroll_bar && bar.needed()).then_some(bar)
     }
 
     /// Number of pages in `b`.
@@ -292,7 +363,42 @@ impl List {
     }
 
     fn row_rect(&self, b: Rect, slot: usize) -> Rect {
-        Rect::new(b.x, b.y + (slot as u32 * self.row_h) as i32, b.w, self.row_h)
+        let w = if self.bar(b).is_some() { ScrollBar::content(b).w } else { b.w };
+        Rect::new(b.x, b.y + (slot as u32 * self.row_h) as i32, w, self.row_h)
+    }
+
+    /// The page whose items are under height `y` of the bar.
+    fn bar_page(&self, b: Rect, y: i32) -> usize {
+        let per = self.per_page(b);
+        ScrollBar::paged(self.items.len(), per, 0).item_at(ScrollBar::track(b), y) / per
+    }
+
+    /// True when `p` is on the scroll bar's touch zone.
+    fn on_bar(&self, b: Rect, p: ink_device::Point) -> bool {
+        self.bar(b).is_some() && ScrollBar::hit_rect(b).contains(p)
+    }
+
+    /// Left edge of a row's content after its indent.
+    fn content_x(&self, r: Rect, item: &ListItem) -> i32 {
+        let pad = if self.has_folds() { 16 } else { 32 };
+        r.x + pad + INDENT * item.level.min(4) as i32
+    }
+
+    fn has_folds(&self) -> bool {
+        self.items.iter().any(|i| i.fold.is_some())
+    }
+
+    /// The touch target of item `i`'s fold chevron in `b`, when it has one and is on the
+    /// page shown.
+    pub fn fold_rect(&self, b: Rect, i: usize) -> Option<Rect> {
+        let item = self.items.get(i)?;
+        item.fold.as_ref()?;
+        let first = self.first(b);
+        if i < first || i >= first + self.per_page(b) {
+            return None;
+        }
+        let r = self.row_rect(b, i - first);
+        Some(Rect::new(self.content_x(r, item), r.y, FOLD_W, r.h))
     }
 
     fn footer(&self, b: Rect) -> Rect {
@@ -301,11 +407,12 @@ impl List {
 
     /// Item index under `y`, if any.
     fn item_at(&self, b: Rect, x: i32, y: i32) -> Option<usize> {
-        if !b.contains(ink_device::Point::new(x, y)) || y >= self.footer(b).y {
+        let p = ink_device::Point::new(x, y);
+        if !b.contains(p) || (!self.scroll_bar && y >= self.footer(b).y) || self.on_bar(b, p) {
             return None;
         }
         let slot = ((y - b.y) / self.row_h as i32) as usize;
-        let i = self.page * self.per_page(b) + slot;
+        let i = self.first(b) + slot;
         (slot < self.per_page(b) && i < self.items.len()).then_some(i)
     }
 
@@ -324,7 +431,7 @@ impl Widget for List {
         let (fg, bg, muted) = (cx.theme.fg, cx.theme.bg, cx.theme.muted);
         let (px, small) = (cx.theme.font_px, cx.theme.small_px);
         let per = self.per_page(b);
-        let start = self.page * per;
+        let start = self.first(b);
         for (slot, i) in (start..(start + per).min(self.items.len())).enumerate() {
             let r = self.row_rect(b, slot);
             let item = &self.items[i];
@@ -340,7 +447,15 @@ impl Widget for List {
                 let rule = cx.theme.rule_px;
                 cx.canvas.fill_rect(r.x + 24, r.y - rule / 2, r.w as i32 - 48, rule, cx.theme.light);
             }
-            let mut x = r.x + 32;
+            let mut x = self.content_x(r, item);
+            if self.has_folds() {
+                if let Some(f) = &item.fold {
+                    let side = (r.h as f32 * 0.36) as u32;
+                    let icon = if f.open { Icon::Down } else { Icon::Forward };
+                    icon.draw(cx.canvas, Rect::new(x + (FOLD_W - side) as i32 / 2, r.y + (r.h - side) as i32 / 2, side, side), tfg);
+                }
+                x += FOLD_W as i32;
+            }
             if let (Some(cover), false) = (&item.cover, pressed) {
                 let h = r.h.saturating_sub(24);
                 let cr = Rect::new(x, r.y + 12, h * 2 / 3, h);
@@ -388,8 +503,16 @@ impl Widget for List {
                 None => cx.text_left(Rect::new(x, r.y, tw, r.h), &item.title, px, Style::Regular, tfg),
             }
         }
+        if let Some(bar) = self.bar(b) {
+            if self.bar_drag.is_some() {
+                bar.paint_drag(cx, ScrollBar::track(b));
+            } else {
+                bar.paint(cx, ScrollBar::track(b));
+            }
+            return;
+        }
         let pages = self.pages(b);
-        if pages > 1 {
+        if pages > 1 && !self.scroll_bar {
             let f = self.footer(b);
             cx.canvas.fill_rect(f.x, f.y, f.w as i32, cx.theme.rule_px, fg);
             let side = FOOTER_H / 2;
@@ -404,6 +527,28 @@ impl Widget for List {
 
     fn event(&mut self, ev: &UiEvent, b: Rect) -> EventResult {
         match ev {
+            // A finger on the scroll bar: the bar follows it, the rows on the lift.
+            UiEvent::Touch(t) if self.bar_drag.is_some() || (t.kind == TouchKind::Down && self.on_bar(b, t.pos)) => {
+                match t.kind {
+                    TouchKind::Up => {
+                        let page = self.bar_drag.take().unwrap_or(self.page);
+                        self.page = page;
+                        self.page_changed = true;
+                    }
+                    TouchKind::Cancel => {
+                        self.bar_drag = None;
+                        self.page_changed = true;
+                    }
+                    _ => {
+                        let page = self.bar_page(b, t.pos.y);
+                        if self.bar_drag != Some(page) {
+                            self.bar_drag = Some(page);
+                            self.bar_changed = true;
+                        }
+                    }
+                }
+                EventResult::Handled
+            }
             UiEvent::Touch(t) => {
                 let before = self.pressed;
                 let under = self.item_at(b, t.pos.x, t.pos.y);
@@ -413,8 +558,16 @@ impl Widget for List {
                 }
                 res
             }
+            // Gestures of a touch that began on the bar: its lift moved the list already.
+            UiEvent::Gesture(g) if self.on_bar(b, g.pos()) => EventResult::Handled,
             UiEvent::Gesture(Gesture::Tap { pos }) => {
                 if let Some(i) = self.item_at(b, pos.x, pos.y) {
+                    if let (Some(f), Some(fr)) = (&self.items[i].fold, self.fold_rect(b, i)) {
+                        if fr.contains(*pos) {
+                            self.changed.extend(self.pressed.take());
+                            return EventResult::Action(f.action.clone());
+                        }
+                    }
                     self.changed.extend(self.pressed.take());
                     self.changed.extend(self.selected);
                     self.changed.push(i);
@@ -422,7 +575,7 @@ impl Widget for List {
                     return EventResult::Action(self.items[i].action.clone());
                 }
                 let f = self.footer(b);
-                if f.contains(*pos) {
+                if !self.scroll_bar && f.contains(*pos) {
                     return self.turn(b, if pos.x < f.x + f.w as i32 / 2 { -1 } else { 1 });
                 }
                 EventResult::Handled
@@ -436,22 +589,20 @@ impl Widget for List {
     }
 
     fn refresh_class(&self) -> RefreshClass {
-        press_class(self.pressed.is_some())
+        press_class(self.pressed.is_some() || self.bar_drag.is_some())
     }
 
     fn damage(&mut self, b: Rect) -> Option<Vec<Rect>> {
         let changed = std::mem::take(&mut self.changed);
         if std::mem::take(&mut self.page_changed) {
+            self.bar_changed = false;
             return None;
         }
-        let per = self.per_page(b);
-        Some(
-            changed
-                .into_iter()
-                .filter(|i| *i / per == self.page)
-                .map(|i| self.row_rect(b, i % per))
-                .collect(),
-        )
+        if std::mem::take(&mut self.bar_changed) {
+            return Some(vec![ScrollBar::track(b)]);
+        }
+        let (first, per) = (self.first(b), self.per_page(b));
+        Some(changed.into_iter().filter(|i| (first..first + per).contains(i)).map(|i| self.row_rect(b, i - first)).collect())
     }
 }
 
@@ -700,6 +851,71 @@ mod tests {
         assert_eq!(l.event(&tap(100, 650), b), EventResult::Handled, "no row 26");
         l.event(&swipe(Direction::Down), b);
         assert_eq!(l.page, 1);
+    }
+
+    #[test]
+    fn fold_chevron_reports_its_own_action_and_indents_by_level() {
+        let items = vec![
+            ListItem::new("Part", "toc:0").fold(true, "fold:0"),
+            ListItem::new("Chapter", "toc:1").level(1),
+            ListItem::new("Leaf", "toc:2"),
+        ];
+        let b = Rect::new(0, 0, 800, 300 + FOOTER_H);
+        let mut l = List::new(items, 100);
+        let fr = l.fold_rect(b, 0).unwrap();
+        assert!(fr.w >= 96 && fr.h == 100, "{fr:?}");
+        assert_eq!(l.fold_rect(b, 1), None, "no chevron without children");
+        assert_eq!(l.event(&tap(fr.x + 10, 50), b), EventResult::Action("fold:0".into()));
+        assert_eq!(l.selected, None, "a fold tap does not select the row");
+        assert_eq!(l.event(&tap(600, 50), b), EventResult::Action("toc:0".into()));
+        // The chevron is drawn in its slot: open points down; the child is indented.
+        let theme = Theme::day();
+        let mut fonts = Fonts::load();
+        let mut canvas = Canvas::new(800, 400);
+        let mut t = WidgetTree::new();
+        t.add(None, Box::new(l), b);
+        t.paint(&mut PaintCx::new(&mut canvas, &mut fonts, &theme));
+        let ink = |r: Rect| (r.x..r.right()).flat_map(|x| (r.y..r.bottom()).map(move |y| (x, y))).filter(|(x, y)| canvas.get(*x, *y) == Some(0)).count();
+        assert!(ink(fr) > 20, "chevron drawn");
+        let indent = |y0: i32| (0..800).find(|x| (y0 + 20..y0 + 80).any(|y| canvas.get(*x, y) == Some(0)));
+        assert!(indent(100).unwrap() >= indent(200).unwrap() + INDENT, "child indented past the leaf");
+    }
+
+    #[test]
+    fn scroll_bar_replaces_the_footer_and_jumps_on_a_drag() {
+        let items: Vec<ListItem> = (0..25).map(|i| ListItem::new(format!("Row {i}"), format!("r:{i}"))).collect();
+        let b = Rect::new(0, 0, 800, 1000);
+        let mut l = List::new(items, 100).with_scroll_bar();
+        assert_eq!((l.per_page(b), l.pages(b)), (10, 3), "no footer: the rows use the whole height");
+        assert_eq!(l.event(&tap(100, 950), b), EventResult::Action("r:9".into()), "the last row is a row");
+        let touch = |kind, y| UiEvent::Touch(Touch { slot: 0, kind, pos: Point::new(790, y), start: Point::new(790, 10), held: Duration::ZERO, moved: kind != TouchKind::Down });
+        // Down on the bar, drag to its bottom: only the bar previews (DU); the lift shows the page.
+        assert_eq!(l.event(&touch(TouchKind::Down, 10), b), EventResult::Handled);
+        l.event(&touch(TouchKind::Move, 990), b);
+        assert_eq!(l.page, 0, "rows wait for the lift");
+        assert_eq!(l.refresh_class(), RefreshClass::Du);
+        assert_eq!(l.damage(b), Some(vec![ScrollBar::track(b)]));
+        l.event(&touch(TouchKind::Up, 990), b);
+        assert_eq!(l.page, 2);
+        // The last screen ends on the last row: rows 15..25, not 20..25 and blanks.
+        assert_eq!(l.event(&tap(100, 50), b), EventResult::Action("r:15".into()));
+        assert_eq!(l.damage(b), None, "the whole list repaints");
+        // The tap gesture of that touch does not open a row; a swipe still moves a screen.
+        assert_eq!(l.event(&tap(790, 990), b), EventResult::Handled);
+        l.event(&swipe(Direction::Down), b);
+        assert_eq!(l.page, 1);
+        // The bar is drawn in the right column; rows stop short of it.
+        let theme = Theme::day();
+        let mut fonts = Fonts::load();
+        let mut canvas = Canvas::new(800, 1000);
+        let mut t = WidgetTree::new();
+        t.add(None, Box::new(l), b);
+        t.paint(&mut PaintCx::new(&mut canvas, &mut fonts, &theme));
+        let thumb = ScrollBar::new(25, 10, 10).thumb(ScrollBar::track(b));
+        assert_eq!(canvas.get(thumb.x + thumb.w as i32 / 2, thumb.y + thumb.h as i32 / 2), Some(0));
+        // Everything fits: no bar, full-width rows.
+        let short = List::new(vec![ListItem::new("One", "1")], 100).with_scroll_bar();
+        assert!(short.bar(b).is_none());
     }
 
     #[test]

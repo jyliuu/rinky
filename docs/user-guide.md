@@ -157,9 +157,13 @@ and *Close book*.
 
 ### Contents, bookmarks and search
 
-**Contents** opens the *Go to* page with three tabs. *Contents* lists the chapters with
-how much of each you have read. *Bookmarks* and *Highlights* list yours; tap one to go
-there. The percent slider at the bottom jumps anywhere in the book.
+**Contents** opens the *Go to* page with three tabs. *Contents* lists the chapters as
+a tree, folded to the top level with the current chapter's parts open and the current
+chapter marked. Tap the arrow left of an entry to show or hide its sections, or the
+collapse and expand buttons at the top right (left of the close button) to fold every
+entry one level in or out; tap a title to go there. *Bookmarks* and *Highlights* list
+yours; tap one to go there. Swipe up or down to move a screenful, or tap or drag the
+scroll bar at the right to jump. The percent slider at the bottom jumps anywhere in the book.
 
 Tap the top-left corner of a page, or **Bookmark** in the menu, to bookmark the page or
 remove its bookmark.

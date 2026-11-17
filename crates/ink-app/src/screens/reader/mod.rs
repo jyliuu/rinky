@@ -564,6 +564,9 @@ pub struct ReaderScreen {
     sel_settle: Option<Rect>,
     /// The book's table of contents (read once).
     toc: Option<Vec<TocEntry>>,
+    /// Which TOC entries the Go to panel shows open (one per entry; reset when the
+    /// count changes).
+    toc_open: Vec<bool>,
     /// Every overlay action handled, in order (tests and logs).
     actions: Vec<String>,
     /// An overlay closed during a touch: the gestures of that touch (a slider drag ends
@@ -740,6 +743,7 @@ impl ReaderScreen {
             sel_settle: None,
             overlay: None,
             toc: None,
+            toc_open: Vec::new(),
             actions: Vec::new(),
             swallow_gestures: false,
             slide: None,
@@ -1076,7 +1080,19 @@ impl ReaderScreen {
             })
             .collect();
         self.listed_marks = marks.into_iter().map(|(_, b)| b).collect();
-        goto::GotoInfo { tab, toc: rows, current: current_chapter(doc, toc, page), bookmarks, percent: footer::bar_progress(doc, page) }
+        // Folded to the top level until the reader opens entries.
+        if self.toc_open.len() != toc.len() {
+            self.toc_open = vec![false; toc.len()];
+        }
+        goto::GotoInfo {
+            tab,
+            toc: rows,
+            current: current_chapter(doc, toc, page),
+            open: self.toc_open.clone(),
+            bookmarks,
+            percent: footer::bar_progress(doc, page),
+            anchor: None,
+        }
     }
 
     /// Adds a bookmark on the current page, or removes the ones on it. Returns true when
