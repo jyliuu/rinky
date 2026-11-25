@@ -21,6 +21,10 @@ const MAX_GAP: u64 = 3 * 24 * 3600;
 /// A rise of this many points between two samples is a charge (smaller ones are the
 /// reading wobbling).
 const CHARGED: u8 = 3;
+/// After a wake the fuel gauge still reports the charge from before the sleep and
+/// updates it some seconds later (15 to 60 s on a Paperwhite 6). A drop that shows up
+/// within this many seconds of a wake was used asleep.
+const WAKE_SETTLE: u64 = 120;
 /// The file is rewritten without old samples when it grows past this many lines.
 const MAX_LINES: usize = 4000;
 
@@ -180,18 +184,32 @@ impl Stats {
     pub fn from_samples(samples: &[Sample], now: u64) -> Stats {
         let mut st = Stats::default();
         let recent: Vec<&Sample> = samples.iter().filter(|s| now.saturating_sub(s.t) < KEEP.as_secs()).collect();
+        // Time of the last wake sample (the first sample after one taken going to sleep).
+        let mut woke: Option<u64> = None;
         for w in recent.windows(2) {
             let (a, b) = (w[0], w[1]);
+            // A drop the gauge reports just after a wake was used asleep.
+            let settling = a.awake && woke.is_some_and(|t| b.t.saturating_sub(t) <= WAKE_SETTLE);
+            if !a.awake {
+                woke = Some(b.t);
+            }
             let dt = b.t.saturating_sub(a.t);
-            if a.charging || b.charging || dt == 0 || dt > MAX_GAP || b.percent >= a.percent + CHARGED {
+            // Two samples in the same second (a sleep and a wake) are no gap; a clock set
+            // back is.
+            if a.charging || b.charging || b.t < a.t || dt > MAX_GAP || b.percent >= a.percent + CHARGED {
                 // A charge (or a gap) ends the run since the last charge.
                 st.since_charge = Use::default();
                 continue;
             }
             // The reading wobbles by a point or two: a small rise counts as nothing used.
             let (used, hours) = (a.percent.saturating_sub(b.percent) as f32, dt as f32 / 3600.0);
-            let part = if a.awake { &mut st.awake } else { &mut st.asleep };
-            part.add(used, hours);
+            if settling {
+                st.awake.add(0.0, hours);
+                st.asleep.add(used, 0.0);
+            } else {
+                let part = if a.awake { &mut st.awake } else { &mut st.asleep };
+                part.add(used, hours);
+            }
             st.since_charge.add(used, hours);
         }
         st
@@ -268,6 +286,41 @@ mod tests {
         let st = Stats::from_samples(&more, t0 + 16 * H);
         assert_eq!(st.since_charge, Use::default());
         assert_eq!(st.per_hour(), Some(Rate::About(20.0 / 13.0)));
+    }
+
+    #[test]
+    fn a_drop_reported_just_after_a_wake_was_used_asleep() {
+        let t0 = 1_700_000_000;
+        // Asleep 10 h; the gauge still says 51 at the wake and 48 twenty seconds later
+        // (seen on a Paperwhite 6), then a point goes in an hour of reading.
+        let samples = [
+            s(t0, 51, false, false),
+            s(t0 + 10 * H, 51, false, true),
+            s(t0 + 10 * H + 20, 48, false, true),
+            s(t0 + 11 * H, 47, false, true),
+        ];
+        let st = Stats::from_samples(&samples, t0 + 11 * H);
+        assert_eq!(st.asleep.percent, 3.0);
+        assert_eq!(st.asleep.hours, 10.0);
+        assert_eq!(st.awake.percent, 1.0);
+        assert!((st.awake.hours - 1.0).abs() < 1e-4, "{}", st.awake.hours);
+        assert_eq!(st.since_charge.percent, 4.0);
+        // A drop more than two minutes after the wake was used awake.
+        let later = [s(t0, 51, false, false), s(t0 + 10 * H, 51, false, true), s(t0 + 10 * H + 300, 50, false, true)];
+        let st = Stats::from_samples(&later, t0 + 11 * H);
+        assert_eq!((st.awake.percent, st.asleep.percent), (1.0, 0.0));
+    }
+
+    #[test]
+    fn samples_in_the_same_second_do_not_end_the_run_since_a_charge() {
+        let t0 = 1_700_000_000;
+        // A cover bump: sleep and wake in the same second.
+        let samples = [s(t0, 80, false, true), s(t0 + H, 78, false, false), s(t0 + H, 78, false, true), s(t0 + 2 * H, 76, false, true)];
+        let st = Stats::from_samples(&samples, t0 + 2 * H);
+        assert_eq!(st.since_charge, Use { percent: 4.0, hours: 2.0 });
+        // A clock set back still ends it.
+        let back = [s(t0, 80, false, true), s(t0 + H, 78, false, true), s(t0 + 30, 78, false, true), s(t0 + 30 + H, 77, false, true)];
+        assert_eq!(Stats::from_samples(&back, t0 + 2 * H).since_charge, Use { percent: 1.0, hours: 1.0 });
     }
 
     #[test]
