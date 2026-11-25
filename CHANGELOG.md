@@ -4,6 +4,14 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The battery page counts the charge used while asleep as asleep. The Kindle reports
+  the new charge only some seconds after it wakes, so the page used to show almost no
+  use asleep and too much awake. "Since the last charge" no longer starts over when
+  the cover is closed and opened within a second.
+
 ## [0.9.2] - 2026-11-17
 
 ### Changed
