@@ -3104,15 +3104,22 @@ impl PluginUi {
     }
 
     /// True when `plugin`'s request `req` may open now: not modal, no modal layer open,
-    /// or the keyboard or a dialog over the plugin's own chat view (a viewer with an
-    /// input bar, [`MarkdownView::stacks`]) when that viewer is the only modal layer.
+    /// or, when one of the plugin's own viewers is the only modal layer, a dialog over
+    /// it (a chat list confirms a delete) or the keyboard over its chat view (a viewer
+    /// with an input bar, [`MarkdownView::stacks`]).
     fn can_start(&self, plugin: &str, req: &UiRequest) -> bool {
         if !opens_modal(req) || !self.modal_open() {
             return true;
         }
         let mut modals = self.layers.iter().filter(|l| l.kind.modal());
         let (Some(only), None) = (modals.next(), modals.next()) else { return false };
-        matches!(req, UiRequest::TextInput { .. } | UiRequest::Dialog { .. }) && only.plugin == plugin && matches!(&only.kind, Kind::Viewer(v) if v.stacks())
+        let Kind::Viewer(v) = &only.kind else { return false };
+        only.plugin == plugin
+            && match req {
+                UiRequest::Dialog { .. } => true,
+                UiRequest::TextInput { .. } => v.stacks(),
+                _ => false,
+            }
     }
 
     /// Requests waiting to be shown.
@@ -3866,6 +3873,15 @@ mod tests {
         let held = UiEvent::Gesture(Gesture::LongPress { pos: p, held: Duration::from_millis(500) });
         assert_eq!(ui.handle(&held, screen()).1, vec![("p".to_string(), 2, "hold:open/c1".to_string())]);
         assert_eq!(ui.layer_names(), vec!["viewer"], "the view stays");
+        // The plugin asks to confirm (Insightful: "Delete this chat?"): the dialog opens
+        // over its list at once. It waited for the list to close: a hold showed nothing.
+        ui.push("p", UiRequest::Dialog { id: 3, title: "Delete this chat?".into(), body: "Chat".into(), buttons: vec![("Cancel".into(), "cancel".into()), ("Delete".into(), "delete".into())] });
+        s.ui(&mut ui, false);
+        assert_eq!(ui.layer_names(), vec!["viewer", "dialog"]);
+        // Another plugin's dialog still waits for the view to close.
+        ui.push("q", UiRequest::Dialog { id: 1, title: "Other".into(), body: "x".into(), buttons: vec![("OK".into(), "ok".into())] });
+        s.ui(&mut ui, false);
+        assert_eq!(ui.layer_names(), vec!["viewer", "dialog"]);
     }
 
     /// Tables as models write them, in an answer card: one without outer pipes, one

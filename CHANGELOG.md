@@ -4,6 +4,12 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Holding a chat in Insightful's chat list asks again whether to delete it. The
+  question waited until the list was closed, so a hold seemed to do nothing.
+
 ## [0.9.4] - 2026-11-26
 
 ### Fixed
