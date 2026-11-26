@@ -547,6 +547,28 @@ fn home_lists_books_then_shows_continue_reading_after_the_reader() {
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
+/// The app quit (or stopped) while a book was open: the library never came back to read
+/// its progress, so library.json is behind. The next start reads the progress of the
+/// books read last from their sidecars.
+#[test]
+fn progress_of_the_last_book_read_is_fresh_after_the_app_quit_in_the_reader() {
+    let (dir, paths) = books("quit-in-reader", &["juliet.epub", "formats/sample.fb2"]);
+    let mut h = Harness::new("quit-in-reader", &dir, paths);
+    let j = dir.join("juliet.epub");
+    h.tap(|x| *x == Hit::Book(j.clone()));
+    assert_eq!(h.pushed(), vec![Route::Reader(j.clone())]);
+    // The reader wrote 60 %; the app quit there.
+    BookState { position: Some("/body/DocFragment[5].0".into()), percent: Some(0.6), ..Default::default() }.save(&j).unwrap();
+    // The next start: a new library screen on the saved library.json.
+    h.screen = LibraryScreen::new();
+    let p = providers();
+    h.screen.on_enter(&mut cx!(h, p)).unwrap();
+    let b = h.screen.library().unwrap().index.get(&j).unwrap();
+    assert_eq!((b.status, b.percent), (ReadingStatus::Reading, Some(0.6)));
+    h.settle_metadata();
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn a_book_the_reader_opened_next_counts_as_opened_back_in_the_library() {
     let (dir, paths) = books("opened-next", &["juliet.epub", "formats/sample.fb2"]);
