@@ -50,13 +50,13 @@ impl Badge {
 }
 
 /// Whether the library shows a progress bar for `b` (every view: list, grid, Home,
-/// details): a finished book, or one with at least 1 % read (as the label rounds). Never
+/// details): a finished book, or one with at least 1 % read (as the label shows it). Never
 /// for a book marked unread (whatever position it kept), one at 0 %, or a locked one.
 pub fn shows_progress(b: &BookEntry) -> bool {
     if b.unsupported || b.status == ReadingStatus::New {
         return false;
     }
-    b.status == ReadingStatus::Complete || b.percent.is_some_and(|v| (v.clamp(0.0, 1.0) * 100.0).round() >= 1.0)
+    b.status == ReadingStatus::Complete || b.percent.is_some_and(|v| percent_text(v) != "0%")
 }
 
 /// Progress (0..=1) of a book that is being read, or the badge it gets instead: a book
@@ -72,9 +72,11 @@ pub fn book_state(b: &BookEntry) -> Result<f32, Badge> {
     }
 }
 
-/// `42%` (clamped; NaN reads `0%`).
+/// `42%` (clamped; NaN reads `0%`), rounded down like the reader's status bar and menu
+/// ([`crate::screens::reader::footer::percent_text`]), so a book reads the same percent
+/// in the library as in the book (rounded, it read 100 % a few pages before the end).
 pub fn percent_text(v: f32) -> String {
-    format!("{}%", (v.clamp(0.0, 1.0) * 100.0).round() as u32)
+    crate::screens::reader::footer::percent_text(v)
 }
 
 /// Width of a chip with `label` (and a leading icon or check mark).
@@ -553,5 +555,8 @@ mod tests {
         assert_eq!(percent_text(0.424), "42%");
         assert_eq!(percent_text(f32::NAN), "0%");
         assert_eq!(percent_text(3.0), "100%");
+        // Rounded down as in the reader: 100 % only at the end.
+        assert_eq!(percent_text(0.996), "99%");
+        assert_eq!(percent_text(0.429), "42%");
     }
 }
