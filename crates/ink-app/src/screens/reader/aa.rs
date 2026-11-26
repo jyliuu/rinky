@@ -884,9 +884,16 @@ pub const PREVIEW_PARAS: [&str; 2] = [
 
 /// Height of the preview block.
 pub const PREVIEW_H: u32 = 212;
+/// The preview's height when a one-column sheet needs the room for its rows (two lines
+/// of text at the default size and spacing).
+pub const PREVIEW_MIN_H: u32 = 128;
 /// Height of a slider row (its buttons are this square).
 pub const ROW_H: u32 = 104;
 const GAP: u32 = 16;
+/// Caption line of a slider in the two-column grid (caption and value above the track).
+const SLIDER_CAPTION_H: u32 = 64;
+/// Space between the two columns of the slider grid.
+const GRID_GAP: u32 = 48;
 const CAPTION_H: u32 = 44;
 const CONTROL_H: u32 = 104;
 
@@ -981,9 +988,19 @@ impl SliderPanel {
         true
     }
 
-    /// Height for `n` rows under a preview of `preview_h`.
-    fn height(n: usize, preview_h: u32) -> u32 {
+    /// Height for `n` rows under a preview of `preview_h` in a panel `w` wide.
+    fn height(n: usize, preview_h: u32, w: u32) -> u32 {
+        if Self::grid(w, n) {
+            return preview_h + GAP + n.div_ceil(2) as u32 * (SLIDER_CAPTION_H + ROW_H + GAP) - GAP;
+        }
         preview_h + GAP + n as u32 * (ROW_H + GAP) - GAP
+    }
+
+    /// A panel `w` wide (the portrait sheet) puts several sliders two to a line, each
+    /// with its caption above it: one per line, the preview had to give them its room,
+    /// and two narrow sheet columns left each track about 100 px.
+    fn grid(w: u32, n: usize) -> bool {
+        n >= 2 && (1000..1400).contains(&w)
     }
 
     /// (preview, rows) inside `b`; side by side when `b` is wide (landscape).
@@ -995,15 +1012,32 @@ impl SliderPanel {
             let w = b.w.saturating_sub(pw + 32);
             return (preview, (0..n).map(|i| Rect::new(x, b.y + (i as u32 * (ROW_H + GAP)) as i32, w, ROW_H)).collect());
         }
+        if Self::grid(b.w, n) {
+            let cell_h = SLIDER_CAPTION_H + ROW_H;
+            let ph = b.h.saturating_sub(n.div_ceil(2) as u32 * (cell_h + GAP)).max(PREVIEW_MIN_H.min(b.h));
+            let preview = Rect::new(b.x, b.y, b.w, ph);
+            let y0 = b.y + (ph + GAP) as i32;
+            let cw = (b.w - GRID_GAP) / 2;
+            let cell = |i: u32| Rect::new(b.x + (i % 2 * (cw + GRID_GAP)) as i32, y0 + (i / 2 * (cell_h + GAP)) as i32, cw, cell_h);
+            return (preview, (0..n as u32).map(cell).collect());
+        }
         // The preview takes what the rows leave.
-        let ph = b.h.saturating_sub(n as u32 * (ROW_H + GAP)).max(PREVIEW_H.min(b.h));
+        let ph = b.h.saturating_sub(n as u32 * (ROW_H + GAP)).max(PREVIEW_MIN_H.min(b.h));
         let preview = Rect::new(b.x, b.y, b.w, ph);
         let y0 = b.y + (ph + GAP) as i32;
         (preview, (0..n).map(|i| Rect::new(b.x, y0 + (i as u32 * (ROW_H + GAP)) as i32, b.w, ROW_H)).collect())
     }
 
-    /// (caption, minus, track, plus) of one row.
+    /// (caption, minus, track, plus) of one row (a grid cell: caption line above).
     fn parts(row: Rect) -> (Rect, Rect, Rect, Rect) {
+        if row.h > ROW_H {
+            let label = Rect::new(row.x + 8, row.y, row.w.saturating_sub(16), row.h - ROW_H);
+            let y = row.bottom() - ROW_H as i32;
+            let minus = Rect::new(row.x, y, ROW_H, ROW_H);
+            let plus = Rect::new(row.right() - ROW_H as i32, y, ROW_H, ROW_H);
+            let track = Rect::new(minus.right() + 24, y, (plus.x - minus.right() - 48).max(1) as u32, ROW_H);
+            return (label, minus, track, plus);
+        }
         let label_w = (row.w * 9 / 25).min(420);
         let label = Rect::new(row.x + 8, row.y, label_w.saturating_sub(8), row.h);
         let minus = Rect::new(row.x + label_w as i32 + 8, row.y, ROW_H, ROW_H);
@@ -1050,11 +1084,20 @@ impl SliderPanel {
         let v = self.shown.borrow().get(self.which[k]);
         let fg = cx.theme.fg;
         let (label, minus, track, plus) = Self::parts(row);
-        // Caption above, value below (bold), in the label column.
-        let top = Rect::new(label.x, label.y + 4, label.w, label.h / 2 - 4);
-        let bottom = Rect::new(label.x, label.y + label.h as i32 / 2, label.w, label.h / 2 - 4);
-        cx.text_left(top, spec.label, cx.theme.small_px, Style::Regular, fg);
-        cx.text_left(bottom, &spec.shown_text(v), cx.theme.font_px, Style::Bold, fg);
+        let value = spec.shown_text(v);
+        if label.h < ROW_H {
+            // Grid cell: caption at the left, value (bold) at the right of one line.
+            let px = cx.theme.font_px;
+            let w = cx.text_width(Style::Bold, px, &value).ceil() as u32 + 4;
+            cx.text_left(label, spec.label, px, Style::Regular, fg);
+            cx.text_left(Rect::new(label.right() - w as i32, label.y, w, label.h), &value, px, Style::Bold, fg);
+        } else {
+            // Caption above, value below (bold), in the label column.
+            let top = Rect::new(label.x, label.y + 4, label.w, label.h / 2 - 4);
+            let bottom = Rect::new(label.x, label.y + label.h as i32 / 2, label.w, label.h / 2 - 4);
+            cx.text_left(top, spec.label, cx.theme.small_px, Style::Regular, fg);
+            cx.text_left(bottom, &value, cx.theme.font_px, Style::Bold, fg);
+        }
         paint_round_button(cx, minus, Icon::Minus);
         paint_round_button(cx, plus, Icon::Plus);
         let f = if spec.max > spec.min { (v - spec.min) / (spec.max - spec.min) } else { 0.0 };
@@ -1347,6 +1390,11 @@ impl Widget for FamilyGrid {
 struct Row {
     caption: Option<&'static str>,
     h: u32,
+    /// The height the row can do with when the sheet is short (a slider panel's preview
+    /// shrinks): one column with a smaller preview beats two narrow ones.
+    min_h: u32,
+    /// A slider panel of this many sliders: its height depends on its width ([`Row::fit`]).
+    sliders: Option<usize>,
     /// The widgets with their [`Overlay::ids`] keys.
     widgets: Vec<(&'static str, Box<dyn Widget>)>,
     /// In the narrow columns of the landscape sheet the widgets go one under the other
@@ -1356,12 +1404,25 @@ struct Row {
 
 impl Row {
     fn one(key: &'static str, caption: Option<&'static str>, h: u32, widget: Box<dyn Widget>) -> Self {
-        Row { caption, h, widgets: vec![(key, widget)], stack_narrow: false }
+        Row { caption, h, min_h: h, sliders: None, widgets: vec![(key, widget)], stack_narrow: false }
+    }
+
+    /// A slider panel of `n` rows: its preview may shrink to [`PREVIEW_MIN_H`].
+    fn sliders(key: &'static str, n: usize, panel: SliderPanel) -> Self {
+        Row { sliders: Some(n), ..Row::one(key, None, 0, Box::new(panel)) }
+    }
+
+    /// Sets a slider panel's heights for a column `w` wide.
+    fn fit(&mut self, w: u32) {
+        if let Some(n) = self.sliders {
+            self.h = SliderPanel::height(n, PREVIEW_H, w);
+            self.min_h = SliderPanel::height(n, PREVIEW_MIN_H, w);
+        }
     }
 
     /// Two controls side by side.
     fn pair(a: (&'static str, Box<dyn Widget>), b: (&'static str, Box<dyn Widget>), stack_narrow: bool) -> Self {
-        Row { caption: None, h: CONTROL_H, widgets: vec![a, b], stack_narrow }
+        Row { caption: None, h: CONTROL_H, min_h: CONTROL_H, sliders: None, widgets: vec![a, b], stack_narrow }
     }
 
     /// Height with the widgets side by side (or `stacked`: one under the other).
@@ -1408,14 +1469,14 @@ fn rows(tab: Tab, shown: &Rc<RefCell<Shown>>, size: Size) -> Vec<Row> {
             }
             vec![
                 Row::one("preset", None, CONTROL_H, seg(presets, |s| s.preset().map_or(-1.0, |i| i as f32))),
-                Row::one("size", None, SliderPanel::height(1, PREVIEW_H), Box::new(SliderPanel::new(vec![0], shown, screen_w))),
+                Row::sliders("size", 1, SliderPanel::new(vec![0], shown, screen_w)),
                 Row::one("font", Some("Font"), 2 * CONTROL_H + GAP, Box::new(FamilyGrid { names: families, shown: shown.clone(), page: 0, painted: None })),
                 Row::pair(("justify", toggle("Justify", "aa-justify", |s| s.justify)), ("hyph", toggle("Hyphenate", "aa-hyph", |s| s.hyph)), false),
                 Row::pair(("publisher", toggle("Book's styles", "aa-publisher", |s| s.publisher)), ("weight", seg(chips(&WEIGHTS, "aa-weight"), |s| s.weight as f32)), true),
             ]
         }
         Tab::Layout => vec![
-            Row::one("sliders", None, SliderPanel::height(4, PREVIEW_H), Box::new(SliderPanel::new(vec![1, 2, 3, 4], shown, screen_w))),
+            Row::sliders("sliders", 4, SliderPanel::new(vec![1, 2, 3, 4], shown, screen_w)),
             Row::one("pspace", Some("Space between paragraphs"), CONTROL_H, seg(chips(&PARA_SPACINGS, "aa-pspace"), |s| s.para_space)),
             Row::one("indent", Some("First-line indent"), CONTROL_H, seg(chips(&INDENTS, "aa-indent"), |s| s.indent)),
             Row::one("annotations", None, CONTROL_H, toggle("Annotations", "aa-annotations", |s| s.annotations)),
@@ -1520,10 +1581,30 @@ pub fn build_tab(l: &LayoutSettings, extras: &AaExtras, tab: usize, size: Size) 
     let body = Rect::new(c.x, tabs_r.bottom() + 24, c.w, (c.bottom() - tabs_r.bottom() - 24).max(0) as u32);
     let global_h = if global { CONTROL_H + GAP } else { 0 };
     let area = Rect::new(body.x, body.y, body.w, body.h.saturating_sub(global_h));
-    // One column; two when the rows do not fit (landscape).
-    let total: u32 = rows.iter().map(|r| r.total(false) + GAP).sum();
-    let cols = if total > area.h + GAP && area.w >= 1000 { 2 } else { 1 };
+    // One column, its previews smaller when that makes the rows fit; two columns when
+    // even that does not (landscape). Two columns in portrait would leave the sliders
+    // short tracks between their buttons.
+    for row in &mut rows {
+        row.fit(area.w);
+    }
+    let mut total: u32 = rows.iter().map(|r| r.total(false) + GAP).sum();
+    let over = total.saturating_sub(area.h + GAP);
+    let slack: u32 = rows.iter().map(|r| r.h - r.min_h).sum();
+    let cols = if over > slack && area.w >= 1000 { 2 } else { 1 };
     let col_w = (area.w - (cols - 1) * 48) / cols;
+    if cols == 2 {
+        for row in &mut rows {
+            row.fit(col_w);
+        }
+        total = rows.iter().map(|r| r.total(false) + GAP).sum();
+    } else {
+        let mut over = over.min(slack);
+        for row in &mut rows {
+            let d = over.min(row.h - row.min_h);
+            row.h -= d;
+            over -= d;
+        }
+    }
     let per_col = total.div_ceil(cols);
     let (mut col, mut y, mut used) = (0u32, area.y, 0u32);
     for row in rows.drain(..) {
@@ -1684,10 +1765,22 @@ mod tests {
                     assert!(seen.iter().all(|s| s.intersect(&r).is_empty()), "tab {tab} {key} {r:?} overlaps");
                     seen.push(r);
                 }
-                for key in ["size", "spacing", "mbottom"] {
-                    if let Some((m, _, p)) = slider_parts(&o, key) {
+                for key in ["size", "spacing", "margin", "mtop", "mbottom"] {
+                    if let Some((m, track, p)) = slider_parts(&o, key) {
                         assert!(m.w >= 96 && m.h >= 96 && p.w >= 96 && p.bottom() <= size.h as i32, "{key} {m:?} {p:?}");
+                        // Portrait: one full-width column (the Layout sliders two to a
+                        // line), so a track is long enough to set a value by dragging
+                        // (two sheet columns left it about 100 px).
+                        if size.w < size.h {
+                            assert!(track.w >= 300, "tab {tab} {key} track {track:?} in {size:?}");
+                        }
                     }
+                }
+                if size.w < size.h && tab == 1 && extras.fixed.is_none() {
+                    let sliders = o.tree.bounds(o.ids["sliders"]).unwrap();
+                    let indent = o.tree.bounds(o.ids["indent"]).unwrap();
+                    assert!(indent.y > sliders.bottom() && indent.w == sliders.w, "one column: {sliders:?} {indent:?}");
+                    assert!(preview_rect(&o).unwrap().h >= PREVIEW_H, "full preview: {:?}", preview_rect(&o));
                 }
                 let back = o.button_rect("aa-linkback").unwrap();
                 assert!(back.right() < size.w as i32 / 2 - 220 && back.h >= 96, "{back:?} clear of the title");
@@ -1757,7 +1850,7 @@ mod tests {
         let l = LayoutSettings::for_screen(1272, 1696);
         let shown = Rc::new(RefCell::new(Shown::new(&l, &AaExtras::default())));
         let mut p = SliderPanel::new(vec![1, 2], &shown, 1272);
-        let b = Rect::new(0, 0, 1200, SliderPanel::height(2, PREVIEW_H));
+        let b = Rect::new(0, 0, 1200, SliderPanel::height(2, PREVIEW_H, 1200));
         let (preview, rows) = SliderPanel::areas(b, 2);
         let (_, _, track, _) = SliderPanel::parts(rows[1]);
         let y = track.y + track.h as i32 / 2;
