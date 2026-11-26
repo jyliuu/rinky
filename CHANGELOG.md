@@ -4,6 +4,14 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Aa › Layout fits in one column again in portrait. Since the Annotations switch was
+  added, the tab split into two columns, which left each slider's track only a
+  finger wide. The four sliders now sit two to a line, each with its name and value
+  above it, under a full-size preview.
+
 ## [0.9.3] - 2026-11-25
 
 ### Fixed
