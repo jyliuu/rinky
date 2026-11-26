@@ -7,8 +7,9 @@ All notable changes to rinky are listed here. The format is based on
 ## [Unreleased]
 
 ### Added
-- Insightful's chat list can delete several chats at once: tap *Select*, tap the chats
-  you want gone (or *Select all*), then *Delete*.
+- Insightful's chat list can delete several chats at once: tap the check box at the
+  top, tap the chats you want gone (or select all), then the bin. Starting a new chat
+  is the **+** at the top of the list.
 
 ### Fixed
 - A book's progress in the library is the percent you see in the book. The library

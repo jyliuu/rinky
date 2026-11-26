@@ -1477,8 +1477,11 @@ enum BoxKind {
     Chip,
     /// A tappable outlined card.
     Card,
-    /// A card marked selected (`:::card LINK | CAPTION | selected`): filled `light`,
-    /// with a check mark on the right.
+    /// A card that a tap picks (`:::card LINK | CAPTION | unselected`): an empty round
+    /// check box on the right.
+    Pickable,
+    /// A picked card (`:::card LINK | CAPTION | selected`): filled `light`, with a
+    /// filled round check box on the right.
     Picked,
     /// A sheet row: icon and label.
     Row,
@@ -1515,8 +1518,9 @@ struct Group {
     link: Option<String>,
 }
 
-/// What [`split_directives`] returns.
-type Directives = (Vec<Seg>, Option<(String, String)>, bool, Option<String>);
+/// What [`split_directives`] returns: the segments, the input bar, sheet or not, the
+/// Back button's link and the app bar's icon buttons.
+type Directives = (Vec<Seg>, Option<(String, String)>, bool, Option<String>, Vec<(String, Icon)>);
 
 /// Splits `md` at `:::` directive lines: the segments, the input bar
 /// `(link, placeholder)` and whether the view is a sheet. Lines starting with `:::` and
@@ -1526,6 +1530,7 @@ fn split_directives(md: &str) -> Directives {
     let mut input = None;
     let mut sheet = false;
     let mut back = None;
+    let mut tools = Vec::new();
     let mut cur = (BoxKind::Plain, String::new(), String::new(), String::new());
     let flush = |cur: (BoxKind, String, String, String), segs: &mut Vec<Seg>| {
         if cur.0 != BoxKind::Plain || !cur.3.trim().is_empty() {
@@ -1544,13 +1549,17 @@ fn split_directives(md: &str) -> Directives {
                 "input" => input = Some((a, b)),
                 "sheet" => sheet = true,
                 "back" => back = Some(a),
+                // An icon button in the app bar, left of Close (an unknown icon: none).
+                "tool" => tools.extend(icon_named(&b).map(|i| (a, i))),
                 // `:::top` is read by `PluginUi::push`; `:::emphasis` asked for real bold
                 // and italics before every viewer had them, and is ignored.
                 "top" | "emphasis" => {}
-                // A card selected in a list where several can be picked.
-                "card" if b.rsplit_once('|').is_some_and(|(_, f)| f.trim() == "selected") => {
-                    let caption = b.rsplit_once('|').map(|(c, _)| c.trim().to_string()).unwrap_or_default();
-                    flush(std::mem::replace(&mut cur, (BoxKind::Picked, a, caption, String::new())), &mut segs);
+                // A card in a list where several are picked: `| selected` or `| unselected`
+                // after the caption.
+                "card" if b.rsplit_once('|').is_some_and(|(_, f)| matches!(f.trim(), "selected" | "unselected")) => {
+                    let (caption, flag) = b.rsplit_once('|').map(|(c, f)| (c.trim().to_string(), f.trim())).unwrap_or_default();
+                    let kind = if flag == "selected" { BoxKind::Picked } else { BoxKind::Pickable };
+                    flush(std::mem::replace(&mut cur, (kind, a, caption, String::new())), &mut segs);
                 }
                 _ => match BoxKind::WORDS.iter().find(|(w, _)| *w == word) {
                     Some(&(_, kind)) => flush(std::mem::replace(&mut cur, (kind, a, b, String::new())), &mut segs),
@@ -1566,7 +1575,7 @@ fn split_directives(md: &str) -> Directives {
         cur.3.push('\n');
     }
     flush(cur, &mut segs);
-    (segs, input, sheet, back)
+    (segs, input, sheet, back, tools)
 }
 
 /// Runs `f` with the UI family's real bold and italic faces
@@ -1589,8 +1598,9 @@ pub(crate) fn icon_named(name: &str) -> Option<Icon> {
 /// `:::you` (the user's message, a filled card on the right), `:::answer LABEL | FOOT`
 /// (an outlined card, label line on top, muted caption at the bottom), `:::action` (a
 /// compact gray chip), `:::chips` (each list item a tappable pill reporting its link),
-/// `:::card LINK | CAPTION` (a tappable outlined card; `| selected` after the caption
-/// draws it picked, filled with a check mark), each ended by `:::` or the next
+/// `:::card LINK | CAPTION` (a tappable outlined card; `| unselected` or `| selected`
+/// after the caption adds a round check box, empty or filled, and fills a selected
+/// card), each ended by `:::` or the next
 /// block. `:::input LINK | PLACEHOLDER` adds an input bar at the bottom whose tap
 /// reports LINK. `:::sheet` shows the view as a bottom sheet of `:::row LINK | ICON`
 /// rows (label as the body); a tap on a row or outside the sheet closes it (a row whose
@@ -1599,7 +1609,8 @@ pub(crate) fn icon_named(name: &str) -> Option<Icon> {
 /// `hold:LINK` and leaves the view open. `:::top` in
 /// a replacing request opens the new text at its first page (tabs; otherwise a view
 /// that was on its last page follows the end of the new text). `:::back LINK` adds a Back
-/// button to the app bar (left of the title) that reports LINK.
+/// button to the app bar (left of the title) that reports LINK; `:::tool LINK | ICON`
+/// adds an icon button to the app bar, left of Close (several in the order given).
 #[derive(Default)]
 pub struct MarkdownView {
     /// Title (a second line is the app bar's subtitle).
@@ -1612,6 +1623,8 @@ pub struct MarkdownView {
     pub sheet: bool,
     /// Link the Back button reports (`:::back`); no button when `None`.
     back: Option<String>,
+    /// Icon buttons in the app bar left of Close (`:::tool LINK | ICON`): link, icon.
+    tools: Vec<(String, Icon)>,
     /// Current page (0-based).
     pub page: usize,
     pages: Vec<Vec<Line>>,
@@ -1908,12 +1921,13 @@ impl MarkdownView {
 
     /// Replaces the text (keeps the page when possible).
     pub fn set_text(&mut self, markdown: &str) {
-        let (segs, input, sheet, back) = split_directives(markdown);
+        let (segs, input, sheet, back, tools) = split_directives(markdown);
         self.blocks = segs.iter().flat_map(|s| s.blocks.iter().cloned()).collect();
         self.segs = segs;
         self.input = input;
         self.sheet = sheet;
         self.back = back;
+        self.tools = tools;
         self.laid_for = None;
     }
 
@@ -1970,7 +1984,11 @@ impl MarkdownView {
             Some((t, s)) => (t, Some(s)),
             None => (self.title.as_str(), None),
         };
-        let mut bar = AppBar::new(title).action(BarAction::icon(Icon::Close, "closed"));
+        let mut bar = AppBar::new(title);
+        for (link, icon) in &self.tools {
+            bar = bar.action(BarAction::icon(*icon, link.clone()));
+        }
+        bar = bar.action(BarAction::icon(Icon::Close, "closed"));
         if self.back.is_some() {
             bar = bar.with_back();
         }
@@ -1982,7 +2000,14 @@ impl MarkdownView {
 
     /// Where a tap closes the view: the Close button with `space(2)` of slack.
     fn close_rect(&self, b: Rect) -> Rect {
-        with_slack(self.bar().action_rects(Rect::new(b.x, b.y, b.w, APP_BAR_H)).first().copied().unwrap_or_default())
+        with_slack(self.bar().action_rects(Rect::new(b.x, b.y, b.w, APP_BAR_H)).last().copied().unwrap_or_default())
+    }
+
+    /// The app bar's icon buttons (`:::tool`) with their links: the button's own cell
+    /// (no slack: they sit side by side).
+    fn tool_rects(&self, b: Rect) -> Vec<(Rect, String)> {
+        let rects = self.bar().action_rects(Rect::new(b.x, b.y, b.w, APP_BAR_H));
+        self.tools.iter().zip(rects).map(|((link, _), r)| (r, link.clone())).collect()
     }
 
     fn input_rect(b: Rect) -> Rect {
@@ -2201,9 +2226,9 @@ impl MarkdownView {
                     }
                     lines.push(gap_line(base * 0.4));
                 }
-                BoxKind::Card | BoxKind::Picked => {
-                    // A picked card keeps room for its check mark on the right.
-                    let picked = seg.kind == BoxKind::Picked;
+                BoxKind::Card | BoxKind::Pickable | BoxKind::Picked => {
+                    // A card that can be picked keeps room for its check box on the right.
+                    let picked = seg.kind != BoxKind::Card;
                     let inner = width - 2.0 * PAD - if picked { CHECK_W } else { 0.0 };
                     let mut body = if seg.b.is_empty() { Vec::new() } else { caption_lines(cx, &seg.b, cap, inner) };
                     body.extend(layout_blocks(cx, &seg.blocks, base, inner));
@@ -2453,13 +2478,24 @@ impl MarkdownView {
                     stroke_round_rect(cx.canvas, r, t.radius_lg, t.border_px as f32, fg);
                 }
                 BoxKind::Answer | BoxKind::Card => stroke_round_rect(cx.canvas, r, t.radius_lg, t.border_px as f32, fg),
-                BoxKind::Picked => {
-                    fill_round_rect(cx.canvas, r, t.radius_lg, t.light);
+                BoxKind::Pickable | BoxKind::Picked => {
+                    let picked = gr.kind == BoxKind::Picked;
+                    if picked {
+                        fill_round_rect(cx.canvas, r, t.radius_lg, t.light);
+                    }
                     stroke_round_rect(cx.canvas, r, t.radius_lg, t.border_px as f32, fg);
-                    // The check mark, centred on the card's right part (kept free of text).
+                    // The round check box, centred on the card's right part (kept free
+                    // of text): a ring, or a filled disc with a check in the background
+                    // colour.
                     let side = CHECK_SIDE as u32;
                     let check = Rect::new(r.right() - PAD as i32 - side as i32, r.y + (r.h as i32 - side as i32) / 2, side, side);
-                    cx.icon(Icon::Check, check, side, fg);
+                    let (ccx, ccy) = ink_ui::draw::center(check);
+                    if picked {
+                        ink_ui::draw::Path::new().circle(ccx, ccy, CHECK_SIDE / 2.0).fill(cx.canvas, fg);
+                        cx.icon(Icon::Check, check, side * 3 / 4, t.bg);
+                    } else {
+                        ink_ui::draw::Path::new().ring(ccx, ccy, CHECK_SIDE / 2.0 - 1.5, 3.0).fill(cx.canvas, fg);
+                    }
                 }
                 BoxKind::Action => {
                     let rad = (r.h as f32 / 2.0).min(t.radius_lg);
@@ -2550,7 +2586,8 @@ impl Widget for MarkdownView {
         } else {
             let px = t.title.px;
             let mut bar = self.bar();
-            bar.title = fit(cx, &bar.title, px, Style::Bold, b.w as f32 - 2.0 * MARGIN - 160.0 - if self.back.is_some() { 120.0 } else { 0.0 });
+            let room = b.w as f32 - 2.0 * MARGIN - 160.0 - if self.back.is_some() { 120.0 } else { 0.0 } - 120.0 * self.tools.len() as f32;
+            bar.title = fit(cx, &bar.title, px, Style::Bold, room);
             bar.paint(cx, Rect::new(b.x, b.y, b.w, APP_BAR_H));
         }
         // Content: boxes first, then the lines.
@@ -2620,12 +2657,14 @@ impl Widget for MarkdownView {
         match ev {
             UiEvent::Gesture(Gesture::Tap { pos }) => {
                 // The Close button, the Back button, the input bar, then the links.
+                let tools = self.tool_rects(b);
                 let buttons = [
                     Some((self.close_rect(b), "closed")),
                     self.back.as_deref().map(|l| (with_slack(AppBar::back_rect(Rect::new(b.x, b.y, b.w, APP_BAR_H))), l)),
                     self.input.as_ref().map(|(l, _)| (Self::input_rect(b), l.as_str())),
                 ];
-                let hit = buttons.into_iter().flatten().find(|(r, _)| r.contains(*pos)).map(|(_, a)| a.to_string());
+                let tool = tools.iter().find(|(r, _)| r.contains(*pos)).map(|(_, l)| l.clone());
+                let hit = tool.or_else(|| buttons.into_iter().flatten().find(|(r, _)| r.contains(*pos)).map(|(_, a)| a.to_string()));
                 if let Some(action) = hit.or_else(|| link_at(pos)) {
                     return EventResult::Action(action);
                 }
@@ -4724,30 +4763,59 @@ mod tests {
         assert!(runs.iter().flatten().all(|r| r.1 == Style::Regular), "rows are labels: {runs:?}");
     }
 
-    /// `:::card LINK | CAPTION | selected` is a card marked picked: same link and
-    /// caption, filled gray, with a check mark on the right of its first line. A caption
-    /// that only ends in other text after a `|` stays a plain card.
+    /// `:::card LINK | CAPTION | unselected` and `| selected` are cards in a list where
+    /// several are picked: same link and caption, a round check box on the right (a
+    /// ring, or a filled disc), the picked card filled gray. A caption that only ends
+    /// in other text after a `|` stays a plain card.
     #[test]
-    fn picked_cards_are_filled_and_checked() {
-        let (canvas, v) = paint_md(":::card pick/c1 | 1 Jan 1970 · 2 messages | selected\nWho is Tybalt?\n:::card pick/c2 | 1 Jan 1970 · 1 message\nWho is Mercutio?\n:::");
+    fn pickable_cards_have_round_check_boxes() {
+        let md = ":::card pick/c1 | 1 Jan 1970 · 2 messages | selected\nWho is Tybalt?\n:::card pick/c2 | 1 Jan 1970 · 1 message | unselected\nWho is Mercutio?\n:::card open/c3 | 1 Jan 1970\nWho is Paris?\n:::";
+        let (canvas, v) = paint_md(md);
         let kinds: Vec<BoxKind> = v.groups.iter().map(|g| g.kind).collect();
-        assert_eq!(kinds, vec![BoxKind::Picked, BoxKind::Card]);
-        assert_eq!(v.groups.iter().map(|g| g.link.clone().unwrap()).collect::<Vec<_>>(), ["pick/c1", "pick/c2"]);
+        assert_eq!(kinds, vec![BoxKind::Picked, BoxKind::Pickable, BoxKind::Card]);
+        assert_eq!(v.groups.iter().map(|g| g.link.clone().unwrap()).collect::<Vec<_>>(), ["pick/c1", "pick/c2", "open/c3"]);
         let runs = runs_of(&v);
         assert_eq!(runs[0].iter().map(|r| r.0.as_str()).collect::<Vec<_>>().join(" "), "1 Jan 1970 · 2 messages", "the caption without the flag");
-        // The picked card's inside is gray, the plain card's white; only the picked one
-        // has dark pixels (the check mark) in its right part, where no text goes.
-        let (r1, r2) = (v.links.iter().find(|(_, l)| l == "pick/c1").unwrap().0, v.links.iter().find(|(_, l)| l == "pick/c2").unwrap().0);
-        let at = |r: &Rect| canvas.pixels[(r.y as usize + 6) * W as usize + r.x as usize + r.w as usize / 2];
+        let rect = |l: &str| v.links.iter().find(|(_, k)| k == l).unwrap().0;
+        let (r1, r2, r3) = (rect("pick/c1"), rect("pick/c2"), rect("open/c3"));
+        let px = |x: i32, y: i32| canvas.pixels[y as usize * W as usize + x as usize];
         let theme = Theme::day();
-        assert_eq!((at(&r1), at(&r2)), (theme.light, theme.bg));
-        let dark_right = |r: &Rect| {
-            let x0 = (r.right() - PAD as i32 - CHECK_W as i32) as usize;
-            (r.y as usize + 8..r.bottom() as usize - 8).any(|y| (x0..x0 + CHECK_W as usize - 4).any(|x| canvas.pixels[y * W as usize + x] < 0x40))
-        };
-        assert!(dark_right(&r1) && !dark_right(&r2));
+        // Inside: gray for the picked card, white for the others.
+        assert_eq!((px(r1.x + r1.w as i32 / 2, r1.y + 6), px(r2.x + r2.w as i32 / 2, r2.y + 6)), (theme.light, theme.bg));
+        // The check box's centre: dark under the filled disc, white inside the ring; the
+        // ring's edge is dark; a plain card has no box.
+        let centre = |r: Rect| (r.right() - PAD as i32 - CHECK_SIDE as i32 / 2, r.y + r.h as i32 / 2);
+        let (c1, c2, c3) = (centre(r1), centre(r2), centre(r3));
+        assert!(px(c1.0 - 14, c1.1 + 14) < 0x40, "filled disc");
+        assert_eq!(px(c2.0, c2.1), theme.bg, "an empty ring");
+        assert!(px(c2.0 + CHECK_SIDE as i32 / 2 - 3, c2.1) < 0x40, "the ring");
+        assert_eq!(px(c3.0 + CHECK_SIDE as i32 / 2 - 3, c3.1), theme.bg, "no box on a plain card");
         let (_, v) = paint_md(":::card open | Act 1 | Scene 2\nText\n:::");
         assert_eq!(v.groups[0].kind, BoxKind::Card);
+    }
+
+    /// `:::tool LINK | ICON` puts icon buttons in the viewer's app bar, left of Close and
+    /// in the order given: a tap reports LINK and leaves the view open; Close still
+    /// closes. An unknown icon makes no button.
+    #[test]
+    fn viewer_tools_in_the_app_bar() {
+        let mut s = Screen::new();
+        let mut ui = PluginUi::default();
+        let md = ":::tool new | plus\n:::tool select | checkbox\n:::tool odd | nosuchicon\n:::card open/c1 | caption\nChat\n:::";
+        ui.push("p", UiRequest::TextViewer { id: 1, title: "Chats\nBook".into(), markdown: md.into() });
+        s.ui(&mut ui, false);
+        let Kind::Viewer(v) = &ui.layers[0].kind else { panic!() };
+        let b = ui.layers[0].rect;
+        let tools = v.tool_rects(Rect::new(0, 0, b.w, b.h));
+        assert_eq!(tools.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(), ["new", "select"]);
+        let close = v.close_rect(Rect::new(0, 0, b.w, b.h));
+        assert!(tools[0].0.right() <= tools[1].0.x && tools[1].0.right() <= close.x + ink_ui::theme::space(2), "{tools:?} {close:?}");
+        let at = |r: Rect| tap(b.x + r.x + r.w as i32 / 2, b.y + r.y + r.h as i32 / 2);
+        assert_eq!(ui.handle(&at(tools[1].0), screen()).1, vec![("p".to_string(), 1, "select".to_string())]);
+        assert_eq!(ui.layer_names(), vec!["viewer"], "the view stays");
+        assert_eq!(ui.handle(&at(tools[0].0), screen()).1, vec![("p".to_string(), 1, "new".to_string())]);
+        assert_eq!(ui.handle(&at(close), screen()).1, vec![("p".to_string(), 1, "closed".to_string())]);
+        assert!(ui.layers.is_empty());
     }
 
     /// Renders an Insightful chat with a rich answer, a dictionary full view, a chat list
@@ -4758,9 +4826,9 @@ mod tests {
         shot(&paint_md(chat).0, "41-insightful-chat");
         let dict = "## Sample English Dictionary\n\n**household** *noun*\n\n1. a house and its occupants regarded as a unit: *the head of the household*\n2. ***plural*** households\n\n**household** *adjective*\n\nrelating to the running of a household.\n\n[Other dictionary](dict:1)";
         shot(&paint_md(dict).0, "42-dictionary-full");
-        let list = ":::back chats\n:::chips\n- [Start new chat](new)\n\n:::card open/c1 | Current · 9 Nov 2026 · 2 messages\nWho is Tybalt?\n\n*\"In fair Verona\"*\n:::card open/c2 | 8 Nov 2026 · 4 messages\nExplain the selected passage clearly\n:::";
+        let list = ":::tool new | plus\n:::tool select | checkbox\n:::card open/c1 | Current · 9 Nov 2026 · 2 messages\nWho is Tybalt?\n\n*\"In fair Verona\"*\n:::card open/c2 | 8 Nov 2026 · 4 messages\nExplain the selected passage clearly\n:::";
         shot(&paint_md(list).0, "43-chat-list");
-        let picking = ":::chips\n- [Delete 1 chat](delete)\n- [Select all](all)\n- [Done](done)\n\n:::\n\n*Tap the chats to delete.*\n\n:::card pick/c1 | Current · 9 Nov 2026 · 2 messages | selected\nWho is Tybalt?\n\n*\"In fair Verona\"*\n:::card pick/c2 | 8 Nov 2026 · 4 messages\nExplain the selected passage clearly\n:::";
+        let picking = ":::back done\n:::tool all | selectall\n:::tool delete | trash\n:::card pick/c1 | Current · 9 Nov 2026 · 2 messages | selected\nWho is Tybalt?\n\n*\"In fair Verona\"*\n:::card pick/c2 | 8 Nov 2026 · 4 messages | unselected\nExplain the selected passage clearly\n:::\n\n*Tap the chats to delete, then the bin at the top.*";
         shot(&paint_md(picking).0, "43-chat-list-select");
         let wiki = ":::top\n\n**Verona** is a city on the *Adige* river in Veneto, Italy.\n\n## History\n\nThe city was a Roman colony; see [Roman Verona](https://en.wikipedia.org/wiki/Verona).\n\n### Middle Ages\n\n- Scaliger rule\n- Venetian rule\n";
         shot(&paint_md(wiki).0, "44-wikipedia");

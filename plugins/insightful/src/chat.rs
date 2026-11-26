@@ -520,26 +520,22 @@ pub fn chats_text(n: usize) -> String {
     format!("{n} chat{}", if n == 1 { "" } else { "s" })
 }
 
-/// The chat list as viewer Markdown (`chat_list.lua`): "Start new chat" and "Select",
-/// then a card per chat (newest first) with the date, the message count and the first
-/// question; the current chat says so. Holding a card deletes the chat.
+/// The chat list as viewer Markdown (`chat_list.lua`): a card per chat (newest first)
+/// with the date, the message count and the first question; the current chat says so.
+/// The app bar has + (a new chat) and, when there are chats, a check box (pick several
+/// to delete). Holding a card deletes the chat.
 ///
 /// With `picked` the list is for deleting several chats: a tap on a card picks it or
-/// leaves it (picked cards are drawn filled, with a check mark), and the chips delete
-/// the picked chats, pick all or none, or go back to the plain list.
+/// leaves it (each card has a round check box, filled when picked), Back goes back to
+/// the plain list, and the app bar selects all (or none) and deletes the picked chats.
 pub fn render_list(book: &BookChats, picked: Option<&BTreeSet<String>>) -> String {
     let mut md = vec![match picked {
-        None if book.chats.is_empty() => format!(":::chips\n- [Start new chat]({LINK_NEW})"),
-        None => format!(":::chips\n- [Start new chat]({LINK_NEW})\n- [Select]({LINK_SELECT})"),
+        None if book.chats.is_empty() => format!(":::tool {LINK_NEW} | plus"),
+        None => format!(":::tool {LINK_NEW} | plus\n:::tool {LINK_SELECT} | checkbox"),
         Some(p) => {
-            let n = book.chats.iter().filter(|c| p.contains(&c.id)).count();
-            let mut chips = Vec::new();
-            if n > 0 {
-                chips.push(format!("- [Delete {}]({LINK_DELETE_PICKED})", chats_text(n)));
-            }
-            chips.push(if n == book.chats.len() { format!("- [Select none]({LINK_PICK_NONE})") } else { format!("- [Select all]({LINK_PICK_ALL})") });
-            chips.push(format!("- [Done]({LINK_SELECT_DONE})"));
-            format!(":::chips\n{}\n\n:::\n\n*Tap the chats to delete.*", chips.join("\n"))
+            let all = book.chats.iter().all(|c| p.contains(&c.id));
+            let pick = if all { LINK_PICK_NONE } else { LINK_PICK_ALL };
+            format!(":::back {LINK_SELECT_DONE}\n:::tool {pick} | selectall\n:::tool {LINK_DELETE_PICKED} | trash")
         }
     }];
     let mut chats: Vec<&Conversation> = book.chats.iter().collect();
@@ -561,17 +557,18 @@ pub fn render_list(book: &BookChats, picked: Option<&BTreeSet<String>>) -> Strin
         }
         md.push(match picked {
             None => format!(":::card {LINK_OPEN}{} | {}\n{body}", c.id, arg(&caption)),
-            Some(p) if p.contains(&c.id) => format!(":::card {LINK_PICK}{} | {} | selected\n{body}", c.id, arg(&caption)),
-            Some(_) => format!(":::card {LINK_PICK}{} | {}\n{body}", c.id, arg(&caption)),
+            Some(p) => format!(":::card {LINK_PICK}{} | {} | {}\n{body}", c.id, arg(&caption), if p.contains(&c.id) { "selected" } else { "unselected" }),
         });
     }
     md.push(":::".into());
-    // While picking, the hint is under the chips.
-    match (picked, book.chats.is_empty()) {
-        (_, true) => md.push("*No chats for this book yet.*".into()),
-        (None, false) => md.push("*Hold a chat to delete it, or tap Select to delete several.*".into()),
-        (Some(_), false) => {}
-    }
+    md.push(
+        match (picked, book.chats.is_empty()) {
+            (_, true) => "*No chats for this book yet. Tap + at the top to start one.*",
+            (None, false) => "*Hold a chat to delete it. To delete several, tap the check box at the top.*",
+            (Some(_), false) => "*Tap the chats to delete, then the bin at the top.*",
+        }
+        .to_string(),
+    );
     md.join("\n\n")
 }
 
@@ -646,15 +643,15 @@ mod tests {
         c.updated = 0;
         c.messages.push(msg("user", "Who is Tybalt?"));
         let md = render_list(&b, None);
-        assert!(md.starts_with(":::chips\n- [Start new chat](insightful:new)\n- [Select](insightful:select)\n\n:::card insightful:open/c1 | 1 Jan 1970 · 1 message\nWho is Tybalt?"), "{md}");
-        assert!(md.ends_with("*Hold a chat to delete it, or tap Select to delete several.*"));
+        assert!(md.starts_with(":::tool insightful:new | plus\n:::tool insightful:select | checkbox\n\n:::card insightful:open/c1 | 1 Jan 1970 · 1 message\nWho is Tybalt?"), "{md}");
+        assert!(md.ends_with("*Hold a chat to delete it. To delete several, tap the check box at the top.*"));
         b.current = Some(id.clone());
         assert!(render_list(&b, None).contains(":::card insightful:open/c1 | Current · 1 Jan 1970"));
         // Deleting the current chat leaves no current chat.
         assert!(b.delete(&id) && b.current.is_none());
         let md = render_list(&b, None);
-        assert!(md.starts_with(":::chips\n- [Start new chat](insightful:new)\n\n"), "nothing to select: {md}");
-        assert!(md.ends_with("*No chats for this book yet.*"));
+        assert!(md.starts_with(":::tool insightful:new | plus\n\n"), "nothing to select: {md}");
+        assert!(md.ends_with("*No chats for this book yet. Tap + at the top to start one.*"));
     }
 
     /// Picking chats: the cards pick, the picked ones are marked, and the chips follow
@@ -665,17 +662,18 @@ mod tests {
         let (one, two) = (b.create("Who is Tybalt?"), b.create("Who is Mercutio?"));
         let none = BTreeSet::new();
         let md = render_list(&b, Some(&none));
-        assert!(md.starts_with(":::chips\n- [Select all](insightful:pick-all)\n- [Done](insightful:select-done)\n\n"), "{md}");
+        // Back leaves the picking; the app bar selects all and deletes.
+        assert!(md.starts_with(":::back insightful:select-done\n:::tool insightful:pick-all | selectall\n:::tool insightful:delete-picked | trash\n\n"), "{md}");
         assert!(md.contains(&format!(":::card insightful:pick/{one} | ")) && !md.contains("insightful:open/") && !md.contains("insightful:new"), "{md}");
-        assert!(!md.contains("| selected") && md.contains("- [Done](insightful:select-done)\n\n:::\n\n*Tap the chats to delete.*\n\n:::card"), "{md}");
+        assert_eq!((md.matches(" | unselected\n").count(), md.matches(" | selected\n").count()), (2, 0), "{md}");
+        assert!(md.ends_with("*Tap the chats to delete, then the bin at the top.*"), "{md}");
         let first = BTreeSet::from([one.clone()]);
         let md = render_list(&b, Some(&first));
-        assert!(md.starts_with(":::chips\n- [Delete 1 chat](insightful:delete-picked)\n- [Select all](insightful:pick-all)\n"), "{md}");
-        assert_eq!(md.matches(" | selected\n").count(), 1, "{md}");
         assert!(md.contains(&format!(":::card insightful:pick/{one} | ")) && md.contains(&format!(":::card insightful:pick/{two} | ")));
+        assert_eq!((md.matches(" | unselected\n").count(), md.matches(" | selected\n").count()), (1, 1), "{md}");
         let both = BTreeSet::from([one, two]);
         let md = render_list(&b, Some(&both));
-        assert!(md.starts_with(":::chips\n- [Delete 2 chats](insightful:delete-picked)\n- [Select none](insightful:pick-none)\n- [Done]"), "{md}");
+        assert!(md.contains(":::tool insightful:pick-none | selectall\n"), "all picked: the same button picks none: {md}");
         assert_eq!(md.matches(" | selected\n").count(), 2);
     }
 

@@ -688,7 +688,8 @@ impl InsightfulPlugin {
         }
         let md = chat::render_list(&b.chats, self.picked.as_ref());
         let title = match &self.picked {
-            Some(p) => format!("Select chats\n{} selected", p.len()),
+            Some(p) if p.is_empty() => format!("Select chats\n{book}"),
+            Some(p) => format!("{} selected\n{book}", p.len()),
             None => format!("Insightful chats\n{book}"),
         };
         cx.view_markdown(VIEWER, &title, &md)?;
@@ -991,7 +992,9 @@ impl Plugin for InsightfulPlugin {
                     self.show_list(cx)?;
                 } else if result == LINK_DELETE_PICKED {
                     let n = self.picked.as_ref().map_or(0, BTreeSet::len);
-                    if n > 0 {
+                    if n == 0 {
+                        cx.toast("Tap the chats to delete first")?;
+                    } else {
                         let title = format!("Delete {}?", chat::chats_text(n));
                         let body = if n == 1 { "The deleted chat cannot be recovered." } else { "The deleted chats cannot be recovered." };
                         cx.dialog(DIALOG_DELETE_PICKED, &title, body, &[("Cancel", "cancel"), ("Delete", "delete")])?;

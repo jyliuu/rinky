@@ -167,7 +167,7 @@ fn chats_list_open_delete_and_close_keeps_running() {
     env.ui.0.clear();
     env.action("chats");
     let list = env.viewers().last().unwrap().clone();
-    assert!(list.starts_with(":::chips\n- [Start new chat](insightful:new)\n- [Select](insightful:select)\n\n:::card insightful:open/c1 | Current · "), "{list}");
+    assert!(list.starts_with(":::tool insightful:new | plus\n:::tool insightful:select | checkbox\n\n:::card insightful:open/c1 | Current · "), "{list}");
     assert!(list.contains(" · 2 messages · 280 tokens\nPeople / characters\n\n*\"In fair Verona\"*"), "{list}");
     env.answer(VIEWER, "insightful:open/c1");
     assert!(env.viewers().last().unwrap().contains("Who is Tybalt?"));
@@ -229,26 +229,29 @@ fn chats_list_select_and_delete_several() {
     env.answer(INPUT_ASK, "Who is Paris?");
     assert!(env.plugin.running());
     env.answer(VIEWER, "insightful:chats");
-    assert!(env.viewers().last().unwrap().contains("- [Select](insightful:select)"));
+    assert!(env.viewers().last().unwrap().contains(":::tool insightful:select | checkbox"));
 
     let title = |env: &Env| env.ui.0.iter().rev().find_map(|r| if let UiRequest::TextViewer { id: VIEWER, title, .. } = r { Some(title.clone()) } else { None }).unwrap();
     env.answer(VIEWER, "insightful:select");
-    assert_eq!(title(&env), "Select chats\n0 selected");
+    assert_eq!(title(&env), "Select chats\nRomeo and Juliet");
     let list = env.viewers().last().unwrap().clone();
-    assert!(list.contains(":::card insightful:pick/c1 | ") && !list.contains("Delete"), "{list}");
+    assert!(list.contains(":::card insightful:pick/c1 | ") && list.contains(":::back insightful:select-done"), "{list}");
+    // The bin with nothing picked says what to do.
+    env.answer(VIEWER, "insightful:delete-picked");
+    assert!(matches!(env.ui.0.last(), Some(UiRequest::Toast { text }) if text == "Tap the chats to delete first"), "{:?}", env.ui.0.last());
     env.answer(VIEWER, "insightful:pick/c1");
-    assert_eq!(title(&env), "Select chats\n1 selected");
-    assert!(env.viewers().last().unwrap().contains("- [Delete 1 chat](insightful:delete-picked)"));
+    assert_eq!(title(&env), "1 selected\nRomeo and Juliet");
+    assert_eq!(env.viewers().last().unwrap().matches(" | selected\n").count(), 1);
     env.answer(VIEWER, "insightful:pick/c1");
-    assert_eq!(title(&env), "Select chats\n0 selected", "a second tap leaves it");
+    assert_eq!(title(&env), "Select chats\nRomeo and Juliet", "a second tap leaves it");
     // A hold while picking does nothing.
     env.ui.0.clear();
     env.answer(VIEWER, "hold:insightful:pick/c2");
     assert!(env.ui.0.is_empty(), "{:?}", env.ui.0);
 
     env.answer(VIEWER, "insightful:pick-all");
-    assert_eq!(title(&env), "Select chats\n4 selected");
-    assert!(env.viewers().last().unwrap().contains("- [Delete 4 chats](insightful:delete-picked)\n- [Select none](insightful:pick-none)"));
+    assert_eq!(title(&env), "4 selected\nRomeo and Juliet");
+    assert!(env.viewers().last().unwrap().contains(":::tool insightful:pick-none | selectall\n:::tool insightful:delete-picked | trash"));
     env.answer(VIEWER, "insightful:delete-picked");
     let Some(UiRequest::Dialog { id, title: t, body, .. }) = env.ui.0.last().cloned() else { panic!("{:?}", env.ui.0.last()) };
     assert_eq!((id, t.as_str(), body.as_str()), (19, "Delete 4 chats?", "The deleted chats cannot be recovered."));
@@ -275,7 +278,7 @@ fn chats_list_select_and_delete_several() {
     env.answer(VIEWER, "insightful:pick-all");
     env.answer(VIEWER, "closed");
     env.action("chats");
-    assert!(env.viewers().last().unwrap().contains("- [Select](insightful:select)"));
+    assert!(env.viewers().last().unwrap().contains(":::tool insightful:select | checkbox"));
     assert_eq!(env.chats_file()["chats"].as_array().unwrap().len(), 1);
 }
 
@@ -293,7 +296,7 @@ fn a_chat_has_a_back_link_to_the_list_and_last_chat_reopens_it() {
     env.pump();
     assert!(env.viewers().last().unwrap().starts_with(":::back insightful:chats\n"), "a chat goes back to the list");
     env.answer(VIEWER, "insightful:chats");
-    assert!(env.viewers().last().unwrap().starts_with(":::chips\n- [Start new chat]"), "the list has no back link");
+    assert!(env.viewers().last().unwrap().starts_with(":::tool insightful:new | plus\n"), "the list has no back link");
     env.answer(VIEWER, "closed");
     env.ui.0.clear();
     env.action("last_chat");
