@@ -6,6 +6,10 @@ All notable changes to rinky are listed here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Insightful's chat list can delete several chats at once: tap *Select*, tap the chats
+  you want gone (or *Select all*), then *Delete*.
+
 ### Fixed
 - Holding a chat in Insightful's chat list asks again whether to delete it. The
   question waited until the list was closed, so a hold seemed to do nothing.

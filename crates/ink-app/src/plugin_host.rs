@@ -1477,6 +1477,9 @@ enum BoxKind {
     Chip,
     /// A tappable outlined card.
     Card,
+    /// A card marked selected (`:::card LINK | CAPTION | selected`): filled `light`,
+    /// with a check mark on the right.
+    Picked,
     /// A sheet row: icon and label.
     Row,
 }
@@ -1544,6 +1547,11 @@ fn split_directives(md: &str) -> Directives {
                 // `:::top` is read by `PluginUi::push`; `:::emphasis` asked for real bold
                 // and italics before every viewer had them, and is ignored.
                 "top" | "emphasis" => {}
+                // A card selected in a list where several can be picked.
+                "card" if b.rsplit_once('|').is_some_and(|(_, f)| f.trim() == "selected") => {
+                    let caption = b.rsplit_once('|').map(|(c, _)| c.trim().to_string()).unwrap_or_default();
+                    flush(std::mem::replace(&mut cur, (BoxKind::Picked, a, caption, String::new())), &mut segs);
+                }
                 _ => match BoxKind::WORDS.iter().find(|(w, _)| *w == word) {
                     Some(&(_, kind)) => flush(std::mem::replace(&mut cur, (kind, a, b, String::new())), &mut segs),
                     None => {
@@ -1581,7 +1589,8 @@ pub(crate) fn icon_named(name: &str) -> Option<Icon> {
 /// `:::you` (the user's message, a filled card on the right), `:::answer LABEL | FOOT`
 /// (an outlined card, label line on top, muted caption at the bottom), `:::action` (a
 /// compact gray chip), `:::chips` (each list item a tappable pill reporting its link),
-/// `:::card LINK | CAPTION` (a tappable outlined card), each ended by `:::` or the next
+/// `:::card LINK | CAPTION` (a tappable outlined card; `| selected` after the caption
+/// draws it picked, filled with a check mark), each ended by `:::` or the next
 /// block. `:::input LINK | PLACEHOLDER` adds an input bar at the bottom whose tap
 /// reports LINK. `:::sheet` shows the view as a bottom sheet of `:::row LINK | ICON`
 /// rows (label as the body); a tap on a row or outside the sheet closes it (a row whose
@@ -1634,6 +1643,9 @@ const FOOT_H: i32 = 80;
 const MARGIN: f32 = 48.0;
 /// Padding inside cards.
 const PAD: f32 = 24.0;
+/// Width a picked card keeps on the right for its check mark, and the mark's side.
+const CHECK_W: f32 = 72.0;
+const CHECK_SIDE: f32 = 48.0;
 /// Height of a sheet row.
 const ROW_H: f32 = 120.0;
 /// Input bar height, and the page counter band above it.
@@ -2189,8 +2201,10 @@ impl MarkdownView {
                     }
                     lines.push(gap_line(base * 0.4));
                 }
-                BoxKind::Card => {
-                    let inner = width - 2.0 * PAD;
+                BoxKind::Card | BoxKind::Picked => {
+                    // A picked card keeps room for its check mark on the right.
+                    let picked = seg.kind == BoxKind::Picked;
+                    let inner = width - 2.0 * PAD - if picked { CHECK_W } else { 0.0 };
                     let mut body = if seg.b.is_empty() { Vec::new() } else { caption_lines(cx, &seg.b, cap, inner) };
                     body.extend(layout_blocks(cx, &seg.blocks, base, inner));
                     trim_gaps(&mut body);
@@ -2439,6 +2453,14 @@ impl MarkdownView {
                     stroke_round_rect(cx.canvas, r, t.radius_lg, t.border_px as f32, fg);
                 }
                 BoxKind::Answer | BoxKind::Card => stroke_round_rect(cx.canvas, r, t.radius_lg, t.border_px as f32, fg),
+                BoxKind::Picked => {
+                    fill_round_rect(cx.canvas, r, t.radius_lg, t.light);
+                    stroke_round_rect(cx.canvas, r, t.radius_lg, t.border_px as f32, fg);
+                    // The check mark, centred on the card's right part (kept free of text).
+                    let side = CHECK_SIDE as u32;
+                    let check = Rect::new(r.right() - PAD as i32 - side as i32, r.y + (r.h as i32 - side as i32) / 2, side, side);
+                    cx.icon(Icon::Check, check, side, fg);
+                }
                 BoxKind::Action => {
                     let rad = (r.h as f32 / 2.0).min(t.radius_lg);
                     fill_round_rect(cx.canvas, r, rad, t.light);
@@ -4702,6 +4724,32 @@ mod tests {
         assert!(runs.iter().flatten().all(|r| r.1 == Style::Regular), "rows are labels: {runs:?}");
     }
 
+    /// `:::card LINK | CAPTION | selected` is a card marked picked: same link and
+    /// caption, filled gray, with a check mark on the right of its first line. A caption
+    /// that only ends in other text after a `|` stays a plain card.
+    #[test]
+    fn picked_cards_are_filled_and_checked() {
+        let (canvas, v) = paint_md(":::card pick/c1 | 1 Jan 1970 · 2 messages | selected\nWho is Tybalt?\n:::card pick/c2 | 1 Jan 1970 · 1 message\nWho is Mercutio?\n:::");
+        let kinds: Vec<BoxKind> = v.groups.iter().map(|g| g.kind).collect();
+        assert_eq!(kinds, vec![BoxKind::Picked, BoxKind::Card]);
+        assert_eq!(v.groups.iter().map(|g| g.link.clone().unwrap()).collect::<Vec<_>>(), ["pick/c1", "pick/c2"]);
+        let runs = runs_of(&v);
+        assert_eq!(runs[0].iter().map(|r| r.0.as_str()).collect::<Vec<_>>().join(" "), "1 Jan 1970 · 2 messages", "the caption without the flag");
+        // The picked card's inside is gray, the plain card's white; only the picked one
+        // has dark pixels (the check mark) in its right part, where no text goes.
+        let (r1, r2) = (v.links.iter().find(|(_, l)| l == "pick/c1").unwrap().0, v.links.iter().find(|(_, l)| l == "pick/c2").unwrap().0);
+        let at = |r: &Rect| canvas.pixels[(r.y as usize + 6) * W as usize + r.x as usize + r.w as usize / 2];
+        let theme = Theme::day();
+        assert_eq!((at(&r1), at(&r2)), (theme.light, theme.bg));
+        let dark_right = |r: &Rect| {
+            let x0 = (r.right() - PAD as i32 - CHECK_W as i32) as usize;
+            (r.y as usize + 8..r.bottom() as usize - 8).any(|y| (x0..x0 + CHECK_W as usize - 4).any(|x| canvas.pixels[y * W as usize + x] < 0x40))
+        };
+        assert!(dark_right(&r1) && !dark_right(&r2));
+        let (_, v) = paint_md(":::card open | Act 1 | Scene 2\nText\n:::");
+        assert_eq!(v.groups[0].kind, BoxKind::Card);
+    }
+
     /// Renders an Insightful chat with a rich answer, a dictionary full view, a chat list
     /// and a Wikipedia-like article (`INK_PLUGIN_SHOTS=DIR`), for a look.
     #[test]
@@ -4712,6 +4760,8 @@ mod tests {
         shot(&paint_md(dict).0, "42-dictionary-full");
         let list = ":::back chats\n:::chips\n- [Start new chat](new)\n\n:::card open/c1 | Current · 9 Nov 2026 · 2 messages\nWho is Tybalt?\n\n*\"In fair Verona\"*\n:::card open/c2 | 8 Nov 2026 · 4 messages\nExplain the selected passage clearly\n:::";
         shot(&paint_md(list).0, "43-chat-list");
+        let picking = ":::chips\n- [Delete 1 chat](delete)\n- [Select all](all)\n- [Done](done)\n\n:::\n\n*Tap the chats to delete.*\n\n:::card pick/c1 | Current · 9 Nov 2026 · 2 messages | selected\nWho is Tybalt?\n\n*\"In fair Verona\"*\n:::card pick/c2 | 8 Nov 2026 · 4 messages\nExplain the selected passage clearly\n:::";
+        shot(&paint_md(picking).0, "43-chat-list-select");
         let wiki = ":::top\n\n**Verona** is a city on the *Adige* river in Veneto, Italy.\n\n## History\n\nThe city was a Roman colony; see [Roman Verona](https://en.wikipedia.org/wiki/Verona).\n\n### Middle Ages\n\n- Scaliger rule\n- Venetian rule\n";
         shot(&paint_md(wiki).0, "44-wikipedia");
     }
