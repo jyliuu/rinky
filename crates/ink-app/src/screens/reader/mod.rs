@@ -318,15 +318,15 @@ pub fn progress(doc: &dyn Document, page: usize) -> f32 {
     ((page + 1) as f32 / total as f32).clamp(0.0, 1.0)
 }
 
-/// Progress written to the sidecar for `page`: [`progress`] (location of the page's
-/// first character, stable while pagination still counts pages), and 1.0 on the last
-/// page once the page count is complete.
+/// Progress written to the sidecar for `page` (the library shows it): the percent the
+/// reader shows ([`footer::bar_progress`]), so a book reads the same in the library as
+/// in its status bar, menu and Go to page. That is the page fraction once every page is
+/// counted (1.0 on the last page), and [`progress`] (location of the page's first
+/// character, stable while pagination still counts pages) before. The location
+/// fraction alone was off where pages hold more or less text than average: a cover and
+/// title pages are 0 % by location.
 pub fn saved_percent(doc: &dyn Document, page: usize) -> f32 {
-    let count = doc.page_count();
-    if count.complete && page + 1 >= count.pages {
-        return 1.0;
-    }
-    progress(doc, page)
+    footer::bar_progress(doc, page)
 }
 
 /// Index of the TOC entry `page` is in: the last entry that starts on or before it.
@@ -683,6 +683,10 @@ pub struct ReaderScreen {
     /// [`POSITION_SAVE_IDLE`] (at most [`POSITION_SAVE_MAX`] after the first unsaved
     /// turn), before the reader closes, and on power events (sleep, cover, USB).
     position_unsaved: Option<(Instant, Instant)>,
+    /// The percent last written to the sidecar. The count of pages may end after it was
+    /// written (the percent shown changes from locations to pages without a turn): the
+    /// reader writes it again when it closes.
+    saved_progress: Option<f32>,
     /// The page to render comes from a page turn or a relayout (font size, margins,
     /// rotation: the saved position is still on the page): its position is saved later.
     turned: bool,
@@ -790,6 +794,7 @@ impl ReaderScreen {
             dict_card: None,
             dict_cancel: Vec::new(),
             position_unsaved: None,
+            saved_progress: None,
             turned: false,
             jumped: false,
             end: None,
@@ -931,10 +936,11 @@ impl ReaderScreen {
         }
     }
 
-    fn save_position(&self) {
+    fn save_position(&mut self) {
         let Some(doc) = self.doc.as_ref() else { return };
         let Ok(pos) = doc.position_of_page(self.page) else { return };
         let percent = saved_percent(doc.as_ref(), self.page);
+        self.saved_progress = Some(percent);
         // The chapter title for the Home tab's hero card (library/home.rs). Only when the
         // TOC is already loaded (the footer loads it); saving never reads the TOC itself.
         let chapter = self.toc.as_deref().map(|toc| current_chapter(doc.as_ref(), toc, self.page).map(|i| toc[i].title.trim().to_string()).filter(|t| !t.is_empty()));
@@ -2504,6 +2510,11 @@ impl AppScreen for ReaderScreen {
     }
 
     fn on_exit(&mut self, cx: &mut AppCtx) {
+        // The percent shown changed since it was written (the page count ended).
+        let percent = self.doc.as_deref().map(|d| saved_percent(d, self.page));
+        if self.position_unsaved.is_none() && self.saved_progress.is_some() && percent != self.saved_progress {
+            self.note_position();
+        }
         self.flush_position();
         publish_bars(None);
         BARS_TOGGLE.with(|c| c.set(false));

@@ -26,8 +26,12 @@ compiled-in rinky plugin (PLAN phase 8). The flows follow the koplugin's `main.l
   other books, ★ when it is), Provider, Statistics (General, Current book, All books:
   requests, tokens and the provider-reported cost; all books in `data/statistics.json`),
   Gesture shortcuts.
-- **Chats**: Start new chat, then a card per chat, newest first, the current one marked.
-  Tap a chat to open it; hold it to delete it after a confirmation.
+- **Chats**: a card per chat, newest first, the current one marked; + (new chat) and a
+  check box (select) in the app bar (`:::tool`). Tap a chat to open it; hold it to
+  delete it after a confirmation. The check box turns the cards into ones a tap picks
+  (a round check box on each: `:::card LINK | CAPTION | selected`/`unselected`); the
+  app bar then has Back, select all (or none) and a bin that deletes the picked chats
+  after a confirmation. The chat still answering is not deleted.
 - Gesture actions: `last_chat` ("Insightful: show current chat"), `chats` ("Insightful:
   show chats"), `ask_book` ("Insightful: start new chat").
 

@@ -383,7 +383,9 @@ If you used Insightful in KOReader, rinky reads its `configuration.lua` once ins
   Turn on *New chat for highlighted actions* in the reader menu's *Insightful* page to
   start a new chat each time, or tick the checkbox under the actions to do it once.
 - **Chats.** The reader menu's *Insightful* page has *Continue current chat*, *Chats*
-  (tap one to open it, hold it to delete it) and *Start new chat*.
+  (tap one to open it, hold it to delete it) and *Start new chat*. In *Chats*, **+** at
+  the top starts a new chat. To delete several chats, tap the check box at the top, tap
+  the chats (or the select-all button), then the bin.
 - **While it answers** you see each look-up it makes in the book. Tap *Stop* to end
   the answer. If you close the chat the answer keeps coming, and a notice tells you
   when it is ready. Each answer ends with follow-up questions you can tap.

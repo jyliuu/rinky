@@ -1402,32 +1402,65 @@ fn on_resize_after_a_half_turn_redraws_the_same_page() {
     assert!(h.canvas.pixels.iter().any(|&v| v < 0x40), "the page is drawn on the new canvas");
 }
 
-/// The sidecar percent is the location of the page start, not (page + 1) / pages: page 1
-/// of a book still being paginated is not 17 %.
+/// While pagination runs the sidecar percent is the location of the page start, not
+/// (page + 1) / pages counted so far: page 1 of a book still being paginated is not 17 %.
+/// (The count may also have ended already: then it is the page fraction.)
 #[test]
 fn sidecar_percent_is_position_based_while_pagination_runs() {
     let mut h = Harness::open("percent", "juliet.epub", false);
-    let st = BookState::load(&h.reader.path).unwrap();
-    assert_eq!(st.percent, Some(0.0), "page 1 is at 0 %");
+    let first = BookState::load(&h.reader.path).unwrap().percent.unwrap();
+    assert!(first < 0.01, "page 1 is at 0 %: {first}");
     h.tap_at(1000, 900);
     h.tap_at(1000, 900);
     assert_eq!(h.reader.page(), 2);
     // Page turns do no file I/O: the position is written once the page rested
     // (POSITION_SAVE_IDLE) or on a power event (sleep, cover).
-    assert_eq!(BookState::load(&h.reader.path).unwrap().percent, Some(0.0), "written at the turn");
+    assert_eq!(BookState::load(&h.reader.path).unwrap().percent, Some(first), "not written at the turn");
     assert!(h.reader.timeout().is_some_and(|t| t <= POSITION_SAVE_IDLE));
     h.feed(InputEvent::Power(ink_device::PowerEvent::GoingToScreenSaver));
     assert!(h.reader.position_unsaved.is_none());
     let pct = BookState::load(&h.reader.path).unwrap().percent.unwrap();
     let doc = h.reader.doc.as_deref_mut().unwrap();
     assert!(doc.wait_paginated(std::time::Duration::from_secs(60)));
-    assert!((pct - progress(doc, 2)).abs() < 1e-6, "{pct}");
+    assert!((pct - progress(doc, 2)).abs() < 1e-6 || (pct - footer::bar_progress(doc, 2)).abs() < 1e-6, "{pct}");
     assert!(pct < 0.05, "{pct}");
     // The last page of a fully paginated book is 100 %.
     let last = doc.page_count().pages - 1;
     h.reader.go_to_page(last);
     h.paint();
     assert_eq!(BookState::load(&h.reader.path).unwrap().percent, Some(1.0));
+}
+
+/// Once every page is counted, the sidecar percent (the library's progress) is the
+/// percent the reader shows (status bar, menu, Go to: page fraction), not the location
+/// fraction, which differs where pages hold more or less text than average. A count
+/// that finishes while the book stays on one page is written when the book closes.
+#[test]
+fn sidecar_percent_is_the_percent_shown_once_paginated() {
+    use crate::router::AppScreen;
+    let mut h = Harness::open("percent-shown", "juliet.epub", true);
+    let doc = h.reader.doc.as_deref().unwrap();
+    assert!(doc.page_count().complete);
+    // A page where the two fractions round to different whole percents.
+    let page = (1..doc.page_count().pages - 1)
+        .find(|&p| footer::percent_text(footer::bar_progress(doc, p)) != footer::percent_text(progress(doc, p)))
+        .expect("a page where locations and pages disagree");
+    h.reader.go_to_page(page);
+    h.paint();
+    let shown = footer::bar_progress(h.reader.doc.as_deref().unwrap(), page);
+    assert_eq!(BookState::load(&h.reader.path).unwrap().percent, Some(shown), "page {}", page + 1);
+
+    // The percent was written by location while the count ran (here: planted, juliet
+    // is counted at once) and the count ended without a turn since: closing the book
+    // writes the percent shown.
+    let by_location = progress(h.reader.doc.as_deref().unwrap(), page);
+    let mut st = BookState::load(&h.reader.path).unwrap();
+    st.percent = Some(by_location);
+    st.save(&h.reader.path).unwrap();
+    h.reader.saved_progress = Some(by_location);
+    assert!(h.reader.position_unsaved.is_none());
+    h.with_cx(|r, cx| r.on_exit(cx));
+    assert_eq!(BookState::load(&h.reader.path).unwrap().percent, Some(shown), "written when the book closed");
 }
 
 mod gesture_stub {

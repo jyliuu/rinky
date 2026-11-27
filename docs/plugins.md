@@ -765,6 +765,16 @@ when repeated.
   start), and a swipe, a tap on a side or a page key moves them by a screenful less a
   line (REAGL on the text below the app bar, no flash); a thin bar shows the position.
   `:::you LINK | CAPTION` makes a user bubble tappable with a muted caption.
+- `:::card LINK | CAPTION` is a tappable outlined card; a long press on it (or any link)
+  reports `hold:LINK` and leaves the view open. For a list where several cards are
+  chosen at once, `| unselected` or `| selected` after the caption adds a round check
+  box on the right (a ring, or a filled disc with a tick; a selected card is filled
+  gray); the plugin sends the view again when a tap changes the choice.
+  `:::tool LINK | ICON` adds an icon button to the app bar, left of Close (several in
+  the order given; ICON is an `ink_ui::Icon` name such as `plus`, `checkbox`,
+  `selectall`, `trash`); a tap reports LINK and leaves the view open. A plugin's dialog
+  opens over its own viewer at once (a delete question over a list); other plugins'
+  requests wait for the viewer to close.
 - A keyboard request over the plugin's chat view docks under it
   (`InputBox::docked`): no new panel with a prompt and Cancel/OK, but the view's input
   bar lifted onto the keyboard (`ink_ui::keyboard::lift_above`); the view lays out above

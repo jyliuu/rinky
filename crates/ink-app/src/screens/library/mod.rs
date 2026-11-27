@@ -95,6 +95,9 @@ pub fn register(reg: &mut ScreenRegistry) {
     reg.register("library", |_| Ok(Box::new(LibraryScreen::new())));
 }
 
+/// Books (most recently opened first) whose progress is read again from their sidecars
+/// when the library is first shown.
+const RECENT_REFRESH: usize = 3;
 /// While the metadata thread runs, its results are taken this often.
 const META_POLL: Duration = Duration::from_millis(200);
 /// While metadata is being read, the screen is repainted at most this often.
@@ -1092,6 +1095,13 @@ impl AppScreen for LibraryScreen {
                 // and the changes come in with the timer (it took 0.8 s for 3000 books
                 // on the Kindle emulator before the first frame).
                 let mut lib = Library::open_saved(cx.paths, &self.dirs);
+                // The books read last may have been left without coming back here (the
+                // app quit or stopped in the reader): their progress is read from their
+                // sidecars, which the reader wrote, not taken from library.json.
+                let recent: Vec<PathBuf> = lib.index.recent(RECENT_REFRESH).iter().map(|b| b.path.clone()).collect();
+                for p in &recent {
+                    lib.refresh_state(p);
+                }
                 // The "Book cover" screensaver shows the last book read until one is opened.
                 if let Some(b) = lib.index.recent(1).first() {
                     crate::sleep_cover::prepare(cx.paths, &b.path, cx.screen.panel_size());

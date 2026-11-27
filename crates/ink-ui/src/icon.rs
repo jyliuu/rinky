@@ -63,6 +63,10 @@ icons! {
     Battery,
     /// Check mark.
     Check,
+    /// A check mark in a rounded square: select items in a list.
+    CheckBox,
+    /// Two stacked check boxes: select all.
+    SelectAll,
     /// Plus.
     Plus,
     /// Minus.
@@ -270,6 +274,19 @@ impl Icon {
                 bar(&mut path, 5.0, 10.0, 13.0, 14.0);
             }
             Icon::Check => poly(&mut path, &[(4.0, 12.5), (9.5, 18.0), (20.0, 6.5)]),
+            Icon::CheckBox => {
+                let (x, y) = p(3.5, 3.5);
+                path.round_rect_outline(x, y, 17.0 * s, 17.0 * s, 3.0 * s, w);
+                poly(&mut path, &[(7.5, 12.0), (10.8, 15.3), (16.8, 8.8)]);
+            }
+            Icon::SelectAll => {
+                // The box behind: its top and right edges show above and beside the
+                // front one.
+                poly(&mut path, &[(7.0, 4.5), (7.0, 2.5), (21.5, 2.5), (21.5, 17.0), (19.5, 17.0)]);
+                let (x, y) = p(2.5, 7.0);
+                path.round_rect_outline(x, y, 14.5 * s, 14.5 * s, 2.5 * s, w);
+                poly(&mut path, &[(6.0, 14.3), (8.8, 17.1), (13.8, 11.6)]);
+            }
             Icon::Plus => {
                 poly(&mut path, &[(12.0, 5.0), (12.0, 19.0)]);
                 poly(&mut path, &[(5.0, 12.0), (19.0, 12.0)]);

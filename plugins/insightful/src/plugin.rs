@@ -7,7 +7,10 @@
 //! host's Markdown viewer (one id, its text replaced as the answer arrives in batches);
 //! the same viewer shows the chat list. The action menus are viewer sheets with icons.
 
-use crate::chat::{self, BookChats, Extras, Live, Message, Totals, HOLD, LINK_ASK, LINK_CHATS, LINK_NEW, LINK_OPEN, LINK_QUESTION, LINK_RETRY, LINK_STOP};
+use crate::chat::{
+    self, BookChats, Extras, Live, Message, Totals, HOLD, LINK_ASK, LINK_CHATS, LINK_DELETE_PICKED, LINK_NEW, LINK_OPEN, LINK_PICK, LINK_PICK_ALL, LINK_PICK_NONE, LINK_QUESTION, LINK_RETRY,
+    LINK_SELECT, LINK_SELECT_DONE, LINK_STOP,
+};
 use crate::config::{self, Config};
 use crate::models;
 use crate::prompts::{PromptSet, SelectionInfo};
@@ -19,6 +22,7 @@ use ink_plugin::kit::Requests;
 use ink_plugin::net::WHOLE_LIMIT;
 use ink_plugin::{HostCtx, HttpEvent, Permission, Plugin, PluginError, PluginManifest, Registrar, Result, StreamMode};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -42,6 +46,7 @@ const INPUT_SEARCH: u32 = 14;
 const DIALOG_MODEL: u32 = 15;
 const MENU_STATS: u32 = 17;
 const DIALOG_DEFAULT: u32 = 18;
+const DIALOG_DELETE_PICKED: u32 = 19;
 
 /// Plugin storage key of "New chat for highlighted actions" for books that have not set it.
 const NEW_CHAT_DEFAULT: &str = "new_chat_on_highlight_default";
@@ -114,6 +119,8 @@ pub struct InsightfulPlugin {
     viewer_open: bool,
     /// The viewer shows the chat list instead of a chat.
     list: bool,
+    /// The chat list is for deleting several chats: the ids picked so far.
+    picked: Option<BTreeSet<String>>,
     /// The highlight menu's one-time checkbox is ticked: this highlight does the
     /// opposite of "New chat for highlighted actions".
     sel_override: bool,
@@ -149,6 +156,7 @@ impl Default for InsightfulPlugin {
             error: None,
             viewer_open: false,
             list: false,
+            picked: None,
             sel_override: false,
             retry_blocked: false,
             fresh: false,
@@ -671,8 +679,20 @@ impl InsightfulPlugin {
     fn show_list(&mut self, cx: &mut HostCtx) -> Result<()> {
         let Some(b) = self.book.as_ref() else { return Ok(()) };
         let book = if b.title.is_empty() { "Book".to_string() } else { b.title.clone() };
-        let md = chat::render_list(&b.chats);
-        cx.view_markdown(VIEWER, &format!("Insightful chats\n{book}"), &md)?;
+        // Picked chats deleted meanwhile (or none left) are dropped.
+        if let Some(p) = self.picked.as_mut() {
+            p.retain(|id| b.chats.get(id).is_some());
+            if b.chats.chats.is_empty() {
+                self.picked = None;
+            }
+        }
+        let md = chat::render_list(&b.chats, self.picked.as_ref());
+        let title = match &self.picked {
+            Some(p) if p.is_empty() => format!("Select chats\n{book}"),
+            Some(p) => format!("{} selected\n{book}", p.len()),
+            None => format!("Insightful chats\n{book}"),
+        };
+        cx.view_markdown(VIEWER, &title, &md)?;
         self.viewer_open = true;
         self.list = true;
         self.fresh = false;
@@ -930,6 +950,7 @@ impl Plugin for InsightfulPlugin {
                 if result == "closed" {
                     self.viewer_open = false;
                     self.list = false;
+                    self.picked = None;
                     self.fresh = false;
                     self.pending_sel = None;
                     // A running answer goes on: it is saved to its chat when it ends.
@@ -949,6 +970,34 @@ impl Plugin for InsightfulPlugin {
                 } else if result == LINK_STOP {
                     if self.run.as_ref().is_some_and(|r| self.chat.as_deref() == Some(r.chat.as_str())) {
                         self.fail(cx, "Request canceled.".into())?;
+                    }
+                } else if result == LINK_SELECT {
+                    self.picked = Some(BTreeSet::new());
+                    self.show_list(cx)?;
+                } else if let Some(cid) = result.strip_prefix(LINK_PICK) {
+                    if let Some(p) = self.picked.as_mut() {
+                        if !p.remove(cid) {
+                            p.insert(cid.to_string());
+                        }
+                    }
+                    self.show_list(cx)?;
+                } else if result == LINK_PICK_ALL || result == LINK_PICK_NONE {
+                    let all = if result == LINK_PICK_ALL { self.book.as_ref().map(|b| b.chats.chats.iter().map(|c| c.id.clone()).collect()) } else { None };
+                    if self.picked.is_some() {
+                        self.picked = Some(all.unwrap_or_default());
+                    }
+                    self.show_list(cx)?;
+                } else if result == LINK_SELECT_DONE {
+                    self.picked = None;
+                    self.show_list(cx)?;
+                } else if result == LINK_DELETE_PICKED {
+                    let n = self.picked.as_ref().map_or(0, BTreeSet::len);
+                    if n == 0 {
+                        cx.toast("Tap the chats to delete first")?;
+                    } else {
+                        let title = format!("Delete {}?", chat::chats_text(n));
+                        let body = if n == 1 { "The deleted chat cannot be recovered." } else { "The deleted chats cannot be recovered." };
+                        cx.dialog(DIALOG_DELETE_PICKED, &title, body, &[("Cancel", "cancel"), ("Delete", "delete")])?;
                     }
                 } else if let Some(cid) = result.strip_prefix(LINK_OPEN) {
                     self.chat = Some(cid.to_string());
@@ -992,6 +1041,30 @@ impl Plugin for InsightfulPlugin {
                     if self.viewer_open && self.list {
                         self.show_list(cx)?;
                     }
+                }
+                Ok(())
+            }
+            DIALOG_DELETE_PICKED if result == "delete" => {
+                let picked = self.picked.take().unwrap_or_default();
+                // The chat being answered stays (its answer is saved into it when it ends).
+                let busy = self.run.as_ref().map(|r| r.chat.clone()).filter(|c| picked.contains(c));
+                let mut deleted = 0;
+                if let Some(b) = self.book.as_mut() {
+                    for cid in picked.iter().filter(|c| Some(*c) != busy.as_ref()) {
+                        deleted += usize::from(b.chats.delete(cid));
+                    }
+                }
+                if self.chat.as_ref().is_some_and(|c| picked.contains(c) && Some(c) != busy.as_ref()) {
+                    self.chat = None;
+                }
+                self.save();
+                let mut text = format!("{} deleted", chat::chats_text(deleted));
+                if busy.is_some() {
+                    text.push_str("; the chat still answering was kept");
+                }
+                cx.toast(&text)?;
+                if self.viewer_open && self.list {
+                    self.show_list(cx)?;
                 }
                 Ok(())
             }
