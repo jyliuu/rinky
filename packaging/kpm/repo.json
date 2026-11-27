@@ -1,0 +1,21 @@
+{
+  "manifest_version": 2,
+  "id": "rinky",
+  "name": "rinky",
+  "description": "An e-book reader for Kindle and Kobo, written in Rust.",
+  "packages": {
+    "rinky": {
+      "name": "rinky",
+      "author": "jyliuu",
+      "description": "An e-book reader for Kindle and Kobo, written in Rust. EPUB, MOBI, AZW3, FB2, TXT, HTML, PDF and CBZ.",
+      "artifacts": [
+        {
+          "url": "rinky-VERSION-kindlehf.kpkg",
+          "version": [0, 0, 0],
+          "dependencies": [],
+          "supported_platforms": ["kindlehf"]
+        }
+      ]
+    }
+  }
+}

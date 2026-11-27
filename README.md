@@ -89,6 +89,10 @@ each step; in short:
 | Copy over USB | `rinky` and `extensions` to the top of the Kindle drive | `.adds` to the top of the Kobo drive (hidden folder) |
 | Start | KUAL › rinky › Start rinky | NickelMenu › rinky |
 
+Kindles whose jailbreak ships KPM instead of KUAL (the Scribe, for one) install the
+release's `.kpkg` with `kpm install rinky` — see
+[Install with KPM](docs/install.md#install-with-kpm-no-kual).
+
 Downloads are on the [latest release](../../releases/latest). *Settings › Update* in
 rinky installs newer versions over Wi-Fi, keeping settings, notes and positions.
 *Settings › Exit to Kindle* (or *to Kobo*) returns to the e-reader's own screens.
