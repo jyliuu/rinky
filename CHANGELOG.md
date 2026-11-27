@@ -4,7 +4,7 @@ All notable changes to rinky are listed here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and rinky follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.5] - 2026-11-27
 
 ### Added
 - Insightful's chat list can delete several chats at once: tap the check box at the
@@ -484,7 +484,8 @@ All notable changes to rinky are listed here. The format is based on
 
 First public release.
 
-[Unreleased]: https://github.com/jyliuu/rinky/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/jyliuu/rinky/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/jyliuu/rinky/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/jyliuu/rinky/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/jyliuu/rinky/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/jyliuu/rinky/compare/v0.9.1...v0.9.2
