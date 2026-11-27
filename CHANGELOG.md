@@ -15,7 +15,8 @@ All notable changes to rinky are listed here. The format is based on
 - A book's progress in the library is the percent you see in the book. The library
   showed a percent counted by characters, which drifts from the page count where pages
   hold pictures, short lines or a title page (a book on page 3 showed as unread). It
-  also rounded to the nearest percent where the book rounds down.
+  also rounded to the nearest percent where the book rounds down, and after rinky quit
+  with a book open it kept showing the progress from before that book was opened.
 - Holding a chat in Insightful's chat list asks again whether to delete it. The
   question waited until the list was closed, so a hold seemed to do nothing.
 
